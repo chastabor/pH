@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "ph-code-graph: files to answers",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      520
+    ],
+    "views": [
+      {
+        "id": "index-run",
+        "label": "Index run",
+        "focus": [
+          "utcp",
+          "cindex",
+          "process",
+          "tags",
+          "symbols",
+          "refs"
+        ],
+        "note": "code_index walks a tree, parses each changed file twice and records definitions and call names."
+      },
+      {
+        "id": "queries",
+        "label": "Six modes",
+        "focus": [
+          "symbols",
+          "refs",
+          "lookup",
+          "calls",
+          "impact"
+        ],
+        "note": "code_graph answers from the tables, and every result carries path:start-end."
+      },
+      {
+        "id": "session-side",
+        "label": "Session side",
+        "focus": [
+          "row",
+          "utcp",
+          "cindex"
+        ],
+        "note": "The code-graph row adds the manual; ph-utcp runs each call as the ph-code-graph command."
+      }
+    ],
+    "legend": {
+      "entries": {
+        "emphasis": {
+          "label": "index path"
+        },
+        "default": {
+          "label": "query"
+        },
+        "dashed": {
+          "label": "manual"
+        },
+        "database": {
+          "label": "sqlite table"
+        }
+      }
+    }
+  },
+  "stages": [
+    {
+      "label": "Session"
+    },
+    {
+      "label": "Index run"
+    },
+    {
+      "label": "Extract"
+    },
+    {
+      "label": "graph.db"
+    },
+    {
+      "label": "code_graph"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "row",
+      "type": "backend",
+      "label": "code-graph row",
+      "sublabel": "row.py",
+      "stage": 0,
+      "row": 0,
+      "tag": "manual",
+      "width": 140
+    },
+    {
+      "id": "utcp",
+      "type": "messagebus",
+      "label": "ph-utcp",
+      "sublabel": "runs the command",
+      "stage": 0,
+      "row": 1,
+      "tag": "ctx.shell"
+    },
+    {
+      "id": "cindex",
+      "type": "backend",
+      "label": "code_index",
+      "sublabel": "walks via ctx.fs",
+      "stage": 1,
+      "row": 1,
+      "tag": "sha256"
+    },
+    {
+      "id": "process",
+      "type": "backend",
+      "label": "process()",
+      "sublabel": "language pack",
+      "stage": 2,
+      "row": 0,
+      "tag": "definitions"
+    },
+    {
+      "id": "tags",
+      "type": "backend",
+      "label": "tags query",
+      "sublabel": "tree-sitter tags.scm",
+      "stage": 2,
+      "row": 2,
+      "tag": "calls"
+    },
+    {
+      "id": "symbols",
+      "type": "database",
+      "label": "symbols",
+      "sublabel": "and symbols_fts",
+      "stage": 3,
+      "row": 0,
+      "tag": "FTS5"
+    },
+    {
+      "id": "refs",
+      "type": "database",
+      "label": "refs",
+      "sublabel": "calls by name",
+      "stage": 3,
+      "row": 2,
+      "tag": "name-based"
+    },
+    {
+      "id": "lookup",
+      "type": "frontend",
+      "label": "search, define",
+      "sublabel": "and entities",
+      "stage": 4,
+      "row": 0,
+      "tag": "symbols",
+      "width": 140
+    },
+    {
+      "id": "calls",
+      "type": "frontend",
+      "label": "callers, callees",
+      "sublabel": "called by, calls",
+      "stage": 4,
+      "row": 1,
+      "tag": "join",
+      "width": 140
+    },
+    {
+      "id": "impact",
+      "type": "frontend",
+      "label": "impact",
+      "sublabel": "ring by ring",
+      "stage": 4,
+      "row": 2,
+      "tag": "recursive",
+      "width": 140
+    }
+  ],
+  "flows": [
+    {
+      "id": "manual",
+      "from": "row",
+      "to": "utcp",
+      "label": "manual",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "call-index",
+      "from": "utcp",
+      "to": "cindex",
+      "label": "call: paths",
+      "variant": "emphasis"
+    },
+    {
+      "id": "text-to-process",
+      "from": "cindex",
+      "to": "process",
+      "label": "changed files",
+      "variant": "emphasis"
+    },
+    {
+      "id": "text-to-tags",
+      "from": "cindex",
+      "to": "tags",
+      "label": "changed files",
+      "variant": "emphasis"
+    },
+    {
+      "id": "definitions",
+      "from": "process",
+      "to": "symbols",
+      "label": "definitions",
+      "variant": "emphasis"
+    },
+    {
+      "id": "references",
+      "from": "tags",
+      "to": "refs",
+      "label": "call names",
+      "variant": "emphasis"
+    },
+    {
+      "id": "fts",
+      "from": "symbols",
+      "to": "lookup",
+      "label": "name + doc"
+    },
+    {
+      "id": "join",
+      "from": "refs",
+      "to": "calls",
+      "label": "join on name",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [
+        [
+          745,
+          271
+        ]
+      ]
+    },
+    {
+      "id": "closure",
+      "from": "refs",
+      "to": "impact",
+      "label": "transitive"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two processes",
+      "items": [
+        "The code-graph row adds the manual with ctx.utcp.add",
+        "tree-sitter and sqlite3 run in the ph-code-graph command",
+        "graph.db sits in the calling agent's scratch"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Two passes per file",
+      "items": [
+        "process() gives definitions, imports and docstrings",
+        "The tags query gives @reference.call, the call edge",
+        "Line numbers are normalized to 1-based on the way out"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Name-based, and it says so",
+      "items": [
+        "callers and callees join refs on the name used",
+        "An ambiguous result carries its definitions count",
+        "A file is re-extracted only when its sha256 changes"
+      ]
+    }
+  ]
+}

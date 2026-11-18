@@ -15,6 +15,7 @@ of it is in force until something chooses**, and this is the choosing.
 ## Two tiers, because the interesting default is not uniform
 
 ```yaml
+# what the `rlm` bundle sets; the row's own defaults are all three unset
 - id: containment
   name: containment
   config:
@@ -26,9 +27,14 @@ of it is in force until something chooses**, and this is the choosing.
 A person running `rlm` is working in their own checkout and would be surprised to
 find their agent editing a copy somewhere else — so the root stays `advisory`.
 Its **children** are the fan-out hazard the tier exists for: eight of them
-writing one tree concurrently is the case §4.8 opens with, so `child_tier`
-defaults to `worktree`. One knob would have forced the wrong answer on one of
-them.
+writing one tree concurrently is the case §4.8 opens with, so the `rlm` bundle
+sets `child_tier: worktree`. One knob would have forced the wrong answer on one
+of them.
+
+That is the bundle's choice, not the row's default. The row ships with `tier`
+and `child_tier` both unset, and an unset `child_tier` follows `tier`: a profile
+that mounts `containment` without the `rlm` bundle and names neither puts its
+children where its root is.
 
 `None` is **no opinion, not `advisory`**. Mounting this row must not opt a
 profile out of a provider it deliberately layered; a profile says `advisory` when

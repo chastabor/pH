@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "pH: the five invariants",
+    "quality_profile": "showcase",
+    "legend": { "entries": {
+      "frontend": { "label": "Invariant" },
+      "backend": { "label": "Mechanism in ph-core" },
+      "security": { "label": "What holds it" }
+    } },
+    "views": [
+      { "id": "structure", "label": "Structure", "focus": ["i1", "m1", "c1", "i5", "m5", "c5"], "note": "I1 and I5 are about shape: everything is a row, and a seam is a key, a provider and its consumers." },
+      { "id": "lifetime", "label": "Lifetime", "focus": ["i2", "m2", "c2"], "note": "What a scope registered or acquired is released when the scope is disposed." },
+      { "id": "the-log", "label": "The log", "focus": ["i3", "m3", "c3", "i4", "m4", "c4"], "note": "The model sees only a projection of the log, and the log is never rewritten." }
+    ]
+  },
+  "components": [
+    { "id": "i1", "type": "frontend", "label": "I1 No privileged core", "sublabel": "everything is a plugin", "pos": [40, 100], "size": [200, 64] },
+    { "id": "i2", "type": "frontend", "label": "I2 Effects unwind", "sublabel": "registrations and resources", "pos": [290, 100], "size": [200, 64] },
+    { "id": "i3", "type": "frontend", "label": "I3 Visible means logged", "sublabel": "what the model sees", "pos": [540, 100], "size": [200, 64] },
+    { "id": "i4", "type": "frontend", "label": "I4 Append-only log", "sublabel": "the surface is what changes", "pos": [790, 100], "size": [200, 64] },
+    { "id": "i5", "type": "frontend", "label": "I5 Three-role seams", "sublabel": "key, provider, consumers", "pos": [1040, 100], "size": [200, 64] },
+    { "id": "m1", "type": "backend", "label": "Profile loader", "sublabel": "rows, patches, entry points", "pos": [40, 280], "size": [200, 64] },
+    { "id": "m2", "type": "backend", "label": "Context scopes", "sublabel": "effect, add_disposer", "pos": [290, 280], "size": [200, 64] },
+    { "id": "m3", "type": "backend", "label": "derive_messages", "sublabel": "the log as model history", "pos": [540, 280], "size": [200, 64] },
+    { "id": "m4", "type": "backend", "label": "SurfaceManager", "sublabel": "append or replace a range", "pos": [790, 280], "size": [200, 64] },
+    { "id": "m5", "type": "backend", "label": "Service keys", "sublabel": "provide, inject, claim", "pos": [1040, 280], "size": [200, 64] },
+    { "id": "c1", "type": "security", "label": "Layering gates", "sublabel": "tests, not a runtime row", "pos": [40, 460], "size": [200, 64] },
+    { "id": "c2", "type": "security", "label": "scope-invariant", "sublabel": "polled: unwind, teardown", "pos": [290, 460], "size": [200, 64] },
+    { "id": "c3", "type": "security", "label": "agent-loop-invariant", "sublabel": "inline: refuses the request", "pos": [540, 460], "size": [200, 64] },
+    { "id": "c4", "type": "security", "label": "session-invariant", "sublabel": "polled: projection equals fold", "pos": [790, 460], "size": [200, 64] },
+    { "id": "c5", "type": "security", "label": "Provider checks", "sublabel": "four layers", "pos": [1040, 460], "size": [200, 64] }
+  ],
+  "connections": [
+    { "id": "i1-by", "from": "i1", "to": "m1", "label": "rows", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "i2-by", "from": "i2", "to": "m2", "label": "disposers", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "i3-by", "from": "i3", "to": "m3", "label": "projection", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "i4-by", "from": "i4", "to": "m4", "label": "surface_op", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "i5-by", "from": "i5", "to": "m5", "label": "keys", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "m1-held", "from": "m1", "to": "c1", "label": "in CI", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "m2-held", "from": "m2", "to": "c2", "label": "polled", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "m3-held", "from": "m3", "to": "c3", "label": "llm/stream", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "m4-held", "from": "m4", "to": "c4", "label": "polled", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "m5-held", "from": "m5", "to": "c5", "label": "at mount", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 70 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Properties, not rules", "items": ["Each is something the architecture makes hard to violate", "pH adds three more: I6, I7 and I8", "Three numbering series exist in plans/; these are I1 to I5"] },
+    { "dot": "emerald", "title": "Enforced by rows", "items": ["Every invariant row is optional, so a profile enforces them", "ctx.invariants lists what this deployment enforces", "phern doctor prints each one as holds or enforced inline"] },
+    { "dot": "rose", "title": "Where they are imperfect", "items": ["phern itself is a host, not a plugin", "An effect outside the harness cannot be unwound", "A poll has content only in a live process"] }
+  ]
+}

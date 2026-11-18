@@ -1,0 +1,1406 @@
+intro: |
+  Every box in the top and bottom rows is one row of the `stabilize` bundle. Each
+  one hooks an event the agent loop, the tool pipeline or `ctx.fs` already fires,
+  so none of them is a parameter of the loop. Click a box for the row entry and
+  its options, or an arrow for the event that crosses it and what it carries.
+
+  The bundle has nine rows and the diagram draws eight. The ninth, and the
+  classifier `hitl` runs, are under [Rows not drawn](topic:rows-not-drawn).
+
+topics:
+  - id: configuring
+    title: Configuring the bundle
+    summary: |
+      Every profile phern ships layers the `stabilize` bundle, as an optional
+      layer: an install without `ph-stabilize` composes the same profiles and
+      never compacts. Seven rows arrive switched on and do nothing until they
+      are configured or a threshold is crossed. Two arrive switched off.
+    blocks:
+      - title: What ships on, and what it does on arrival
+        table:
+          columns: [row, shipped, on arrival]
+          rows:
+            - ["[tool-todo](node:todo)", "**off**", "nothing; a profile arms it (`rlm-stable` does)"]
+            - ["[skill-steps](node:skill-steps)", "**off**", "nothing; no shipped profile arms it"]
+            - ["[tool-result-offload](node:result-offload)", "on", "acts only on a result over 80 000 characters"]
+            - ["[input-offload](node:input-offload)", "on", "acts only on a pasted message over 200 000 characters"]
+            - ["[compaction-summarize](node:compaction)", "on", "acts only at 85% of the context window"]
+            - ["[command-compact](topic:rows-not-drawn)", "on", "registers `/compact`"]
+            - ["[limits](node:limits)", "on", "every ceiling unset; the breaker stops a tool after 5 failures in a row"]
+            - ["[hitl](node:hitl)", "on", "asks about a tool that declares itself irreversible when the destructive classifier finds something"]
+            - ["[permissions-fs](node:permissions-fs)", "on", "one live rule: a write outside the agent's workspace asks a person"]
+      - title: How a profile layers it
+        text: |
+          A shipped profile is a list of layers (`ph_app.profiles.PROFILES`). Every one of them has `Bundle("stabilize", required=False)` in it, placed before the profile's own document so that document can address a stabilize row by id. `rlm-stable` and `rlm-indexed` name the bundle again as required, because `rlm-stable.yaml` patches `tool-todo`.
+
+          A person changes a row in one of three places, all in the same grammar:
+
+          - a named profile, `$PH_HOME/profiles/<name>.yaml`: `extends:` a shipped profile and `rows:` with only what differs
+          - `--patch '<entry>'` on the command line, composed last as the `cli` layer
+          - inside a session, `/sandbox` and `/model`, which change their own rows only
+
+          An entry that names a row by `id` is a patch. It may set `disabled`, replace `config`, `insert` or `remove`. **A patch replaces the row's whole config**; it does not merge. Restate what you want to keep.
+      - title: A full example profile
+        lang: yaml
+        note: |
+          `permissions-fs` restates the shipped write rule last, because its
+          `rules` list is replaced. `hitl.interruptOn` keys Code Mode on the
+          reserved name `run_code`, not the name the model sees.
+        code: |
+          # $PH_HOME/profiles/careful.yaml
+          extends: rlm
+          rows:
+            - id: tool-todo
+              disabled: false
+            - id: skill-steps
+              disabled: false
+              config:
+                maxNudges: 3
+            - id: skills-progressive
+              config:
+                paths: [~/.ph/skills, ./.ph/skills]
+            - id: tool-result-offload
+              config:
+                tokenLimit: 20000
+                excludedTools: [my_paging_tool]
+            - id: input-offload
+              config:
+                tokenLimit: 50000
+            - id: compaction-summarize
+              config:
+                triggerFraction: 0.8
+                keepFraction: 0.1
+            - id: limits
+              config:
+                modelCalls: {turnLimit: 40, sessionLimit: 400, exit: end}
+                toolCalls: {turnLimit: 100, perTool: {bash: {turnLimit: 20}}, exit: continue}
+                children: {sessionLimit: 12}
+                breaker: {consecutiveFailures: 5}
+            - id: hitl
+              config:
+                mode: auto
+                interruptOn:
+                  bash:
+                    preset: destructive
+                    when: ["\\bsudo\\b"]
+                  run_code:
+                    preset: destructive
+                    allowedDecisions: [approve, reject]
+            - id: permissions-fs
+              config:
+                rules:
+                  - operations: [read]
+                    paths: ["**/.env", "**/*.pem"]
+                    mode: deny
+                  - operations: [write]
+                    paths: ["**"]
+                    scope: outside-workspace
+                    mode: interrupt
+      - title: Checking what is in force
+        lang: bash
+        code: |
+          phern --profile careful --dump-config    # the rows as composed, with the layer that last set each
+          phern config --row permissions-fs        # one row's options
+          phern doctor --profile careful           # what activated: File permissions, Skill steps
+      - links:
+          - {to: "topic:self-steering", label: "Switching self-steering on"}
+          - {to: "topic:rows-not-drawn", label: "Rows not drawn"}
+
+  - id: self-steering
+    title: Switching self-steering on
+    summary: |
+      `tool-todo` and `skill-steps` ship in the bundle switched off, and
+      `skills-progressive` scans no directory until a profile names one. A
+      profile arms them, or a `--patch` does at a start. Asking the agent to read
+      a self-steering skill does not: with `skill-steps` off, the skill reads as
+      an ordinary one and its `steps:` seed nothing.
+    blocks:
+      - title: In a profile
+        lang: yaml
+        code: |
+          # $PH_HOME/profiles/<name>.yaml
+          extends: rlm
+          rows:
+            - id: skills-progressive      # where skills are read from; empty by default
+              config:
+                paths: [~/.ph/skills, ./.ph/skills]
+            - id: tool-todo               # the list the steps are seeded into
+              disabled: false
+            - id: skill-steps             # the seeding and the nudge
+              disabled: false
+      - title: At a start
+        lang: bash
+        note: |
+          A terminal passes `--patch` to the daemon it starts. A daemon that is
+          already running does not receive it.
+        code: |
+          phern --mode tui \
+            --patch '{id: tool-todo, disabled: false}' \
+            --patch '{id: skill-steps, disabled: false}' \
+            --patch '{id: skills-progressive, config: {paths: [~/.ph/skills]}}'
+      - title: Can the agent switch them on itself?
+        text: |
+          No. A row is mounted when a session starts, from the environment its log records. No tool the model can call mounts a row, and a skill cannot either.
+
+          A running session's rows change through one door, `ph.session_profile.override`. It changes the config of a row that is already running, and it refuses a row that is switched off. Only `/sandbox`, `/model` and a start's own `--patch` options reach it. So turning self-steering on for a session that is already open is a person's act, and it takes a restart of that session:
+
+          - edit a named profile, then type `/profile use <name>` in the session: the session starts again on it at once, with its conversation
+          - or start the daemon again with the `--patch` options above; each is recorded in the session's log as a `profile/override` and stays with the session
+
+          The full answer, with the code behind each sentence, is on the [self-steering page](self-steering#topic:dynamic).
+      - title: Limits
+        tone: limit
+        list:
+          - "`skill-steps` without `tool-todo` is worse than nothing: the steps are still seeded into the log and the turn is still nudged, but the model has no `write_todos` to mark a step done. The row spends its nudges and stands down."
+          - "The nudge holds the model to its own plan, not to the world. Marking a step done is still the model's word."
+          - "It stops after `maxNudges` nudges the plan does not answer (3 by default)."
+          - "With `/autonomous` open as well, both listen on `agent/turn-stopping` and neither outranks the other."
+      - links:
+          - {to: "self-steering", label: "How a self-steering skill runs, step by step"}
+          - {to: "node:skill-steps", label: "The skill-steps row"}
+          - {to: "node:todo", label: "The tool-todo row"}
+
+  - id: rows-not-drawn
+    title: Rows not drawn
+    summary: |
+      The bundle's ninth row is `command-compact`, the person's verb for what
+      `compaction-summarize` does by itself. `ph_stabilize.destructive` is not a
+      row: it is the classifier the `hitl` row runs for `preset: destructive`.
+      Two rows outside the bundle complete the picture: `compaction` in ph-core
+      is the seam the engine registers on, and `skills-progressive` is where a
+      self-steering skill is read from.
+    blocks:
+      - row: command-compact
+      - title: What /compact does
+        text: |
+          `/compact [what you are about to work on]` calls `ctx.compaction.compact_now(agent, instructions=...)`. It is a command, not a turn: nothing is sent to the model as a prompt. The engine refuses while the agent is working, and each refusal is a sentence chosen by `CompactionError.code` (`busy`, `summary`, `unavailable`). Anything typed after the verb reaches the summarizer labeled as the person's and is recorded on `compaction/summarized` as `instructions`.
+
+          It needs an engine. With `compaction-summarize` switched off the row still mounts, and `/compact` answers with the `unavailable` sentence.
+      - title: What comes back
+        struct: ph.seams.compaction:CompactionResult
+      - title: The destructive classifier (a module, not a row)
+        text: |
+          `ph_stabilize.destructive` reads each string argument of a call in its own dialect: shell through `shlex`, SQL as statements, Python through `ast`. It follows a `subprocess.run(...)` in a code cell back into the shell reader. What it finds is put in the approval prompt in a person's words, for example `rm -rf build (removes a directory tree)`. Its tables `SHELL_RULES`, `SQL_STATEMENTS` and `PYTHON_CALLS` are public, and neither claims to be complete.
+
+          A profile reaches it only through [hitl](node:hitl): `preset: destructive` on a rule, or the row's `declared` default.
+      - title: The seam the engine registers on
+        row: compaction
+      - title: Where skills are read from
+        row: skills-progressive
+
+  - id: dispatch
+    title: Which dispatch mode carries each hook
+    summary: |
+      Seven of the nine rows act through a waterfall, because a waterfall is the
+      only mode where a listener can veto or rewrite. `skill-steps` is the
+      exception on both of its events: it hears an `emit` and objects on a
+      `serial`.
+    blocks:
+      - table:
+          columns: [row, event, mode, what the listener may do]
+          rows:
+            - ["input-offload", "`agent/request`", waterfall, "append a surface replace, then pass the config on unchanged"]
+            - ["compaction-summarize", "`agent/pre-step`", waterfall, "compact after the chain has said `enter`"]
+            - ["compaction-summarize", "`agent/request`", waterfall, "clip or summarize a request the estimate puts past the window"]
+            - ["compaction-summarize", "`agent/request-error`", waterfall, "answer `CONTEXT_WINDOW_EXCEEDED` with `retry` once the surface moved"]
+            - ["limits", "`agent/pre-step`", waterfall, "return `reject` without calling on"]
+            - ["limits", "`agent/request-error`", waterfall, "take back a retry another row granted"]
+            - ["limits", "`tools/pre-execute`", waterfall, "return `Deny` without calling on"]
+            - ["hitl", "`tools/pre-execute`", waterfall, "return `Ask`; the registry routes it to `ctx.approval`"]
+            - ["tool-todo", "`tools/pre-execute`", waterfall, "return `Deny` for two `write_todos` in one message"]
+            - ["tool-result-offload", "`tools/post-execute`", waterfall, "replace the content the model reads"]
+            - ["permissions-fs", "`fs/read-intent`, `fs/write-intent`, `fs/edit-intent`", waterfall, "return a refusal sentence, or ask a person first"]
+            - ["skill-steps", "`skills/read`", emit, "nothing comes back; a raise is logged and the skill is still read"]
+            - ["skill-steps", "`agent/turn-stopping`", serial, "no return value; it objects by calling `agent.steer`"]
+      - title: Not bus events
+        list:
+          - "`ctx.llm.decide` is a service call to the adapter, then HTTP."
+          - "`ctx.approval.request` is a service call; inside it the prompt is routed on the `approval/request` waterfall to whichever front end answers."
+          - "`ctx.subagents.guard` is a registration: the `limits` child ceiling is asked before a spawn, not dispatched to."
+          - "`ctx.compaction.register(engine)` and `ctx.spill_store.claim(...)` are registrations on a seam."
+      - links:
+          - {to: "dispatch", label: "The four dispatch modes"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      No row here keeps its state in memory. Each one answers its question by
+      folding the session log, so a daemon that restarts picks every one of them
+      up where it stopped. What is lost is small and listed below.
+    blocks:
+      - title: Read back from the log
+        tone: durable
+        list:
+          - "**The todo list** is the last `todo/write` record. A resume shows it; a fork inherits the one its prefix ended with."
+          - "**A seeded procedure** is entries in that list tagged `source: skill`. Its nudge budget is the last `skill-steps/budget` record, and the nudges spent are counted from the `user/message` records the row's own steers left."
+          - "**Limits** are counted from `turn/start`, `step/start`, `step/retry` and `tool/call`. A child ceiling is counted from the children's own `subagent/admitted` records, which the resume sweep loads first."
+          - "**The approval posture** is the last `approval/mode` record. An ask a crash left open is closed as `interrupted` by repair; it is not asked again."
+          - "**A summary** is a `user/message` that replaces a range of the surface, written in one batch with its `compaction/summarized` record. The messages it stands for are still in the log."
+          - "**An offloaded paste** is a surface replace written in one batch with `offload/input-spilled`, after the blob is on disk."
+          - "**An offloaded tool result**: the `tool/result` record already holds the preview the model saw, and `offload/spilled` names the file."
+          - "**A declined compaction** is a `compaction/declined` record. The engine reads it back and does not try again until the surface has moved."
+      - title: The files
+        tone: durable
+        list:
+          - "Spilled blobs live in the spill store under the session id. A name is the first 16 hex digits of the content's SHA-256, then `large_tool_results_<call id>` or `conversation_history_<seq>.md`."
+          - "When a stored log is loaded, the spill sweep collects blobs no record names and reports a record whose blob is missing."
+      - title: Not kept
+        tone: limit
+        list:
+          - "`skill-steps` remembers in memory which warnings it already gave and until when a decision route that timed out is resting. A restart warns once more and asks the route again at once."
+          - "The decision batch limit learned from a server's refusal (`ctx.llm.decision_limit`) lasts until the daemon restarts."
+          - "The fold cache `limits` reads is a cache. It is rebuilt from the log."
+          - "A turn that was waiting on an approval is closed as interrupted on resume. The model reads that the call did not start and may ask again."
+      - links:
+          - {to: "durability", label: "Durability across the whole harness"}
+
+  - id: subagents
+    title: What a sub-agent inherits
+    summary: |
+      A child agent runs on its parent's mount. It never gets a mount of its own,
+      so every row of this bundle that runs for the parent runs for the child
+      with the same config. A row's listeners are registered on a scope that
+      reaches every agent, so they hear a child's events as they hear the root's.
+    blocks:
+      - table:
+          columns: [row, inside a child]
+          rows:
+            - ["limits", "The same ceilings, counted in the child's own log: its own turns, model calls and tool calls. A child that spawns is held to `children` too."]
+            - ["hitl", "The same rules. The ask is recorded in the child's log with its `agentId` and routed to the same front end."]
+            - ["permissions-fs", "The same rule list. `scope: outside-workspace` is judged against the child's own workspace, so a child in a worktree is asked about a write to its parent's checkout."]
+            - ["tool-result-offload, input-offload", "The same thresholds. The blob is stored under the child's session, and the replacement names the tools the child can call."]
+            - ["compaction-summarize", "The same thresholds, against the window of the model the child runs on."]
+            - ["tool-todo", "`write_todos` only if the spawn grants the child that tool. Its list is its own: it lives in the child's log."]
+            - ["skill-steps", "Seeds and nudges inside the child when the child reads a skill with the `skill` tool. A skill handed over in the spawn's brief is not read through the tool and seeds nothing."]
+      - title: What a child cannot widen
+        tone: secure
+        list:
+          - "A spawn narrows by restriction only. A child holds a subset of its parent's tools and skills, fixed when it is admitted."
+          - "A profile a parent assigns to a child is read as a narrowing. A row it would add is refused by name. A row it drops takes that row's tools and skills away from the child, so dropping `tool-todo` removes `write_todos`."
+          - "None of this bundle's rows declares a narrower (`plugin(..., narrows=)`), so none of their settings can differ for one agent of a mount. A child cannot get looser limits, a different approval posture or fewer path rules than its parent."
+          - "The listeners of `limits`, `hitl` and `permissions-fs` cannot be dropped for a child: they belong to the mount, not to the agent."
+      - title: Limits
+        tone: limit
+        list:
+          - "There is no way to give a child a tighter ceiling than its parent's through this bundle. The spawn's own options and the subagent provider's queue are the per-child controls."
+          - "Counts are per agent. Ten children each get the full `toolCalls.sessionLimit`; no ceiling here bounds a family's total."
+      - links:
+          - {to: "ph-core", label: "ph-core: scopes and the subagent seam"}
+
+  - id: invariants
+    title: How the five invariants show up
+    summary: |
+      The bundle is the design's test case: nine features added without changing
+      the loop.
+    blocks:
+      - table:
+          columns: [invariant, here]
+          rows:
+            - ["I1 Everything is a plugin", "Each feature is a row on an event that already exists. Removing the bundle leaves a working harness that never compacts."]
+            - ["I2 Registrations unwind", "A row's listeners, its tool, its prompt section and its spill claim are effects of the row's scope. A live `/sandbox` or `/model` change remounts one row and nothing else."]
+            - ["I3 Model-visible means logged", "`write_todos` writes `todo/write` itself. A nudge reaches the model as a logged `user/message`. An approval is on disk before anybody is asked."]
+            - ["I4 The log is append-only", "A summary and an offloaded paste are surface replaces: the model reads the replacement, the log keeps the original, and the transcript shows the person what they sent."]
+            - ["I5 Seams have three roles", "ph-core defines `ctx.compaction` with no engine; `compaction-summarize` provides one; `/compact` and the loop hooks consume it."]
+      - links:
+          - {to: "invariants", label: "The five invariants"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      What the bundle does not do, stated in the terms the code uses.
+    blocks:
+      - title: Scope of the gates
+        tone: limit
+        list:
+          - "`permissions-fs` bounds calls that go through `ctx.fs`. An `open()` inside a code cell or a subprocess never fires an intent. A sandbox provider bounds those; the row says which is true on `ctx.fs_permissions.reach` and in `phern doctor`."
+          - "A symlink inside the workspace that points out of it is not asked about by the `outside-workspace` rule."
+          - "`hitl` in the shipped `auto` posture asks only when a rule's condition matches. The destructive tables are a starting point, not a complete list."
+          - "`hitl.set_mode` records a posture change (`approval/mode`), and no shipped command calls it. The posture is the row's `mode` unless something else writes that record."
+          - "`limits` ceilings are all unset as shipped. Only the breaker is live."
+          - "`limits.modelCalls.turnLimit` is shared by a person's interjection: a prompt typed at a busy agent joins the running turn and its count."
+      - title: Context management
+        tone: limit
+        list:
+          - "Compaction can decline. When the only cut that keeps every tool call with its result is the start of the conversation, nothing is compacted and `compaction/declined` says so."
+          - "Offloading fails open. If the spill write fails, the original result or paste is kept in the request."
+          - "A tool that declares `self_limits` is never offloaded. A Code Mode cell does not declare it."
+          - "The offload threshold is an estimate: 4 characters a token."
+      - title: Planning
+        tone: limit
+        list:
+          - "`skill-steps` holds the model to its own plan, not to reality. `worked` on a completed entry makes a tick with no tool calls behind it visible to a person; it does not refuse it."
+          - "Nothing schedules a step, times one out, or notices one that has been `in_progress` for an hour."
+          - "The one-call rule for `write_todos` holds for native tool calling only. A Code Mode cell orders its own calls."
+          - "`skill-steps` and `/autonomous` both listen on `agent/turn-stopping`. With a goal open and a procedure unfinished, the row can steer past the goal's budget."
+      - links:
+          - {to: "topic:subagents", label: "What a sub-agent inherits"}
+          - {to: "topic:durability", label: "What survives a restart"}
+
+nodes:
+  input-offload:
+    summary: |
+      A person pastes a build log or a dumped table into the prompt. This row
+      writes the text to the spill store and puts a preview in its place on the
+      surface, so the model reads a head and a tail and a path. The log keeps
+      the message as it was sent.
+    blocks:
+      - row: input-offload
+      - title: In a profile
+        lang: yaml
+        note: "`tokenLimit: null` switches the row's work off. The character threshold is four times the number."
+        code: |
+          - id: input-offload
+            config:
+              tokenLimit: 25000     # offload a paste over 100 000 characters
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`agent/request`", waterfall, "finds the newest message from the person in this step, spills it if it is over the limit, appends the replacement, passes the config on unchanged"]
+      - event: agent/request
+      - title: What it writes to the log
+        text: |
+          Two records in one batch, after the blob is on disk: a `user/message` whose surface operation replaces the person's message, and `offload/input-spilled`. The replacement's source is `PluginSource(plugin="input-offload", form="notice")`, so the transcript does not show the preview as the person's words.
+      - record: offload/input-spilled
+        example: |
+          {"type": "offload/input-spilled",
+           "data": {"seq": 41,
+                    "locator": "<spill root>/<session id>/9f2c41d07a11b3e5-conversation_history_41.md",
+                    "bytes": 2104331,
+                    "size": {"unit": "bytes", "before": 2104331, "after": 1873}}}
+      - title: What it is handed back by the store
+        struct: ph.seams.spill:SpillRef
+      - title: Services
+        list:
+          - "Needs `ctx.spill_store` (the `spill-local` row in ph-core). Without it the row does not activate."
+          - "It claims the store under the session with `hands_paths`, which is what lets a read rule follow the path it gave the model."
+      - title: Durability
+        tone: durable
+        list:
+          - "The replacement and its record land together or not at all. A resumed session reads the preview, not the paste."
+          - "The pass is idempotent: the replacement is itself a `user/message`, so the next request meets it first and stops."
+      - title: Limits
+        tone: limit
+        list:
+          - "Text blocks only. An image in the message is left where it is."
+          - "Only the newest message from the person, within the current step."
+          - "If the store cannot take the text, the paste is sent whole."
+
+  compaction:
+    title: compaction-summarize
+    summary: |
+      When the conversation itself no longer fits, this row replaces older
+      history with a summary. It is the engine behind `ctx.compaction`; ph-core
+      ships that seam with no engine, so a profile without this row never
+      compacts. Two cheaper remedies run first: eliding long tool-call arguments
+      in kept history, and spilling the last batch of tool results.
+    blocks:
+      - row: compaction-summarize
+      - title: In a profile
+        lang: yaml
+        note: |
+          The fractions apply when the window is known. `triggerTokens` and
+          `keepMessages` apply when it is not. `auto: false` leaves only
+          `/compact`.
+        code: |
+          - id: compaction-summarize
+            config:
+              auto: true
+              triggerFraction: 0.8      # compact at 80% of the window
+              keepFraction: 0.15        # keep the newest 15% as it is
+              truncateArgs:
+                maxLength: 1000         # elide a tool-call argument longer than this
+      - title: The argument-elision options
+        struct: ph_stabilize.compaction:TruncateArgsConfig
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, trigger, what the row does]
+          rows:
+            - ["`agent/pre-step`", waterfall, "`pressure`", "after the chain says `enter`, compacts if the estimate is at the threshold"]
+            - ["`agent/request`", waterfall, "`window`", "clips or summarizes a request the estimate puts past the whole window, before it is sent"]
+            - ["`agent/request-error`", waterfall, "`overflow`", "on `CONTEXT_WINDOW_EXCEEDED`: clip the trailing tool results, then summarize; answers `retry` if either moved the surface"]
+      - event: agent/pre-step
+      - title: What it writes to the log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`user/message` (surface replace)", "the summary, source `PluginSource(plugin=\"compaction-summarize\", form=\"compaction\")`"]
+            - ["`compaction/summarized`", "in the same batch as the summary"]
+            - ["`compaction/args-truncated`", "one record for every argument elided in one pass"]
+            - ["`compaction/declined`", "an attempt that changed nothing, with a code and a reason"]
+            - ["`offload/spilled`", "a trailing tool result clipped on overflow"]
+      - record: compaction/summarized
+        example: |
+          {"type": "compaction/summarized",
+           "data": {"trigger": "pressure",
+                    "shadowedSeqs": [12, 13, 15, 18],
+                    "shadowedTokens": 148210,
+                    "kept": 6,
+                    "provider": "llama", "model": "qwen",
+                    "maxTokens": 8192,
+                    "locator": "<spill root>/<session id>/41c07be2a9d3f610-conversation_history_211.md",
+                    "usage": {"inputTokens": 150122, "outputTokens": 1904},
+                    "instructions": null,
+                    "shape": "replay",
+                    "size": {"unit": "tokens", "before": 148210, "after": 2301}}}
+      - record: compaction/declined
+        example: |
+          {"type": "compaction/declined",
+           "data": {"trigger": "pressure", "code": "summary", "reason": "..."}}
+      - record: compaction/args-truncated
+        example: |
+          {"type": "compaction/args-truncated",
+           "data": {"trigger": "pressure", "seqs": [31, 44], "savedChars": 51200,
+                    "size": {"unit": "tokens", "before": 13900, "after": 1100}}}
+      - title: Services
+        list:
+          - "Needs `ctx.compaction`, `ctx.token_meter`, `ctx.llm`, `ctx.spill_store` and `ctx.tools`. It registers itself on `ctx.compaction` as the engine."
+          - "The summary is asked of the session's own model, in a request that replays the conversation's own system prompt and tools so a provider's prefix cache serves it."
+      - title: Durability
+        tone: durable
+        list:
+          - "The log never changes. The summary shadows a range of the surface and cites every seq it stands for."
+          - "The full history is also written to the spill store (`<digest>-conversation_history_<seq>.md`), and the summary names the file."
+          - "The automatic path never raises into the turn. A failure becomes a `compaction/declined` record."
+      - title: Limits
+        tone: limit
+        list:
+          - "The cut is moved back so a tool call is never split from its result. If no such cut exists, the attempt declines."
+          - "A reply with no text is retried once without tools. On overflow only the last 4 000 tokens of the range are sent to the summarizer, and the text says it was trimmed."
+          - "It does not run while a compaction of the same session is already running."
+      - links:
+          - {to: "topic:rows-not-drawn", label: "command-compact, the /compact verb"}
+
+  limits:
+    summary: |
+      Hard ceilings on a loop that has stopped making progress: model calls,
+      tool calls and children, each per turn and per session, plus a breaker that
+      stops a tool after it fails several times in a row. Every ceiling is unset
+      as shipped; the breaker is on at 5.
+    blocks:
+      - row: limits
+      - title: In a profile
+        lang: yaml
+        note: |
+          `exit` says what happens at the ceiling. `continue` denies the call
+          and lets the turn go on, `end` denies it and ends the turn, `error`
+          ends the turn and the model reads a spent budget, not a policy.
+          `modelCalls` takes `end` or `error` only.
+        code: |
+          - id: limits
+            config:
+              modelCalls: {turnLimit: 40, sessionLimit: 400, exit: end}
+              toolCalls:
+                turnLimit: 100
+                perTool: {bash: {turnLimit: 20}}
+                exit: continue
+              children: {turnLimit: 6, sessionLimit: 12, exit: continue}
+              breaker: {consecutiveFailures: 5}
+      - title: One budget
+        struct: ph_stabilize.limits:CallBudget
+      - title: Model calls
+        struct: ph_stabilize.limits:ModelCallLimits
+      - title: Tool calls
+        struct: ph_stabilize.limits:ToolCallLimits
+      - title: Children
+        struct: ph_stabilize.limits:ChildLimits
+      - title: The breaker
+        struct: ph_stabilize.limits:BreakerConfig
+      - title: What it listens to
+        table:
+          columns: [hook, dispatch, what the row does]
+          rows:
+            - ["`agent/pre-step`", waterfall, "rejects the step when the next model call would pass a ceiling"]
+            - ["`agent/request-error`", waterfall, "registered first; takes back a retry that would pass the ceiling"]
+            - ["`tools/pre-execute`", waterfall, "denies a call over a tool ceiling, or one the breaker has stopped"]
+            - ["`ctx.subagents.guard`", "service", "refuses a spawn over the child ceiling before the provider is asked"]
+      - record: limits/exceeded
+        example: |
+          {"type": "limits/exceeded",
+           "data": {"limit": "tool-calls", "posture": "continue", "tool": "bash",
+                    "message": "'bash' tool call limit reached: turn limit exceeded (21/20 calls)."}}
+      - record: limits/breaker-tripped
+        example: |
+          {"type": "limits/breaker-tripped",
+           "data": {"tool": "edit", "failures": 5, "limit": 5}}
+      - title: Durability
+        tone: durable
+        list:
+          - "The counts are a fold over the log, not a counter in memory. A resumed session is at the count it stopped at."
+          - "Children are counted from their own logs. A deleted child still counts; a fork starts its child count at zero."
+          - "A breach is recorded before `exit: error` raises, so the loudest posture also leaves a record."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Every agent on the mount, each against its own log. A child cannot raise or clear a ceiling."
+          - "A refused spawn creates nothing: the guard runs before the subagent provider."
+      - title: Limits
+        tone: limit
+        list:
+          - "No ceiling on how many children run at once. That is the subagent provider's queue."
+          - "A prompt typed at a busy agent joins the running turn, so it shares `turnLimit` with the work already done."
+          - "The breaker counts per tool and any success resets it."
+      - links:
+          - {to: "edge:limits-step-hook", label: "The step gate"}
+          - {to: "edge:limits-call-hook", label: "The tool-call gate"}
+
+  hitl:
+    summary: |
+      Puts a person between the model and an action it cannot take back. On
+      `tools/pre-execute` the row decides whether a call needs an answer and
+      returns `Ask`; the tool registry routes the question through
+      `ctx.approval`, which records both halves and fails closed.
+    blocks:
+      - row: hitl
+      - title: In a profile
+        lang: yaml
+        note: |
+          Keys are tool names. `run_code` is the reserved name of the Code Mode
+          transport; the row honors it for whatever name the model sees.
+        code: |
+          - id: hitl
+            config:
+              mode: auto                    # manual | auto | yolo
+              interruptOn:
+                bash:
+                  preset: destructive
+                  when: ["\\b(npm|pnpm|yarn|uv|pip)\\s+publish\\b", "\\bsudo\\b"]
+                  description: This command changes something a worktree cannot undo.
+                run_code:
+                  preset: destructive
+                  when: ["\\bsubprocess\\b"]
+                  allowedDecisions: [approve, reject]
+      - title: One rule
+        struct: ph_stabilize.hitl:Rule
+      - title: Which rule a call gets
+        text: |
+          - a key in `interruptOn` with the tool's name wins
+          - else, if the tool declares `is_irreversible` for these arguments, the `declared` rule (the destructive classifier by default)
+          - else no rule, and the call is not asked about
+
+          Then the posture decides. `yolo` asks about nothing. `auto` asks when the rule has no condition or its condition matched. `manual` asks about every call that has a rule.
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`tools/pre-execute`", waterfall, "returns `Ask(reason, allowed_decisions)` without calling on, or passes the call along"]
+      - title: What a person may answer
+        table:
+          columns: [decision, effect]
+          rows:
+            - ["`approve`", "the call runs"]
+            - ["`reject`", "the model is told the user rejected it"]
+            - ["`edit`", "the call runs with the arguments the person gave"]
+            - ["`respond`", "the call does not run; the model reads the person's message as the result"]
+      - title: What is written to the log
+        note: The approval seam writes these, not the row. The call's arguments stay in the assistant message.
+        code: |
+          {"type": "approval/asked",
+           "data": {"toolName": "bash", "callId": "call_7",
+                    "reason": "This command changes something a worktree cannot undo. — matched 'rm -rf build (removes a directory tree)'",
+                    "agentId": "<session id>",
+                    "allowedDecisions": ["approve", "reject"]}}
+          {"type": "approval/decided",
+           "data": {"toolName": "bash", "outcome": "allowed-once", "askSeq": 88, "callId": "call_7"}}
+        lang: json
+      - record: approval/mode
+        example: |
+          {"type": "approval/mode", "data": {"mode": "manual"}}
+      - title: The request an answerer receives
+        struct: ph.seams.approval:ApprovalRequest
+      - title: Durability
+        tone: durable
+        list:
+          - "`approval/asked` is on disk before anybody is asked, and a decision that lets a call run is on disk before it runs."
+          - "An ask a crash left open is closed as `interrupted` on resume. The turn that was waiting is gone, so it is not asked again."
+          - "The posture is the last `approval/mode` record, else the row's `mode`."
+      - title: What it offers
+        tone: secure
+        list:
+          - "Fails closed: no answerer, a canceled prompt or an error inside an answerer all deny. The call runs only on `allowed-once` or an edit."
+          - "The rule is found by the tool's own declaration, so renaming a tool does not switch the gate off."
+          - "A child's call is gated by the same rules; the ask carries the child's `agentId`."
+      - title: Limits
+        tone: limit
+        list:
+          - "`interruptOn` is empty as shipped, and in `auto` the `declared` rule asks only when the classifier finds something."
+          - "A `when:` pattern is a regex over each decoded string argument. It cannot match across two arguments."
+          - "No shipped command switches the posture; `set_mode` has no caller outside tests."
+          - "It judges a call's arguments, not what the call then does."
+      - links:
+          - {to: "topic:rows-not-drawn", label: "The destructive classifier"}
+          - {to: "edge:hitl-hook", label: "What crosses tools/pre-execute"}
+
+  permissions-fs:
+    summary: |
+      Path rules over file access. The rules sit on the three intents `ctx.fs`
+      fires before anything reaches disk, so every tool that goes through the
+      seam is covered without the row knowing a tool name. First match wins and
+      the default is allow.
+    blocks:
+      - row: permissions-fs
+      - title: In a profile
+        lang: yaml
+        note: |
+          A narrow `allow` above a broad `deny` is how an exception is written.
+          The shipped rule is restated last, because `rules` is replaced whole.
+        code: |
+          - id: permissions-fs
+            config:
+              rules:
+                - operations: [read, write]
+                  paths: ["**/.env", "**/*.pem", "secrets/**"]
+                  mode: deny
+                - operations: [write]
+                  paths: ["docs/**"]
+                  mode: allow
+                - operations: [write]
+                  paths: ["**"]
+                  scope: outside-workspace
+                  mode: interrupt
+                  description: This write leaves the agent's own tree.
+      - title: One rule
+        struct: ph_stabilize.permissions_fs:Rule
+      - title: What a rule can say
+        table:
+          columns: [field, values, meaning]
+          rows:
+            - ["`operations`", "`read`, `write`", "`write` is every change: create, overwrite, edit and delete"]
+            - ["`paths`", "globs", "matched against the absolute path and the path relative to the agent's root; an empty list matches nothing"]
+            - ["`scope`", "`anywhere`, `outside-workspace`", "the second applies only to a path outside the agent's workspace, its scratch, the sandbox's allowed directories and, for a read, a path the harness handed it"]
+            - ["`mode`", "`allow`, `deny`, `interrupt`", "`interrupt` asks a person through `ctx.approval`, offering approve and reject"]
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`fs/read-intent`", waterfall, "judges a read"]
+            - ["`fs/write-intent`", waterfall, "judges a whole-file write"]
+            - ["`fs/edit-intent`", waterfall, "judges an in-place edit, as a write"]
+            - ["`ctx.fs.screen`", "service", "hides a path during `glob` and `grep` walks; `deny` and `interrupt` both conceal"]
+      - title: What it provides
+        text: |
+          `ctx.fs_permissions`, an `FsPermissions`: the rules, `decide(operation, path, agent)`, and `reach`, a sentence that says whether a sandbox bounds what these rules do not. `phern doctor` prints it under *File permissions*.
+      - title: What is written to the log
+        text: |
+          The row writes nothing of its own. A `deny` is a refusal sentence the tool returns: `write denied by permissions-fs: <path>`. An `interrupt` goes through the approval seam, which records `approval/asked` and `approval/decided` with `toolName` `fs.read` or `fs.write`.
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Every tool that reads or writes through `ctx.fs`: the fs tools, a second editing tool, a Code Mode binding."
+          - "The workspace in `outside-workspace` is the acting agent's own. A child in a worktree is asked about a write outside that worktree."
+          - "An ask with no agent or no approval seam denies."
+          - "A recursive delete is refused when any rule could match something inside the tree. No shipped tool deletes, so nothing calls this yet."
+      - title: Limits
+        tone: limit
+        list:
+          - "A raw `open()` in a code cell and a subprocess never fire an intent. A sandbox provider bounds those; without one the row logs a warning at mount."
+          - "With no rules the row attaches no listener at all."
+          - "When the agent has no workspace, an `outside-workspace` rule does not apply."
+          - "A path that is textually inside the workspace is accepted without resolving it, so a symlink pointing out is not asked about."
+      - links:
+          - {to: "edge:permissions-hook", label: "What crosses the fs intents"}
+          - {to: "node:fs", label: "ctx.fs"}
+
+  loop:
+    title: Agent loop
+    summary: |
+      The `agent-loop` row of ph-core. It runs a turn as steps: claim the inbox,
+      ask `agent/pre-step`, build the request through `agent/request`, stream the
+      model, run the tool calls, and at the end ask `agent/turn-stopping` whether
+      anything objects. It knows none of the rows on this page.
+    blocks:
+      - row: agent-loop
+      - title: The events this bundle hooks
+        table:
+          columns: [event, dispatch, who listens here]
+          rows:
+            - ["`agent/pre-step`", waterfall, "compaction-summarize, limits"]
+            - ["`agent/request`", waterfall, "input-offload, compaction-summarize"]
+            - ["`agent/request-error`", waterfall, "limits, compaction-summarize"]
+            - ["`agent/turn-stopping`", serial, "skill-steps"]
+      - title: One turn
+        lang: text
+        code: |
+          turn/start
+            agent/pre-step            reject | enter(messages)
+            step/start
+              user/message*           the claimed inbox batch
+              agent/request           the call config
+              llm/stream              assistant/chunk* then assistant/message
+              agent/request-error     retry | none
+              tool calls              through the tool pipeline
+            step/end
+            agent/turn-stopping       a listener objects by steering
+          turn/end
+      - title: What a listener is handed
+        struct: ph.agent.types:PreStepRequest
+      - title: Three ways to reach a running agent
+        table:
+          columns: [call, lands at, wakes an idle agent]
+          rows:
+            - ["`agent.followup`", "the next turn", "yes"]
+            - ["`agent.steer`", "the next step", "yes"]
+            - ["`agent.inject`", "the next step", "no"]
+      - title: Durability
+        tone: durable
+        list:
+          - "Every request's messages are derived from the log, so a row that changes the surface changes the next request without telling the loop."
+          - "A turn a crash left open is closed by repair on resume: a synthetic result for each unanswered call, `step/end`, and `turn/end` with reason `interrupted`."
+      - links:
+          - {to: "ph-core", label: "ph-core: the loop, the log and the seams"}
+
+  pipeline:
+    title: Tool pipeline
+    summary: |
+      The `tools` row of ph-core, published as `ctx.tools`. Every tool call
+      crosses the same waterfalls whether the model made it natively or a Code
+      Mode cell dispatched it: policy before, the body, policy after.
+    blocks:
+      - row: tools
+      - title: Its events
+        events: tools
+      - title: What a gate is handed
+        struct: ph.tools.definition:ToolExecution
+      - title: What a gate may answer before the body runs
+        table:
+          columns: [decision, effect, who returns it here]
+          rows:
+            - ["`Allow`", "the call goes on, with replaced arguments if given", ""]
+            - ["`Deny`", "the model reads the reason; `concludes_turn` also ends the turn", "limits, tool-todo"]
+            - ["`Ask`", "routed to `ctx.approval`", "hitl"]
+            - ["`Respond`", "the call does not run and the model reads a message", ""]
+      - title: A denial
+        struct: ph.tools.definition:Deny
+      - title: Durability
+        tone: durable
+        list:
+          - "`tool/call` is written after the pre-execute gates, so it exists only for a call that was let through."
+          - "`tool/result` holds what the model read. After `tool-result-offload` that is the preview."
+      - links:
+          - {to: "ph-core", label: "ph-core: the tool registry"}
+
+  fs:
+    title: ctx.fs
+    summary: |
+      The filesystem seam of ph-core, provided by the `fs-local` row. The fs
+      tools call it, and before a read, a write or an edit reaches disk it
+      dispatches an intent that a policy row may veto. That placement is why one
+      rule list covers every tool.
+    blocks:
+      - row: fs-local
+      - title: Its events
+        events: fs
+      - title: A write awaiting policy
+        struct: ph.seams.fs:WriteIntent
+      - title: An edit awaiting policy
+        struct: ph.seams.fs:EditIntent
+      - title: A read awaiting policy
+        struct: ph.seams.fs:ReadIntent
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Each intent carries the acting `agent` and the `scope` it was judged in, so a rule can ask about that agent's own workspace."
+          - "`ctx.fs.root_for(agent)` answers per agent: a child in a worktree has its own root."
+      - title: Limits
+        tone: limit
+        list:
+          - "Only calls through the seam fire an intent. A process the agent starts reads and writes without it."
+      - links:
+          - {to: "node:permissions-fs", label: "The rules that listen"}
+
+  result-offload:
+    title: tool-result-offload
+    summary: |
+      One tool result of 200 000 characters can use up a context window by
+      itself. This row writes an oversized result to the spill store and hands
+      the model the first and last five lines and the path. The result is a
+      file the model can read and search.
+    blocks:
+      - row: tool-result-offload
+      - title: In a profile
+        lang: yaml
+        note: |
+          Either threshold tripping offloads. `tokenLimit` is an estimate at 4
+          characters a token; `maxInlineBytes` is off unless set.
+        code: |
+          - id: tool-result-offload
+            config:
+              tokenLimit: 10000             # offload a result over 40 000 characters
+              maxInlineBytes: 65536
+              excludedTools: [my_paging_tool]
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`tools/post-execute`", waterfall, "lets the chain decide first, measures the content as it will be sent, and replaces it when it is over a threshold"]
+      - record: offload/spilled
+        example: |
+          {"type": "offload/spilled",
+           "data": {"callId": "call_19",
+                    "locator": "<spill root>/<session id>/7be01c22d4a9f3e8-large_tool_results_call_19",
+                    "bytes": 412877}}
+      - title: What the model reads instead
+        lang: text
+        note: The tool names are the ones this agent can call. The search sentence is added only when a visible tool searches paths.
+        code: |
+          Tool result too large, the result of this tool call call_19 was saved in the filesystem at this path: <locator>
+          You can read the result from the filesystem by using the read tool, but make sure to only read part of the result at a time.
+          ...
+          Here is a preview showing the head and tail of the result ...
+               1  first line
+          ... [8120 lines truncated] ...
+            8126  last line
+          This path is an ordinary file on disk, so `grep` and `glob` reach it with the path above as their `path` argument ...
+      - title: What the store hands back
+        struct: ph.seams.spill:SpillRef
+      - title: Services
+        list:
+          - "Needs `ctx.tools` and `ctx.spill_store`."
+          - "It asks each tool whether it limits itself (`ToolDefinition.self_limits`); `read` and `grep` do, and are left alone."
+      - title: Durability
+        tone: durable
+        list:
+          - "The swap happens before the result is logged: `tool/result` carries the preview, the store holds the full text, and `offload/spilled` names it."
+          - "The record is written after the blob is on disk, so no record names bytes that are not there."
+      - title: Limits
+        tone: limit
+        list:
+          - "Fails open: if the store cannot take the result, the model gets it whole."
+          - "Each result is judged alone. Forty small results in one cell are not offloaded as a group."
+          - "Only the rendered text is replaced. Under Code Mode the program still receives the full value."
+      - links:
+          - {to: "edge:result-offload-hook", label: "What crosses tools/post-execute"}
+
+  skill-steps:
+    summary: |
+      Makes a skill that declares `steps:` into work the model must finish. Reading
+      the skill seeds the steps into the todo list; when a turn is about to end
+      with a step that could start, the row steers the agent to carry on. It
+      ships switched off, because it can keep a turn going.
+    blocks:
+      - row: skill-steps
+      - title: With a decision model
+        lang: yaml
+        note: |
+          `decision` names a route an adapter row registered. Without it every
+          unfinished procedure is nudged.
+        code: |
+          - id: skill-steps
+            disabled: false
+            config:
+              maxNudges: 3
+              decision:
+                provider: decision
+                model: bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L
+                holdAt: 0.8
+                timeoutMs: 3000
+      - title: The decision option
+        struct: ph_stabilize.skill_steps:Decision
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`skills/read`", emit, "seeds the skill's steps at the end of the todo list"]
+            - ["`agent/turn-stopping`", serial, "asks the decision model, then steers or lets the turn end"]
+      - title: What it writes to the log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`todo/write`", "the list with the seeded steps appended"]
+            - ["`skill-steps/budget`", "in the same batch: the skill's name and its own `max-nudges`, or null"]
+            - ["`skill-steps/decided`", "each answer from the decision model: `{waiting, holdAt}`"]
+            - ["`user/message` from a plugin", "the nudge itself, written by the loop when it claims the steer; tagged `ph_stabilize.skill_steps` so the transcript does not show it as the person's"]
+      - record: skill-steps/budget
+        example: |
+          {"type": "skill-steps/budget", "data": {"skill": "port-a-feature", "maxNudges": null}}
+      - title: Services
+        list:
+          - "No `inject`. The row mounts with nothing but the bus, so a missing decision model cannot stop the seeding or the nudge."
+          - "`ctx.llm` is looked up only when a decision is asked for."
+          - "It contributes the *Skill steps* section of `phern doctor`: the route, and whether its adapter can decide."
+      - title: Durability
+        tone: durable
+        list:
+          - "The row keeps no plan state of its own. Seeded steps, the budget and nudges are log records, so a restarted daemon picks the procedure up where it stopped."
+          - "The nudge count is folded from the log (`nudges_since`), not held in memory."
+      - title: Limits
+        tone: limit
+        list:
+          - "A loop step is not a plan step: the row never claims to know which step is running."
+          - "A decision model that times out is not asked again for 60 seconds; the nudge goes ahead."
+          - "A decision is a judgement about a message. `ctx.approval` is what stops a tool call."
+          - "With `tool-todo` off the row still seeds and nudges, and the model has no tool to answer with."
+      - links:
+          - {to: "self-steering", label: "How a self-steering skill runs, step by step"}
+          - {to: "topic:self-steering", label: "Switching self-steering on"}
+          - {to: "edge:skill-steps-decide", label: "What is sent to the decision model"}
+
+  todo:
+    title: tool-todo
+    summary: |
+      The `write_todos` tool, the `todo/write` record and a prompt section. The
+      list lives in the log and nowhere else, which is why it survives a resume
+      and a fork, and why the sidebar and the model see one projection. It ships
+      switched off, because layering the bundle must not hand the model a tool.
+    blocks:
+      - row: tool-todo
+      - title: In a profile
+        lang: yaml
+        note: The row takes no options. `rlm-stable` switches it on.
+        code: |
+          - id: tool-todo
+            disabled: false
+      - title: One entry of the list
+        struct: ph_stabilize.todo:TodoItem
+      - title: The tool's arguments
+        struct: ph_stabilize.todo:WriteTodosArgs
+      - title: What the harness adds to an entry
+        table:
+          columns: [field, written by, meaning]
+          rows:
+            - ["`source: skill`", "skill-steps, re-attached on every write", "the entry is a skill's step; it may be marked done and may not be dropped, reordered or reworded"]
+            - ["`worked`", "tool-todo, when an entry is completed", "how many tool calls the harness saw since the previous `todo/write`"]
+      - record: todo/write
+        example: |
+          {"type": "todo/write",
+           "data": {"todos": [
+             {"content": "read the plan row", "status": "completed", "requires": [], "worked": 2},
+             {"content": "survey the callers", "status": "in_progress", "requires": [], "source": "skill"},
+             {"content": "port the row", "status": "pending", "requires": ["survey the callers"], "source": "skill"}]}}
+      - title: What it registers
+        table:
+          columns: [what, where]
+          rows:
+            - ["the `write_todos` tool", "`ctx.tools`"]
+            - ["a listener that refuses two calls in one message", "`tools/pre-execute`, waterfall"]
+            - ["the `write-todos` guidance section", "`ctx.system_prompt`, in the cached prefix"]
+            - ["the `todos` context: the list as `[ ]`, `[~]`, `[x]`", "`ctx.system_prompt`, rebuilt each turn after the history"]
+      - title: What is refused
+        tone: secure
+        list:
+          - "A plan that contradicts itself: a `requires` naming nothing, a cycle, two entries with the same text, an entry under way while something it waits on is not done."
+          - "A write that drops, reorders or rewords a skill's step. The model's arguments never carry `source`; it is put back from the log."
+          - "Each refusal is a `PlanError` the model reads as a failed tool result, and nothing is written."
+      - title: Limits
+        tone: limit
+        list:
+          - "`write_todos` replaces the whole list: at most 100 entries, 500 characters each, 20 `requires` each."
+          - "More than one `write_todos` in one assistant message fails all of them (native tool calling only)."
+          - "`worked: 0` is a signal for a person, not a refusal."
+
+  decider:
+    title: Decision model
+    summary: |
+      A model server asked typed questions about a state. It answers with
+      probabilities, in about a third of a second, where a chat model would spend
+      a turn of tokens on a sentence the row would then have to parse. It is an
+      outside party: llama.cpp and Ollama answer the request for the model
+      families they support.
+    blocks:
+      - title: The route, in the adapter row
+        lang: yaml
+        note: |
+          One more entry in the profile's own `llm-openai-compatible` row
+          (`llm-llama` in the shipped `llama` profile). A list in row config is
+          replaced, not merged, so the chat route is restated. `apiKeyEnv` is
+          the name of a variable.
+        code: |
+          - id: llm-llama
+            config:
+              profiles:
+                - provider: llama        # the chat route, as it was
+                - provider: decision
+                  baseUrl: ${env:DECISION_BASE_URL:-http://127.0.0.1:9932/v1}
+                  apiKeyEnv: DECISION_API_KEY
+                  maxDecisionTokens: 8192   # the server's --ubatch-size; 512 when left out
+      - title: The adapter row
+        row: llm-openai-compatible
+      - title: Limits
+        tone: limit
+        list:
+          - "A llama.cpp reads a decision in one batch, so what it takes is bounded by `--ubatch-size` (512 tokens unless raised), not by its context window."
+          - "A server that cannot be asked costs the exception, never the feature: the nudge goes ahead and the daemon logs one warning for each failure code."
+          - "A server without `/systemone`, or one serving a chat model there, answers with a status and its own sentence; that is the error."
+      - links:
+          - {to: "edge:skill-steps-decide", label: "The request and the answer"}
+          - {to: "self-steering#node:decider", label: "The decision model on the self-steering page"}
+
+edges:
+  loop-to-pipeline:
+    transport: call
+    summary: |
+      After the model's message is committed, the loop hands each tool call in it
+      to `ctx.tools`. The pipeline runs the call through its waterfalls and
+      returns a result, which the loop sends back to the model in the next step.
+    blocks:
+      - title: The waterfalls one call crosses
+        events: tools
+      - title: What is left in the log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`assistant/message`", "before any of its calls runs; it holds the calls and their arguments"]
+            - ["`tool/call`", "after the pre-execute gates let the call through"]
+            - ["`tool/result`", "what the model reads, after the post-execute policy"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A gate that raises does not take the call down: the pipeline turns a policy row's exception into a failed result."
+          - "A `Deny` with `concludes_turn` ends the turn; calls of the same message already in flight are not undone."
+          - "`agent-loop`'s `maxParallelToolCalls` (10 by default) bounds how many calls of one message run at once."
+
+  pipeline-to-fs:
+    transport: call
+    summary: |
+      The fs tools (`read`, `write`, `edit`, `glob`, `grep`) do not touch disk
+      themselves. They call `ctx.fs`, which dispatches an intent first and
+      performs the operation only if no listener objects.
+    blocks:
+      - title: The intents
+        events: fs
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A refusal comes back to the tool as a sentence, and the model reads it as the tool's failed result."
+          - "`bash` and a code cell do not go through this arrow. They are bounded by the sandbox and asked about by `hitl`."
+
+  input-offload-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The loop dispatches `agent/request` after it has appended the step's
+      `user/message` records and before it derives the messages to send.
+      `input-offload` appends a replacement in that gap and returns the call
+      config untouched; the loop's own derivation then picks the preview up.
+    blocks:
+      - event: agent/request
+      - title: The payload
+        struct: ph.agent.types:RequestProposal
+      - title: What the replacement looks like in the log
+        lang: json
+        note: A `user/message` that replaces seq 41 on the surface. The original record stays.
+        code: |
+          {"type": "user/message",
+           "data": {"role": "user",
+                    "source": {"kind": "plugin", "plugin": "input-offload", "form": "notice",
+                               "summary": "2104331 bytes offloaded to 9f2c41d07a11b3e5-conversation_history_41.md"},
+                    "content": [{"type": "text",
+                                 "text": "Message content too large and was saved to the filesystem at: <locator>\n\nYou can read the full content using the read tool with pagination ..."}]}}
+      - record: offload/input-spilled
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "If the spill store refuses the text, the listener passes the request on with the paste in it."
+          - "The listener returns the same config it was given. It never rewrites the request itself."
+
+  compaction-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The loop dispatches `agent/pre-step` to decide whether a step is entered.
+      `compaction-summarize` lets the rest of the chain answer first and, when
+      the answer is `enter`, checks the token estimate and compacts if it is at
+      the threshold. It never changes the decision.
+    blocks:
+      - event: agent/pre-step
+      - title: The decision that comes back
+        struct: ph.agent.types:PreStepDecision
+      - title: The other two triggers
+        text: |
+          The row also listens on `agent/request` (trigger `window`) and `agent/request-error` (trigger `overflow`). On an overflow it answers with a retry once the clip or the summary has moved the surface:
+      - struct: ph.agent.types:RequestErrorAction
+      - event: agent/request-error
+      - title: What a compaction leaves
+        text: |
+          A `user/message` that replaces the shadowed range, and `compaction/summarized` in the same batch. See [the row](node:compaction) for both shapes.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The hook never raises into the turn; a failure is a `compaction/declined` record."
+          - "A step another row rejected is not compacted for."
+          - "If neither the clip nor the summary changed anything, the overflow is passed on and the turn ends with the provider's error."
+
+  limits-step-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      Before each step the loop asks `agent/pre-step`. When the next model call
+      would pass a ceiling, `limits` returns `reject` without calling the rest
+      of the chain, and the turn ends as blocked.
+    blocks:
+      - event: agent/pre-step
+      - title: The payload
+        struct: ph.agent.types:PreStepRequest
+      - title: What comes back at the ceiling
+        lang: python
+        code: |
+          PreStepDecision(kind="reject", reason="Model call limits exceeded: turn limit (40/40)")
+      - record: limits/exceeded
+        example: |
+          {"type": "limits/exceeded",
+           "data": {"limit": "model-calls", "posture": "end", "turn": 40, "session": 212,
+                    "message": "Model call limits exceeded: turn limit (40/40)"}}
+      - title: A retry is a model call too
+        text: |
+          The row is also first in line on `agent/request-error`. It lets the chain answer, and if a row granted a retry that would pass the ceiling it returns nothing: the failure stands, and the record carries `retry: true`.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`exit: error` raises `ModelCallLimitExceeded`. The breach is recorded first."
+          - "With no model-call ceiling set the listener passes every step on."
+
+  limits-call-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      Before a tool body runs, the pipeline dispatches `tools/pre-execute`.
+      `limits` reads the counts for the call's own session and returns `Deny`
+      when a tool ceiling is passed or the breaker has stopped that tool.
+    blocks:
+      - event: tools/pre-execute
+      - title: The payload
+        struct: ph.tools.definition:ToolExecution
+      - title: What comes back
+        table:
+          columns: [exit, the model reads, the turn]
+          rows:
+            - ["`continue`", "`Tool call limit exceeded. Do not call 'bash' again.`", "goes on"]
+            - ["`end`", "the same sentence; later calls of the same message read that execution stopped", "ends"]
+            - ["`error`", "`'bash' call limit reached: ...`, as a failed result", "ends"]
+            - ["breaker", "`'edit' has failed 5 times in a row and is not being called again. ...`", "goes on"]
+      - title: The denial
+        struct: ph.tools.definition:Deny
+      - record: limits/exceeded
+      - record: limits/breaker-tripped
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The counts hold every call before the one being judged, because `tool/call` is written after the gates."
+          - "With no tool ceiling and the breaker off, the listener does not read the counts at all."
+
+  hitl-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      On `tools/pre-execute`, `hitl` returns `Ask` for a call its rules select.
+      The registry stops the chain there and calls `ctx.approval.request`, which
+      routes the prompt to a front end on the `approval/request` waterfall and
+      comes back with the answer.
+    blocks:
+      - event: tools/pre-execute
+      - title: What the row returns
+        struct: ph.tools.definition:Ask
+      - title: Where the question goes next
+        event: approval/request
+      - title: What an answerer receives
+        struct: ph.seams.approval:ApprovalRequest
+      - title: The answers
+        table:
+          columns: [answer, on the wire, the call]
+          rows:
+            - ["allowed once", "`\"allowed-once\"`", "runs"]
+            - ["edited", "`{\"kind\": \"edited\", \"arguments\": ...}`", "runs with those arguments"]
+            - ["responded", "`{\"kind\": \"responded\", \"message\": \"...\"}`", "does not run; the model reads the message"]
+            - ["rejected, canceled, unavailable", "the bare word", "does not run; the model is told which"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No answerer, an error inside one, or a log that cannot be written: the answer is `unavailable` and the call does not run."
+          - "A person stopping the turn while being asked closes the pair as `canceled`."
+          - "A session whose last `approval/policy` record says `never` is answered `rejected` at once, recorded as automatic."
+
+  permissions-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      `ctx.fs` dispatches an intent before a read, a write or an edit. The
+      listener returns nothing to let it through, or a sentence that refuses it.
+      For an `interrupt` rule it asks a person first and lets the operation
+      through only on `allowed-once`.
+    blocks:
+      - event: fs/write-intent
+      - event: fs/edit-intent
+      - event: fs/read-intent
+      - title: A write intent
+        struct: ph.seams.fs:WriteIntent
+      - title: What comes back
+        table:
+          columns: [rule, the listener returns, the tool reads]
+          rows:
+            - ["no rule matched, or `allow`", "calls on", "the operation's own result"]
+            - ["`deny`", "`write denied by permissions-fs: <path>`", "that sentence"]
+            - ["`interrupt`, approved", "calls on", "the operation's own result"]
+            - ["`interrupt`, not approved", "`the user rejected write of <path>`, or the sentence for canceled or unavailable", "that sentence"]
+      - title: What the prompt says
+        lang: text
+        code: |
+          write /home/me/other-repo/x.py — outside this agent's workspace (/home/me/repo) and its scratch
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An ask with no agent on the intent, or with no approval seam mounted, is refused as unavailable."
+          - "Only approve and reject are offered for a path."
+          - "Enumeration is not asked about. `glob` and `grep` skip a path a rule would deny or interrupt."
+
+  skill-steps-hook:
+    transport: bus
+    mode: serial
+    summary: |
+      The agent loop dispatches this when a turn is about to end. A listener that
+      wants the turn to go on does not return a value: it steers the agent, and
+      the loop sees a message waiting for the next step and does not stop.
+    blocks:
+      - event: agent/turn-stopping
+      - title: What the listener is called with
+        text: |
+          `(agent, turn)`: the agent's driver and the turn number. The event declares no payload class. The row reads everything else from `agent.session`.
+      - title: What the row sends back
+        note: |
+          The `user/message` the loop writes when it claims the steer. Its source
+          is the plugin, not the person.
+        lang: json
+        code: |
+          {"type": "user/message",
+           "data": {"id": "e0f6e683-...",
+                    "role": "user",
+                    "content": [{"type": "text",
+                                 "text": "A skill you read set out a procedure and it is not finished: 'survey the callers' can be started now. 2 further steps wait on these. Continue with it, or if a step genuinely does not apply, mark it completed and say why in your next message."}],
+                    "source": {"kind": "plugin", "plugin": "ph_stabilize.skill_steps",
+                               "form": "notice", "summary": "a skill's procedure is unfinished"}}}
+      - title: The message source
+        struct: ph.llm.types:PluginSource
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`serial` runs listeners in registration order. `/autonomous` and the subagent seam listen here too, and none can outrank another."
+          - "The row steers at most `maxNudges` times while the todo list does not change."
+      - links:
+          - {to: "self-steering#edge:nudge", label: "The nudge on the self-steering page"}
+
+  skill-steps-decide:
+    transport: service
+    summary: |
+      A call on the `llm` service, not a bus event. `ctx.llm.decide` finds the
+      adapter for the route's provider, which posts the request to the server's
+      `/systemone`, and records `llm/decided` or `llm/decision-failed` in the
+      session's log. The row then records what was answered.
+    blocks:
+      - title: The request
+        struct: ph.llm.adapter:DecisionRequest
+      - title: The question asked
+        struct: ph.llm.adapter:Noul
+      - title: On the wire
+        lang: json
+        note: "`model` is left out when the route names none. `usage.input_tokens` is read when the server reports it."
+        code: |
+          POST {baseUrl}/systemone
+          {"state": "An assistant is following a procedure and has not finished it: 'survey the callers' can be started now. 2 further steps wait on these.\n\nThe assistant ended its turn with this message:\n...the end of what it said...",
+           "questions": {"waiting": {"type": "noul",
+                                     "instructions": "Did the assistant stop to wait for the person: a question it needs answered, or an approval or confirmation it asked for, before it goes on with the procedure?"}},
+           "model": "bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L"}
+
+          200
+          {"answers": {"waiting": {"noul": 0.97}},
+           "usage": {"input_tokens": 412}}
+      - title: The answer
+        struct: ph.llm.adapter:Decisions
+      - title: One answer
+        struct: ph.llm.adapter:NoulAnswer
+      - record: llm/decided
+        example: |
+          {"type": "llm/decided",
+           "data": {"provider": "decision", "model": "bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L",
+                    "questions": 1, "usage": {"inputTokens": 412, "outputTokens": 0}}}
+      - record: llm/decision-failed
+        example: |
+          {"type": "llm/decision-failed",
+           "data": {"provider": "decision", "model": "", "questions": 1,
+                    "code": "TIMEOUT", "reason": "provider \"decision\" did not decide within 3 s"}}
+      - record: skill-steps/decided
+        example: |
+          {"type": "skill-steps/decided", "data": {"waiting": 0.97, "holdAt": 0.8}}
+      - title: Limits
+        tone: limit
+        list:
+          - "The row waits `timeoutMs` (3000 ms) for both tries together."
+          - "A refusal for length is retried once with less of the message, sized from the two numbers in the refusal."
+          - "After a timeout the row does not ask this route again for 60 seconds."
+          - "Every failure leaves the nudge the row would have sent without a decision model."
+      - links:
+          - {to: "self-steering#edge:decide", label: "The decision call in full"}
+
+  skill-steps-seed:
+    transport: log
+    summary: |
+      Not a call between the rows. `skill-steps` appends a `todo/write` record
+      with the skill's steps added, each tagged `source: skill`, and `tool-todo`
+      reads the list back from the log like every other reader.
+    blocks:
+      - event: skills/read
+      - title: What the listener is handed
+        lang: python
+        note: The event declares no payload class. This is the dict `skills-progressive` emits.
+        code: |
+          {"skill": Skill(...),          # the installed skill
+           "steps": ["...", "..."],      # with {{parameters.x}} already filled in
+           "max_nudges": None,           # the skill's own budget, or None
+           "session": Session(...)}      # the session of the agent that read it
+      - record: todo/write
+        example: |
+          {"type": "todo/write",
+           "data": {"todos": [
+             {"content": "survey the callers", "status": "pending", "requires": [], "source": "skill"},
+             {"content": "port the row", "status": "pending", "requires": ["survey the callers"], "source": "skill"},
+             {"content": "gate it", "status": "pending", "requires": ["port the row"], "source": "skill"}]}}
+      - record: skill-steps/budget
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "All or nothing. A step over 500 characters, a list that would pass 100 entries, or a step whose text the model already used seeds nothing, with a warning in the daemon's log."
+          - "Seeding is idempotent by content: reading the skill again adds nothing."
+          - "`emit` ignores what a listener returns and logs what it raises, so a failure here never un-reads the skill."
+
+  todo-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      `write_todos` is an ordinary tool call, so it crosses the tool pipeline's
+      waterfalls. The row also listens on `tools/pre-execute` to refuse two
+      `write_todos` calls in one assistant message, before either body runs.
+    blocks:
+      - event: tools/pre-execute
+      - title: The refusal
+        lang: text
+        code: |
+          Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list.
+      - title: What a successful call returns
+        lang: text
+        note: The tool echoes the list as written, with `source` and `worked` attached.
+        code: |
+          Updated todo list to [{'content': 'survey the callers', 'status': 'completed', 'requires': [], 'source': 'skill', 'worked': 4}, ...]
+      - record: todo/write
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The count is read from the assistant message in the log, which is committed before any of its calls runs, so every sibling call gets the same answer."
+          - "A plan the row refuses (`PlanError`) is a failed tool result, not a denial, and writes nothing."
+
+  result-offload-hook:
+    transport: bus
+    mode: waterfall
+    summary: |
+      After a tool body returns, the pipeline dispatches `tools/post-execute`
+      with the execution and its result. `tool-result-offload` lets the rest of
+      the chain decide, and if the decision is `Accept` and the content is over
+      a threshold it returns the same decision with the content replaced.
+    blocks:
+      - event: tools/post-execute
+      - title: The decision it rewrites
+        struct: ph.tools.definition:Accept
+      - record: offload/spilled
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A decision other than `Accept` is passed through untouched."
+          - "It measures the content as it will be sent, so an earlier listener's rewrite is what is judged."
+          - "The value rides through unchanged; only the rendered content is replaced."

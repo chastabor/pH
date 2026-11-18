@@ -1,0 +1,326 @@
+intro: |
+  Rows do not call each other. A row either dispatches a declared event on the
+  bus, in exactly one of four modes, or calls a service through its seam. This
+  page shows the four modes with every event declared in each, and the two ways
+  of talking that are not the bus. On the other pages, every arrow's panel names
+  which of these carries it.
+
+topics:
+  - id: which-mode
+    title: Which mode carries what
+    summary: |
+      The mode is part of an event's contract, chosen by what a listener must be
+      able to do.
+    blocks:
+      - table:
+          columns: [a listener must be able to, mode, examples]
+          rows:
+            - ["only hear about it", "emit", "`session/created`, `agent/status`, `skills/read`, `fs/changed`"]
+            - ["change the value or refuse", "waterfall", "`tools/pre-execute`, `agent/request`, `fs/write-intent`, `llm/stream`"]
+            - ["act in turn, and stop the rest by answering", "serial", "`agent/turn-stopping`, `llm/send`, `profile/mounted`"]
+            - ["finish its own work before the caller goes on, alongside the others", "parallel", "`session/flush`, `session/loaded`"]
+      - title: Between the boxes on the other pages
+        table:
+          columns: [exchange, carried by]
+          rows:
+            - ["a row gating or rewriting a tool call", "waterfall on `tools/pre-execute`, `tools/execute`, `tools/post-execute`"]
+            - ["a row changing or refusing a step or a request", "waterfall on `agent/pre-step`, `agent/request`, `agent/request-error`"]
+            - ["a row keeping a turn alive", "serial on `agent/turn-stopping`; the listener steers, it returns nothing"]
+            - ["a filesystem rule", "waterfall on `fs/read-intent`, `fs/write-intent`, `fs/edit-intent`"]
+            - ["asking a person", "waterfall on `approval/request` and `user-question/ask`"]
+            - ["writing the log to disk", "parallel on `session/flush`"]
+            - ["the loop calling a model", "a service call on `ctx.llm`, which crosses the `llm/stream` waterfall, then HTTP from the adapter"]
+            - ["a tool reading a file", "a service call on `ctx.fs`"]
+            - ["a client and the daemon", "JSON-RPC lines on a unix socket"]
+            - ["the kernel and the guest", "JSON frames on fd 3"]
+      - links:
+          - {to: "ph-core", label: "ph-core: the loop, the log and the seams"}
+          - {to: "ph-stabilize", label: "ph-stabilize: each row and the event it hooks"}
+          - {to: "ph-runtime-guest", label: "ph-runtime-guest: the fd 3 frames"}
+          - {to: "phern", label: "phern: the daemon socket and the adapters"}
+  - id: all-events
+    title: Every declared event
+    summary: |
+      Read from the event registry when this page was built, with the rows that
+      listen in the shipped profiles. `phern events --profile <name>` prints the
+      same matrix for a profile.
+    blocks:
+      - events: all
+  - id: four-not-five
+    title: Why four modes
+    summary: |
+      The framework pH was ported from has a fifth mode, a synchronous `bail`:
+      `serial` without the `await`. No package declared an event in it, so it was
+      dropped. Its one rule lives on in `serial`: any return value except `None`
+      and `False` bails, so `0` and `""` stop the dispatch too.
+
+nodes:
+  producer:
+    title: A row dispatches
+    summary: |
+      Each mode is a method of the same name on `Context`. The dispatching row
+      names the event; the registry checks that the name was declared for that
+      mode.
+    blocks:
+      - title: The four calls
+        lang: python
+        code: |
+          ctx.emit("session/created", session)                              # returns nothing
+          await ctx.serial("agent/turn-stopping", agent, turn)              # the first bail, or None
+          await ctx.parallel("session/flush", session)                      # when every listener is done
+          await ctx.waterfall("tools/pre-execute", execution, inner=decide) # the chain's answer
+      - title: Scope
+        text: |
+          A dispatch reaches a listener when the listener's scope reaches the
+          target. A row's registration is global and reaches everything; one
+          made in an agent's scope reaches that agent alone. A listener is owned
+          by the scope that registered it and is removed when that scope is
+          disposed, so a row that is unmounted stops listening.
+      - links:
+          - {to: "topic:which-mode", label: "Which mode carries what"}
+  registry:
+    summary: |
+      Every event is declared once, at import, by the module that owns it. The
+      declaration fixes the dispatch mode as part of the contract.
+    blocks:
+      - title: One declaration
+        struct: ph.cordis.events:EventDeclaration
+      - title: In the owning module
+        lang: python
+        code: |
+          events.declare("agent/created", "emit", owner="ph.agent", doc="An agent handle was created.")
+      - title: What it refuses
+        tone: secure
+        list:
+          - "Dispatching an event through a mode other than the one declared raises `EventModeError`."
+          - "Listening to, or dispatching, an undeclared name raises `UndeclaredEventError`."
+          - "Declaring a name again with another mode, or from another owner, raises."
+      - title: Limits
+        tone: limit
+        list:
+          - "Who dispatches is knowable from an import. Who listens is a property of the profile: `ctx.on` runs when a row activates, so the listener column needs a mount."
+          - "Many events are declared without a payload type; their arguments are positional and documented at the dispatch site."
+  emit:
+    summary: |
+      Synchronous, and return values are ignored. An emitted event records
+      something that already happened, so no listener can undo it or keep the
+      others from hearing it.
+    blocks:
+      - title: Rules
+        list:
+          - "A listener that returns a coroutine is scheduled, not awaited. It runs as detached work of the scope that registered it, and that scope's dispose cancels it."
+          - "A listener that raises is logged and the dispatch goes on."
+          - "A listener that must be able to refuse belongs on a `serial` or `waterfall` event."
+      - title: Every emit event
+        events: emit
+  waterfall:
+    summary: |
+      Around-middleware. Listeners run outermost first and each receives the
+      arguments plus `next`. Calling `next()` delegates to the rest of the chain;
+      returning without calling it vetoes the rest, the built-in behavior
+      included.
+    blocks:
+      - title: A real listener
+        note: From `ph_stabilize/hitl.py`. It either passes the call on or answers `Ask` without calling `next_`.
+        lang: python
+        code: |
+          async def gate(execution: ToolExecution, next_: Next[PreToolDecision]) -> PreToolDecision:
+              rule = rule_for(execution)
+              if rule is None:
+                  return await next_(execution)
+              ...
+              return Ask(reason=_reason(execution, rule, matched),
+                         allowed_decisions=rule.allowed_decisions)
+
+          ctx.on("tools/pre-execute", gate)
+      - title: Rules
+        list:
+          - "`next(*replacement)` hands the rest of the chain different arguments, which is how a row rewrites a request."
+          - "`ctx.on(..., prepend=True)` puts a listener before the existing ones. `agent-loop-invariant` uses it to see a request before any other row can rewrite it."
+          - "`waterfall_attributed` also returns which plugin produced the answer, so a refusal can name its row."
+      - title: Every waterfall event
+        events: waterfall
+  serial:
+    summary: |
+      Listeners are awaited one at a time, in registration order. The first that
+      returns anything other than `None` or `False` stops the dispatch, and its
+      value is the result.
+    blocks:
+      - title: Order matters, and nothing ranks
+        tone: limit
+        list:
+          - "Registration order is mount order. Two listeners on one serial event cannot outrank each other; `/autonomous` and `skill-steps` both listen on `agent/turn-stopping` and each may steer."
+          - "A listener that only acts (steers the agent, writes a checkpoint) returns `None`, and the rest still run."
+      - title: Every serial event
+        events: serial
+  parallel:
+    summary: |
+      Every listener runs concurrently and all are awaited. A caller that awaits
+      the dispatch has awaited every listener, not the first to answer.
+    blocks:
+      - title: Rules
+        list:
+          - "Every listener runs even if one fails. The failures are collected and raised together as an `ExceptionGroup`."
+          - "`session/flush` is parallel so that a caller waiting for the log to be on disk has waited for every backend."
+      - title: Every parallel event
+        events: parallel
+  observers:
+    summary: |
+      Rows that only need to know. They cannot change what happened.
+    blocks:
+      - event: session/created
+      - event: session/disposed
+      - event: skills/read
+      - links:
+          - {to: "self-steering", label: "skills/read seeding a procedure"}
+  policy:
+    summary: |
+      Rows that gate, rewrite or refuse. Most extension points in pH are policy
+      interceptions, which is why waterfall is the most used mode after emit.
+    blocks:
+      - event: tools/pre-execute
+      - event: agent/pre-step
+      - event: agent/request
+      - event: fs/write-intent
+      - links:
+          - {to: "ph-stabilize", label: "The rows that listen on these"}
+  steerers:
+    title: Ordered listeners
+    summary: |
+      Rows that must run one after another: the ones that may keep a turn alive,
+      and the checkpoint policy, which must have written before the step it
+      precedes goes on.
+    blocks:
+      - event: agent/turn-stopping
+      - event: llm/send
+      - event: profile/mounted
+  flushers:
+    title: Flush and load
+    summary: |
+      The persistence backend writes on `session/flush`, reading everything past
+      its cursor off the log. Appending to the log never blocks on I/O; the flush
+      is where the bytes reach disk.
+    blocks:
+      - event: session/flush
+      - event: session/loaded
+      - links:
+          - {to: "durability", label: "What a flush makes durable"}
+  services:
+    title: A service call
+    summary: |
+      A capability is reached by calling its service, not by dispatching an event.
+      A row lists the service keys it injects, is activated when they exist, and
+      calls `ctx.require(KEY)`.
+    blocks:
+      - title: In code
+        lang: python
+        code: |
+          decided = await ctx.require(LLM).decide(request, session=session, timeout_s=3.0)
+          text = await ctx.require(FS).read(path, scope=boundary)
+      - title: How the two meet
+        text: |
+          A service usually dispatches events inside itself. `ctx.fs.write`
+          crosses the `fs/write-intent` waterfall before it writes, so a rule row
+          can refuse; `ctx.llm.stream` crosses `llm/stream`; the tool registry
+          crosses `tools/pre-execute`, `tools/execute` and `tools/post-execute`
+          around every call. The caller sees one method.
+      - title: What a consumer cannot see
+        tone: secure
+        list:
+          - "Which provider answered. A provider swap leaves every consumer unchanged."
+          - "A service in another realm. A row mounted with `isolate: [fs]` runs in its own realm with a private copy of the named rows; it and everything beneath it resolve the private service, and every other row keeps the shared one."
+      - links:
+          - {to: "ph-core#node:seams", label: "The seams in ph-core"}
+          - {to: "security", label: "Scopes, isolation and visibility"}
+  wire:
+    title: Across a process
+    summary: |
+      Four places where one side is another process. Each has its own framing,
+      and none is the event bus.
+    blocks:
+      - table:
+          columns: [between, wire, see]
+          rows:
+            - ["a client (TUI, CLI, web) and the daemon", "JSON-RPC, one line per frame, on a unix socket", "[phern](phern)"]
+            - ["the kernel manager and the guest that runs model code", "one line of JSON per frame on fd 3", "[ph-runtime-guest](ph-runtime-guest)"]
+            - ["an adapter and a model server", "HTTP; a streamed reply as server-sent events", "[phern](phern)"]
+            - ["a UTCP tool and its command", "a subprocess started by `ctx.shell`, under the agent's sandbox", "[ph-utcp](ph-utcp)"]
+      - title: Why they are separate
+        tone: secure
+        list:
+          - "The guest imports no harness code. The process boundary exists so that model code cannot reach the harness."
+          - "A client holds no session state. The daemon owns the work and a client subscribes to it."
+
+edges:
+  dispatch:
+    transport: call
+    summary: |
+      The row calls the method for the mode; the registry checks the name was
+      declared for that mode before any listener runs.
+    blocks:
+      - struct: ph.cordis.events:EventDeclaration
+  as-emit:
+    transport: bus
+    mode: emit
+    summary: Twenty-odd events that report something that happened.
+    blocks:
+      - events: emit
+  as-waterfall:
+    transport: bus
+    mode: waterfall
+    summary: The policy interceptions.
+    blocks:
+      - events: waterfall
+  as-serial:
+    transport: bus
+    mode: serial
+    summary: The few events whose listeners must run in turn.
+    blocks:
+      - events: serial
+  as-parallel:
+    transport: bus
+    mode: parallel
+    summary: The two events a caller waits on every listener for.
+    blocks:
+      - events: parallel
+  emit-to:
+    transport: bus
+    mode: emit
+    summary: Each listener is called with the event's arguments. What it returns is ignored.
+    blocks:
+      - event: session/disposed
+  waterfall-to:
+    transport: bus
+    mode: waterfall
+    summary: |
+      Each listener is called with the arguments and `next`. The value that comes
+      back up the chain is the dispatch's result.
+    blocks:
+      - event: tools/pre-execute
+  serial-to:
+    transport: bus
+    mode: serial
+    summary: Each listener is awaited before the next is called.
+    blocks:
+      - event: agent/turn-stopping
+  parallel-to:
+    transport: bus
+    mode: parallel
+    summary: All listeners are started together and the dispatch returns when the last one has.
+    blocks:
+      - event: session/flush
+  direct-call:
+    transport: service
+    summary: |
+      `ctx.require(KEY)` returns the service a provider published under that key,
+      and the row calls a method on it. No event is involved at the call site.
+    blocks:
+      - links: [{to: "node:services", label: "A service call"}]
+  provider-crosses:
+    transport: process
+    summary: |
+      Some providers answer from another process: the code runtime over fd 3, a
+      model adapter over HTTP, a UTCP tool as a subprocess. The consumer's call is
+      the same.
+    blocks:
+      - links: [{to: "node:wire", label: "The four process boundaries"}]

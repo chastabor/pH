@@ -16,7 +16,8 @@ fix it deferred (`ToolRunContext.present`).
 U8 and U9 are built too: `text-index-endpoint`, the OpenAI-compatible `/v1/embeddings`
 embedder, and `text-index-adapter`, which embeds through one of the session's own
 model routes. U10's documents were written with each step: both READMEs, `ph-utcp`'s,
-the cookbook and the two skills. **Every step of the plan is built.**
+the cookbook and the two skills. **Every step of the plan is built.** *U9's row and
+U5's host were removed on 2026-11-15; see the note of that date below.*
 
 What each built step settled, and what it found that the plan had wrong, is under
 "What U9 settled", "What U8 settled", "What U5 settled", "What U4a and U6 settled" and
@@ -32,6 +33,29 @@ four gaps closed", and "A fourth `/simplify` pass" over it.
 the tools three ways, the manual names an endpoint's key variable, and four of the
 records under "Not verified" were run for real. Three of those runs found something.
 See "Before publishing".
+
+**2026-11-15 (commit 7791207). The sockets are gone, and one command is one call.**
+What this document says of a socket, a host or the adapter embedder below is a record
+of what was built and then removed. What holds now:
+
+- **No host.** `ph.toolcli serve`, `$PH_TOOL_HOST` and the sockets under
+  `$PH_RUNTIME/utcp` are removed. A long run is the same one-shot `call`, started in
+  the background by `ph-utcp` with `--progress` and read from its stderr
+  (`ph_utcp.Background`); a call waits `wait_s` for the run it started and then
+  answers `state: indexing`.
+- **No adapter embedder.** The `text-index-adapter` row, the `EmbeddingAdapter`
+  Protocol, `ctx.llm.embed` and `ctx.llm.embeds`, the embedding socket,
+  `$PH_TEXT_INDEX_EMBEDDER` and the `llm/embedded` record are removed. The text index
+  embeds with a local model (`text-index-local`) or against an OpenAI-compatible
+  server (`text-index-endpoint`), and nothing else.
+- **Decision 10 no longer holds.** An endpoint's key is not kept in the harness: the
+  session's row names the variable in the manual's `pass_env`, and the command that
+  embeds is started with it in its environment. Every other command an agent runs
+  still starts from the scrubbed environment, and `ph-utcp` says so when the scrub
+  would not drop a name a manual passes. What an endpoint spends on embeddings is not
+  in a session's log.
+- **Decision 11 holds for the index.** A child still shares its parent's index unless
+  it has a tree it writes for keeps (`UtcpSeam.owner_of`); there is no host to share.
 
 ## Before publishing
 
@@ -297,12 +321,16 @@ Left as they were, with the reason:
 
 10. **The adapter stays in the harness, and the command asks it for vectors over a
     socket** — so a route's key is held where the seam holds it, and an agent cannot
-    reveal it to a model's context by accident.
+    reveal it to a model's context by accident. *Reversed on 2026-11-15: the socket and
+    the adapter embedder were removed, and a key reaches the command by `pass_env`.*
 11. **Children share their parent's index and host.** A child builds its own only when
     it is writable and would need one. A read-only fan-out, which is what `rlm-indexed`
     runs, shares one index.
 
 ## What U9 settled
+
+*Removed on 2026-11-15 (commit 7791207), with the row, the Protocol, the socket and
+the `llm/embedded` record. Kept as the record of what was built.*
 
 - **`EmbeddingAdapter` is an optional Protocol beside `LlmAdapter`**, asked with
   `isinstance`; `ctx.llm.embed` routes a request to it and `ctx.llm.embeds` says
@@ -815,6 +843,9 @@ Left as they were, with the reason:
   one's name.
 
 ## What U5 settled
+
+*The host was removed on 2026-11-15 (commit 7791207): `serve`, `$PH_TOOL_HOST` and its
+socket. Background runs stayed, as one-shot commands `ph-utcp` starts and watches.*
 
 The worker is built, and it is called a **host**. It differs from "Before U5" in four
 places, each because the code allowed something simpler.

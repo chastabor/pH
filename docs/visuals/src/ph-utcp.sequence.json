@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "ph-utcp: a manual becomes a tool",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [
+      1080,
+      582
+    ],
+    "views": [
+      {
+        "id": "discovery",
+        "label": "Discovery at mount",
+        "focus": [
+          "pkg",
+          "utcp",
+          "client",
+          "shell",
+          "cmd",
+          "tools"
+        ],
+        "note": "A manual is added, its command is asked for its tools, and each one is registered on ctx.tools."
+      },
+      {
+        "id": "one-call",
+        "label": "One tool call",
+        "focus": [
+          "loop",
+          "tools",
+          "utcp",
+          "client",
+          "shell",
+          "cmd"
+        ],
+        "note": "The call crosses the tool pipeline and ends as one command started by ctx.shell for the calling agent."
+      },
+      {
+        "id": "sandbox-door",
+        "label": "The sandbox door",
+        "focus": [
+          "client",
+          "shell",
+          "cmd"
+        ],
+        "note": "PhCliProtocol keeps the library's script building and replaces only how the script is started."
+      }
+    ],
+    "legend": {
+      "entries": {
+        "security": {
+          "label": "ctx.shell"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "pkg",
+      "type": "backend",
+      "label": "Package row",
+      "sublabel": "e.g. code-graph"
+    },
+    {
+      "id": "loop",
+      "type": "frontend",
+      "label": "Agent loop",
+      "sublabel": "ph-core"
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "ctx.tools",
+      "sublabel": "tool pipeline"
+    },
+    {
+      "id": "utcp",
+      "type": "messagebus",
+      "label": "utcp row",
+      "sublabel": "UtcpSeam"
+    },
+    {
+      "id": "client",
+      "type": "cloud",
+      "label": "UtcpClient",
+      "sublabel": "PhCliProtocol"
+    },
+    {
+      "id": "shell",
+      "type": "security",
+      "label": "ctx.shell",
+      "sublabel": "run_argv"
+    },
+    {
+      "id": "cmd",
+      "type": "external",
+      "label": "Command",
+      "sublabel": "the tool's cli"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 292,
+      "label": "Mount: discovery"
+    },
+    {
+      "from": 300,
+      "to": 492,
+      "label": "A tool call"
+    }
+  ],
+  "messages": [
+    {
+      "id": "add-manual",
+      "from": "pkg",
+      "to": "utcp",
+      "y": 160,
+      "label": "ctx.utcp.add(manual)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "register-manual",
+      "from": "utcp",
+      "to": "client",
+      "y": 184,
+      "label": "register_manual",
+      "variant": "default"
+    },
+    {
+      "id": "discovery-run",
+      "from": "client",
+      "to": "shell",
+      "y": 208,
+      "label": "run_argv",
+      "variant": "security"
+    },
+    {
+      "id": "manual-command",
+      "from": "shell",
+      "to": "cmd",
+      "y": 232,
+      "label": "<cli> manual",
+      "variant": "security"
+    },
+    {
+      "id": "manual-json",
+      "from": "cmd",
+      "to": "client",
+      "y": 260,
+      "label": "tools and schemas",
+      "variant": "return"
+    },
+    {
+      "id": "register-tool",
+      "from": "utcp",
+      "to": "tools",
+      "y": 284,
+      "label": "register(definition)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "model-call",
+      "from": "loop",
+      "to": "tools",
+      "y": 312,
+      "label": "tool call",
+      "variant": "emphasis"
+    },
+    {
+      "id": "execute",
+      "from": "tools",
+      "to": "utcp",
+      "y": 336,
+      "label": "execute(args, run)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "call-tool",
+      "from": "utcp",
+      "to": "client",
+      "y": 360,
+      "label": "call_tool",
+      "variant": "default"
+    },
+    {
+      "id": "call-run",
+      "from": "client",
+      "to": "shell",
+      "y": 384,
+      "label": "run_argv, agent",
+      "variant": "security"
+    },
+    {
+      "id": "sandboxed-command",
+      "from": "shell",
+      "to": "cmd",
+      "y": 408,
+      "label": "sandboxed command",
+      "variant": "security"
+    },
+    {
+      "id": "envelope",
+      "from": "cmd",
+      "to": "client",
+      "y": 436,
+      "label": "envelope JSON",
+      "variant": "return"
+    },
+    {
+      "id": "present",
+      "from": "utcp",
+      "to": "tools",
+      "y": 460,
+      "label": "value and text",
+      "variant": "return"
+    },
+    {
+      "id": "tool-result",
+      "from": "tools",
+      "to": "loop",
+      "y": 484,
+      "label": "tool result",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "utcp",
+      "from": 160,
+      "to": 289,
+      "type": "messagebus"
+    },
+    {
+      "participant": "client",
+      "from": 184,
+      "to": 265,
+      "type": "cloud"
+    },
+    {
+      "participant": "shell",
+      "from": 208,
+      "to": 237,
+      "type": "security"
+    },
+    {
+      "participant": "tools",
+      "from": 312,
+      "to": 489,
+      "type": "backend"
+    },
+    {
+      "participant": "utcp",
+      "from": 336,
+      "to": 465,
+      "type": "messagebus"
+    },
+    {
+      "participant": "client",
+      "from": 360,
+      "to": 441,
+      "type": "cloud"
+    },
+    {
+      "participant": "shell",
+      "from": 384,
+      "to": 413,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Discovery at mount",
+      "items": [
+        "A manual is a UTCP call template, from config or ctx.utcp.add",
+        "A manual that fails discovery is skipped, with a warning",
+        "Only the cli protocol is allowed by default"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "A call is one command",
+      "items": [
+        "PhCliProtocol starts the script through ctx.shell.run_argv",
+        "It runs in the calling agent's workspace and sandbox",
+        "require_ran fails a cli call that skipped run_argv"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "state, writable, traits",
+      "items": [
+        "state: $PH_TOOL_STATE in the calling agent's scratch",
+        "writable: shared paths; one overlapping the workspace is refused",
+        "tools: concurrency_safe and effect_free, both off by default"
+      ]
+    }
+  ]
+}

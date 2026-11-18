@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "durability: what survives a restart",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "frontend": { "label": "Profile" },
+        "security": { "label": "Barrier row" },
+        "external": { "label": "Outside ph-core" }
+      }
+    },
+    "views": [
+      { "id": "writing", "label": "Writing", "focus": ["rows", "journal", "log", "policy", "store", "disk"], "note": "A record is appended in memory through a writer; a barrier flushes the log to disk before the effect it describes." },
+      { "id": "restart", "label": "A restart", "focus": ["disk", "repair", "environment", "supervisor", "children"], "note": "The next process reads each log back, closes what the crash left open, and mounts the root in the rows its log records." },
+      { "id": "intents", "label": "Intents", "focus": ["rows", "journal", "log", "repair"], "note": "An act opens a record before it happens and settles it after; repair settles the ones a dead process left open." },
+      { "id": "outside-the-log", "label": "Outside the log", "focus": ["kernel", "processes", "disk"], "note": "Kernel variables are blobs the log names; child processes are journaled so a later start can kill the ones left behind." }
+    ]
+  },
+  "components": [
+    { "id": "journal", "type": "backend", "label": "ctx.intents", "sublabel": "open before, settle after", "pos": [270, 110], "size": [170, 64] },
+    { "id": "policy", "type": "security", "label": "checkpoint-policy", "sublabel": "when the log reaches disk", "pos": [520, 110], "size": [170, 64] },
+    { "id": "kernel", "type": "external", "label": "Code kernel", "sublabel": "kernel/snapshot, spill blobs", "pos": [770, 110], "size": [170, 64] },
+    { "id": "processes", "type": "external", "label": "Child processes", "sublabel": "journaled, swept at start", "pos": [1020, 110], "size": [170, 64] },
+    { "id": "rows", "type": "backend", "label": "Rows that write", "sublabel": "one log_writer per module", "pos": [20, 290], "size": [170, 64] },
+    { "id": "log", "type": "database", "label": "Session log", "sublabel": "append-only, memory first", "pos": [270, 290], "size": [170, 64] },
+    { "id": "store", "type": "database", "label": "session-persistence", "sublabel": "JSONL or Turso, synced", "pos": [520, 290], "size": [170, 64] },
+    { "id": "disk", "type": "database", "label": "$PH_HOME/sessions", "sublabel": "a log per session, leases", "pos": [770, 290], "size": [170, 64] },
+    { "id": "children", "type": "backend", "label": "Sub-agents", "sublabel": "each owns its log", "pos": [270, 470], "size": [170, 64] },
+    { "id": "supervisor", "type": "external", "label": "Daemon supervisor", "sublabel": "roots, ladders, owed index", "pos": [520, 470], "size": [170, 64] },
+    { "id": "repair", "type": "backend", "label": "open_session", "sublabel": "claim, repair, record", "pos": [770, 470], "size": [170, 64] },
+    { "id": "environment", "type": "frontend", "label": "Session profile", "sublabel": "profile/base, overrides", "pos": [1020, 470], "size": [170, 64] }
+  ],
+  "connections": [
+    { "id": "append", "from": "rows", "to": "log", "label": "append", "variant": "emphasis" },
+    { "id": "intent-pair", "from": "journal", "to": "log", "label": "open, settle", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "flush", "from": "log", "to": "store", "label": "session/flush", "variant": "emphasis" },
+    { "id": "barriers", "from": "policy", "to": "store", "label": "barriers", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "sync", "from": "store", "to": "disk", "label": "fsync", "variant": "emphasis" },
+    { "id": "kernel-blobs", "from": "kernel", "to": "disk", "label": "blobs", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "spawn-journal", "from": "kernel", "to": "processes", "label": "spawns", "variant": "dashed" },
+    { "id": "read-back", "from": "disk", "to": "repair", "label": "read", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "opened", "from": "repair", "to": "environment", "label": "opened()" },
+    { "id": "resumed-root", "from": "repair", "to": "supervisor", "label": "session", "variant": "emphasis" },
+    { "id": "readmit", "from": "supervisor", "to": "children", "label": "readmit", "variant": "emphasis" },
+    { "id": "own-log", "from": "children", "to": "log", "label": "own log", "variant": "dashed", "fromSide": "top", "toSide": "bottom", "labelDy": -70 }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Written before it acts", "items": ["Every record goes through its module's own writer", "The log is flushed before each model request and tool body", "An intent's record is on disk before its act starts"] },
+    { "dot": "cyan", "title": "Read back at a restart", "items": ["Repair closes an open turn and settles open intents", "A root mounts in the rows its own log records", "A child is readmitted from its own log, up to three times"] },
+    { "dot": "rose", "title": "Not durable", "items": ["A model stream in flight and anything not yet flushed", "A running tool call: its outcome reads as unknown", "The kernel process; staged attachments; who was attached"] }
+  ]
+}

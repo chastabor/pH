@@ -1,0 +1,379 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ph-stabilize: rows and their hooks",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "before-a-request",
+        "label": "Requests",
+        "focus": [
+          "input-offload",
+          "compaction",
+          "limits",
+          "loop"
+        ],
+        "note": "Rows that act before the model is called: a paste relocated, history summarized, a step refused."
+      },
+      {
+        "id": "around-a-tool-call",
+        "label": "Tool calls",
+        "focus": [
+          "limits",
+          "hitl",
+          "todo",
+          "result-offload",
+          "pipeline"
+        ],
+        "note": "Gates run on tools/pre-execute; a large result is relocated on tools/post-execute."
+      },
+      {
+        "id": "ending-a-turn",
+        "label": "Turn end",
+        "focus": [
+          "skill-steps",
+          "decider",
+          "todo",
+          "loop"
+        ],
+        "note": "skill-steps asks a decision model whether the turn waits on a person before it steers the agent on."
+      },
+      {
+        "id": "file-rules",
+        "label": "File rules",
+        "focus": [
+          "permissions-fs",
+          "fs",
+          "pipeline"
+        ],
+        "note": "Path rules sit on the ctx.fs intents, so every tool that goes through the seam is covered."
+      }
+    ],
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "ph-core"
+        },
+        "backend": {
+          "label": "Row"
+        },
+        "security": {
+          "label": "Gate row"
+        },
+        "external": {
+          "label": "Model server"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "input-offload",
+      "type": "backend",
+      "label": "input-offload",
+      "sublabel": "pasted blob to a preview",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "compaction",
+      "type": "backend",
+      "label": "compaction-summarize",
+      "sublabel": "summary, and /compact",
+      "pos": [
+        329,
+        100
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "limits",
+      "type": "security",
+      "label": "limits",
+      "sublabel": "ceilings folded from the log",
+      "pos": [
+        550,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "hitl",
+      "type": "security",
+      "label": "hitl",
+      "sublabel": "asks through ctx.approval",
+      "pos": [
+        781,
+        100
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "permissions-fs",
+      "type": "security",
+      "label": "permissions-fs",
+      "sublabel": "first match wins",
+      "pos": [
+        1095,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "loop",
+      "type": "frontend",
+      "label": "Agent loop",
+      "sublabel": "ph-core: steps, requests, turn end",
+      "pos": [
+        290,
+        300
+      ],
+      "size": [
+        280,
+        64
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "frontend",
+      "label": "Tool pipeline",
+      "sublabel": "ph-core: ctx.tools waterfalls",
+      "pos": [
+        720,
+        300
+      ],
+      "size": [
+        280,
+        64
+      ]
+    },
+    {
+      "id": "fs",
+      "type": "frontend",
+      "label": "ctx.fs",
+      "sublabel": "ph-core: fs intents",
+      "pos": [
+        1100,
+        300
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "decider",
+      "type": "external",
+      "label": "Decision model",
+      "sublabel": "probability, not prose",
+      "pos": [
+        40,
+        500
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "skill-steps",
+      "type": "backend",
+      "label": "skill-steps",
+      "sublabel": "a skill's steps must finish",
+      "pos": [
+        335,
+        500
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "todo",
+      "type": "backend",
+      "label": "tool-todo",
+      "sublabel": "write_todos, list in the log",
+      "pos": [
+        759,
+        500
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "result-offload",
+      "type": "backend",
+      "label": "tool-result-offload",
+      "sublabel": "big result to the spill store",
+      "pos": [
+        1010,
+        500
+      ],
+      "size": [
+        200,
+        64
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "loop-to-pipeline",
+      "from": "loop",
+      "to": "pipeline",
+      "label": "tool calls",
+      "variant": "emphasis"
+    },
+    {
+      "id": "pipeline-to-fs",
+      "from": "pipeline",
+      "to": "fs",
+      "label": "fs tools",
+      "variant": "emphasis"
+    },
+    {
+      "id": "input-offload-hook",
+      "from": "input-offload",
+      "to": "loop",
+      "label": "agent/request",
+      "variant": "dashed"
+    },
+    {
+      "id": "compaction-hook",
+      "from": "compaction",
+      "to": "loop",
+      "label": "agent/pre-step",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 32
+    },
+    {
+      "id": "limits-step-hook",
+      "from": "limits",
+      "to": "loop",
+      "label": "agent/pre-step",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "limits-call-hook",
+      "from": "limits",
+      "to": "pipeline",
+      "label": "tools/pre-execute",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "hitl-hook",
+      "from": "hitl",
+      "to": "pipeline",
+      "label": "tools/pre-execute",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 32
+    },
+    {
+      "id": "permissions-hook",
+      "from": "permissions-fs",
+      "to": "fs",
+      "label": "fs/*-intent",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 80
+    },
+    {
+      "id": "skill-steps-hook",
+      "from": "skill-steps",
+      "to": "loop",
+      "label": "agent/turn-stopping",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "skill-steps-decide",
+      "from": "skill-steps",
+      "to": "decider",
+      "label": "ctx.llm.decide"
+    },
+    {
+      "id": "skill-steps-seed",
+      "from": "skill-steps",
+      "to": "todo",
+      "label": "seeds steps"
+    },
+    {
+      "id": "todo-hook",
+      "from": "todo",
+      "to": "pipeline",
+      "label": "write_todos",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "result-offload-hook",
+      "from": "result-offload",
+      "to": "pipeline",
+      "label": "tools/post-execute",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Rows, not loop parameters",
+      "items": [
+        "Each row listens on a waterfall ph-core already fires",
+        "The stabilize bundle is optional in every profile",
+        "tool-todo and skill-steps ship disabled"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Relocated, not lost",
+      "items": [
+        "input-offload and compaction are surface replaces",
+        "The log keeps the original; transcript() shows it",
+        "A spilled tool result is a file the model can read"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Asked, never relied on",
+      "items": [
+        "skill-steps holds its nudge when the turn waits on a person",
+        "A decision route that fails leaves the usual nudge",
+        "permissions-fs bounds ctx.fs calls, not a subprocess"
+      ]
+    }
+  ]
+}

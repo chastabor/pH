@@ -1,0 +1,341 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "pH: how the parts talk",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "backend": {
+          "label": "A row"
+        },
+        "messagebus": {
+          "label": "Dispatch mode"
+        },
+        "frontend": {
+          "label": "Who listens"
+        },
+        "security": {
+          "label": "Not on the bus"
+        }
+      }
+    },
+    "views": [
+      {
+        "id": "facts",
+        "label": "Facts",
+        "focus": [
+          "producer",
+          "registry",
+          "emit",
+          "observers"
+        ],
+        "note": "emit tells every listener something that already happened; nobody can refuse it."
+      },
+      {
+        "id": "policy",
+        "label": "Policy",
+        "focus": [
+          "producer",
+          "registry",
+          "waterfall",
+          "policy"
+        ],
+        "note": "waterfall wraps the built-in behavior; a listener changes the value or refuses by not calling next()."
+      },
+      {
+        "id": "ordered",
+        "label": "In order, or together",
+        "focus": [
+          "registry",
+          "serial",
+          "steerers",
+          "parallel",
+          "flushers"
+        ],
+        "note": "serial awaits one listener at a time; parallel awaits all of them at once."
+      },
+      {
+        "id": "direct",
+        "label": "Not the bus",
+        "focus": [
+          "producer",
+          "services",
+          "wire"
+        ],
+        "note": "A row reaches a capability by calling its service; some providers cross a process to answer."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "producer",
+      "type": "backend",
+      "label": "A row dispatches",
+      "sublabel": "emit, serial, parallel, waterfall",
+      "pos": [
+        40,
+        290
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "registry",
+      "type": "database",
+      "label": "Event registry",
+      "sublabel": "name, mode, payload, owner",
+      "pos": [
+        320,
+        290
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "emit",
+      "type": "messagebus",
+      "label": "emit",
+      "sublabel": "a fact; cannot be refused",
+      "pos": [
+        590,
+        80
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "waterfall",
+      "type": "messagebus",
+      "label": "waterfall",
+      "sublabel": "wraps next(); may veto",
+      "pos": [
+        590,
+        220
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "serial",
+      "type": "messagebus",
+      "label": "serial",
+      "sublabel": "one at a time, until one bails",
+      "pos": [
+        590,
+        360
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "parallel",
+      "type": "messagebus",
+      "label": "parallel",
+      "sublabel": "all at once, all awaited",
+      "pos": [
+        590,
+        500
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "observers",
+      "type": "frontend",
+      "label": "Observers",
+      "sublabel": "persistence, telemetry, kernel",
+      "pos": [
+        880,
+        80
+      ],
+      "size": [
+        220,
+        64
+      ]
+    },
+    {
+      "id": "policy",
+      "type": "frontend",
+      "label": "Policy rows",
+      "sublabel": "hitl, limits, offload, rules",
+      "pos": [
+        880,
+        220
+      ],
+      "size": [
+        220,
+        64
+      ]
+    },
+    {
+      "id": "steerers",
+      "type": "frontend",
+      "label": "Ordered listeners",
+      "sublabel": "skill-steps, checkpoints",
+      "pos": [
+        880,
+        360
+      ],
+      "size": [
+        220,
+        64
+      ]
+    },
+    {
+      "id": "flushers",
+      "type": "frontend",
+      "label": "Flush and load",
+      "sublabel": "persistence, spill, workspace",
+      "pos": [
+        880,
+        500
+      ],
+      "size": [
+        220,
+        64
+      ]
+    },
+    {
+      "id": "services",
+      "type": "security",
+      "label": "A service call",
+      "sublabel": "ctx.fs, ctx.llm, ctx.tools",
+      "pos": [
+        40,
+        480
+      ],
+      "size": [
+        210,
+        64
+      ]
+    },
+    {
+      "id": "wire",
+      "type": "security",
+      "label": "Across a process",
+      "sublabel": "socket, fd 3, HTTP",
+      "pos": [
+        320,
+        480
+      ],
+      "size": [
+        190,
+        64
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "dispatch",
+      "from": "producer",
+      "to": "registry",
+      "label": "by name",
+      "variant": "emphasis"
+    },
+    {
+      "id": "as-emit",
+      "from": "registry",
+      "to": "emit"
+    },
+    {
+      "id": "as-waterfall",
+      "from": "registry",
+      "to": "waterfall",
+      "variant": "emphasis"
+    },
+    {
+      "id": "as-serial",
+      "from": "registry",
+      "to": "serial"
+    },
+    {
+      "id": "as-parallel",
+      "from": "registry",
+      "to": "parallel"
+    },
+    {
+      "id": "emit-to",
+      "from": "emit",
+      "to": "observers",
+      "label": "told"
+    },
+    {
+      "id": "waterfall-to",
+      "from": "waterfall",
+      "to": "policy",
+      "label": "next()",
+      "variant": "emphasis"
+    },
+    {
+      "id": "serial-to",
+      "from": "serial",
+      "to": "steerers",
+      "label": "awaited"
+    },
+    {
+      "id": "parallel-to",
+      "from": "parallel",
+      "to": "flushers",
+      "label": "awaited"
+    },
+    {
+      "id": "direct-call",
+      "from": "producer",
+      "to": "services",
+      "label": "ctx.require",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 70
+    },
+    {
+      "id": "provider-crosses",
+      "from": "services",
+      "to": "wire",
+      "label": "provider",
+      "variant": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "orange",
+      "title": "Every event is declared",
+      "items": [
+        "A name carries exactly one dispatch mode",
+        "Dispatching it through another mode raises",
+        "Listening to an undeclared name raises"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Why waterfall is common",
+      "items": [
+        "Most extension points are policy interceptions",
+        "Only a waterfall listener can veto",
+        "tools/pre-execute, agent/request and fs intents are waterfalls"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Not everything is an event",
+      "items": [
+        "A capability is a service call through its seam",
+        "A process boundary has its own wire",
+        "phern events prints the matrix for a profile"
+      ]
+    }
+  ]
+}

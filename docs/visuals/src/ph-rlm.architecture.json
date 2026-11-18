@@ -1,0 +1,368 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ph-rlm: how a code cell runs",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "cell-run",
+        "label": "A cell runs",
+        "focus": [
+          "presentation",
+          "transport",
+          "kernel",
+          "guest"
+        ],
+        "note": "The model sees one callable, python. Its program goes to the agent's own kernel and runs in the guest."
+      },
+      {
+        "id": "binding-call",
+        "label": "Binding call",
+        "focus": [
+          "guest",
+          "kernel",
+          "pipeline",
+          "bindings",
+          "messaging",
+          "loader",
+          "log"
+        ],
+        "note": "Each await tools.x(...) is a call frame that re-enters ph-core's tool pipeline and is logged."
+      },
+      {
+        "id": "delegation",
+        "label": "Delegation",
+        "focus": [
+          "bindings",
+          "subagents",
+          "child",
+          "messaging"
+        ],
+        "note": "rlm.run admits a child and returns a handle at once. Family members talk by agent message."
+      },
+      {
+        "id": "in-the-log",
+        "label": "In the log",
+        "focus": [
+          "kernel",
+          "pipeline",
+          "harness",
+          "log"
+        ],
+        "note": "Dispatches, namespace snapshots and harness refinements are all events in the session log."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "presentation",
+      "type": "frontend",
+      "label": "rlm-presentation",
+      "sublabel": "shows run_code as python",
+      "pos": [
+        40,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "guest",
+      "type": "security",
+      "label": "ph-runtime-guest",
+      "sublabel": "runs the cell",
+      "pos": [
+        310,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "tag": "own venv"
+    },
+    {
+      "id": "transport",
+      "type": "external",
+      "label": "run_code transport",
+      "sublabel": "ph-core tools-code-mode",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "kernel",
+      "type": "backend",
+      "label": "code-runtime-python",
+      "sublabel": "Kernel: one child per agent",
+      "pos": [
+        310,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "external",
+      "label": "Tool pipeline",
+      "sublabel": "ph-core DispatchBridge",
+      "pos": [
+        580,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "bindings",
+      "type": "backend",
+      "label": "rlm-bindings",
+      "sublabel": "rlm.run is tool rlm_run",
+      "pos": [
+        870,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "messaging",
+      "type": "messagebus",
+      "label": "rlm-messaging",
+      "sublabel": "agent_message, family guard",
+      "pos": [
+        870,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "loader",
+      "type": "backend",
+      "label": "rlm-context-loader",
+      "sublabel": "context_search",
+      "pos": [
+        870,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "tag": "off"
+    },
+    {
+      "id": "subagents",
+      "type": "backend",
+      "label": "rlm-subagent-provider",
+      "sublabel": "ctx.subagents: rlm-child",
+      "pos": [
+        1150,
+        100
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "child",
+      "type": "external",
+      "label": "Child agent",
+      "sublabel": "own log, own kernel",
+      "pos": [
+        1150,
+        280
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "log",
+      "type": "database",
+      "label": "Session log",
+      "sublabel": "ph-core, append-only",
+      "pos": [
+        310,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "harness",
+      "type": "backend",
+      "label": "rlm-harness",
+      "sublabel": "/refine, Continual Harness",
+      "pos": [
+        40,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "guest process: imports no harness code",
+      "wraps": [
+        "guest"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "present",
+      "from": "presentation",
+      "to": "transport",
+      "label": "present_transport",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 70
+    },
+    {
+      "id": "run-request",
+      "from": "transport",
+      "to": "kernel",
+      "label": "runtime.run",
+      "variant": "emphasis"
+    },
+    {
+      "id": "frames",
+      "from": "kernel",
+      "to": "guest",
+      "label": "fd 3 frames",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "dispatch",
+      "from": "kernel",
+      "to": "pipeline",
+      "label": "call: dispatch",
+      "variant": "emphasis"
+    },
+    {
+      "id": "to-bindings",
+      "from": "pipeline",
+      "to": "bindings",
+      "label": "rlm_run"
+    },
+    {
+      "id": "to-messaging",
+      "from": "pipeline",
+      "to": "messaging",
+      "label": "send",
+      "labelDx": 32
+    },
+    {
+      "id": "to-loader",
+      "from": "pipeline",
+      "to": "loader",
+      "label": "query",
+      "variant": "dashed"
+    },
+    {
+      "id": "start-child",
+      "from": "bindings",
+      "to": "subagents",
+      "label": "start"
+    },
+    {
+      "id": "admit",
+      "from": "subagents",
+      "to": "child",
+      "label": "admits",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 70
+    },
+    {
+      "id": "steer",
+      "from": "messaging",
+      "to": "child",
+      "label": "steer"
+    },
+    {
+      "id": "dispatch-log",
+      "from": "pipeline",
+      "to": "log",
+      "label": "tool/code-dispatch",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "snapshot-log",
+      "from": "kernel",
+      "to": "log",
+      "label": "kernel/snapshot",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 70
+    },
+    {
+      "id": "harness-log",
+      "from": "harness",
+      "to": "log",
+      "label": "harness/refined",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "One cell, many governed calls",
+      "items": [
+        "The model sees one callable, python",
+        "Each binding call is a call frame back into the tool pipeline",
+        "Forty calls log forty tool/code-dispatch records"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "State lives in the log",
+      "items": [
+        "rlm-kernel-snapshot records one kernel/snapshot per changed variable",
+        "Harness state is a fold over harness/refined events",
+        "A dead kernel is replaced and the next run starts with a reset notice"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Delegation does not block",
+      "items": [
+        "rlm.run returns an admission handle, not an answer",
+        "A child's records are in the child's own log",
+        "A denial ends the whole run; a failure is the program's to handle"
+      ]
+    }
+  ]
+}

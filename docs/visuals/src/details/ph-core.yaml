@@ -1,0 +1,1327 @@
+intro: |
+  ph-core is the harness with no front end: a plugin substrate (`ph.cordis`), an
+  agent loop, a model seam, a tool pipeline, capability seams, and a session log.
+  Almost every box here is one or more rows of `ph/bundles/base.yaml`, mounted
+  from a profile. The loop has no parameters for features; a feature is a row
+  that listens on an event the loop or the tool pipeline already dispatches.
+
+  Click a box for its rows, options and structures, or an arrow for how the two
+  sides talk and what is sent.
+
+topics:
+  - id: invariants
+    title: The five invariants here
+    summary: |
+      Five properties the design makes hard to violate. Each shows up on this
+      page as a mechanism, not as a rule somebody remembers.
+    blocks:
+      - table:
+          columns: [invariant, where it shows on this page, more]
+          rows:
+            - ["**I1** Everything is a plugin", "The loop, the log, the tool registry, the model seam and persistence are rows. [Profile](node:profile) lists them; [ph.cordis](node:cordis) mounts them.", "[I1](invariants#node:i1)"]
+            - ["**I2** Registrations and acquired resources are effects that unwind", "`ctx.provide`, `ctx.on`, `ctx.effect` all return or register a disposer on the scope that made them. See [ph.cordis](node:cordis).", "[I2](invariants#node:i2)"]
+            - ["**I3** Model-visible means logged", "A request's `messages` is `session.derive_messages()` and nothing else; `agent-loop-invariant` compares them on every `llm/stream`. See [the request arrow](edge:loop-request).", "[I3](invariants#node:i3)"]
+            - ["**I4** The log is append-only; the surface is what changes", "Compaction and offload append a `replace`; the shadowed events stay in the log. See [ph.session](node:session).", "[I4](invariants#node:i4)"]
+            - ["**I5** Seams have three roles", "A key, a provider and consumers. Swapping the provider row changes the product without touching a consumer. See [ph.seams](node:seams).", "[I5](invariants#node:i5)"]
+      - links:
+          - {to: "invariants", label: "The invariants page"}
+
+  - id: configuring
+    title: Configuring a row
+    summary: |
+      A profile is an ordered list of layers. A layer is a list of entries: a
+      row (it has a `name:`) or a patch that addresses a row by `id:`. Later
+      layers win per row. There are three places a person writes one, and each
+      may set one kind of row.
+    blocks:
+      - title: The three kinds, and who owns each
+        table:
+          columns: [a row `affects`, what it shapes, where a person sets it]
+          rows:
+            - ["`environment`", "what the agent sees or can do: model, tools, skills, sandbox, workspace", "a session profile, `$PH_HOME/profiles/<name>.yaml`"]
+            - ["`deployment`", "the host's machinery: persistence, telemetry, invariants, local stores, credentials", "`$PH_HOME/daemon.yaml`"]
+            - ["`presentation`", "how a front end draws: screens, footer readings", "the TUI's `$PH_HOME/tui.json`"]
+      - title: A named profile
+        note: Sparse. It `extends` a shipped profile and holds only the rows that differ.
+        code: |
+          # $PH_HOME/profiles/careful.yaml
+          extends: rlm
+          rows:
+            - id: sandbox                   # a patch: replace this row's whole config
+              config:
+                defaultMode: workspace-write
+            - id: agent-loop
+              config:
+                maxParallelToolCalls: 4
+            - id: tool-todo                 # a patch: arm a row that ships off
+              disabled: false
+            - id: memory-agents-md          # a patch: drop a row
+              remove: true
+            - insert:                       # add rows
+                - id: my-row
+                  name: my-plugin
+                  config: {limit: 3}
+      - title: For one run
+        note: The same grammar, composed last as the `cli` layer. Logged in the session as a `profile/override`.
+        lang: bash
+        code: |
+          phern --profile rlm \
+            --patch '{id: agent-loop, config: {maxParallelToolCalls: 4}}' \
+            --patch '{id: tool-todo, disabled: false}'
+      - title: Seeing what composed
+        lang: bash
+        code: |
+          phern --profile careful --dump-config    # every row, with the layer that last set it
+          phern doctor --profile careful           # what activated, what waits on which key
+          phern events --profile careful           # who dispatches and who listens, per event
+          phern profiles show careful --full       # every row through its config model
+      - title: Rules
+        tone: limit
+        list:
+          - "A patch replaces a row's **whole** config. It does not merge, and a list in config is replaced, not appended to."
+          - "An entry with both `id:` and `name:` is a row. Swapping a provider is a `remove` and an `insert`."
+          - "A layer a person writes may touch one kind. A session profile that patches a `deployment` row is refused, naming `daemon.yaml`."
+          - "A row with no config model refuses a non-empty `config:`. A model refuses an unknown key."
+          - "The only interpolation is `${env:VAR:-default}`. YAML tags, timestamps and sexagesimals are refused."
+          - "Row order carries no load semantics. A row activates when the services it injects exist."
+      - links:
+          - {to: "node:profile", label: "The entry grammar in full"}
+          - {to: "durability#node:environment", label: "How a session records the profile it runs in"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      Stated here, from DESIGN.md §8 and the package README, so nobody has to
+      find them by accident.
+    blocks:
+      - title: What ph-core does not ship
+        tone: limit
+        list:
+          - "No real model wire. `llm-fake` and `llm-replay` are for wiring and tests; Anthropic, Google and the OpenAI-compatible route are rows in phern."
+          - "No provider for `code_runtime`, `subagents`, compaction's engine or `uploads`. A profile that layers nothing never runs code, never delegates and never compacts."
+          - "No front end. `tests/test_layering.py` fails the build on a Textual, Rich or Typer import."
+      - title: Bounds that are narrower than they look
+        tone: limit
+        list:
+          - "`ctx.fs` rules bound tool-mediated access only. Model-written `open(path, 'w')` in a code cell never fires an intent; the sandbox rung is what bounds that."
+          - "`sandbox-local` is Linux (bwrap) and macOS (Seatbelt). Landlock is unwritten. A host that cannot confine declines and says so in `phern doctor`."
+          - "`DEPLOYMENT` is the mount's isolation chain, not a union over agents. A tool registered on one agent's scope is invisible under it."
+          - "A realm's provider cannot be swapped mid-session. `isolate:` is fixed at mount."
+      - title: Rough edges
+        tone: limit
+        list:
+          - "`LlmRuntime.register_adapter` uses no claiming helper and takes no `scope=`: the one provider slot outside the ownership sweep."
+          - "A log writer can be forged on purpose (import another module's, construct one, call `Session._append`). A test fails on each; the runtime does not."
+          - "A package's log type is known to a reader only once the package is imported."
+          - "There is no max-steps in the driver and no global turn or request timeout. Ceilings are the `limits` row in ph-stabilize, which ships with every ceiling off."
+          - "`TurnEndReason(kind=\"interrupted\")` is never constructed; it reaches a log only as repair's payload."
+          - "`freeze_json_value` re-copies an already-frozen tree: about 232 µs for a 500-node tool result on each re-admit."
+          - "Nothing watches the file system. `AGENTS.md` is re-read each turn."
+      - links:
+          - {to: "security.html", label: "Containment, isolation and what a sub-agent inherits"}
+          - {to: "durability", label: "What survives a restart, and what does not"}
+
+nodes:
+  profile:
+    title: Profile
+    summary: |
+      A profile is data: an ordered list of YAML layers that compose into rows.
+      A row mounts one plugin with one config. Nothing in a profile is code, and
+      nothing in it runs until the loader hands the rows to cordis.
+    blocks:
+      - title: One composed row
+        struct: ph.cordis.loader:Row
+      - title: A row entry
+        table:
+          columns: [key, means, default]
+          rows:
+            - ["`name`", "the plugin to mount, resolved through the `ph.plugins` entry-point group", "required"]
+            - ["`id`", "how later layers address the row", "the `name`"]
+            - ["`config`", "passed through the plugin's config model; `${env:VAR:-default}` is interpolated", "none"]
+            - ["`disabled`", "`true`, or a predicate `${platform:...}` / `${env:...}`; a disabled row does not mount", "`false`"]
+            - ["`isolate`", "row ids this row gets private copies of, as a list or `{id: config}`", "none"]
+      - title: A patch entry
+        table:
+          columns: [form, does]
+          rows:
+            - ["`{insert: [row, ...]}`", "adds rows"]
+            - ["`{id: x, config: {...}}`", "replaces that row's whole config"]
+            - ["`{id: x, disabled: false}`", "arms or disarms it"]
+            - ["`{id: x, remove: true}`", "drops it"]
+            - ["`{id: x, isolate: [fs]}`", "gives it a private realm"]
+      - title: One layer
+        struct: ph.cordis.loader:ProfileDocument
+      - title: The shipped profiles, as layers
+        note: From `ph_app/profiles.py`. A bundle is resolved through the `ph.bundles` entry-point group.
+        table:
+          columns: [profile, layers]
+          rows:
+            - ["`base`", "`base.yaml`, stabilize"]
+            - ["`headless`", "`base.yaml`, `headless.yaml`, stabilize"]
+            - ["`tui`", "headless + `tui.yaml`"]
+            - ["`anthropic`, `google`, `deepseek`, `llama`", "`base.yaml`, stabilize, the provider's document"]
+            - ["`rlm`", "tui + the rlm bundle"]
+            - ["`rlm-stable`", "rlm + stabilize + `rlm-stable.yaml`"]
+            - ["`rlm-indexed`", "rlm-stable + utcp, code-graph, text-index"]
+            - ["`rlm-clm`", "rlm + clm"]
+      - title: The composed profile
+        struct: ph.cordis.loader:Profile
+      - title: Durability
+        tone: durable
+        list:
+          - "A session's log records the environment rows it started on (`profile/base`) and each later change (`profile/override`). A restart mounts the root from those, not from the file as it is today."
+          - "A named profile that moved is found at a start and taken only on purpose."
+      - title: What a sub-agent gets
+        tone: secure
+        list:
+          - "A child runs on its root's mount. It has no profile of its own."
+          - "A profile a parent assigns a child is a narrowing: a row the child would run that the parent does not is refused by name."
+          - "Nothing the model can call mounts a row. A running session's rows change through `ph.session_profile.override` only."
+      - title: Limits
+        tone: limit
+        list:
+          - "Two rows may not share an id. Re-declaring a shipped row is refused; address it by id."
+          - "An `isolate:` must name an enabled row that is not the row itself."
+          - "The log-layer rows (storage, telemetry, export, checkpoint) are gathered together wherever the first is written; every other row keeps file order."
+      - links:
+          - {to: "topic:configuring", label: "Configuring a row"}
+          - {to: "edge:profile-rows", label: "How rows reach cordis"}
+          - {to: "invariants#node:i1", label: "I1: everything is a plugin"}
+
+  cordis:
+    title: ph.cordis
+    summary: |
+      The plugin substrate: one `Context` tree that is a service locator, an
+      event bus and a lifetime manager at once. A plugin is a name, what its
+      settings shape, the service keys it injects, an optional config model and
+      an `apply(ctx, config)` body. Everything a body registers or acquires is
+      an effect of its scope, and disposing the scope unwinds it.
+    blocks:
+      - title: A plugin
+        lang: python
+        code: |
+          class Config(WireModel):          # YAML is camelCase: `limit`, `rootDir`
+              limit: int = 3
+
+          @plugin("my-plugin", affects="environment", inject=[SESSIONS, TOOLS], config=Config)
+          async def apply(ctx: Context, config: Config) -> None:
+              ctx.provide(MY_KEY, service)         # claim ctx.<key> in this realm
+              ctx.on("agent/pre-step", listener)   # listen; unwinds with the row
+              await ctx.effect(enter, label="worktree")   # acquire and register release
+      - title: A plugin's identity
+        struct: ph.cordis.plugin:PluginSpec
+      - title: What a Context does
+        table:
+          columns: [call, does, unwinds]
+          rows:
+            - ["`ctx.provide(key, service)`", "claims `ctx.<key>` in the provisioning realm; a second claim raises `ServiceConflictError`", "the disposer removes it only if it is still the one registered"]
+            - ["`ctx.get(key)` / `ctx.require(key)`", "resolves along the scope chain, most specific first", ""]
+            - ["`ctx.on(event, listener)`", "registers a listener for a declared event", "with the registering scope"]
+            - ["`await ctx.effect(enter, label=)`", "acquires an external artifact and registers its release in one step", "LIFO, after the scope's children"]
+            - ["`ctx.add_disposer(fn, label=)`", "registers a teardown", "LIFO"]
+            - ["`ctx.scope(label)`", "a child that is an isolation boundary and its own realm (what an agent gets)", "with its parent"]
+            - ["`await ctx.reconcile()`", "activates every row whose injected keys resolve, to a fixpoint (64 rounds, then an error naming the cycle)", ""]
+            - ["`await ctx.dispose()`", "children first in reverse order, then own effects LIFO, under `GRACE_SECONDS` (10 s)", ""]
+      - title: The four dispatch modes
+        note: Every event is declared with one mode. Dispatching it through another raises; listening to an undeclared name raises.
+        table:
+          columns: [mode, semantics, used for]
+          rows:
+            - ["`emit`", "synchronous; return values ignored; a raising listener is logged and the dispatch goes on", "facts: `session/created`, `tools/result`"]
+            - ["`serial`", "awaits listeners in registration order until one bails", "barriers and refusals: `llm/send`, `profile/mounted`"]
+            - ["`parallel`", "all listeners at once, all awaited; failures collected", "`session/flush`, `session/loaded`"]
+            - ["`waterfall`", "around-middleware: a listener receives `(*args, next)`; not calling `next()` vetoes the rest", "policy: `tools/pre-execute`, `agent/request`"]
+      - events: all
+        title: Every declared event
+      - title: Service-driven activation
+        list:
+          - "Mounting a profile runs nothing. `reconcile()` activates a row when every key in its `inject` resolves."
+          - "Losing a service deactivates the row and leaves it mounted; providing the key again reactivates it."
+          - "An `apply` that raises is deactivated before the exception propagates."
+          - "After reconciliation `profile/mounted` is dispatched (serial). A listener may refuse the deployment by raising."
+      - title: The mount
+        struct: ph.cordis.loader:Mount
+      - title: Scopes, isolation and visibility
+        tone: secure
+        list:
+          - "Each agent gets its own `Context` created with `isolated=True`. That scope is an isolation boundary."
+          - "One rule decides visibility for events and for every scoped registry: `reaches(target)`. A global registration reaches everything; an agent-scoped one reaches that agent alone."
+          - "A row's activation scope is transparent, so what a row registers is global. Isolation is for agents, not rows."
+          - "`isolate: [fs]` on a row gives it a private realm with its own copy of the `fs` row. Every other row keeps the shared one."
+          - "A boundary argument has no default. `DEPLOYMENT` is the named way to say the mount, so a missing scope is a type error and not the widest answer."
+      - title: Durability
+        tone: durable
+        list:
+          - "Nothing in cordis is durable. A restart mounts the profile again and every row rebuilds its state from the session log."
+          - "A clean stop unwinds every scope, so child processes are stopped, leases released and logs written. A `SIGKILL` runs none of it."
+      - title: Limits
+        tone: limit
+        list:
+          - "An effect registered about a child runs after that child's scope is gone. A teardown may use the store and the log, not the child's own services."
+          - "A private copy mounted by `isolate:` does not hear dispatches; the isolating row does."
+          - "`ctx.<seam>` is `Any` to mypy; the runtime check is a missing required argument at mount."
+      - links:
+          - {to: "dispatch", label: "Which mode carries each communication"}
+          - {to: "security.html", label: "Scopes and isolation in full"}
+          - {to: "invariants#node:i2", label: "I2: effects that unwind"}
+
+  bundles:
+    title: Bundle rows
+    summary: |
+      A bundle is a YAML document of rows and patches that a package ships. It
+      reaches a profile as a layer, resolved through the `ph.bundles`
+      entry-point group; each row in it names a plugin from the `ph.plugins`
+      group. A bundle changes ph-core by mounting rows on seams that already
+      exist, never by patching code.
+    blocks:
+      - title: How a package attaches
+        lang: toml
+        code: |
+          # pyproject.toml of ph-rlm
+          [project.entry-points."ph.bundles"]
+          rlm = "ph_rlm:BUNDLE"                      # a Path to bundle.yaml
+
+          [project.entry-points."ph.plugins"]
+          code-runtime-python = "ph_rlm.kernel.manager:apply"
+          rlm-kernel-snapshot = "ph_rlm.snapshot:apply"
+      - title: What a bundle document looks like
+        note: A bundle both patches base rows by id and adds its own.
+        code: |
+          # ph_rlm/bundle.yaml
+          - id: tools                 # a patch to a base row
+            config:
+              mode: code
+          - id: tools-code-mode       # a row of its own
+            name: tools-code-mode
+            config:
+              maxDispatchesPerRun: 256
+      - title: The bundles that ship
+        table:
+          columns: [bundle, package, what it provides to ph-core's seams]
+          rows:
+            - ["`rlm`", "ph-rlm", "`code_runtime` (the Python kernel), a `subagents` provider, the git-worktree `workspace` tier, Code Mode"]
+            - ["`stabilize`", "ph-stabilize", "the compaction engine, offload, limits, approvals policy (`hitl`), `permissions-fs`, todo"]
+            - ["`clm`", "ph-clm", "context-editing tools and the context mirror"]
+            - ["`utcp`", "ph-utcp", "tools from UTCP manuals"]
+            - ["`code-graph`, `text-index`", "ph-code-graph, ph-text-index", "indexing tools, registered through utcp"]
+      - title: What a bundle may not do
+        tone: secure
+        list:
+          - "A bundle's rows are held to the same `affects` kinds and config models as any row."
+          - "A row writes only the log record types its module owns; a bundle's own types are declared with `declare_log_type`."
+          - "ph-core imports no bundle. `tests/test_layering.py` holds the import direction."
+      - title: Limits
+        tone: limit
+        list:
+          - "A profile is offered only if every required bundle resolves on this install. `stabilize` is optional: without it a profile composes, without compaction."
+          - "A patch can only address a row an earlier layer declared, so a bundle is layered before the document that patches its rows. Order of layers matters even though order of rows does not."
+      - links:
+          - {to: "ph-rlm", label: "ph-rlm"}
+          - {to: "ph-stabilize", label: "ph-stabilize"}
+          - {to: "edge:bundle-providers", label: "How a bundle row becomes a seam's provider"}
+
+  adapters:
+    title: Adapter rows
+    summary: |
+      A model wire is a row. Each adapter row calls
+      `ctx.llm.register_adapter(providers, adapter)` and from then on owns those
+      provider names. ph-core ships only `llm-fake` and `llm-replay`; the real
+      wires (`llm-anthropic`, `llm-google`, `llm-openai-compatible`) live in
+      phern. The loop never learns which adapter answered.
+    blocks:
+      - row: llm-anthropic
+      - row: llm-openai-compatible
+      - title: A provider and its models, in a profile
+        note: |
+          `apiKeyEnv` is the name of a variable. The adapter row gets the key
+          through `ctx.credentials`; no credential value is ever stored.
+        code: |
+          - insert:
+              - id: llm-anthropic
+                name: llm-anthropic
+                config:
+                  provider: anthropic
+                  apiKeyEnv: ANTHROPIC_API_KEY
+                  contextWindow: 200000
+          - id: models
+            config:
+              default: main
+              models:
+                main: {provider: anthropic, model: claude-sonnet-5}
+                fast: {provider: anthropic, model: claude-haiku-4-5-20251001}
+      - title: The rows ph-core ships
+        row: llm-fake
+      - row: llm-replay
+      - title: The model list
+        row: models
+      - title: What an adapter is
+        lang: python
+        code: |
+          class LlmAdapter(Protocol):
+              def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]: ...
+
+          class DecisionAdapter(Protocol):          # optional: a route that also decides
+              async def decide(self, request: DecisionRequest) -> Decisions: ...
+      - title: Security
+        tone: secure
+        list:
+          - "Only an adapter turns a credential name into a header. A row's config names the variable and never holds the value."
+          - "A resumed root or child whose route names a credential the deployment cannot supply is held (`credential/needed`), not started."
+          - "A child's model is a key of its parent's `models` list. A key the parent does not hold is refused."
+      - title: Limits
+        tone: limit
+        list:
+          - "`register_adapter` takes no `scope=` and uses no claiming helper."
+          - "Extra routes on the OpenAI-compatible wire go in that row's `profiles` list. A list in config is replaced, not merged, so the existing route is restated."
+          - "A route that cannot carry a setting (a sampling value, an effort) has it withheld, and the request header records what was asked and not sent."
+      - links:
+          - {to: "phern#node:adapters", label: "The adapters on the phern page"}
+          - {to: "edge:llm-wire", label: "What crosses to an adapter"}
+
+  llm:
+    title: ph.llm
+    summary: |
+      The model seam, published as `ctx.llm` by the `llm` row. It routes a
+      request to the adapter that owns its provider, through the `llm/stream`
+      waterfall and then the `llm/send` barrier, and turns anything an adapter
+      raises into a terminal `finish` chunk so a consumer handles one shape. A
+      route may also decide: typed questions answered with probabilities.
+    blocks:
+      - row: llm
+      - title: The service
+        table:
+          columns: [call, does]
+          rows:
+            - ["`await ctx.llm.stream(options)`", "one request through `llm/stream`, then `llm/send`, then the adapter; returns an async iterator of chunks"]
+            - ["`await ctx.llm.decide(request, session=, timeout_s=)`", "asks a decision route; records `llm/decided` or `llm/decision-failed` in `session`"]
+            - ["`ctx.llm.register_adapter(providers, adapter)`", "claims provider names for an adapter; returns a handle to dispose"]
+            - ["`ctx.llm.resolve_model(provider, model)`", "the route's context window, max tokens and media limits"]
+            - ["`ctx.llm.list_providers()`", "the provider names that have an adapter"]
+      - title: One request
+        struct: ph.llm.types:GenerateOptions
+      - title: The durable part of a request
+        struct: ph.llm.types:LlmCallConfig
+      - title: The stream
+        note: |
+          Block indexes correlate interleaved deltas. `block-end` carries the
+          assembled block. `usage` comes before the terminal `finish`, and
+          nothing follows it. Tool arguments stay raw JSON strings until
+          `block-end`.
+        table:
+          columns: [chunk, "`type`", carries]
+          rows:
+            - ["`BlockStart`", "`block-start`", "`index`, `blockType`"]
+            - ["`TextDelta`", "`text-delta`", "`index`, `text`"]
+            - ["`ReasoningDelta`", "`reasoning-delta`", "`index`, `text`"]
+            - ["`ToolCallDelta`", "`tool-call-delta`", "`index`, `id`, `argumentsDelta`, `name`"]
+            - ["`BlockEnd`", "`block-end`", "`index`, `block`"]
+            - ["`UsageChunk`", "`usage`", "`usage`"]
+            - ["`Finish`", "`finish`", "`reason: {kind, failure}`; kind is `stop`, `tool-calls`, `max-tokens`, `aborted` or `error`"]
+      - title: How a response stopped
+        struct: ph.llm.types:FinishReason
+      - title: A failure
+        struct: ph.llm.types:LlmFailure
+      - title: Token accounting
+        struct: ph.llm.types:TokenUsage
+      - title: A decision request
+        struct: ph.llm.adapter:DecisionRequest
+      - title: The answers
+        struct: ph.llm.adapter:Decisions
+      - title: Retry
+        row: llm-retry
+      - title: What llm-retry retries
+        note: It listens on the `agent/request-error` waterfall and answers with a retry or passes.
+        table:
+          columns: [failure, action]
+          rows:
+            - ["rate limit, 5xx, timeout, connection error, overloaded, empty response", "retry with exponential backoff (`baseDelayMs` doubling to `maxDelayMs`); a provider's own retry-after wins"]
+            - ["`FILE_EXPIRED`", "retry: the adapter already dropped the dead handle"]
+            - ["`CONTEXT_WINDOW_EXCEEDED`", "not retried: this is the signal compaction keys off"]
+            - ["anything else", "not retried"]
+      - title: The records a call leaves
+        table:
+          columns: [record, when]
+          rows:
+            - ["`request/header`", "the call config, system prompt and tool schemas, only when they changed"]
+            - ["`request/context`", "the resolved route (`provider`, `model`, `contextWindow`), only when it changed"]
+            - ["`assistant/chunk`", "each raw chunk, before assembly"]
+            - ["`assistant/message`", "the assembled reply, with `usage`"]
+            - ["`step/retry`", "the loop is about to make the call again: `{turn, step, attempt, by}`"]
+            - ["`llm/retry`", "`llm-retry`'s own account: `{turn, step, attempt, delayMs, code}`"]
+            - ["`llm/decided`, `llm/decision-failed`", "a decision route was used, and what it cost or why it failed"]
+      - title: Durability
+        tone: durable
+        list:
+          - "`session-checkpoint-policy` flushes the log on `llm/send`, so the events that motivated a request are on disk before it is in flight."
+          - "Chunks are logged as they arrive, but not flushed one by one. A kill mid-stream loses the chunks since the last flush and the turn is closed `interrupted`."
+          - "A canceled stream still finalizes what was shown: `assistant/message` with `interrupted: true`."
+      - title: Limits
+        tone: limit
+        list:
+          - "No global request timeout. A decision takes `timeout_s`; a stream takes the adapter's own."
+          - "`response_schema` and tools are not combined on one request."
+          - "A request with a `session_id` and no `purpose` is a loop request and is held to the log. The opt-out set is closed: `compaction`, `session-title`, `refine`."
+      - links:
+          - {to: "edge:loop-request", label: "The request, from the loop"}
+          - {to: "edge:llm-wire", label: "The stream, to an adapter"}
+
+  loop:
+    title: agent-loop
+    summary: |
+      The ReAct driver, and a row like any other. It drives one session through
+      turn and step boundaries: claim what is in the inbox, ask the model, run
+      the tool calls, repeat until a step ends with no calls. Every feature
+      beyond that attaches to one of the events it dispatches.
+    blocks:
+      - row: agent-loop
+      - title: In a profile
+        code: |
+          - id: agent-loop
+            config:
+              maxParallelToolCalls: 4      # how many concurrency-safe calls of one step may overlap
+      - title: One turn
+        lang: text
+        code: |
+          turn/start
+            system_prompt.assemble      -> system-prompt/assemble   (waterfall)
+            inbox.propose               (nothing taken yet)
+            agent/pre-step              -> reject | enter(messages) (waterfall)
+                 reject                 -> agent/step-rejected (serial), turn/end{blocked}
+            step/start                  (one batch with the inbox splice)
+              user/message*             (the batch, surface: append)
+              agent/request             -> LlmCallConfig            (waterfall)
+              request/header            (only when it changed)
+              request/context           (only when the route changed)
+              ctx.llm.stream            -> assistant/chunk* -> assistant/message
+              agent/request-error       -> retry | None             (waterfall)
+              tool calls                -> tool/call, tool/result
+            step/end
+            agent/turn-stopping         (serial; a listener objects by steering)
+          turn/end
+      - events: agent
+        title: Every agent event
+      - event: agent/pre-step
+      - title: The pre-step decision
+        struct: ph.agent.types:PreStepDecision
+      - event: agent/request
+      - event: agent/request-error
+      - title: What a listener may answer a failure with
+        struct: ph.agent.types:RequestErrorAction
+      - event: agent/turn-stopping
+      - title: Why a turn ended
+        struct: ph.agent.types:TurnEndReason
+      - title: The inbox
+        note: Every mutation is logged as `agent/inbox/spliced` before the projection changes.
+        table:
+          columns: [call, lands at, wakes an idle agent]
+          rows:
+            - ["`agent.followup(msg)`", "next turn", "yes"]
+            - ["`agent.steer(msg)`", "next step", "yes"]
+            - ["`agent.inject(msg)`", "next step", "no"]
+      - title: What it writes to the log
+        table:
+          columns: [record, shape]
+          rows:
+            - ["`turn/start`", "`{turn}`"]
+            - ["`step/start`, `step/end`", "`{turn, step}`"]
+            - ["`user/message`", "the message itself, `surfaceOp: append`"]
+            - ["`assistant/chunk`", "`{turn, step, attempt, chunk}`"]
+            - ["`assistant/message`", "`{turn, step, message, usage}`, citing its chunks"]
+            - ["`request/header`, `request/context`", "what the request was built under"]
+            - ["`step/retry`", "`{turn, step, attempt, by}`"]
+            - ["`turn/end`", "`{turn, reason: {kind}}`"]
+      - record: turn/end
+        example: |
+          {"type": "turn/end", "seq": 142, "time": 1794836401220,
+           "data": {"turn": 7, "reason": {"kind": "completed"}}}
+      - title: Two rules the loop holds itself to
+        tone: secure
+        list:
+          - "Every request's `messages` is `session.derive_messages()`. `agent-loop-invariant` compares the two on `llm/stream` and raises `ModelVisibleNotLoggedError` on a difference."
+          - "`max-tokens` is sticky for the turn: a later completed step cannot report a truncated answer as clean."
+          - "`run()` contains every failure except cancellation, so one bad turn does not take the process down."
+      - title: Durability
+        tone: durable
+        list:
+          - "The loop keeps no durable state. Turn and step numbers are read from the log (`turn/start`), and the inbox is a fold of `agent/inbox/spliced`."
+          - "Taking a prompt out of the inbox and putting it in the conversation are one batch, so a crash cannot lose a prompt between the two."
+          - "Durability is not the loop's job: the checkpoint policy flushes around it, and a record that must precede an effect is an intent."
+      - title: Limits
+        tone: limit
+        list:
+          - "No max-steps and no turn timeout in the driver. The `limits` row adds ceilings, and ships with all of them off."
+          - "Several listeners on `agent/turn-stopping` do not outrank each other."
+          - "A turn stopped from outside closes `aborted`; the partial reply is kept with `interrupted: true`."
+      - links:
+          - {to: "ph-stabilize", label: "The rows that hook these events"}
+          - {to: "dispatch", label: "The dispatch modes"}
+          - {to: "edge:loop-events", label: "The events it appends"}
+
+  tools:
+    title: ph.tools
+    summary: |
+      The tool registry and the governed pipeline, published as `ctx.tools` by
+      the `tools` row. A tool is a `ToolDefinition` registered globally or on one
+      agent's scope. Every call, whoever makes it, passes the same pipeline:
+      policy before, a wrapper around, policy after, and one frozen result.
+    blocks:
+      - row: tools
+      - title: Presentation mode
+        note: "`native`: tools are offered as provider tool calls. `code`: the model writes Python and each call is a dispatch from a cell. `both`: either."
+        code: |
+          - id: tools
+            config:
+              mode: code
+      - title: A tool
+        struct: ph.tools.definition:ToolDefinition
+      - title: What a definition declares about itself
+        note: Only `name`, `description` and `parameters` are sent to the model.
+        table:
+          columns: [field, says, read by]
+          rows:
+            - ["`timeout_ms`", "a cooperative budget for the body", "the `tools-timeout` row"]
+            - ["`is_concurrency_safe`", "only `True` lets a call overlap its siblings; anything else is exclusive", "the batch scheduler"]
+            - ["`effect_free`", "the call changes nothing: no file, no process, no message", "the checkpoint barrier, which skips a flush for it"]
+            - ["`effects_confined_to_workspace`", "every effect is a file inside the agent's workspace", "restore points and `/revert`"]
+            - ["`is_irreversible`", "the call may do something the harness cannot take back", "the `hitl` row in ph-stabilize, which asks a person"]
+            - ["`idempotency_key`", "what the call's effect is, as a key: same key, same effect", "`tool/effect`, so a repeat is answered from the log"]
+            - ["`reconcile`", "did this call happen? asked on resume of a call a crash left unresolved", "repair"]
+            - ["`self_limits`, `reads_paths`, `searches_paths`, `arguments_disposable`", "how the tool bounds or pages its own output, and whether its arguments need keeping", "offload and compaction rows"]
+            - ["`finalize_content`", "a last content transform, run once for every outcome; must not raise", "the pipeline"]
+      - title: The pipeline
+        lang: text
+        code: |
+          tools/pre-execute   waterfall   Allow | Deny | Ask | Respond
+            Ask               -> ctx.approval (approval/asked ... approval/decided)
+          guards              deny-only, after approval: the last word
+          tool/call           recorded once the gate has decided
+          tools/execute       waterfall   around the body: timeouts, restore points
+          tools/body          serial      the checkpoint barrier
+          body                definition.execute(arguments, run)
+          tools/post-execute  waterfall   Accept | Block
+          finalize_content, then tools/result (emit)
+          tool/result         committed in model order
+      - event: tools/pre-execute
+      - title: What a pre-execute listener may return
+        table:
+          columns: [decision, means]
+          rows:
+            - ["`Allow()`", "run it. `Allow(arguments=..., has_arguments=True)` runs it with substituted arguments"]
+            - ["`Deny(reason, concludes_turn=, failure_kind=)`", "do not run it; the model reads the reason. `failed` marks a spent budget, not a policy refusal"]
+            - ["`Ask(reason, allowed_decisions=)`", "put it to a person through `ctx.approval`"]
+            - ["`Respond(message)`", "do not run it; hand the model this as a successful result"]
+      - event: tools/execute
+      - event: tools/post-execute
+      - title: What a post-execute listener may return
+        table:
+          columns: [decision, means]
+          rows:
+            - ["`Accept()`", "keep the result. `content=` replaces what the model sees; `value=` replaces what a program receives"]
+            - ["`Block(feedback)`", "turn the result into an error whose content is corrective feedback"]
+      - title: One call in flight
+        struct: ph.tools.definition:ToolExecution
+      - title: The frozen outcome
+        struct: ph.tools.definition:ToolExecutionResult
+      - title: The batch scheduler
+        list:
+          - "One assistant step's calls are prepared in model order and may overlap. Each call is `parallel` or `exclusive` (`ToolDefinition.is_concurrency_safe`); an exclusive call is a barrier."
+          - "At most `maxParallelToolCalls` run at once (the `agent-loop` row's option)."
+          - "Results commit in model order: a call that finishes early waits its turn."
+          - "An aborted batch records a `tool/call` and `tool/result` pair for every call it skipped, in one batch."
+      - title: The records
+        table:
+          columns: [record, when]
+          rows:
+            - ["`tool/call`", "after the gate decided: `{turn, step, callId, name, arguments}`. Not model-visible."]
+            - ["`tool/result`", "the result message, `surfaceOp: append`, citing its `tool/call`"]
+            - ["`tool/code-dispatch-start`, `tool/code-dispatch`", "a call made from a code cell, opened and settled"]
+            - ["`tool/effect`, `tool/effect-settled`", "a call whose tool names its effect (`idempotency_key`), so a repeat is answered from the log"]
+      - record: tool/call
+        example: |
+          {"type": "tool/call", "seq": 409, "time": 1794836399871,
+           "data": {"turn": 7, "step": 2, "callId": "toolu_01", "name": "bash",
+                    "arguments": "{\"command\": \"make test\"}"}}
+      - record: tool/result
+        example: |
+          {"type": "tool/result", "seq": 411, "time": 1794836401007,
+           "data": {"turn": 7, "step": 2,
+                    "message": {"id": "...", "role": "user",
+                                "source": {"kind": "tool", "callId": "toolu_01"},
+                                "content": [{"type": "tool-result", "toolCallId": "toolu_01", "isError": false,
+                                             "content": [{"type": "text", "text": "42 passed"}]}]}},
+           "surfaceOp": "append", "sourceEventSeqs": [409]}
+      - title: The rows that add tools
+        table:
+          columns: [row, tools, needs]
+          rows:
+            - ["`tool-fs`", "read, write, edit, glob, grep", "`ctx.fs`"]
+            - ["`tool-bash`", "bash", "`ctx.shell`"]
+            - ["`tool-attach`", "attach", "`ctx.fs`, `ctx.attachments`"]
+            - ["`tool-ask-user` (ships off)", "ask_user", "`ctx.user_questions`"]
+            - ["`subagent-task`", "task, only when a subagent provider is mounted", "`ctx.subagents`"]
+            - ["`tools-timeout`", "no tool: bounds each body by `ToolDefinition.timeout_ms` on `tools/execute`", ""]
+      - title: Scope and visibility
+        tone: secure
+        list:
+          - "A tool registered on an agent's scope is visible to that agent alone and shadows a global tool of the same name."
+          - "A restriction (`ctx.tools.restrict`) filters global names for one scope. Restrictions intersect, so a child can be narrowed and never widened."
+          - "Guards run after approval and are deny-only. A person's approval does not override a guard."
+          - "A registration is an effect of the row that made it and unwinds with that row."
+      - title: Durability
+        tone: durable
+        list:
+          - "The registry is rebuilt at mount. Nothing about it is stored."
+          - "`tool/call` is flushed before the body runs (`tools/body`). A crashed call is closed on resume as `TOOL_OUTCOME_UNKNOWN`; a call never recorded is `TOOL_NOT_STARTED`."
+          - "A tool that declares `reconcile` is asked on resume whether its interrupted call happened."
+      - title: Limits
+        tone: limit
+        list:
+          - "The pipeline governs registered tools. Code a model writes in a cell reaches the file system directly unless the sandbox confines it."
+          - "A tool that declares no `timeout_ms` is not bounded by `tools-timeout`. The budget is cooperative: the body is handed a signal and must stop when asked."
+          - "`tool-ask-user` ships disabled; `subagent-task` registers nothing in `ph-base`."
+      - links:
+          - {to: "edge:loop-tool-calls", label: "A tool call, from the loop"}
+          - {to: "edge:tools-through-seams", label: "How a tool reaches the file system"}
+          - {to: "ph-utcp", label: "Tools from a UTCP manual"}
+
+  seams:
+    title: ph.seams
+    summary: |
+      A seam is a service key with three roles: a definition (a `Protocol` and a
+      key), a provider (a row that registers an implementation) and consumers
+      (usually tools). A consumer asks `ctx.fs` or `ctx.sandbox` and never learns
+      which row answered, so swapping a provider row changes the product without
+      touching a consumer.
+    blocks:
+      - title: Seams with a provider slot
+        table:
+          columns: [key, provider registers with, base.yaml ships, with no provider]
+          rows:
+            - ["`fs`", "`rebase` (a root resolver)", "`fs-local`", "falls back to the process root"]
+            - ["`sandbox`", "`register_provider`", "`sandbox-policy` and `sandbox-local`", "`confine()` raises; never returns the argv unchanged"]
+            - ["`workspace`", "`register_provider`", "`workspace-shared`", "falls back to the shared directory"]
+            - ["`compaction`", "`register`", "the seam only, no engine", "`compact_if_needed` does nothing; `compact_now` raises"]
+            - ["`code_runtime`", "`register`", "the seam only", "`require()` raises: nothing runs model-written code"]
+            - ["`subagents`", "`register_provider(name, ...)`, many by name", "the seam only", "`resolve()` returns `None` and warns; no `task` tool"]
+            - ["`llm`", "`register_adapter`", "the seam only (`llm-fake` in `headless.yaml`)", "a request for an unowned provider fails as `NO_ADAPTER`"]
+            - ["`uploads`", "each adapter row registers its own", "the seam only", "every byte is sent inline"]
+      - title: The other kinds of seam
+        list:
+          - "**Contribution tables** (many registrations, no single holder): `commands`, `skills`, `diagnostics`, `tui_screens`, `tui_status`, `session_telemetry`."
+          - "**Waterfall answerers**: `approval` and `user_questions` register answerers as listeners."
+          - "**Service only**: `attachments`, `containment`, `credentials`, `goals`, `jobs`, `permission_presets`, `schedule`, `shell`, `spill_store`, `subprocess`, `token_meter`."
+      - title: The file system
+        row: fs-local
+      - title: Its events
+        events: fs
+      - title: An intent a listener may veto
+        struct: ph.seams.fs:WriteIntent
+      - title: The shell
+        row: shell-local
+      - title: What a command returns
+        struct: ph.seams.shell:ShellResult
+      - title: Child processes
+        row: subprocess-local
+      - title: The sandbox posture
+        row: sandbox-policy
+      - title: The sandbox backend
+        row: sandbox-local
+      - title: What a confined command may reach
+        row: sandbox-allow
+      - title: A posture for one profile
+        note: |
+          `defaultMode` is `read-only`, `workspace-write` or `danger-full-access`.
+          A spelled `sandbox-allow` config replaces the whole shipped list.
+        code: |
+          # $PH_HOME/profiles/<name>.yaml
+          extends: rlm
+          rows:
+            - id: sandbox
+              config:
+                defaultMode: workspace-write
+            - id: sandbox-allow
+              config:
+                paths: [~/.cache/uv]
+                network:
+                  mode: allowlist
+                  hosts: [pypi.org, files.pythonhosted.org]
+      - title: The policy handed to a backend
+        struct: ph.seams.sandbox:SandboxPolicy
+      - title: The workspace
+        row: workspace-shared
+      - title: What a seam bounds
+        tone: secure
+        list:
+          - "Every read, write and edit through `ctx.fs` crosses a waterfall before it touches the disk. A policy row vetoes by not calling `next()`."
+          - "`confine()` never passes through. A caller asking for confinement gets a wrapped argv or an error."
+          - "`sandbox-allow` is the one statement of what a confined command reaches beyond its workspace. Without the row: no extra directory, no network."
+          - "`ctx.subprocess` scrubs credential-looking variables from a child's environment (`scrub`, `keep`)."
+          - "A child's sandbox mode, writable paths and skills are narrowings of its parent's. A row declares how a child holds less of it (`narrows=`)."
+      - title: Durability
+        tone: durable
+        list:
+          - "Sandbox mode and approval policy are read from the log (`sandbox/mode`, `approval/policy`), so a session-level change survives a restart."
+          - "A workspace tree acquired and not disposed is reconciled when the session is next loaded (`workspace-reconcile`)."
+          - "Spawned children are journaled; a later start kills the strays of a hard-killed run."
+      - title: Limits
+        tone: limit
+        list:
+          - "Seam rules bound seam-mediated access. Only the sandbox tier bounds an absolute-path write from model-written code."
+          - "`glob` and `grep` are filtered by a screen, not gated: a path a screen hides is still readable unless a rule also vetoes `fs/read-intent`."
+          - "A provider cannot be swapped under a running agent."
+      - links:
+          - {to: "security.html", label: "Containment, the sandbox and the ladder"}
+          - {to: "invariants#node:i5", label: "I5: seams have three roles"}
+          - {to: "edge:seam-effects", label: "How an effect is confined"}
+
+  session:
+    title: ph.session
+    summary: |
+      The append-only event log, published as `ctx.sessions` by the `session`
+      row, with the intent journal (`ctx.intents`) over it. The log is the
+      state: what the model sees, the inbox, the todo list and every mode are
+      projections of it. Events are never rewritten.
+    blocks:
+      - row: session
+      - title: The record envelope
+        note: |
+          On disk in camelCase, absent optional fields omitted. `seq` is the log
+          index. `time` is epoch milliseconds. `ignorable` is stamped from the
+          type's declaration: a reader may skip an unknown ignorable type and
+          must refuse an unknown required one. `surfaceOp` and `sourceEventSeqs`
+          are allowed only on the three message types. `batch` is set when
+          events were appended together.
+        struct: ph.session.events:SessionEvent
+      - title: On disk
+        lang: json
+        code: |
+          {"type": "assistant/message", "seq": 408, "time": 1794836399802,
+           "data": {"turn": 7, "step": 2,
+                    "message": {"id": "...", "role": "assistant",
+                                "source": {"kind": "model", "...": "..."},
+                                "content": [{"type": "tool-call", "id": "toolu_01", "name": "bash", "arguments": "{...}"}]},
+                    "usage": {"inputTokens": 1820, "outputTokens": 64}},
+           "surfaceOp": "append", "sourceEventSeqs": [401, 402, 403, 404, 405, 406, 407]}
+      - title: What the model sees
+        text: |
+          `session.derive_messages()` folds the surface: the ordered list of
+          `user/message`, `assistant/message` and `tool/result` events that have
+          not been replaced. One event projects to one message or none. Every
+          other record type (turn boundaries, chunks, headers, a person's `!`
+          command) is not model-visible, by its type and not by a filter.
+
+          `session.transcript()` is the other projection: every append-origin
+          message, replaced or not, for a person.
+      - title: A surface replace
+        note: |
+          Compaction, offload and a context edit append a replacement through
+          one door, `ph.session.revise`. The replaced events stay in the log.
+        struct: ph.session.events:SurfaceReplace
+      - title: A replace on disk
+        lang: json
+        code: |
+          {"type": "user/message", "seq": 530, "time": 1794836501113,
+           "data": {"id": "...", "role": "user", "source": {"...": "..."},
+                    "content": [{"type": "text", "text": "Summary of the earlier conversation: ..."}]},
+           "surfaceOp": {"op": "replace", "replaces": [12, 14, 20, 22]},
+           "sourceEventSeqs": [12, 14, 20, 22]}
+      - title: Its events
+        events: session
+      - title: Reading the log
+        table:
+          columns: [call, answers]
+          rows:
+            - ["`session.derive_messages()`", "the model's message history"]
+            - ["`session.transcript()`", "the human transcript"]
+            - ["`session.latest(type)`, `last_event_of(*types)`", "the newest event of a type"]
+            - ["`session.select(*patterns)`", "events whose type matches"]
+            - ["`session.projection(type, parse)`", "a cached snapshot fold of one type"]
+            - ["`session.records_of(seq)`", "the producer's record of why a replacement is there"]
+            - ["`session.batch()`", "append several events as one unit"]
+      - title: Forking
+        list:
+          - "`ctx.sessions.fork(source, boundary)` branches at a closed turn. A fork stores a reference to its parent's prefix, not a copy."
+          - "A sub-agent's log is a session of its own, filed in its root's family."
+      - title: Security
+        tone: secure
+        list:
+          - "Nothing writes a log but a module's own writer (`log_writer(__name__)`), and a writer refuses a type its module does not own."
+          - "A person's shell command (`shell/*`) is not surface-eligible, so it cannot reach the model unless the person asked for that."
+      - title: Durability
+        tone: durable
+        list:
+          - "Everything here is what survives a restart. How and when it reaches disk is on the durability page."
+      - title: Limits
+        tone: limit
+        list:
+          - "`seq == index`, contiguous from 0, on every seed. A gap makes a log unopenable."
+          - "A replace must name surface nodes that are on the surface now, and cite every one."
+          - "A log of another `SESSION_FORMAT_VERSION` (now 4) is refused, not migrated."
+      - links:
+          - {to: "durability", label: "What makes a session durable"}
+          - {to: "durability#node:journal", label: "Intents: open before, settle after"}
+          - {to: "invariants#node:i4", label: "I4: the log is append-only"}
+
+  persistence:
+    title: ph.persistence
+    summary: |
+      The backends that keep the log, the row that decides when it is forced to
+      disk, the lease that keeps one writer per log, and the repair that closes
+      what a crash left open. Two backends satisfy one `SessionPersistence`
+      protocol; a consumer asks `exists`, `read`, `stored` and `locate` and never
+      builds a filename.
+    blocks:
+      - row: session-persistence-jsonl
+      - row: session-persistence-turso
+      - title: Changing where logs live
+        note: A `deployment` row, so it goes in `daemon.yaml`.
+        code: |
+          # $PH_HOME/daemon.yaml
+          rows:
+            - id: session-persistence
+              config:
+                root: /var/lib/ph/sessions
+      - title: Swapping the backend
+        code: |
+          # $PH_HOME/daemon.yaml
+          rows:
+            - id: session-persistence
+              remove: true
+            - insert:
+                - id: session-persistence
+                  name: session-persistence-turso
+      - title: When the log reaches disk
+        row: session-checkpoint-policy
+      - title: What is in the package
+        table:
+          columns: [module, does]
+          rows:
+            - ["`jsonl.py`, `turso.py`", "the two backends: write past a cursor on `session/flush`, synced"]
+            - ["`protocol.py`", "`SessionPersistence`, `SessionArchive`, `ClaimingStore`, the mount's last write"]
+            - ["`checkpoint_policy.py`", "the barriers before a model request and a tool body"]
+            - ["`lease.py`", "one writer per log, an `flock` under `<root>/.leases/`"]
+            - ["`opening.py`", "`open_session`: claim, then resume or create"]
+            - ["`resume.py`, `repair.py`", "close an interrupted turn, settle open intents, record `session/resumed`"]
+            - ["`lineage.py`, `families.py`", "read a fork through its ancestors; find a parent's children on disk"]
+      - title: A listing row
+        struct: ph.persistence.protocol:StoredSession
+      - title: Limits
+        tone: limit
+        list:
+          - "JSONL is the default. Turso (`pyturso`) is pre-1.0, has no Windows wheels, and no shipped profile mounts it."
+          - "Neither backend searches."
+          - "A backend with no per-session file cannot hold the lease; the host says so in a warning."
+      - links:
+          - {to: "durability", label: "The whole durability picture"}
+          - {to: "durability#node:store", label: "The two backends compared"}
+          - {to: "durability#node:repair", label: "Resume and repair"}
+          - {to: "durability#topic:settings", label: "Settings that change durability"}
+
+  workspace:
+    title: Workspace
+    summary: |
+      The files and processes an agent works on: outside ph-core, and the only
+      place an effect lands. An agent reaches them through seams, never
+      directly. `ctx.workspace` decides which directory an agent gets (the
+      shared one, or a tree of its own); `ctx.fs`, `ctx.shell` and
+      `ctx.subprocess` act in it; `ctx.sandbox` bounds what a command can touch.
+    blocks:
+      - row: workspace-shared
+      - title: What an agent holds
+        struct: ph.seams.workspace:Workspace
+      - title: The tiers
+        table:
+          columns: [row, an agent gets, ships in]
+          rows:
+            - ["`workspace-shared`", "the process's own directory", "`base.yaml`"]
+            - ["`workspace-git-worktree`", "a git worktree of its own", "the rlm bundle"]
+            - ["`workspace-jj`", "a jj workspace", "no shipped profile"]
+            - ["`workspace-agentfs`", "an agentfs tree", "no shipped profile"]
+            - ["`workspace-readonly-scratch`", "a read-only view with a scratch directory", "no shipped profile"]
+      - title: Its lifecycle rows
+        row: workspace-lifecycle
+      - row: workspace-reconcile
+      - title: Decline is not failure
+        list:
+          - "A tier that cannot serve a directory (not a repository, branch in use) declines with a reason, and the agent falls back to `shared`."
+          - "What happened is recorded on `workspace/acquired`, as a code and not a sentence."
+      - title: Security
+        tone: secure
+        list:
+          - "A child asks for `read` (the default) or `write` access to its parent's workspace, and the grant is recorded on its admission."
+          - "The worktree tier bounds relative writes. Only the sandbox tier bounds an absolute-path write."
+      - title: Durability
+        tone: durable
+        list:
+          - "`workspace/acquired` with no `workspace/disposed` is a leak a crash left. It is reclaimed the next time the session is loaded."
+          - "`workspace/checkpoint` records a restore point; the supervisor's retry ladder and `/revert` restore to it."
+          - "A restore is an intent (`workspace/restoring`, `workspace/restored`): one cut short reads back as `ok: false`."
+      - title: Limits
+        tone: limit
+        list:
+          - "A child process a hard kill left behind may still be writing until the next start's sweep."
+          - "A restore covers files in the tree. A write that left the tree, a network call or a push is not undone."
+      - links:
+          - {to: "security.html", label: "The containment ladder"}
+          - {to: "durability#node:processes", label: "What is killed and what is left"}
+
+edges:
+  profile-rows:
+    transport: call
+    summary: |
+      The host resolves a profile name to layers, parses each into a
+      `ProfileDocument`, and composes them into rows (`compose_rows`). Then
+      `Profile.mount(ctx)` hands each enabled row to cordis as
+      `ctx.plugin(...)`. Nothing has run yet.
+    blocks:
+      - title: The path
+        lang: text
+        code: |
+          profile name -> layers (paths and bundles)
+                       -> load_profile_documents -> [ProfileDocument]
+                       -> compose_rows           -> [Row]        (patches applied, ids unique)
+                       -> Profile.mount(ctx)     -> ctx.plugin(row) x N, private realms first
+                       -> ctx.reconcile()        (see the mounts arrow)
+      - title: What crosses
+        struct: ph.cordis.loader:Row
+      - title: One layer
+        struct: ph.cordis.loader:ProfileDocument
+      - title: What composition refuses
+        tone: limit
+        list:
+          - "An unknown key on a row or a patch."
+          - "A patch for an id that is not a row; two rows with one id."
+          - "An entry of a kind its layer does not own (`sets`), naming the file that does."
+          - "An `isolate:` naming a missing, disabled or identical row."
+          - "A YAML tag, or a value the safe loader will not convert."
+          - "A config its plugin's model rejects, at mount."
+      - links:
+          - {to: "topic:configuring", label: "Configuring a row"}
+
+  cordis-mounts:
+    transport: call
+    summary: |
+      `ctx.reconcile()` activates each mounted row whose injected service keys
+      resolve, calling its `apply(ctx, config)` inside a scope of its own, and
+      repeats until nothing changes. The agent loop is one of those rows: it
+      activates once `agents`, `llm`, `sessions` and `system_prompt` exist.
+      Then `profile/mounted` is dispatched.
+    blocks:
+      - event: profile/mounted
+      - title: What a row sees
+        lang: python
+        code: |
+          async def apply(ctx: Context, config: Config) -> None:
+              # ctx is this row's activation scope; config is validated
+              agents = ctx.require(AGENTS)        # present, because the row injected it
+      - title: The states a row can be in
+        note: As `phern doctor` prints them under Topology (`Mount.topology`).
+        list:
+          - "`active`"
+          - "`activating`"
+          - "`waiting on <key>`: an injected key nobody provides yet"
+          - "`unwound · waiting on <key>`: it was active and lost a service"
+          - "`disabled · by <layer>`"
+          - "`unmounted`"
+      - title: The mount
+        struct: ph.cordis.loader:Mount
+      - title: Failure
+        tone: limit
+        list:
+          - "An `apply` that raises deactivates the row and the error propagates: the profile does not mount."
+          - "A `profile/mounted` listener that raises refuses the run (a strict containment posture with no sandbox backend)."
+          - "Activation that does not settle in 64 rounds raises, naming the cycle."
+          - "`Mount.reconfigure(row_id, config)` changes one row's config live; only `ph.session_profile.override` may call it."
+
+  loop-request:
+    transport: service
+    summary: |
+      The loop builds one `GenerateOptions` and calls `ctx.llm.stream(request)`.
+      The messages are `session.derive_messages()`; the call config comes out of
+      the `agent/request` waterfall. An async iterator of chunks comes back, and
+      the loop logs each chunk, assembles the reply, and appends
+      `assistant/message`.
+    blocks:
+      - title: The request
+        struct: ph.llm.types:GenerateOptions
+      - event: agent/request
+      - event: llm/stream
+      - event: llm/send
+      - title: What the request leaves in the log
+        lang: json
+        code: |
+          {"type": "request/header", "seq": 398, "data": {"header": {"config": {"provider": "anthropic", "model": "claude-sonnet-5", "maxTokens": 8192}, "system": "...", "tools": ["..."]}, "reason": "change"}}
+          {"type": "request/context", "seq": 399, "data": {"provider": "anthropic", "model": "claude-sonnet-5", "contextWindow": 200000}}
+          {"type": "assistant/chunk", "seq": 401, "data": {"turn": 7, "step": 2, "attempt": 0, "chunk": {"type": "text-delta", "index": 0, "text": "Running"}}}
+        note: |
+          Abridged (`time` left out). `reason` is `initial`, `resume` or
+          `change`. A header is appended only when it differs from the last one.
+      - record: assistant/message
+      - title: When it fails
+        event: agent/request-error
+      - title: The failure handed to listeners
+        struct: ph.agent.types:RequestFailure
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A stream always ends in a `finish`. An adapter that raises is turned into `finish{error}`."
+          - "On `error` or `aborted` the loop asks `agent/request-error`. No retry answer means `LlmError` and the turn ends `error`."
+          - "A retry keeps `(turn, step)` and bumps `attempt`; `step/retry` records it and the wait is the loop's."
+          - "`llm/send` is where the checkpoint barrier flushes. If the flush raises, the adapter is not called."
+          - "`agent-loop-invariant` refuses a loop request whose messages are not the session's derivation."
+      - links:
+          - {to: "node:llm", label: "ph.llm"}
+          - {to: "dispatch#node:waterfall", label: "The waterfall mode"}
+
+  llm-wire:
+    transport: service
+    summary: |
+      `ctx.llm` finds the adapter that registered the request's provider and
+      calls `adapter.stream(request)`, running as the row that registered it.
+      The adapter turns the request into its provider's HTTP call and yields
+      `StreamChunk`s back. For a decision route the call is
+      `adapter.decide(request)` and the answer is a `Decisions`.
+    blocks:
+      - title: Registration
+        lang: python
+        code: |
+          handle = ctx.llm.register_adapter(["anthropic"], adapter)   # in the adapter row's apply
+          # ctx.llm.stream(request) -> adapter.stream(request) for request.provider == "anthropic"
+      - title: Chunks, as logged
+        lang: json
+        code: |
+          {"type": "block-start", "index": 0, "blockType": "text"}
+          {"type": "text-delta", "index": 0, "text": "Running the tests."}
+          {"type": "block-end", "index": 0, "block": {"type": "text", "text": "Running the tests."}}
+          {"type": "tool-call-delta", "index": 1, "id": "toolu_01", "name": "bash", "argumentsDelta": "{\"command\""}
+          {"type": "usage", "usage": {"inputTokens": 1820, "outputTokens": 64}}
+          {"type": "finish", "reason": {"kind": "tool-calls"}}
+      - title: A resolved route
+        struct: ph.llm.adapter:ResolvedModel
+      - title: A decision
+        struct: ph.llm.adapter:DecisionRequest
+      - title: One question
+        struct: ph.llm.adapter:Noul
+      - record: llm/decided
+      - record: llm/decision-failed
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No adapter for the provider: `NO_ADAPTER`. An adapter that cannot decide: `NO_DECISIONS`. Answers that do not match the questions: `BAD_DECISION`."
+          - "A decision slower than `timeout_s` is refused as `TIMEOUT` and recorded like any other failure."
+          - "A setting the route cannot carry is withheld with one warning per session."
+          - "The HTTP shape is the adapter's and is not part of ph-core."
+      - links:
+          - {to: "node:adapters", label: "Adapter rows"}
+          - {to: "phern", label: "From a command to a model call"}
+
+  loop-tool-calls:
+    transport: service
+    summary: |
+      When a reply carries tool calls, the loop hands the step's calls to
+      `execute_tool_calls`, which drives each through `ctx.tools`. Results come
+      back as `tool/result` events committed in the order the model asked, and
+      any extra context a tool returned is put in the next step's inbox.
+    blocks:
+      - title: What the loop hands over
+        struct: ph.tools.definition:ToolExecutionInput
+      - event: tools/pre-execute
+      - event: tools/post-execute
+      - title: What comes back
+        struct: ph.tools.definition:ToolExecutionResult
+      - record: tool/call
+      - record: tool/result
+      - title: A failed result
+        note: "`failureKind` says whether policy refused (`denied`) or something failed or was spent (`failed`)."
+        lang: json
+        code: |
+          {"type": "tool/result", "seq": 411,
+           "data": {"turn": 7, "step": 2, "failureKind": "denied",
+                    "message": {"id": "...", "role": "user", "source": {"kind": "tool", "callId": "toolu_01"},
+                                "content": [{"type": "tool-result", "toolCallId": "toolu_01", "isError": true,
+                                             "content": [{"type": "text", "text": "..."}]}]}},
+           "surfaceOp": "append", "sourceEventSeqs": [409]}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A denial, a timeout and a raised exception all come back as a `tool/result` with `isError: true`. The turn goes on unless the result concludes it."
+          - "An approval with nobody attached does not resolve: the turn parks on `approval/asked`."
+          - "A canceled batch writes a call and result pair for every call it skipped, so every `tool_use` the model made has a result."
+          - "The outcome is `aborted` when the turn was canceled; the loop then ends the turn."
+      - links:
+          - {to: "node:tools", label: "The pipeline in full"}
+          - {to: "ph-stabilize", label: "The rows on these waterfalls"}
+
+  tools-through-seams:
+    transport: service
+    summary: |
+      A tool body does not open a file or spawn a process itself. `tool-fs`
+      calls `ctx.fs.read / write / edit / glob / grep`, and `tool-bash` calls
+      `ctx.shell.run`. Each `ctx.fs` access crosses an intent waterfall before
+      it touches the disk, which is where a path rule vetoes.
+    blocks:
+      - title: The calls
+        table:
+          columns: [call, intent event, returns]
+          rows:
+            - ["`await ctx.fs.read(path, ...)`", "`fs/read-intent`", "a `FileSlice`; records `fs/observed`"]
+            - ["`await ctx.fs.write(path, content)`", "`fs/write-intent`", "what was written; emits `fs/changed`"]
+            - ["`await ctx.fs.edit(path, old_text, new_text)`", "`fs/edit-intent`", "emits `fs/changed`"]
+            - ["`await ctx.fs.glob(pattern)`, `grep(pattern)`", "none: filtered by a screen during the walk", "paths, matches"]
+            - ["`await ctx.shell.run(command, agent=, policy=)`", "none", "a `ShellResult`"]
+      - event: fs/write-intent
+      - title: The write intent
+        struct: ph.seams.fs:WriteIntent
+      - title: The edit intent
+        struct: ph.seams.fs:EditIntent
+      - title: The read intent
+        struct: ph.seams.fs:ReadIntent
+      - title: A shell result
+        struct: ph.seams.shell:ShellResult
+      - record: fs/observed
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A vetoed intent raises `FsDenied`; a file over the size limit raises `FileTooLarge`. The tool result tells the two apart (`denied` or `failed`)."
+          - "`fs-read-before-edit` refuses an edit of a file the agent has not read, from `fs/observed`."
+          - "`ctx.fs.root_for(agent)` is the agent's own root. A resolver that raises falls back to the process root."
+          - "A tool that bypasses the seam is not governed by it. Shipped tools do not."
+      - links:
+          - {to: "node:seams", label: "The seams and their rows"}
+          - {to: "security.html", label: "What the file rules reach"}
+
+  loop-events:
+    transport: log
+    summary: |
+      The loop appends every boundary and every message to the session through
+      its own writer. An append is synchronous, validates the event against the
+      surface, and returns it. The store then emits `session/event` to anyone
+      listening. Nothing is written to disk at this point.
+    blocks:
+      - title: The envelope
+        struct: ph.session.events:SessionEvent
+      - title: What the loop appends
+        table:
+          columns: [record, model-visible]
+          rows:
+            - ["`turn/start`, `step/start`, `step/end`, `turn/end`", "no"]
+            - ["`user/message`", "yes"]
+            - ["`assistant/chunk`", "no"]
+            - ["`assistant/message`", "yes"]
+            - ["`request/header`, `request/context`, `step/retry`", "no"]
+      - event: session/event
+      - record: user/message
+        example: |
+          {"type": "user/message", "seq": 396, "time": 1794836399001,
+           "data": {"id": "...", "role": "user", "source": {"kind": "user"},
+                    "content": [{"type": "text", "text": "run the tests"}]},
+           "surfaceOp": "append"}
+      - record: assistant/message
+        example: |
+          {"type": "assistant/message", "seq": 408, "time": 1794836399802,
+           "data": {"turn": 7, "step": 2,
+                    "message": {"id": "...", "role": "assistant", "source": {"kind": "model", "...": "..."},
+                                "content": [{"type": "text", "text": "Running the tests."}]},
+                    "usage": {"inputTokens": 1820, "outputTokens": 64}},
+           "surfaceOp": "append", "sourceEventSeqs": [401, 402, 403]}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An append the surface would reject raises and leaves the log untouched."
+          - "A writer refuses a type its module does not own (`LogWriteError`)."
+          - "`session/event` is an `emit`: a failing listener neither aborts the dispatch nor un-appends the event."
+      - links:
+          - {to: "durability#edge:append", label: "The write door, on the durability page"}
+
+  session-durable:
+    transport: bus
+    mode: parallel
+    summary: |
+      `ctx.sessions.flush(session)` dispatches `session/flush` and awaits every
+      backend. The backend writes what the log holds past its cursor and syncs
+      it. The checkpoint policy calls this before each model request and each
+      tool body.
+    blocks:
+      - event: session/flush
+      - event: session/durable
+      - title: What a backend writes
+        lang: json
+        code: |
+          {"type": "session/header", "header": {"version": 4, "id": "...", "createdAt": 1794836581000, "cwd": "/home/me/proj", "family": "..."}}
+          {"type": "turn/start", "seq": 2, "time": 1794836581412, "data": {"turn": 1}}
+        note: JSONL. The header is the first line, written once; then one event per line.
+      - title: Failure
+        tone: limit
+        list:
+          - "A flush that raises says so as `session/unwritten`. The barriers before a request and a tool body are fail-closed."
+          - "A second process opening the same session is refused with `session_already_active`."
+      - links:
+          - {to: "durability#edge:flush", label: "session/flush in detail"}
+          - {to: "durability#edge:sync", label: "What is on disk after a flush"}
+          - {to: "dispatch#node:parallel", label: "The parallel mode"}
+
+  bundle-providers:
+    transport: call
+    summary: |
+      A bundle's row injects a seam's key and, in its `apply`, registers itself
+      as the provider: `ctx.code_runtime.register(runtime)`,
+      `ctx.workspace.register_provider(provider)`. The registration is a claim
+      that unwinds with the row, and consumers of the seam now get an answer.
+    blocks:
+      - title: A provider row
+        lang: python
+        code: |
+          @plugin("code-runtime-python", affects="environment", inject=[CODE_RUNTIME], config=Config)
+          async def apply(ctx: Context, config: Config) -> None:
+              ctx.require(CODE_RUNTIME).register(runtime)   # claim_slot: a second raises
+      - title: The claiming helpers
+        table:
+          columns: [helper, guarantees, releases]
+          rows:
+            - ["`claim_slot`", "a single holder; a second registration raises. Records who registered in `<attr>_by`", "both fields, only if still the one registered"]
+            - ["`claim_key`", "one holder per name; a held key raises", "only if the value is still identically the one registered"]
+            - ["`claim_entry`", "appends; no conflict", "by identity, never by equality"]
+      - title: How a provider is checked
+        list:
+          - "Static typing: the provider Protocols are checked by mypy."
+          - "Two capability probes at runtime: `ReclaimingProvider` and `RehydratableProvider`."
+          - "One registration-time refusal: a code runtime that declares `persistence: namespace` must declare kernel snapshots."
+          - "A tree-walking test requires every scoped method and provider slot to be classified."
+      - title: Failure
+        tone: limit
+        list:
+          - "A second provider for a single-holder seam is refused at mount, naming the incumbent."
+          - "A workspace provider that declines falls back to `shared` with a recorded reason. A sandbox with no provider refuses."
+          - "Removing the row removes the provider; the seam goes back to its no-provider behavior."
+      - links:
+          - {to: "node:bundles", label: "Bundle rows"}
+          - {to: "node:seams", label: "What each seam does with no provider"}
+
+  seam-effects:
+    transport: process
+    summary: |
+      An effect reaches the workspace as a file operation under the agent's
+      root, or as a child process. A command that must be confined is wrapped
+      first: `ctx.sandbox.confine(argv, policy)` returns the argv the kernel
+      will enforce, and `ctx.subprocess` spawns it with a scrubbed environment.
+    blocks:
+      - title: The policy
+        struct: ph.seams.sandbox:SandboxPolicy
+      - title: The wrapped command
+        struct: ph.seams.sandbox:ConfinedArgv
+      - title: The spawn
+        struct: ph.seams.subprocess:SubprocessSpawnSpec
+      - title: What the deployment allows beyond the workspace
+        struct: ph.seams.sandbox:Allowances
+      - record: sandbox/denied
+      - record: sandbox/mode
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No sandbox backend: `confine()` raises `SandboxError`. It never returns the argv unchanged."
+          - "A refused host or a refused write is recorded as `sandbox/denied` in the agent's session."
+          - "Network is `off`, `allowlist` (through an egress proxy) or `full`. `allowlist` with no proxy door means no network."
+          - "A child a hard kill left behind is killed by the next start's orphan sweep, when its start token still matches."
+      - links:
+          - {to: "security.html", label: "Containment and the sandbox"}
+          - {to: "durability#node:processes", label: "What is killed and what is left"}

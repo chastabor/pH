@@ -1,0 +1,354 @@
+intro: |
+  Nine packages. `ph-core` holds the plugin framework, the log, the loop and the
+  seams; `phern` is the command a person installs; the other seven are bundles of
+  rows that a profile layers on. Click a package for what it ships and how a
+  profile reaches it, or an arrow for what crosses that boundary. Each package has
+  its own page with the detail.
+
+topics:
+  - id: profiles
+    title: Which profile layers which package
+    summary: |
+      A shipped profile is an ordered list of layers. `phern --profile <name>`
+      composes them; a bundle that is not installed takes its profiles out of the
+      list instead of breaking the rest.
+    blocks:
+      - table:
+          columns: [profile, layers, in order]
+          rows:
+            - ["`base`", "ph-core, ph-stabilize", "`base.yaml`, the stabilize bundle"]
+            - ["`headless`", "ph-core, ph-stabilize", "`base.yaml`, `headless.yaml` (the scripted `llm-fake` adapter), stabilize"]
+            - ["`tui`", "ph-core, ph-stabilize", "headless, then `tui.yaml`: a person is present, so the workspace is writable"]
+            - ["`anthropic`, `google`, `deepseek`, `llama`", "ph-core, ph-stabilize, one adapter", "base, stabilize, then the profile's adapter row"]
+            - ["`rlm`", "tui + ph-rlm", "Code Mode, bindings, subagents"]
+            - ["`rlm-stable`", "rlm + ph-stabilize, required", "`rlm-stable.yaml` arms `tool-todo`"]
+            - ["`rlm-indexed`", "rlm-stable + ph-utcp, ph-code-graph, ph-text-index", "the two index tools as UTCP manuals"]
+            - ["`rlm-clm`", "rlm + ph-clm", "the model edits its own context"]
+      - title: Your own
+        note: A named profile extends a shipped one and lists only the rows that differ.
+        code: |
+          # $PH_HOME/profiles/mine.yaml
+          extends: rlm-stable
+          rows:
+            - id: skill-steps
+              disabled: false
+            - id: agent-loop
+              config: {maxParallelToolCalls: 4}
+      - title: Looking at what you got
+        lang: bash
+        code: |
+          phern --dump-config --profile mine     # the composition, before anything runs
+          phern config --profile mine            # every option every row accepts, and what the profile sets
+          phern doctor --profile mine            # what actually activated, and which invariants it enforces
+          phern events --profile mine            # every event, its dispatch mode, and who listens
+  - id: cross-cutting
+    title: The pages that cut across packages
+    summary: Four questions that no single package answers.
+    blocks:
+      - links:
+          - {to: "dispatch", label: "How the parts talk: emit, serial, parallel, waterfall, and what is not the bus"}
+          - {to: "invariants", label: "The five invariants and what holds each"}
+          - {to: "durability", label: "What makes a session durable, and what a restart loses"}
+          - {to: "security", label: "Scopes, isolation, visibility, and what a sub-agent inherits"}
+          - {to: "self-steering", label: "A self-steering skill, from the ask to the last step"}
+
+nodes:
+  person:
+    summary: |
+      Someone at a terminal, a script, or another program speaking the daemon's
+      protocol. Everything a person types is either a prompt for the model or a
+      command for the harness; a command costs no model turn.
+    blocks:
+      - title: Ways in
+        table:
+          columns: [how, what it is]
+          rows:
+            - ["`phern --mode tui`", "the Textual TUI, attached to a daemon it starts if none is running"]
+            - ["`phern -p \"...\"`", "one prompt, answered and printed; `--mode text`, `json`, `transcript` or `rpc`"]
+            - ["`phern agents ...`", "talk to a running daemon: list, attach, send, schedule, status"]
+            - ["`/command` in a session", "a slash command: `/sandbox`, `/model`, `/compact`, `/refine`, `/autonomous` and others"]
+      - links:
+          - {to: "phern", label: "phern: from a command to a model call"}
+  phern:
+    summary: |
+      The distribution a person installs and the command they get. It holds the
+      CLI, the TUI, the daemon and its wire protocol, and the model adapters. It
+      depends on every bundle's wheel and imports none of them.
+    blocks:
+      - title: The adapter rows it ships
+        text: |
+          Each is a row like any other. A profile picks one, or lists several
+          routes in one row's `profiles`.
+      - row: llm-anthropic
+      - row: llm-google
+      - row: llm-openai-compatible
+      - title: How it stays separate from the bundles
+        tone: secure
+        list:
+          - "`ph_app` may not `import ph_rlm`, `ph_stabilize` or any other bundle. `test_app_layering.py` imports the app's entry points in a fresh interpreter and fails if one drags a bundle in."
+          - "A bundle reaches the app through the `ph.bundles` entry-point group, the same way a third-party wheel would."
+      - links:
+          - {to: "phern", label: "The phern page"}
+          - {to: "topic:profiles", label: "Which profile layers which package"}
+  providers:
+    title: Model servers
+    summary: |
+      Whatever answers a model request: a hosted API or a server on this machine.
+      A chat model streams a reply; a decision model answers typed questions with
+      probabilities.
+    blocks:
+      - title: A route, in an adapter row
+        note: The `llama` profile's row, with a decision route added. `models` names the route a session starts on.
+        code: |
+          - id: llm-llama
+            name: llm-openai-compatible
+            config:
+              profiles:
+                - provider: llama
+                  baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
+                  apiKeyEnv: LLAMA_API_KEY        # the name of a variable, never a key
+                  contextWindow: ${env:LLAMA_CONTEXT_WINDOW:-32768}
+                  defaultMaxTokens: 4096
+                - provider: decision
+                  baseUrl: ${env:DECISION_BASE_URL:-http://127.0.0.1:9932/v1}
+                  apiKeyEnv: DECISION_API_KEY
+          - id: models
+            config:
+              default: main
+              models:
+                main: {provider: llama, model: "${env:LLAMA_MODEL:-default}"}
+      - title: Security
+        tone: secure
+        list:
+          - "A credential is never stored. A row holds the name of an environment variable, resolved when the request is sent."
+          - "What leaves the machine for a provider is recorded: `attachment/uploaded` names the provider and the file."
+      - links:
+          - {to: "phern#node:adapters", label: "The adapters in phern"}
+  core:
+    summary: |
+      The plugin framework (`ph.cordis`), the append-only session log, the model
+      vocabulary, the tool pipeline, the agent loop and every capability seam.
+      Every other package depends on it and it depends on none of them.
+    blocks:
+      - title: Every row base.yaml mounts
+        bundle: ph/bundles/base.yaml
+      - links:
+          - {to: "ph-core", label: "The ph-core page"}
+          - {to: "invariants", label: "The five invariants"}
+  stabilize:
+    summary: |
+      Rows that keep a long session from falling over: a plan, offloading in both
+      directions, compaction, limits, human approval, filesystem rules, and the
+      nudge that finishes a skill's procedure. Layered into every shipped profile.
+    blocks:
+      - bundle: ph_stabilize/bundle.yaml
+      - links:
+          - {to: "ph-stabilize", label: "The ph-stabilize page"}
+          - {to: "self-steering", label: "Self-steering skills"}
+  clm:
+    summary: |
+      The model edits its own context: it can tombstone, replace and rewrite
+      sections of what it sees. Each edit is a surface replace, so the log keeps
+      the originals.
+    blocks:
+      - bundle: ph_clm/bundle.yaml
+      - links:
+          - {to: "ph-clm", label: "The ph-clm page"}
+  rlm:
+    summary: |
+      Code Mode. The model writes Python instead of calling tools one at a time;
+      each binding call in a cell re-enters the governed tool pipeline. Also ships
+      the subagent provider, agent messaging and the Continual Harness (`/refine`).
+    blocks:
+      - bundle: ph_rlm/bundle.yaml
+      - links:
+          - {to: "ph-rlm", label: "The ph-rlm page"}
+  guest:
+    summary: |
+      The half of the code runtime that runs model-written Python. It lives in its
+      own virtual environment and its own process, and talks to the harness over
+      one framed channel on file descriptor 3.
+    blocks:
+      - title: Why it is a separate distribution
+        tone: secure
+        list:
+          - "It imports neither `ph-core` nor `ph-rlm`. The process boundary exists so that model code cannot reach the harness; importing the harness would put it back inside."
+          - "What it shares with ph-core (`_characters.py`, `_json.py`, the truncation marker) it keeps as copies, held to the originals by `test_protocol_mirror.py`."
+          - "fd 0, 1 and 2 stay the program's own, so a cell's `print` needs no untangling from frames."
+      - links:
+          - {to: "ph-runtime-guest", label: "The ph-runtime-guest page"}
+  utcp:
+    summary: |
+      One row that turns a UTCP manual into pH tools: in the prompt, through the
+      pipeline, in the log, and in Code Mode's listing.
+    blocks:
+      - row: utcp
+      - title: Security
+        tone: secure
+        list:
+          - "A `cli` tool's command is started by `ctx.shell` for the calling agent: in that agent's workspace, under that agent's sandbox, ended by the call's cancellation."
+          - "`permissions-fs` does not apply to it. Those rules govern calls through `ctx.fs`, and a subprocess is not one. What bounds a UTCP tool is the sandbox."
+      - links:
+          - {to: "ph-utcp", label: "The ph-utcp page"}
+  text:
+    summary: |
+      `text_index` and `text_search`: semantic retrieval over the agent's own
+      documents, on a local vector index. The same two tools also run from a shell
+      or under any other harness that speaks UTCP.
+    blocks:
+      - bundle: ph_text_index/bundle.yaml
+      - links:
+          - {to: "ph-text-index", label: "The ph-text-index page"}
+  graph:
+    summary: |
+      `code_index` and `code_graph`: a tree-sitter code graph in SQLite, answering
+      with `path:start-end` the model can read.
+    blocks:
+      - bundle: ph_code_graph/bundle.yaml
+      - links:
+          - {to: "ph-code-graph", label: "The ph-code-graph page"}
+
+edges:
+  person-to-phern:
+    transport: socket
+    summary: |
+      A front end holds no session. It connects to the daemon's unix socket and
+      speaks JSON-RPC, one line per frame; the daemon owns the work and the front
+      end subscribes to it. A one-shot run (`phern -p`) mounts a session in its
+      own process instead.
+    blocks:
+      - links:
+          - {to: "phern#edge:tui-socket", label: "The socket frames, in phern"}
+          - {to: "phern#edge:person-cli", label: "The command line"}
+  phern-mounts-core:
+    transport: call
+    summary: |
+      phern composes the profile's layers into rows and mounts them on a ph-core
+      `Context`. There is one way to mount: the daemon and the one-shot modes all
+      go through `ph_app.runtime`.
+    blocks:
+      - title: One row, as the loader holds it
+        struct: ph.cordis.loader:Row
+      - event: profile/mounted
+      - title: Durability
+        tone: durable
+        list:
+          - "A session's log records the environment it started in (`profile/base`) and every later change (`profile/override`). A restarted daemon mounts each session from its own log, not from whatever the profile file says now."
+      - links:
+          - {to: "phern#edge:runtime-core", label: "Mounting, in phern"}
+          - {to: "ph-core#node:profile", label: "Profiles and rows, in ph-core"}
+          - {to: "durability", label: "What survives a restart"}
+  phern-to-providers:
+    transport: http
+    summary: |
+      The loop calls `ctx.llm`; the adapter row for the route's provider sends the
+      request. A chat reply streams back as server-sent events. A decision request
+      is one POST to `/systemone` with a JSON answer.
+    blocks:
+      - title: What the loop hands the adapter
+        struct: ph.llm.types:GenerateOptions
+      - title: A decision request
+        struct: ph.llm.adapter:DecisionRequest
+      - event: llm/stream
+      - record: llm/decided
+      - links:
+          - {to: "phern#edge:adapters-models", label: "The requests on the wire, in phern"}
+          - {to: "self-steering", label: "Where a decision model is asked"}
+  stabilize-rows:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The bundle's rows do not call the loop. Each listens on an event ph-core
+      already dispatches, most of them waterfalls, where a listener can change the
+      value or refuse.
+    blocks:
+      - bundle: ph_stabilize/bundle.yaml
+      - event: tools/pre-execute
+      - event: agent/pre-step
+      - links:
+          - {to: "ph-stabilize", label: "Each row and the event it hooks"}
+  clm-rows:
+    transport: bus
+    mode: waterfall
+    summary: |
+      `clm-context` registers the `context_*` tools; `clm-mirror` renders the
+      context file at each request. An edit lands as a surface `replace` and a
+      `clm/revised` record.
+    blocks:
+      - bundle: ph_clm/bundle.yaml
+      - record: clm/revised
+      - event: agent/request
+      - links:
+          - {to: "ph-clm", label: "How a context edit lands"}
+  core-to-rlm:
+    transport: service
+    summary: |
+      Code Mode's one model-facing tool is a transport. ph-core hands the cell's
+      program to the `code_runtime` service, which ph-rlm's `code-runtime-python`
+      row provides. Each binding call the program makes comes back as a tool
+      dispatch through the governed pipeline.
+    blocks:
+      - title: The request
+        struct: ph.seams.code_runtime:CodeRunRequest
+      - title: The result
+        struct: ph.seams.code_runtime:CodeRunResult
+      - row: code-runtime-python
+      - row: tools-code-mode
+      - title: Limits
+        tone: limit
+        list:
+          - "ph-core ships the `code_runtime` seam with no provider. Without ph-rlm (or `code-runtime-stub`) nothing runs model-written code."
+          - "A cell's own `open(path, \"w\")` never crosses `ctx.fs`, so filesystem rules do not see it. The sandbox that confines the kernel is what bounds it."
+      - links:
+          - {to: "ph-rlm", label: "How a code cell runs"}
+  rlm-to-guest:
+    transport: frame
+    summary: |
+      One line of JSON per frame, on fd 3 of the guest process. The host sends
+      `boot`, `run` and `reply`; the guest sends `log`, `call`, `snapshot` and
+      `done`. Protocol version 4; a mismatched pairing is refused at `boot-ack`.
+    blocks:
+      - title: Every frame
+        frames: all
+      - frame: run
+      - frame: call
+      - frame: reply
+      - frame: done
+      - links:
+          - {to: "ph-runtime-guest", label: "One cell run, frame by frame"}
+  utcp-tools:
+    transport: service
+    summary: |
+      The `utcp` row registers each tool a manual names with the tool registry, so
+      a UTCP tool is called, gated and logged like a built-in one. Running it is a
+      subprocess started through `ctx.shell`.
+    blocks:
+      - title: What a manual says about a tool
+        struct: ph_utcp:ToolTraits
+      - links:
+          - {to: "ph-utcp", label: "How a manual becomes a tool"}
+  text-manual:
+    transport: service
+    summary: |
+      The package's row hands its own manual to the `utcp` service with
+      `ctx.utcp.add`. The tools exist in the session only if that succeeds, and
+      the package's skill is offered only then.
+    blocks:
+      - title: A manual
+        struct: ph_utcp:Manual
+      - links:
+          - {to: "ph-text-index", label: "The ph-text-index page"}
+  graph-manual:
+    transport: service
+    summary: |
+      As for ph-text-index: the `code-graph` row adds the package's manual with
+      `ctx.utcp.add`. The manual carries a background command, so an indexing run
+      can start before the root agent's first step when the row's `index` option
+      asks for it, and go on past the call that started it.
+    blocks:
+      - title: A manual
+        struct: ph_utcp:Manual
+      - title: A command that outlives the call that started it
+        struct: ph_utcp:Background
+      - links:
+          - {to: "ph-code-graph", label: "The ph-code-graph page"}

@@ -743,8 +743,11 @@ it; to use a model's whole length, start the server with `-b` and `-ub` as
 large as the window. A hosted API has nothing to ask, so write `max_tokens` there (8191 for
 OpenAI's embedding models).
 
-Changing `max_tokens` cuts every document again. Passages already in an index
-stay as they were cut until their document changes.
+Changing `max_tokens` changes how a document is cut from then on, and does not
+cut the index again. A document the version control vouches for, or whose text
+has the digest it had last time, is skipped before it is cut, so its passages
+stay as they were until the document changes. To cut everything at the new
+length, drop the documents with `text_index(forget: true)` and index again.
 
 ## An endpoint instead of a local model
 
@@ -795,7 +798,8 @@ local server — llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place
     agent's commands can read is readable by `bash`.
 - **A confined agent needs the host allowed.** A sandboxed command has the
   network its deployment allows: name the endpoint's host and port in
-  `sandbox-allow` (`hosts: ["127.0.0.1:8080"]`). One that is not allowed, or is
+  `sandbox-allow` (`network: {hosts: ["127.0.0.1:8080"]}` — the list replaces the
+  shipped one, and a top-level `hosts` is refused at mount). One that is not allowed, or is
   down, fails with `TEXT_INDEX_ENDPOINT_UNREACHABLE`; a server that answers with
   an error fails with `TEXT_INDEX_ENDPOINT_FAILED` and the server's own words, or
   `CONTEXT_WINDOW_EXCEEDED` when the words say an input was too long.
@@ -815,7 +819,7 @@ local server — llama.cpp, Ollama, vLLM — and a hosted API. Mount it in place
   different index answering. An endpoint that cannot be reached is the answer.
 
 A provider's embeddings API is the same row with its address, the name of its
-key, and its host in `sandbox-allow` (`hosts: ["api.openai.com:443"]`):
+key, and its host in `sandbox-allow` (`network: {hosts: ["api.openai.com:443"]}`):
 
 ```yaml
 - id: text-index-endpoint

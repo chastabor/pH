@@ -1,0 +1,1324 @@
+intro: |
+  `ph-code-graph` is two tools and a command. `code_index` parses a code tree
+  and writes what each file defines and calls into one SQLite file. `code_graph`
+  answers six questions from that file, and every answer is a `path:start-end`
+  an agent can hand to `read`.
+
+  The tools do not run in the session's process. The [code-graph row](node:row)
+  adds a UTCP manual, [ph-utcp](node:utcp) turns it into two tools, and each
+  call starts the `ph-code-graph` command under the calling agent's sandbox.
+  How a manual becomes a tool is on the [ph-utcp page](ph-utcp); this page is
+  what the command does once it runs.
+
+  Every JSON answer on this page was produced by running `ph-code-graph call`
+  against a five-file scratch tree (`shop/`), unless a note says otherwise.
+
+topics:
+  - id: configuring
+    title: Configuring it
+    summary: |
+      One row, `code-graph`, in a bundle of its own. The `rlm-indexed` profile
+      layers the `utcp` bundle and then this one, so the tools are there with no
+      configuration. The row ships switched on, starts an indexing run before a
+      root agent's first step, and looks at the whole workspace unless a
+      profile points it at a package.
+    blocks:
+      - title: What the bundle mounts
+        bundle: ph_code_graph/bundle.yaml
+      - title: A profile that points it at one package
+        lang: yaml
+        note: |
+          Checked with `phern --profile graphed --dump-config`. An entry that
+          names a row by `id` is a patch, and a patch replaces the row's whole
+          config: restate what you want to keep. Options are written in
+          camelCase here, as the option table shows them; the snake_case
+          spelling the README uses (`on_mount`, `wait_s`) validates too.
+        code: |
+          # $PH_HOME/profiles/graphed.yaml
+          extends: rlm-indexed
+          rows:
+            - id: code-graph
+              config:
+                index:
+                  paths: [packages/ph-core]              # default ["."]
+                  exclude: ["**/tests/**", "**/vendor/**"]
+                  onMount: false                         # index only when code_index is called
+                languages: [python]                      # default: every language with a grammar
+                maxBytes: 1048576                        # skip a file past 1 MiB
+                maxFiles: 5000
+                waitS: 30
+      - title: On a profile that does not layer the bundle
+        lang: bash
+        note: |
+          The `utcp` row goes first: `code-graph` injects `ctx.utcp` and waits
+          on it.
+        code: |
+          phern --profile llama --provider llama --model <model> \
+            --patch '{insert: [{id: utcp, name: utcp}, {id: code-graph, name: code-graph}]}' \
+            -p "what calls claim_slot?"
+      - title: Every option
+        row: code-graph
+      - title: "`index`: what a bare code_index looks at"
+        struct: ph_code_graph._config:Scope
+      - title: The three fields it inherits
+        struct: ph.seams.fs:IndexScope
+      - title: How a call narrows the row's scope
+        text: |
+          `IndexScope.narrowed` is the one rule, shared with `ph-text-index`:
+
+          - a call's `paths` replace the row's `paths`
+          - a call's `glob` replaces the row's `include` for that call
+          - a call's `exclude` is **added** to the row's, so a call can narrow a deployment's scope and cannot lift an exclusion out of it
+          - `exclude` is read against the workspace root, so `**/tests/**` means the same under every entry of `paths`, and a directory it covers is never entered
+
+          `include` defaults to `**/*` because the language filter is the real one: a path whose extension names no language with a tags query is passed over without a skip line.
+      - title: Making the grammars ready
+        lang: text
+        note: |
+          Both are commands a person types, not tools. In a session they run
+          `ph-code-graph status` or `install` outside the sandbox and show what
+          it said. Run `install` once before the first session: grammars come
+          from GitHub, and a confined command cannot fetch one.
+        code: |
+          /code-graph status     # how many grammars are ready, and where they are
+          /code-graph install    # fetch each one now, naming any that will not come
+      - title: Checking what is in force
+        lang: bash
+        code: |
+          phern --profile graphed --dump-config    # the rows as composed, with the layer that set each
+          phern config --row code-graph            # the row's options
+          phern doctor --profile graphed           # "Code graph": tools, command, index, grammars
+      - links:
+          - {to: "node:row", label: "The code-graph row"}
+          - {to: "topic:outside", label: "Settings when there is no profile"}
+
+  - id: schema
+    title: The schema
+    summary: |
+      One SQLite file, `graph.db`: four tables, a `meta` table, and a
+      contentless FTS5 index. The graph is name-based. A reference stores the
+      name it used, and the queries join on that name.
+    blocks:
+      - title: The statements, as `_store.SCHEMA` has them
+        lang: sql
+        note: |
+          `prepare()` runs this once per indexing run and stamps
+          `meta.schema = 1`. A file stamped with another version is refused
+          with `IndexVersion`: delete it to rebuild. Connections use
+          `journal_mode = WAL` and `synchronous = NORMAL`.
+        code: |
+          CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+          CREATE TABLE IF NOT EXISTS files (
+              path       TEXT PRIMARY KEY,
+              language   TEXT NOT NULL,
+              digest     TEXT NOT NULL,
+              vcs_id     TEXT NOT NULL DEFAULT '',
+              lines      INTEGER NOT NULL,
+              indexed_at INTEGER NOT NULL
+          );
+
+          CREATE TABLE IF NOT EXISTS symbols (
+              id         INTEGER PRIMARY KEY,
+              path       TEXT NOT NULL,
+              name       TEXT NOT NULL,
+              kind       TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line   INTEGER NOT NULL,
+              doc        TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+          CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path, start_line);
+          CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+
+          CREATE TABLE IF NOT EXISTS refs (
+              id          INTEGER PRIMARY KEY,
+              path        TEXT NOT NULL,
+              name        TEXT NOT NULL,
+              kind        TEXT NOT NULL,
+              line        INTEGER NOT NULL,
+              from_symbol INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name);
+          CREATE INDEX IF NOT EXISTS idx_refs_from ON refs(from_symbol);
+          CREATE INDEX IF NOT EXISTS idx_refs_path ON refs(path);
+
+          CREATE TABLE IF NOT EXISTS imports (
+              path   TEXT NOT NULL,
+              source TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_imports_path ON imports(path);
+
+          CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+              name, doc, path, content=''
+          );
+      - title: What each table is for
+        table:
+          columns: [table, one row is, written by, read by]
+          rows:
+            - ["`files`", "an indexed file: its language, its sha256, the version-control blob id when there is one", "`put`, once per changed file", "`known()` at the start of every run; the counts in every answer"]
+            - ["`symbols`", "one definition with its 1-based line span and its docstring", "[definitions](edge:definitions)", "all six modes"]
+            - ["`symbols_fts`", "the name, docstring and path of one symbol, keyed by `symbols.id`", "[definitions](edge:definitions)", "[search](edge:fts)"]
+            - ["`refs`", "one call, by the name it used, and the `symbols.id` of the definition it is written inside", "[call names](edge:references)", "[callers, callees](edge:join), [impact](edge:closure)"]
+            - ["`imports`", "one import statement of a file, as text", "`put`", "nothing yet"]
+            - ["`meta`", "`schema` (the version) and `vcs` (the version-control token of the last run)", "`prepare`, `remember`", "`prepare`, `token`"]
+      - title: Real rows, from the scratch tree
+        lang: text
+        note: |
+          Read with `sqlite3` from the `graph.db` the calls on this page built.
+          `vcs_id` is empty because the scratch tree is not a repository.
+        code: |
+          files    path='shop/cart.py' language='python' digest='050ef601087d…cfe72f' vcs_id='' lines=20 indexed_at=1794883416
+          symbols  id=4  path='shop/cart.py'    name='total'          kind='function' start_line=16 end_line=19 doc='What the cart costs, after any discount code.'
+          symbols  id=10 path='shop/pricing.py' name='apply_discount' kind='function' start_line=16 end_line=20 doc='Take a discount code off an amount.'
+          refs     id=5  path='shop/cart.py'    name='apply_discount' kind='call' line=19 from_symbol=4
+          refs     id=2  path='shop/cart.py'    name='sum'            kind='call' line=18 from_symbol=4
+          imports  path='shop/cart.py' source='from .pricing import apply_discount, price_of'
+          meta     key='schema' value='1'
+      - title: Why the standard library's sqlite3 and not turso
+        text: |
+          pH's session log runs on turso; this store does not, and the reason is measured (the `_store` module docstring records it). Against a real 40 MB code-graph database, `pyturso` served indexed lookups, joins and aggregates correctly, and then:
+
+          - **FTS5 is absent.** A `CREATE VIRTUAL TABLE … USING fts5` is invisible to it. That is `search`.
+          - **Recursive CTEs are not supported.** That is `impact`.
+          - **`json_extract` returned NULL** where SQLite returned the value, with no error.
+
+          Two of the six modes are the two turso cannot serve, so the store uses `sqlite3` from the standard library: FTS5 is compiled in and there is no dependency to add.
+      - title: How the store is written
+        tone: durable
+        list:
+          - "**One transaction per file.** `put` deletes the file's old rows and writes the new ones inside one `BEGIN IMMEDIATE … COMMIT`. A crash in the middle leaves the file absent from `files`, so the next run indexes it again."
+          - "**Replace, not merge.** A file is the unit of extraction."
+          - "**The FTS rows are deleted with the values they were inserted under.** `symbols_fts` is contentless, and FTS5's `'delete'` command removes nothing when the values differ. Both tuples come from one function, `_fts_values`."
+          - "**The schema is written once per run**, by `prepare()`, not on every connection."
+      - title: Limits
+        tone: limit
+        list:
+          - "`imports` is written and nothing reads it. No mode resolves an import to a file."
+          - "`refs.from_symbol` is `NULL` for a call at module level. Such a call has no caller to report, so `callers` and `impact` never show it."
+          - "`symbols.id` has no `AUTOINCREMENT`: an id is reused after a file is re-indexed. Only the file's own `refs` and FTS rows hold an id, and they are deleted with it."
+          - "There is one schema version and no migration. A newer build that changes the schema refuses the old file."
+
+  - id: where
+    title: Where it lives, and what a sub-agent sees
+    summary: |
+      The index is a file. In a session it sits in the scratch of the agent
+      whose tree it describes, so it is writable under every sandbox mode and
+      it is the same file for the same agent after a restart. The source is the
+      truth; the index is rebuilt from it when absent.
+    blocks:
+      - title: The paths
+        table:
+          columns: [what, where, who sets it]
+          rows:
+            - ["the index, in a session", "`$PH_HOME/scratch/<session>/<agent>/code-graph/graph.db`", "ph-utcp, as `$PH_TOOL_STATE` on each command (`Manual.state = \"code-graph\"`)"]
+            - ["the index, from a shell", "`--state DIR` or `$PH_TOOL_STATE`; with neither, `$PH_CACHE/code-graph/<digest of the workspace root>/graph.db`", "`_config.index_path`"]
+            - ["the writer lock", "`graph.db.lock` beside the database", "`engine._lock_of`"]
+            - ["the grammars", "`$PH_CACHE/tree-sitter`, or `$TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` when an operator set it", "the engine row at mount (`use_cache`)"]
+            - ["the command's log", "`$PH_CACHE/logs/ph-code-graph.log`, rotated at 1 MiB", "`ToolCli.log_file`"]
+            - ["settings with no profile", "`$PH_HOME/tools/ph-code-graph.yaml`", "a person"]
+      - title: Which agent's index a call uses
+        text: |
+          `UtcpSeam.owner_of` decides, per call. What a tool builds about a tree belongs to the tree:
+
+          - **A child in its parent's checkout** (the same root) asks its parent's index. One tree, one index, one run at a time.
+          - **A child granted only to read the project** (`readonly-scratch`, and the two ephemeral kinds) asks its parent's index too. A read-only fan-out of ten children builds nothing.
+          - **A child with a tree it writes for keeps** (a `worktree`, an `overlay`) owns that tree and builds its own index, at its first call.
+
+          When a child asks an ancestor's index, the command runs in the ancestor's tree, and the result's text ends with `[Paths here are relative to <root>, the tree this was built from.]`. The ancestor's state directory is granted to the child's command as writable, because it is outside the child's own scratch.
+      - title: What survives a restart
+        tone: durable
+        list:
+          - "**The index.** A resumed session has the same session and agent ids, so `$PH_TOOL_STATE` is the same directory and `graph.db` is found again."
+          - "**Every finished file of a stopped run.** Each file is its own transaction; the next run finds them by digest and parses only the rest."
+          - "**The grammars**, under `$PH_CACHE`, shared by every agent and every session."
+          - "**Nothing is in the session log about the index itself.** A tool call leaves the ordinary `tool/call` and `tool/result` records, and the note that a background run ended is a logged `user/message`."
+      - title: What a restart loses
+        tone: limit
+        list:
+          - "**A run in progress.** It is a job of the agent that owns the tree, held in memory by ph-utcp. A daemon that restarts does not continue it; ph-utcp's record of which agents it already started a run for is in memory too, so a resumed root agent gets a new run at its first step. That run is cheap: unchanged files are not parsed."
+          - "**The promise of a note.** A call answered `state: indexing` is owed word when the run ends. That debt is in memory."
+          - "**A new session starts with no index.** The scratch path has the session id in it, so a new session builds its own instead of finding the last one's."
+          - "An index under `$PH_CACHE` whose workspace has been gone a week is removed on a later index (`ph.workspace_caches`). One in an agent's scratch goes when the scratch does."
+      - links:
+          - {to: "ph-utcp", label: "ph-utcp: how a manual becomes a tool"}
+          - {to: "durability", label: "Durability across the whole harness"}
+          - {to: "security", label: "Scopes, isolation and the containment ladder"}
+
+  - id: outside
+    title: Running it outside phern
+    summary: |
+      `ph-code-graph` is an ordinary command. A person can run a query by hand,
+      and any UTCP harness can register the same manual a phern session uses.
+      Nothing stays up between calls and nothing listens on a socket.
+    blocks:
+      - title: Three ways in
+        table:
+          columns: [who, how the tools arrive, the tool names]
+          rows:
+            - ["a phern session", "the `code-graph` row adds the manual to `ctx.utcp`; ph-utcp registers what it names. Under Code Mode the same two are `await tools.code_index(...)` and `await tools.code_graph(...)`", "`code_index`, `code_graph`"]
+            - ["a person at a shell", "`ph-code-graph call <tool> --field value`", "the same"]
+            - ["another harness, over UTCP", "it registers what `ph-code-graph manual --registration` prints, runs `manual` once, then runs the command each tool names", "`ph_code_graph.code_index`, `ph_code_graph.code_graph`"]
+      - title: The command
+        table:
+          columns: [command, what it does]
+          rows:
+            - ["`call TOOL [--field value ...]`", "run one tool; each field is a flag, or pass them all as `--args-json '{...}'`. `--format text` prints only the prose"]
+            - ["`tools`", "the tools and their flags"]
+            - ["`status`", "which grammars are ready, where the index is and what it holds"]
+            - ["`install`", "fetch every grammar now"]
+            - ["`manual`", "the UTCP manual; `manual --registration` is what a harness registers"]
+      - title: Flags every command takes
+        table:
+          columns: [flag, meaning]
+          rows:
+            - ["`--root DIR`", "the workspace; defaults to the working directory"]
+            - ["`--state DIR`", "where the index goes; over `$PH_TOOL_STATE`"]
+            - ["`--config FILE`", "row settings by row id, over `$PH_HOME/tools/ph-code-graph.yaml` and `$PH_TOOL_CONFIG`"]
+            - ["`--progress` (call)", "report the run on stderr as JSONL"]
+            - ["`--wait SECONDS` (call)", "how long to wait for another run that holds the index, over the row's `waitS`; `0` answers at once"]
+      - title: A call prints one JSON object
+        lang: json
+        note: |
+          Generated. `value` is the result as data, `text` is the same result
+          written for a model. A failure is `ok: false` with a code. The exit
+          code is 0 or 1, and the failure is in the object either way, because
+          the UTCP command-line protocol ignores exit codes.
+        code: |
+          $ ph-code-graph call code_graph --mode callers
+          {"ok":false,"error":{"code":"CODE_GRAPH_FAILED","message":"mode=callers needs `query`"}}
+
+          $ ph-code-graph call code_index --paths shop README.md
+          {"ok":false,"error":{"code":"BAD_ARGUMENTS","message":"ph-code-graph call code_index: unrecognized arguments: README.md"}}
+
+          $ ph-code-graph call code_index --args-json '{"paths": ["shop", "README.md"]}'
+          {"ok":true,"value":{"state":"done","indexed":1,"unchanged":4, ...},"text":"Indexed 1 file (4 already current), 1 symbol.\n..."}
+      - title: Progress, on stderr
+        lang: json
+        note: |
+          Generated with `call code_index --paths shop --progress`. A `working`
+          line at most every 0.5 s, then exactly one last line: `done`, `busy`
+          or `failed`. A stream that ends with no last line is a command that
+          was killed.
+        code: |
+          {"state":"working","done":0,"total":5,"what":"files"}
+          {"state":"done","done":5,"total":5,"what":"files","changed":false,"note":"Indexed 0 files (5 already current), 0 symbols.\nThe graph holds 10 symbols and 12 references across 5 files (python)."}
+      - title: The line type
+        struct: ph.toolcli:Progress
+      - title: Settings with no profile
+        lang: yaml
+        note: |
+          The session row's own options, by row id. Read from three places,
+          the later winning: this file, then `$PH_TOOL_CONFIG` (one JSON
+          object), then `--config FILE`.
+        code: |
+          # ~/.ph/tools/ph-code-graph.yaml
+          code-graph:
+            languages: [python]
+            index:
+              paths: [src]
+              exclude: ["**/tests/**"]
+      - title: What a harness registers
+        lang: json
+        note: |
+          Generated with `ph-code-graph manual --registration`. The command is
+          the absolute path of the interpreter the package is installed in, so
+          it needs no `PATH`. `-P` keeps the working directory off the module
+          path, so no file of the tree is imported by the command.
+        code: |
+          {"name":"ph_code_graph","call_template_type":"cli",
+           "commands":[{"command":"/home/me/pH/.venv/bin/python3 -P -m ph_code_graph manual"}],
+           "inherit_env_vars":["PATH","HOME","LANG","LC_ALL","LC_CTYPE","USER","LOGNAME","SHELL","TZ","TERM",
+             "PH_HOME","PH_CACHE","PH_RUNTIME","XDG_CACHE_HOME","XDG_RUNTIME_DIR",
+             "PH_TOOL_CONFIG","PH_TOOL_STATE","TREE_SITTER_LANGUAGE_PACK_CACHE_DIR"]}
+      - title: What a harness needs to know
+        list:
+          - "**The workspace is the directory the command is started in.** Start the harness in the tree."
+          - "**Give the model `text`.** `value` is for code."
+          - "**Nothing watches the tree.** Have the model call `code_index` again after it edits; an unchanged file is not parsed again."
+          - "**One index a tree.** Without `PH_TOOL_STATE` the index is under `$PH_CACHE`, keyed by the workspace root. A harness that wants one per agent sets `PH_TOOL_STATE` for each."
+          - "**In a sandbox, three places are written**: the index's directory, `$PH_CACHE/tree-sitter` and `$PH_CACHE/logs`. Nothing in the tree is."
+          - "**A stock UTCP client merges stderr into stdout**, so no template of the manual carries `--progress`. A harness that wants a background run starts `call code_index --progress` itself and reads the two streams apart."
+          - "**The model's instructions ship with the package**: `ph_code_graph/skills/code-graph/SKILL.md`."
+      - links:
+          - {to: "ph-utcp", label: "ph-utcp: what phern's own harness adds"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      The graph is name-based and says so. What follows is what that costs, and
+      what the package does not do at all.
+    blocks:
+      - title: A name is not a symbol
+        tone: limit
+        list:
+          - "**Two definitions of one name are one name.** `callers`, `callees` and `impact` join on the name a call used. Two `add` functions in two files share their callers. Every answer carries `definitions`, the count of places the name is defined; above 1, the text says the edges may belong to more than one, and `mode=define` lists them."
+          - "**No import resolution, no scope, no types.** `obj.total()` is a call to the name `total`, whatever `obj` is. Import statements are stored and not used."
+          - "**A call to something the tree does not define is stored and matches nothing.** `sum`, `len` and `append` are rows in `refs`; `callees` shows a call only when the name is defined in the index."
+          - "**Only calls are edges.** The tags queries also capture `reference.type`, `reference.class` and more; those are dropped at extraction, so `callers` never returns a place that only mentions a type."
+          - "**Structure, not behavior.** It cannot say what a function does or whether a branch is reachable."
+      - title: Languages
+        tone: limit
+        list:
+          - "**A language with no tags query is not indexed**, and its files are passed over without a skip line. `indexable` asks the pack: `bash`, `sql`, `markdown` and `toml` answer no."
+          - "**C has definitions and no call references.** Its tags query ships no `@reference.*` capture, so `callers` and `callees` are empty for C. `search`, `define` and `entities` work."
+          - "**A bare Ruby send is invisible.** `helper` without parentheses parses as an identifier; only `helper()` becomes an edge."
+          - "**A Python method's kind is `function`.** The kind is whatever the language's own query calls it, so `kind=method` finds nothing in Python."
+          - "**A grammar has to be on disk.** With an empty grammar cache and no network every file is skipped, with a reason that names `/code-graph install`."
+      - title: Freshness
+        tone: limit
+        list:
+          - "**Nothing watches the filesystem.** The index changes when `code_index` runs and at no other moment. After an edit, answers are stale until it runs again."
+          - "**A request made during another run is not queued.** `state: indexing` means this call did nothing. Call again once the run ends."
+          - "**A walk stops at `maxFiles`** (20 000) and reports nothing about what it did not reach. Point `index.paths` at a package."
+          - "**A file past `maxBytes`** (2 MiB) is skipped and named in `skipped`."
+          - "**A new session builds a new index.** Nothing carries one session's index to the next."
+      - title: Reach
+        tone: limit
+        list:
+          - "**`permissions-fs` does not screen these tools.** Its rules govern a session's `ctx.fs`, and the command is another process. The sandbox bounds what the command reads, as it bounds `bash`."
+          - "`search` returns at most `limit` rows and reports that number as `total`; it does not page. Only `entities` takes `offset`."
+          - "`impact` follows at most 6 hops and returns at most `limit` symbols in all, nearest ring first."
+      - links:
+          - {to: "topic:schema", label: "The schema"}
+          - {to: "node:calls", label: "callers and callees"}
+
+nodes:
+  row:
+    title: The code-graph row
+    summary: |
+      The row a session mounts. It registers no tool itself: it hands the
+      package's UTCP manual to `ctx.utcp`, and ph-utcp registers `code_index`
+      and `code_graph` from it. The row also says where the index goes, grants
+      the command the two shared paths it writes, carries its own config
+      across to the command, and offers the skill, the `/code-graph` command
+      and the `phern doctor` section.
+    blocks:
+      - row: code-graph
+      - title: A profile entry
+        lang: yaml
+        note: "Checked with `phern --profile graphed --dump-config`. See [Configuring it](topic:configuring) for each option."
+        code: |
+          # $PH_HOME/profiles/graphed.yaml
+          extends: rlm-indexed
+          rows:
+            - id: code-graph
+              config:
+                index:
+                  paths: [packages/ph-core]
+                  exclude: ["**/tests/**"]
+                languages: [python]
+                waitS: 30
+      - title: Where it ships
+        bundle: ph_code_graph/bundle.yaml
+      - title: The manual it hands to ctx.utcp
+        lang: json
+        note: |
+          Generated by calling `ph_code_graph.row.manual` with the config
+          above; `inherit_env_vars` is shortened. `env` carries the row's
+          config, with only what differs from the defaults. `writable` is the
+          grammar cache and the log's folder. `state` is a name, not a path.
+        code: |
+          {
+            "template": {"name": "ph_code_graph", "call_template_type": "cli",
+                         "commands": [{"command": "/home/me/pH/.venv/bin/python3 -P -m ph_code_graph manual"}],
+                         "inherit_env_vars": ["PATH", "HOME", "LANG", "..."]},
+            "names": "bare",
+            "envelope": true,
+            "state": "code-graph",
+            "writable": ["/home/me/.cache/ph/tree-sitter", "/home/me/.cache/ph/logs"],
+            "env": {"PH_TOOL_CONFIG": "{\"code-graph\":{\"index\":{\"paths\":[\"packages/ph-core\"]},\"languages\":[\"python\"],\"waitS\":30.0}}"},
+            "passEnv": [],
+            "background": {"command": ["/home/me/pH/.venv/bin/python3", "-P", "-m", "ph_code_graph", "call"],
+                           "label": "code graph", "tools": ["code_index"], "eager": true, "waitS": 30.0},
+            "tools": {
+              "code_index": {"concurrencySafe": false, "selfLimits": true,
+                             "view": {"card": "search", "title": "Index code", "argument": "paths"}},
+              "code_graph": {"concurrencySafe": true, "selfLimits": true,
+                             "view": {"card": "search", "title": "Code graph", "argument": "query"}}
+            }
+          }
+      - title: The manual's type
+        struct: ph_utcp:Manual
+      - title: Events and services
+        table:
+          columns: [what, how, mode]
+          rows:
+            - ["adds the manual", "`ctx.utcp.add(manual, scope=ctx)`, a service call at mount", "not a bus event"]
+            - ["offers the skill", "`ph.seams.skills.offer_skills`, only when the manual gave tools", "a registration"]
+            - ["registers `/code-graph`", "`contribute_item(ctx, COMMANDS, ...)`", "a registration"]
+            - ["adds the doctor section", "`contribute(ctx, Diagnostic(id=\"code-graph\", title=\"Code graph\"))`", "a registration"]
+            - ["the run before the first step", "ph-utcp's listener on `agent/pre-step`, because `background.eager` is true", "waterfall"]
+      - title: "/code-graph install and /code-graph status"
+        text: |
+          A command, not a tool: a person asks the harness to provision, and it costs no model turn. The row runs `ph-code-graph install` or `status` through `ctx.utcp.run_command` for the agent that typed it, with that agent's state directory, and shows what the command said. It runs **outside the sandbox**, because `install` needs the network. It may run for ten minutes (`PROVISION_TIMEOUT_MS`).
+
+          `status` counts what that agent's `code_graph` would answer from:
+      - lang: text
+        note: "Generated with `ph-code-graph status --state <dir>` after the calls on this page."
+        code: |
+          grammars under /home/me/.cache/ph/tree-sitter: 2 of 18 ready; missing tsx, javascript, rust, go, ...
+          Code graph:
+            tree-sitter: 0.26.0
+            grammars: /home/me/.cache/ph/tree-sitter
+            index: /home/me/.ph/scratch/<session>/<agent>/code-graph/graph.db
+            files: 5
+            symbols: 10
+            references: 12
+            languages: python
+      - title: What phern doctor shows
+        lang: text
+        note: |
+          Generated with `phern doctor --profile graphed`. The row answers
+          without starting the command; counts are `/code-graph status`'s to
+          say. Without a `utcp` row the topology line reads
+          `code-graph: waiting on utcp`.
+        code: |
+          Code graph
+            tools     code_graph, code_index (through UTCP)
+            command   /home/me/pH/.venv/bin/python3 -P -m ph_code_graph
+            index     each agent's own, in its scratch (code-graph/)
+            grammars  /home/me/.cache/ph/tree-sitter
+            details   /code-graph status
+          UTCP tools
+            ph_code_graph  2 tools
+          Topology
+            code-graph  active · injects utcp, fs, shell · from profiles/graphed.yaml
+      - title: The skill it offers
+        text: |
+          `skills/code-graph/SKILL.md`, offered with `source="ph-code-graph"`. Its frontmatter names `allowed-tools: [code_index, code_graph, read, grep, glob]`. The page says: index first, once; ask the question you have (a table of the six modes); then `read` the narrow span; matching is by name, so check `definitions`; use `grep` when you know the exact string.
+
+          It is registered by the row, not found by a directory scan, so it arrives when the tools do and leaves with them. If the manual gave no tools the skill is not offered: its catalog line would name two tools the session does not have.
+      - title: When the manual cannot be discovered
+        text: |
+          The row stands down instead of refusing the mount: no tools, no skill, and a `phern doctor` line saying why. The `/code-graph` command is still registered.
+      - title: Durable
+        tone: durable
+        list:
+          - "The row holds no state. Its config is in the session's recorded profile, so a resumed session mounts it with the same options."
+          - "The index is a file in the agent's scratch. See [where it lives](topic:where)."
+      - title: Secure
+        tone: secure
+        list:
+          - "**The harness process never loads the parser.** tree-sitter, its grammars and SQLite writes run in the command, and so does a crash in one. A test holds that a fresh interpreter mounting only the session's rows never imports tree-sitter."
+          - "**The command runs under the calling agent's sandbox**, in that agent's tree (or the tree it shares). A child in its own worktree indexes that worktree."
+          - "**Read-only bars the tree, not the index.** The index is in the agent's scratch, which is writable under every sandbox mode. An agent that may not write a tree can still index it, and cannot write the tree by doing so."
+          - "**Two shared paths are granted**: the grammar cache and the log's folder, both under `$PH_CACHE`. A grant that overlaps the workspace is refused by ph-utcp."
+          - "**No credential crosses.** `passEnv` is empty; the config travels as JSON in `$PH_TOOL_CONFIG`."
+      - title: Limits
+        tone: limit
+        list:
+          - "It injects `ctx.utcp`. In a profile with no `utcp` row it stays waiting on that service and never activates: no tools, no skill, no command."
+          - "`permissions-fs` rules do not reach the command's reads. The sandbox is the bound."
+          - "Discovery (`manual`) and `/code-graph install|status` run with no sandbox."
+          - "The row declares no narrower, so a child cannot be given different index settings from its parent's."
+      - links:
+          - {to: "ph-utcp#edge:add-manual", label: "ph-utcp: ctx.utcp.add(manual)"}
+          - {to: "edge:manual", label: "The manual arrow"}
+
+  utcp:
+    title: ph-utcp
+    summary: |
+      The `utcp` row is what turns the manual into two pH tools and runs each
+      call as a command through `ctx.shell`. This box is that row seen from this
+      package: what it is told by the manual, where it puts the index, and how
+      it runs a long indexing run in the background. The full path is on the
+      [ph-utcp page](ph-utcp).
+    blocks:
+      - row: utcp
+      - title: What it does with this manual
+        text: |
+          1. Runs the discovery command (`python -P -m ph_code_graph manual`) once and reads the tools and their schemas.
+          2. Registers `code_index` and `code_graph` under their own names (`names: bare`), with the traits the manual gives: `code_index` is not concurrency-safe, both bound their own output.
+          3. For each call, finds the agent whose tree the call is about (`owner_of`), sets `$PH_TOOL_STATE` to `<that agent's scratch>/code-graph`, sets `$PH_TOOL_CONFIG`, and starts the command in that tree, under the calling agent's sandbox.
+          4. Reads the one JSON object the command prints. `value` becomes the tool's value and `text` the content the model reads; `ok: false` is raised with the command's own code.
+      - title: The run before the first step
+        event: agent/pre-step
+      - text: |
+          `UtcpSeam.eager` listens on `agent/pre-step`. For a root agent, once, it starts `code_index` with no arguments as a background job of that agent and then calls on: the step is not held up. A sub-agent with a tree of its own gets its run at its first call instead. `index.onMount: false` switches this off.
+
+          The job runs `ph-code-graph call code_index --progress --args-json {}` with no time limit, and ph-utcp reads the progress lines from its stderr for the footer.
+      - title: What a code_index call does while a run is going
+        text: |
+          A call joins the run already going for its tree, or starts one, and waits `waitS` for it (15 s by default). A run that was this call's and ended in time is the call's answer. Otherwise ph-utcp asks the command directly with `--wait 0`, and the command answers `state: indexing`. The run goes on, and the agent is told when it ends.
+      - title: The note an agent is given when a run ends
+        lang: text
+        note: |
+          Built from the format strings in `UtcpSeam._ended` and the real
+          `done` line above; illustrative, not captured from a session. It is
+          injected as a `user/message` from `ph_utcp` with `form: notice`: it
+          waits for the agent's next step and starts no turn. A run nobody
+          asked for that changed nothing says nothing.
+        code: |
+          The code graph is finished: 5 files. Searches now cover all of it.
+          Indexed 5 files (0 already current), 10 symbols.
+          The graph holds 10 symbols and 12 references across 5 files (python).
+      - title: Durable
+        tone: durable
+        list:
+          - "The note is a logged `user/message` in the owning agent's log."
+          - "Which runs are going, and which agents already had their first run, are in memory. See [what a restart loses](topic:where)."
+      - title: Secure
+        tone: secure
+        list:
+          - "A `cli` manual's commands go through `ctx.shell`, which confines a command for an agent that holds a workspace."
+          - "A child that shares its parent's index is granted that one state directory as writable, and nothing else of its parent's scratch."
+          - "The command's environment starts as the deployment's scrubbed one. This manual names no variable to pass."
+      - links:
+          - {to: "ph-utcp", label: "ph-utcp: a manual becomes a tool"}
+          - {to: "ph-utcp#edge:call-run", label: "ph-utcp: run_argv for the agent"}
+          - {to: "ph-utcp#edge:envelope", label: "ph-utcp: the envelope"}
+
+  cindex:
+    title: code_index
+    summary: |
+      The indexing tool, registered by the `code-graph-engine` row inside the
+      `ph-code-graph` command. One call is one run: it takes the index's lock,
+      walks the scope, skips every file it can prove unchanged, parses the rest
+      twice, and writes each file in its own transaction. Its answer is counts,
+      not content.
+    blocks:
+      - title: The row the command mounts
+        row: code-graph-engine
+      - text: |
+          `ph.toolcli` mounts a small profile in the command's process: `tools`, `subprocess-local`, `fs-local`, `commands`, `diagnostics`, and then `code-graph-engine` **under the id `code-graph`**, so the config a profile writes for the session row is the config the engine reads. There is no model, no session and no agent in that process: `run.agent` is always `None`, and `ctx.fs` is the command's own, rooted at the working directory.
+      - title: Arguments
+        struct: ph_code_graph.engine:IndexArgs
+      - title: Result
+        struct: ph_code_graph.engine:IndexValue
+      - struct: ph_code_graph.engine:SkippedValue
+      - title: A first run, and a second
+        lang: json
+        note: "Generated. The second call parsed nothing: every digest matched."
+        code: |
+          $ ph-code-graph call code_index --paths shop
+          {"ok":true,"value":{"state":"done","indexed":5,"unchanged":0,"removed":0,"symbols":10,"skipped":[],"total_files":5,"total_symbols":10,"total_refs":12,"languages":["python"]},"text":"Indexed 5 files (0 already current), 10 symbols.\nThe graph holds 10 symbols and 12 references across 5 files (python)."}
+
+          $ ph-code-graph call code_index --paths shop
+          {"ok":true,"value":{"state":"done","indexed":0,"unchanged":5,"removed":0,"symbols":0,"skipped":[],"total_files":5,"total_symbols":10,"total_refs":12,"languages":["python"]},"text":"Indexed 0 files (5 already current), 0 symbols.\nThe graph holds 10 symbols and 12 references across 5 files (python)."}
+      - title: A skipped file
+        lang: json
+        note: "Generated with `maxBytes: 300` in `$PH_TOOL_CONFIG`. A skip is reported, never an error."
+        code: |
+          {"ok":true,"value":{"state":"done","indexed":2,"unchanged":0,"removed":0,"symbols":1,
+            "skipped":[{"path":"shop/cart.py","reason":"618 bytes, past the 300-byte limit"},
+                       {"path":"shop/checkout.py","reason":"342 bytes, past the 300-byte limit"},
+                       {"path":"shop/pricing.py","reason":"475 bytes, past the 300-byte limit"}],
+            "total_files":2,"total_symbols":1,"total_refs":2,"languages":["python"]},
+           "text":"Indexed 2 files (0 already current), 1 symbol.\n  skipped shop/cart.py: 618 bytes, past the 300-byte limit\n  ..."}
+      - title: When another run holds the index
+        lang: json
+        note: |
+          Generated by holding `graph.db.lock` from another process and calling
+          with `--wait 0`. Nothing but the totals was done by this call.
+        code: |
+          {"ok":true,"value":{"state":"indexing","indexed":0,"unchanged":0,"removed":0,"symbols":0,"skipped":[],"total_files":5,"total_symbols":10,"total_refs":12,"languages":["python"]},"text":"An indexing run is already building this graph, so this call started none. `code_graph` answers now, from what is indexed already, and says while the index is still being built. Call `code_index` again once that run has finished.\nThe graph holds 10 symbols from 5 files so far."}
+      - title: Forgetting a path
+        lang: json
+        note: Generated.
+        code: |
+          $ ph-code-graph call code_index --paths shop/ledger.py --forget true
+          {"ok":true,"value":{"state":"done","indexed":0,"unchanged":0,"removed":1,"symbols":0,"skipped":[],"total_files":4,"total_symbols":9,"total_refs":10,"languages":["python"]},"text":"Removed 1 file from the index. It now holds 9 symbols from 4 files."}
+      - title: One run, step by step
+        text: |
+          1. **Take the lock.** `flock` on `graph.db.lock`, waited for `waitS` seconds (or `--wait`). Not held in time: answer `state: indexing` with the totals, and walk nothing.
+          2. **Walk.** `ctx.fs.collect` over the narrowed scope, up to `maxFiles` paths.
+          3. **Read what is known.** `known()` returns `{path: (digest, vcs_id)}` for every indexed file in one statement.
+          4. **Ask version control what changed**, once for the tree: `ph.seams.changes.tree_state` asks git or jj. A tree with no version control answers an empty state and loses nothing else.
+          5. **For each file, in this order**: pass over a path whose language has no tags query or is not in `languages`; skip one whose grammar is not to be had; count it `unchanged` **without opening it** when version control vouches for it; skip one past `maxBytes`; read it; compare its sha256 with the stored digest; if they differ, [extract](edge:text-to-process) and `put`.
+          6. **Forget what is gone.** Every indexed path that no longer exists on disk is removed. This is asked of the filesystem, not of the walk, so a walk cut short by `maxFiles` forgets nothing it did not reach.
+          7. **Store the version-control token** last, so a crash cannot leave a token vouching for files that were never written.
+      - title: Incremental by content, never by clock
+        text: |
+          A file is re-extracted when its **sha256** changes (`digest_of`: SHA-256 of the UTF-8 text). An mtime is never consulted: a checkout, a rebase or a `touch` moves timestamps without moving content. Version control only decides which files to open; the digest decides whether what was opened is different.
+      - title: One writer
+        text: |
+          The lock is a file beside the database, not a lock in the process, because the index can be shared by more than one process: an agent's call, the background run, a person's `ph-code-graph`. `flock` refuses a second holder even inside one process, so it orders this command's own calls too. The session side adds a second guard: the tool is declared not concurrency-safe, so the scheduler does not run two `code_index` calls of one batch together.
+      - title: Durable
+        tone: durable
+        list:
+          - "Each file is one transaction. A run that is stopped keeps every file it finished."
+          - "A crash inside a file's transaction leaves that file absent from `files`; the next run does it again."
+          - "The version-control token is stored after the loop, never before."
+      - title: Secure
+        tone: secure
+        list:
+          - "The walk goes through the **command's** `ctx.fs`, rooted at the directory ph-utcp started it in. No `permissions-fs` row is mounted in the command, so no path rule screens it. The sandbox around the command is the bound."
+          - "It writes three places: the state directory, the grammar cache and the log. It writes no file of the tree."
+          - "It uses the network only to fetch a grammar that is not on disk, and stops asking after the first fetch that fails in that process."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A file that does not parse is skipped with `did not parse (...)` and the run goes on."
+          - "A grammar that is not on disk and cannot be fetched skips every file of that language: `no python parser available — grammars come from GitHub the first time; /code-graph install`."
+          - "If the grammar cache cannot be written the engine row refuses to mount, and the call answers `ok: false` with code `MOUNT_REFUSED` (per the README)."
+          - "The walk stops at `maxFiles` and says nothing about the rest."
+          - "A canceled call stops at the next file; finished files stay."
+      - links:
+          - {to: "topic:where", label: "Where the index lives"}
+          - {to: "edge:call-index", label: "How the call arrives"}
+
+  process:
+    title: "process(): the language pack pass"
+    summary: |
+      The first of two passes over a file. `tree-sitter-language-pack`'s
+      `process()` gives the definitions with their kinds, the file's import
+      statements, and its docstrings and comments. It gives no references: it
+      says a function exists, never who calls it.
+    blocks:
+      - title: What is asked for
+        lang: python
+        note: From `_extract.extract`.
+        code: |
+          config = pack.ProcessConfig(
+              language=language, symbols=True, imports=True, docstrings=True, comments=True
+          )
+          result = pack.process(text, config)
+      - title: What the pack returns, and what leaves this module
+        lang: text
+        note: |
+          Generated from `shop/cart.py`. The pack's spans are 0-based; every
+          line pH shows a model is 1-based, because that is what `read` takes.
+          The `+ 1` happens once, here.
+        code: |
+          pack.process():   Cart      Class     span 5-18   doc None
+                            __init__  Function  span 8-9    doc None
+                            add       Function  span 11-13  doc None
+                            total     Function  span 15-18  doc None
+          docstrings:       '"""Put an item in the cart."""'  associated_item='add'
+
+          Definition(name='Cart',     kind='class',    start_line=6,  end_line=19, doc='Items and quantities, before checkout.')
+          Definition(name='__init__', kind='function', start_line=9,  end_line=10, doc=None)
+          Definition(name='add',      kind='function', start_line=12, end_line=14, doc='Put an item in the cart.')
+          Definition(name='total',    kind='function', start_line=16, end_line=19, doc='What the cart costs, after any discount code.')
+          imports: ('from .pricing import apply_discount, price_of',)
+      - struct: ph_code_graph._extract:Definition
+      - title: Where a definition's prose comes from
+        text: |
+          `SymbolInfo.doc` is always `None` in this pack, so `_documented` takes prose from two other channels:
+
+          - **`result.docstrings`**, which carries `associated_item`: the pack's own answer to which symbol a docstring belongs to. Used as given.
+          - **`result.comments`** of kind `Doc` or `Line`: Rust's `///`, TypeScript's block form, Go's `//`. These carry no association, so the rule is positional and narrow: the comment's last line must be **immediately above** the definition's first. A run of single-line comments is merged into one block; a blank line breaks it.
+
+          A module docstring, or a comment inside a body, belongs to nobody and is dropped. `clean_prose` strips the delimiters (`"""`, `///`, `/**`, `//`, `#`) so the FTS index holds words, not punctuation.
+      - title: Limits
+        tone: limit
+        list:
+          - "A kind is whatever the pack calls it, lowercased. In Python a method is `function`."
+          - "A doc comment one blank line above its definition is not attached."
+          - "A symbol with no name is dropped."
+
+  tags:
+    title: The tags query pass
+    summary: |
+      The second pass: tree-sitter's own `tags.scm` for the language, the same
+      data GitHub's code navigation is built on. It yields `@reference.call`,
+      the edge this package exists to record, and any definition the first
+      pass missed.
+    blocks:
+      - title: The Python query
+        lang: scheme
+        note: "Printed by `pack.get_tags_query(\"python\")` in pack 1.16.2."
+        code: |
+          (class_definition
+            name: (identifier) @name) @definition.class
+
+          (function_definition
+            name: (identifier) @name) @definition.function
+
+          (call
+            function: [
+                (identifier) @name
+                (attribute
+                  attribute: (identifier) @name)
+            ]) @reference.call
+      - title: What it yields for one file
+        lang: text
+        note: |
+          Generated from `shop/cart.py`. `self.items.get(...)` is the name
+          `get`; `apply_discount(amount, code)` is the name `apply_discount`.
+          The receiver is not recorded.
+        code: |
+          Reference(name='get',            kind='call', line=14)
+          Reference(name='sum',            kind='call', line=18)
+          Reference(name='price_of',       kind='call', line=18)
+          Reference(name='items',          kind='call', line=18)
+          Reference(name='apply_discount', kind='call', line=19)
+      - struct: ph_code_graph._extract:Reference
+      - title: Rules
+        list:
+          - "**Lines are 1-based.** `nodes[0].start_point[0] + 1`: tree-sitter points are 0-based too."
+          - "**Only `reference.call` becomes an edge** (`REFERENCE_KINDS`). Other reference captures are dropped, not stored and filtered."
+          - "**A definition is kept only if `process()` missed it**, matched on `(name, line)`, so the union has no duplicates."
+          - "**TypeScript and TSX inherit javascript's query** (`INHERITS`). Upstream splits them: `class`, `function` and `call` live in the javascript query, and a `.ts` file matched against the typescript query alone yields two tags and no calls."
+          - "**The compiled query is cached per language**, not per file."
+      - title: Languages
+        text: |
+          A language is indexed when the pack has a tags query for it (`indexable`) and its grammar is on disk or can be fetched. The pack detects the language from the path. `/code-graph install` fetches a convenience list, filtered through `indexable`: python, typescript, tsx, javascript, rust, go, java, csharp, c, cpp, ruby, php, swift, kotlin, scala, dart, lua, r. A language outside that list still works when the pack has it.
+      - title: Limits
+        tone: limit
+        list:
+          - "A language with no tags query yields nothing and is passed over: `bash`, `sql`, `markdown`, `toml`."
+          - "C's query has no `@reference.*` capture, so C files give definitions and no edges."
+          - "A bare Ruby send (`helper` with no parentheses) is not a `call` node."
+
+  symbols:
+    title: "symbols, and symbols_fts"
+    summary: |
+      One row per definition: name, kind, path, 1-based line span and
+      docstring. `symbols_fts` is a contentless FTS5 table over the same name,
+      docstring and path, keyed by the symbol's id. Every mode reads `symbols`.
+    blocks:
+      - lang: sql
+        code: |
+          CREATE TABLE IF NOT EXISTS symbols (
+              id         INTEGER PRIMARY KEY,
+              path       TEXT NOT NULL,
+              name       TEXT NOT NULL,
+              kind       TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line   INTEGER NOT NULL,
+              doc        TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+          CREATE INDEX IF NOT EXISTS idx_symbols_path ON symbols(path, start_line);
+          CREATE INDEX IF NOT EXISTS idx_symbols_kind ON symbols(kind);
+
+          CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
+              name, doc, path, content=''
+          );
+      - title: Real rows
+        lang: text
+        note: Read from the scratch `graph.db`.
+        code: |
+          id=1  path='shop/cart.py'    name='Cart'  kind='class'    start_line=6  end_line=19 doc='Items and quantities, before checkout.'
+          id=2  path='shop/cart.py'    name='__init__' kind='function' start_line=9 end_line=10 doc=None
+          id=3  path='shop/cart.py'    name='add'   kind='function' start_line=12 end_line=14 doc='Put an item in the cart.'
+          id=7  path='shop/ledger.py'  name='add'   kind='function' start_line=6  end_line=9  doc='Record an entry and return its id.'
+      - title: The row as the model reads it
+        struct: ph_code_graph._store:SymbolRow
+      - text: |
+          `lines` is derived (`end_line - start_line + 1`), not stored. `symbols_fts` is contentless because the indexer rewrites a file's rows wholesale: an external-content table would need triggers to stay in step.
+      - links:
+          - {to: "topic:schema", label: "The whole schema, and why sqlite3"}
+
+  refs:
+    title: refs
+    summary: |
+      One row per call: the name the call used, the line it is on, and the id
+      of the definition it is written inside. The name is the edge. Nothing
+      resolves it to one definition.
+    blocks:
+      - lang: sql
+        code: |
+          CREATE TABLE IF NOT EXISTS refs (
+              id          INTEGER PRIMARY KEY,
+              path        TEXT NOT NULL,
+              name        TEXT NOT NULL,
+              kind        TEXT NOT NULL,
+              line        INTEGER NOT NULL,
+              from_symbol INTEGER
+          );
+          CREATE INDEX IF NOT EXISTS idx_refs_name ON refs(name);
+          CREATE INDEX IF NOT EXISTS idx_refs_from ON refs(from_symbol);
+          CREATE INDEX IF NOT EXISTS idx_refs_path ON refs(path);
+      - title: Real rows
+        lang: text
+        note: |
+          Read from the scratch `graph.db`. `from_symbol=5` is `charge`, and
+          the name `add` is defined twice, in `cart.py` and in `ledger.py`.
+        code: |
+          id=6  path='shop/checkout.py' name='add'    kind='call' line=9  from_symbol=5
+          id=7  path='shop/checkout.py' name='charge' kind='call' line=14 from_symbol=6
+          id=8  path='shop/checkout.py' name='total'  kind='call' line=14 from_symbol=6
+          id=10 path='shop/ledger.py'   name='len'    kind='call' line=9  from_symbol=7
+      - title: Limits
+        tone: limit
+        list:
+          - "`kind` is always `call`."
+          - "`from_symbol` is `NULL` for a call outside every definition."
+          - "A call to a name the tree does not define (`len`) is a row that no `symbols` row matches."
+
+  lookup:
+    title: "search, define and entities"
+    summary: |
+      Three modes of `code_graph` that read `symbols` alone. `search` takes
+      prose and ranks by FTS5; `define` takes an exact name; `entities` lists
+      the largest definitions under a path. Each row is a `path:start-end`.
+    blocks:
+      - title: Arguments, for all six modes
+        struct: ph_code_graph.engine:GraphArgs
+      - title: Result, for all six modes
+        struct: ph_code_graph.engine:GraphValue
+      - struct: ph_code_graph.engine:SymbolValue
+      - title: search
+        lang: json
+        note: |
+          Generated. `definitions` is 0 in this mode: it is not counted for
+          prose.
+        code: |
+          $ ph-code-graph call code_graph --mode search --query "discount code"
+          {"ok":true,"value":{"mode":"search","query":"discount code","definitions":0,"offset":0,"indexed_files":5,"indexing":false,
+            "symbols":[{"name":"apply_discount","kind":"function","path":"shop/pricing.py","start_line":16,"end_line":20,"doc":"Take a discount code off an amount.","lines":5},
+                       {"name":"total","kind":"function","path":"shop/cart.py","start_line":16,"end_line":19,"doc":"What the cart costs, after any discount code.","lines":4}],
+            "edges":[],"rings":[],"total":2,"truncated":false},
+           "text":"2 matches for 'discount code':\n  function   apply_discount           shop/pricing.py:16-20  — Take a discount code off an amount.\n  function   total                    shop/cart.py:16-19  — What the cart costs, after any discount code."}
+      - title: define
+        lang: json
+        note: "Generated. Two definitions of one name: `definitions` is 2 and the text says so."
+        code: |
+          $ ph-code-graph call code_graph --mode define --query add
+          {"ok":true,"value":{"mode":"define","query":"add","definitions":2,"offset":0,"indexed_files":5,"indexing":false,
+            "symbols":[{"name":"add","kind":"function","path":"shop/cart.py","start_line":12,"end_line":14,"doc":"Put an item in the cart.","lines":3},
+                       {"name":"add","kind":"function","path":"shop/ledger.py","start_line":6,"end_line":9,"doc":"Record an entry and return its id.","lines":4}],
+            "edges":[],"rings":[],"total":2,"truncated":false},
+           "text":"2 matches for 'add':\n  function   add                      shop/cart.py:12-14  — Put an item in the cart.\n  function   add                      shop/ledger.py:6-9  — Record an entry and return its id.\n['add' is defined in 2 places and this index matches by name, so these edges may belong to more than one of them; `mode=define` lists them]"}
+      - title: entities
+        lang: json
+        note: "Generated. The only mode that pages: `truncated` and the text name the next `offset`."
+        code: |
+          $ ph-code-graph call code_graph --mode entities --path shop --kind function --limit 3
+          {"ok":true,"value":{"mode":"entities","query":null,"definitions":0,"offset":0,"indexed_files":5,"indexing":false,
+            "symbols":[{"name":"apply_discount","kind":"function","path":"shop/pricing.py","start_line":16,"end_line":20,"doc":"Take a discount code off an amount.","lines":5},
+                       {"name":"total","kind":"function","path":"shop/cart.py","start_line":16,"end_line":19,"doc":"What the cart costs, after any discount code.","lines":4},
+                       {"name":"add","kind":"function","path":"shop/ledger.py","start_line":6,"end_line":9,"doc":"Record an entry and return its id.","lines":4}],
+            "edges":[],"rings":[],"total":9,"truncated":true},
+           "text":"9 definitions, biggest first:\n\nlines  kind       name                     where\n    5  function   apply_discount           shop/pricing.py:16-20\n    4  function   total                    shop/cart.py:16-19\n    4  function   add                      shop/ledger.py:6-9\n\n[6 more; re-run with offset=3]"}
+      - title: While a run is still indexing
+        lang: json
+        note: |
+          Generated by holding the lock from another process. `code_graph`
+          takes no lock and never waits: it answers from what is indexed so
+          far, sets `indexing: true`, and the text ends with the note.
+        code: |
+          {"ok":true,"value":{"mode":"define","query":"charge","definitions":1,"offset":0,"indexed_files":5,"indexing":true,
+            "symbols":[{"name":"charge","kind":"function","path":"shop/checkout.py","start_line":7,"end_line":9,"doc":"Charge the customer and return a receipt id.","lines":3}],
+            "edges":[],"rings":[],"total":1,"truncated":false},
+           "text":"1 match for 'charge':\n  function   charge                   shop/checkout.py:7-9  — Charge the customer and return a receipt id.\n[Not finished indexing. This answer covers what is indexed so far; ask again once it finishes.]"}
+      - title: Failure
+        lang: json
+        note: "Generated. Both carry the code `CODE_GRAPH_FAILED`. A name that matches nothing is not a failure."
+        code: |
+          {"ok":false,"error":{"code":"CODE_GRAPH_FAILED","message":"no code index exists for this workspace yet; run `code_index` first"}}
+          {"ok":false,"error":{"code":"CODE_GRAPH_FAILED","message":"mode=callers needs `query`"}}
+
+          {"ok":true,"value":{"mode":"define","query":"nothing_here","definitions":0, ... "total":0,"truncated":false},
+           "text":"Nothing matched 'nothing_here' in 5 indexed files. Run `code_index` first if this tree was never indexed."}
+      - title: Limits
+        tone: limit
+        list:
+          - "`search` matches whole words of names and docstrings, OR-ed. It is not semantic; [ph-text-index](ph-text-index) is the package for meaning."
+          - "`define` is exact and case-sensitive: it is `WHERE name = ?`."
+          - "`search` and `define` report the number of rows returned as `total`, capped by `limit`."
+          - "`kind` is used by `entities` only, and `path` matches a file or a directory prefix."
+      - links:
+          - {to: "edge:fts", label: "The SQL behind these three"}
+
+  calls:
+    title: "callers and callees"
+    summary: |
+      Two modes that join `refs` to `symbols` on the name a call used.
+      `callers` returns the definition each call is written inside, and the
+      calling line. `callees` returns the definitions of the names called from
+      inside the queried one.
+    blocks:
+      - title: An edge
+        struct: ph_code_graph.engine:EdgeValue
+      - title: callers
+        lang: json
+        note: |
+          Generated. `checkout.py` imports `add` from `ledger`, and the answer
+          cannot know that: `definitions` is 2, and the text warns that the
+          edge may belong to either `add`.
+        code: |
+          $ ph-code-graph call code_graph --mode callers --query add
+          {"ok":true,"value":{"mode":"callers","query":"add","definitions":2,"offset":0,"indexed_files":5,"indexing":false,"symbols":[],
+            "edges":[{"name":"charge","kind":"function","path":"shop/checkout.py","start_line":7,"end_line":9,"doc":"Charge the customer and return a receipt id.","lines":3,
+                      "ref_line":9,"ref_path":"shop/checkout.py","via":"add"}],
+            "rings":[],"total":1,"truncated":false},
+           "text":"1 site — calling 'add':\n  charge                   shop/checkout.py:9                           (defined shop/checkout.py:7-9)\n['add' is defined in 2 places and this index matches by name, so these edges may belong to more than one of them; `mode=define` lists them]"}
+      - title: callees
+        lang: json
+        note: |
+          Generated. For `callees`, `path` is the callee's definition and
+          `ref_path:ref_line` is the call site in the caller. They are
+          different files for `total`.
+        code: |
+          $ ph-code-graph call code_graph --mode callees --query checkout
+          {"ok":true,"value":{"mode":"callees","query":"checkout","definitions":1,"offset":0,"indexed_files":5,"indexing":false,"symbols":[],
+            "edges":[{"name":"total","kind":"function","path":"shop/cart.py","start_line":16,"end_line":19,"doc":"What the cart costs, after any discount code.","lines":4,
+                      "ref_line":14,"ref_path":"shop/checkout.py","via":"total"},
+                     {"name":"charge","kind":"function","path":"shop/checkout.py","start_line":7,"end_line":9,"doc":"Charge the customer and return a receipt id.","lines":3,
+                      "ref_line":14,"ref_path":"shop/checkout.py","via":"charge"}],
+            "rings":[],"total":2,"truncated":false},
+           "text":"2 sites — where 'checkout' calls out:\n  total                    shop/checkout.py:14                          (defined shop/cart.py:16-19) via total\n  charge                   shop/checkout.py:14                          (defined shop/checkout.py:7-9) via charge"}
+      - title: Which definition a call belongs to
+        text: |
+          The caller of a call is the **tightest** definition that contains its line (`_extract.owners`): a call inside a nested function belongs to the nested function, not to the one around it. It is resolved when the file is written, as `refs.from_symbol`, so no query recomputes containment.
+      - title: Limits
+        tone: limit
+        list:
+          - "Both join on a bare name. A method call `cart.total()` and a function `total` are the same name."
+          - "`callees` lists one row per definition of each called name, so a called name defined twice appears twice."
+          - "`callees` shows nothing for a call to a builtin or a library the index does not hold."
+          - "The engine asks for `limit + 1` rows to know whether there are more, so `total` is at most `limit + 1`. Neither mode takes `offset`."
+      - links:
+          - {to: "edge:join", label: "The join"}
+          - {to: "topic:limits", label: "Limits and known gaps"}
+
+  impact:
+    title: impact
+    summary: |
+      Everything that calls the queried name, and everything that calls those,
+      out to `distance` hops, grouped into rings by the nearest hop. It is the
+      question an agent asks before a change: what does this break.
+    blocks:
+      - struct: ph_code_graph.engine:RingValue
+      - title: A real answer
+        lang: json
+        note: |
+          Generated. `round_money` is called by `apply_discount`, which is
+          called by `total`, which is called by `checkout`: three rings.
+        code: |
+          $ ph-code-graph call code_graph --mode impact --query round_money --distance 3
+          {"ok":true,"value":{"mode":"impact","query":"round_money","definitions":1,"offset":0,"indexed_files":5,"indexing":false,"symbols":[],"edges":[],
+            "rings":[{"distance":1,"symbols":[{"name":"apply_discount","kind":"function","path":"shop/pricing.py","start_line":16,"end_line":20,"doc":"Take a discount code off an amount.","lines":5}]},
+                     {"distance":2,"symbols":[{"name":"total","kind":"function","path":"shop/cart.py","start_line":16,"end_line":19,"doc":"What the cart costs, after any discount code.","lines":4}]},
+                     {"distance":3,"symbols":[{"name":"checkout","kind":"function","path":"shop/checkout.py","start_line":12,"end_line":14,"doc":"Total the cart and charge it.","lines":3}]}],
+            "total":3,"truncated":false},
+           "text":"Changing 'round_money' reaches:\n\n  1 hop — 1 symbol:\n    apply_discount           shop/pricing.py:16-20\n\n  2 hops — 1 symbol:\n    total                    shop/cart.py:16-19\n\n  3 hops — 1 symbol:\n    checkout                 shop/checkout.py:12-14"}
+      - title: Limits
+        tone: limit
+        list:
+          - "`distance` is 1 to 6, 2 by default."
+          - "`limit` cuts the whole answer, nearest ring first. `truncated` is not set for this mode, so a full `limit` may hide more."
+          - "Each hop joins on a name, so one ambiguous name widens every ring after it."
+          - "It follows callers only. What the queried name itself calls is `callees`."
+      - links:
+          - {to: "edge:closure", label: "The recursive query"}
+
+edges:
+  manual:
+    transport: service
+    summary: |
+      At mount the `code-graph` row calls `ctx.utcp.add(manual, scope=ctx)`.
+      ph-utcp runs the manual's discovery command once, registers the two tools
+      it names, and returns a `ManualState` that says whether they arrived.
+      Nothing crosses at run time.
+    blocks:
+      - title: What is handed over
+        struct: ph_utcp:Manual
+      - title: The long-run part
+        struct: ph_utcp:Background
+      - title: What comes back
+        struct: ph_utcp:ManualState
+      - title: What the discovery command prints
+        lang: json
+        note: |
+          Generated with `ph-code-graph manual`; schemas shortened. Each tool's
+          template has one flag per field, and its `outputs` is the envelope
+          around the tool's own value schema.
+        code: |
+          {"utcp_version": "1.2.0", "manual_version": "0.12.0",
+           "tools": [
+             {"name": "code_graph",
+              "description": "Ask about a codebase's structure instead of reading it. ...",
+              "inputs": {"title": "GraphArgs", "type": "object", "additionalProperties": false, "properties": {"mode": {"enum": ["search", "define", "callers", "callees", "impact", "entities"], "default": "search"}, "...": {}}},
+              "outputs": {"type": "object", "properties": {"ok": {"type": "boolean"}, "value": {"...": {}}, "text": {"...": {}}, "error": {"...": {}}}},
+              "tool_call_template": {"call_template_type": "cli",
+                "commands": [{"command": "/home/me/pH/.venv/bin/python3 -P -m ph_code_graph call code_graph --format json --mode=UTCP_ARG_mode_UTCP_END --query=UTCP_ARG_query_UTCP_END --path=UTCP_ARG_path_UTCP_END --kind=UTCP_ARG_kind_UTCP_END --distance=UTCP_ARG_distance_UTCP_END --limit=UTCP_ARG_limit_UTCP_END --offset=UTCP_ARG_offset_UTCP_END"}],
+                "inherit_env_vars": ["PATH", "HOME", "...", "PH_TOOL_CONFIG", "PH_TOOL_STATE", "TREE_SITTER_LANGUAGE_PACK_CACHE_DIR"]}},
+             {"name": "code_index", "...": "..."}
+           ]}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "If discovery fails or times out (`discoveryTimeoutMs`, 60 s) the row stands down: no tools, no skill, a `phern doctor` line with the reason, and the model is told the tools are not available."
+          - "Discovery runs for no agent, so it runs with no sandbox."
+          - "The manual is a registration of the row's scope. Unmounting the row removes the two tools."
+      - links:
+          - {to: "ph-utcp#edge:add-manual", label: "ph-utcp: add(manual)"}
+          - {to: "ph-utcp#edge:manual-json", label: "ph-utcp: tools and schemas"}
+          - {to: "ph-utcp#edge:register-tool", label: "ph-utcp: register(definition)"}
+
+  call-index:
+    transport: process
+    summary: |
+      A `code_index` call from the model reaches ph-utcp's `execute`, which
+      starts `ph-code-graph call code_index` through `ctx.shell` in the owning
+      agent's tree, under the calling agent's sandbox. The arguments go in as
+      flags or as one JSON object; one JSON envelope comes back on stdout.
+    blocks:
+      - title: The command line
+        lang: bash
+        note: |
+          The first is what the manual's template expands to for a UTCP client.
+          The second is what ph-utcp runs for a background run; the third is
+          how it asks when it will not wait. `$PH_TOOL_STATE` and
+          `$PH_TOOL_CONFIG` are set on each.
+        code: |
+          python -P -m ph_code_graph call code_index --format json --paths=... --glob=... --exclude=... --forget=...
+          python -P -m ph_code_graph call code_index --progress --args-json '{"paths": ["shop"]}'
+          python -P -m ph_code_graph call code_index --wait 0 --args-json '{"paths": ["shop"]}'
+      - title: What the command is given
+        table:
+          columns: [what, value]
+          rows:
+            - ["working directory", "the root of the agent that owns the tree"]
+            - ["`PH_TOOL_STATE`", "`<owner's scratch>/code-graph`"]
+            - ["`PH_TOOL_CONFIG`", "`{\"code-graph\": {...}}`: the row's config, only what differs from the defaults"]
+            - ["writable outside the workspace", "the grammar cache, the log's folder, and the owner's state directory when it is not the caller's own"]
+            - ["inherited variables", "the template's `inherit_env_vars`, from the deployment's scrubbed environment"]
+      - title: Arguments
+        struct: ph_code_graph.engine:IndexArgs
+      - title: What comes back
+        lang: json
+        note: Generated.
+        code: |
+          {"ok":true,"value":{"state":"done","indexed":5,"unchanged":0,"removed":0,"symbols":10,"skipped":[],"total_files":5,"total_symbols":10,"total_refs":12,"languages":["python"]},"text":"Indexed 5 files (0 already current), 10 symbols.\nThe graph holds 10 symbols and 12 references across 5 files (python)."}
+      - title: In the session log
+        text: |
+          The call is an ordinary tool call: a `tool/call` and a `tool/result` in the calling agent's log, with the envelope's `text` as the content the model reads. The command itself writes nothing to the session log. Its tracebacks go to `$PH_CACHE/logs/ph-code-graph.log`.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A UTCP client passes each argument as `str(value)`: a list arrives as Python's repr, an omitted optional as `MISSING_ARG_<name>`. `ph.toolcli.decode_argument` reads each by the tool's own schema."
+          - "A mistyped flag is `ok: false` with `BAD_ARGUMENTS`, not an exit."
+          - "The command's stderr is closed for the length of a call, because a UTCP client merges it into stdout. Only `--progress` writes there."
+          - "A call's command may run for `timeoutMs` of the `utcp` row (120 s). A background run has no limit; its job ends it."
+          - "If the sandbox refuses the command, the call fails with the sandbox's own code."
+      - links:
+          - {to: "ph-utcp#edge:call-run", label: "ph-utcp: run_argv for the agent"}
+          - {to: "ph-utcp#edge:sandboxed-command", label: "ph-utcp: the sandboxed command"}
+          - {to: "ph-utcp#edge:envelope", label: "ph-utcp: the envelope"}
+
+  text-to-process:
+    transport: call
+    summary: |
+      For each file whose digest changed, `code_index` calls
+      `_extract.extract(path, text, language)` in a worker thread. The first
+      thing it does is hand the text to the pack's `process()`.
+    blocks:
+      - title: What goes in
+        table:
+          columns: [argument, what it is]
+          rows:
+            - ["`path`", "relative to the workspace root, as it will be stored"]
+            - ["`text`", "the whole file, read through `ctx.fs.read` with no size bound of its own; `maxBytes` was checked before"]
+            - ["`language`", "the pack's name for the path's language (`detect_language`)"]
+      - title: What comes back, after both passes
+        struct: ph_code_graph._extract:Extraction
+      - title: Which files get this far
+        list:
+          - "The language has a tags query, and is in `languages` when that is set."
+          - "A parser for it is on disk, or was fetched (asked once per language per run)."
+          - "Version control did not vouch for the file, and its sha256 differs from the stored digest."
+          - "It is not past `maxBytes`."
+      - title: Failure
+        tone: limit
+        list:
+          - "`extract` catches nothing. The caller turns any raise into a skip, `did not parse (...)`, and goes on to the next file."
+
+  text-to-tags:
+    transport: call
+    summary: |
+      Inside the same `extract` call, the text is parsed a second time with
+      tree-sitter and matched against the language's compiled tags query.
+      Parsing twice costs less than it saves: each pass answers something the
+      other cannot.
+    blocks:
+      - title: The second pass
+        lang: python
+        note: From `_extract.extract`, shortened.
+        code: |
+          tree = pack.get_parser(language).parse(text.encode("utf-8"))
+          for _pattern, capture in QueryCursor(_tags_query(language)).matches(tree.root_node):
+              name = capture["name"][0].text.decode()
+              for label, nodes in capture.items():          # "definition.function", "reference.call"
+                  line = nodes[0].start_point[0] + 1        # 0-based point, 1-based line
+                  ...
+      - title: Measured
+        text: |
+          The `_extract` docstring records it: over `packages/ph-core/src/ph`, 136 files and 1.58 MiB went through `process()` in 219 ms and through the tags query in 108 ms.
+      - links:
+          - {to: "node:tags", label: "The tags query pass"}
+
+  definitions:
+    transport: file
+    summary: |
+      `CodeGraphStore.put` writes one file's definitions into `symbols` and
+      `symbols_fts`, inside the file's transaction. The file's old rows are
+      deleted first, so a re-index replaces and never merges.
+    blocks:
+      - title: The statements
+        lang: sql
+        note: "`doc` is nullable in `symbols` and stored as `''` in the FTS row."
+        code: |
+          BEGIN IMMEDIATE;
+          -- _forget(path): the FTS 'delete' rows, then symbols, refs, imports, files
+          INSERT INTO files(path, language, digest, vcs_id, lines, indexed_at) VALUES (?, ?, ?, ?, ?, ?);
+          INSERT INTO symbols(path, name, kind, start_line, end_line, doc) VALUES (?, ?, ?, ?, ?, ?);
+          INSERT INTO symbols_fts(rowid, name, doc, path) VALUES (?, ?, ?, ?);   -- rowid = the symbol's id
+          ...
+          COMMIT;
+      - title: Real rows it wrote
+        lang: text
+        code: |
+          files    path='shop/pricing.py' language='python' digest='678217a26190…f60ce8' vcs_id='' lines=21 indexed_at=1794883416
+          symbols  id=8  path='shop/pricing.py' name='price_of'       kind='function' start_line=6  end_line=8  doc='Look up the unit price of an item.'
+          symbols  id=9  path='shop/pricing.py' name='round_money'    kind='function' start_line=11 end_line=13 doc='Round an amount to whole cents.'
+          symbols  id=10 path='shop/pricing.py' name='apply_discount' kind='function' start_line=16 end_line=20 doc='Take a discount code off an amount.'
+      - title: Durable
+        tone: durable
+        list:
+          - "One transaction per file: all of a file's rows, or none."
+          - "A file whose transaction did not commit has no `files` row, so its digest is not known and the next run does it again."
+      - links:
+          - {to: "node:symbols", label: "The symbols table"}
+
+  references:
+    transport: file
+    summary: |
+      In the same transaction, `put` writes one `refs` row per call, with the
+      id of the definition the call is written inside, and one `imports` row
+      per import statement.
+    blocks:
+      - title: The statements
+        lang: sql
+        code: |
+          INSERT INTO refs(path, name, kind, line, from_symbol) VALUES (?, ?, ?, ?, ?);
+          INSERT INTO imports(path, source) VALUES (?, ?);
+      - title: How from_symbol is found
+        text: |
+          `owners(definitions)` builds one table for the file, `{line: the tightest definition containing it}`, widest span first so a narrower one overwrites it. Each reference looks its line up once. The definition's `start_line` is then mapped to the `symbols.id` that was just inserted.
+      - title: Real rows it wrote
+        lang: text
+        note: "`from_symbol=10` is `apply_discount`; `from_symbol=9` is `round_money`, calling the builtin `round`."
+        code: |
+          refs     id=12 path='shop/pricing.py' name='round_money' kind='call' line=20 from_symbol=10
+          refs     id=11 path='shop/pricing.py' name='round'       kind='call' line=13 from_symbol=9
+          imports  path='shop/checkout.py' source='from .ledger import add'
+      - links:
+          - {to: "node:refs", label: "The refs table"}
+
+  fts:
+    transport: file
+    summary: |
+      `search`, `define` and `entities` are each one SELECT over `symbols`.
+      `search` goes through `symbols_fts` first and joins back on the row id.
+    blocks:
+      - title: search
+        lang: sql
+        note: |
+          `bm25(symbols_fts, 10.0, 1.0, 0.0)` weights a match in the name ten
+          times a match in the docstring, and ignores the path.
+        code: |
+          SELECT s.*
+          FROM symbols_fts f JOIN symbols s ON s.id = f.rowid
+          WHERE symbols_fts MATCH ?
+          ORDER BY bm25(symbols_fts, 10.0, 1.0, 0.0) LIMIT ?
+      - title: How a model's words become the MATCH expression
+        text: |
+          FTS5 reads `-`, `"`, `*`, `(`, `:` and `NEAR` as operators, so `read-before-edit` would be a syntax error. `engine._fts` quotes every term and ORs them: `discount code` becomes `"discount" OR "code"`. A model's phrasing cannot raise.
+      - title: define
+        lang: sql
+        code: |
+          SELECT * FROM symbols WHERE name = ? ORDER BY path, start_line LIMIT ?
+      - title: entities
+        lang: sql
+        note: "`path` and `kind` add `(path = ? OR path LIKE ? || '/%')` and `kind = ?`. A second statement counts the matches for `total`."
+        code: |
+          SELECT * FROM symbols
+          WHERE 1 = 1
+          ORDER BY (end_line - start_line + 1) DESC, path, start_line
+          LIMIT ? OFFSET ?
+      - title: The two counts in every answer
+        lang: sql
+        note: "`definitions` is counted for every mode but `search`, when a `query` was given."
+        code: |
+          SELECT COUNT(*) FROM files                      -- indexed_files
+          SELECT COUNT(*) FROM symbols WHERE name = ?     -- definitions
+      - links:
+          - {to: "node:lookup", label: "search, define and entities"}
+
+  join:
+    transport: file
+    summary: |
+      `callers` and `callees` are each one join between `refs` and `symbols`.
+      The join key is the name. That is the whole reason an answer can be
+      ambiguous, and the reason it carries `definitions`.
+    blocks:
+      - title: callers
+        lang: sql
+        note: "Every call that used the name, and the definition each is written inside."
+        code: |
+          SELECT s.*, r.line AS ref_line, r.path AS ref_path
+          FROM refs r JOIN symbols s ON s.id = r.from_symbol
+          WHERE r.name = ? ORDER BY s.path, r.line LIMIT ?
+      - title: callees
+        lang: sql
+        note: |
+          Every definition named as the queried one (`s`), each call written
+          inside it (`r`), and every definition of the called name (`t`).
+        code: |
+          SELECT t.*, r.line AS ref_line, r.path AS ref_path, r.name AS via
+          FROM symbols s
+          JOIN refs r ON r.from_symbol = s.id
+          JOIN symbols t ON t.name = r.name
+          WHERE s.name = ? ORDER BY r.line, t.path LIMIT ?
+      - title: The typed edge
+        struct: ph_code_graph._store:Hit
+      - title: Limits
+        tone: limit
+        list:
+          - "`callers` cannot tell which `add` a call meant. `refs` row 6 (`add`, called from `charge`) is returned for both definitions."
+          - "`callees` fans out: `JOIN symbols t ON t.name = r.name` returns one row per definition of each called name."
+      - links:
+          - {to: "node:calls", label: "callers and callees"}
+
+  closure:
+    transport: file
+    summary: |
+      `impact` is one recursive statement over `refs` and `symbols`. It starts
+      from every definition of the name and repeatedly adds the definitions
+      that contain a call to a name already reached, up to `distance` hops.
+    blocks:
+      - title: The query
+        lang: sql
+        note: |
+          `UNION` (not `UNION ALL`) keeps a `(id, depth)` pair once, so a
+          cycle ends at the depth bound. `MIN(depth)` puts a symbol reachable
+          at two distances in the nearer ring.
+        code: |
+          WITH RECURSIVE reach(id, depth) AS (
+              SELECT id, 0 FROM symbols WHERE name = ?
+            UNION
+              SELECT s.id, r.depth + 1
+              FROM reach r
+              JOIN symbols origin ON origin.id = r.id
+              JOIN refs f ON f.name = origin.name
+              JOIN symbols s ON s.id = f.from_symbol
+              WHERE r.depth < ?
+          )
+          SELECT MIN(depth) AS depth, s.*
+          FROM reach JOIN symbols s ON s.id = reach.id
+          WHERE depth > 0
+          GROUP BY s.id ORDER BY depth, s.path, s.start_line LIMIT ?
+      - title: Why one statement
+        text: |
+          A loop in Python would issue one query per symbol on the frontier, and the names worth asking about have hundreds of callers. This is also the query turso could not run when the store was chosen: recursive CTEs were not supported.
+      - title: The scratch tree, hop by hop
+        table:
+          columns: [depth, reached, because]
+          rows:
+            - ["0", "`round_money` (id 9)", "the seed; left out of the answer by `depth > 0`"]
+            - ["1", "`apply_discount` (id 10)", "`refs` row 12: `round_money` called on line 20, inside symbol 10"]
+            - ["2", "`total` (id 4)", "`refs` row 5: `apply_discount` called inside symbol 4"]
+            - ["3", "`checkout` (id 6)", "`refs` row 8: `total` called inside symbol 6"]
+      - title: Limits
+        tone: limit
+        list:
+          - "Each hop is a join on a name, so the closure is over names, not over resolved symbols."
+          - "The seed is every definition of the name. A name defined twice starts from both."
+      - links:
+          - {to: "node:impact", label: "impact"}

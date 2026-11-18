@@ -1,12 +1,12 @@
 """Intents: an act the log records before it happens, and settles after.
 
-Seven pairs already work this way — `approval/asked` and `approval/decided`,
-`question/asked` and `question/answered`, `shell/command` and `shell/result`,
-`tool/call` and `tool/result`, a Code Mode dispatch and its result, a daemon verb
-and its outcome, a workspace tree acquired and disposed. Each has its own fold of
-"opened and never settled", and three different places settle the orphans a crash
-leaves. Each fold is correct; what was missing is **one statement** of the rule
-that repair, the dedupe index and every reader share.
+Pairs of records worked this way before this module did — `approval/asked` and
+`approval/decided`, `question/asked` and `question/answered`, `shell/command` and
+`shell/result`, `tool/call` and `tool/result`, a Code Mode dispatch and its result,
+a daemon verb and its outcome, a workspace tree acquired and disposed. Each had its
+own fold of "opened and never settled", and three different places settled the
+orphans a crash leaves. Each fold was correct; what was missing was **one
+statement** of the rule that repair, the dedupe index and every reader share.
 
 This module is that statement, and nothing else: declarations and pure functions
 over a sequence of events. No service — `ctx.intents` (P10-06) is where appending,
@@ -22,6 +22,8 @@ second copy on the envelope would be a second carrier of one fact.
 
 **Kinds are declared in leaves** (T4): ph-core's in `ph.session.kinds`, which this
 package imports, and a package's in its own `kinds`, which that package imports.
+`declared_intents` lists them. Not every pair above is one: `tool/call` and
+`tool/result`, and a workspace tree, keep their own folds.
 
 **One fold, `fold_intents`**: per key, the latest intent opened under it and the
 settle that closed it. `open_intents` and the journal's `Prior` are both read off it,

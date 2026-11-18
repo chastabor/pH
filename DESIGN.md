@@ -59,14 +59,14 @@ of it.
 
 | | |
 |---|---|
-| Packages | 7 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-text-index`, `ph-code-graph`) |
-| Source | ~48 000 lines |
-| Tests | 1 796 (one skipped without a provider key) |
-| Registered plugins | 90 across the `ph.plugins` entry-point group |
-| Installable bundles | 2 (`rlm`, `stabilize`) via `ph.bundles` |
-| Base profile | 55 rows (`ph/bundles/base.yaml`) |
+| Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
+| Source | ~126 000 lines |
+| Tests | 4 607 collected |
+| Registered plugins | 110 across the `ph.plugins` entry-point group |
+| Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
+| Base profile | 61 rows (`ph/bundles/base.yaml`) |
 | Capability seams | 27 service keys across 26 modules |
-| Declared bus events | 36 |
+| Declared bus events | 46 |
 | Python | ≥ 3.12 |
 
 ### The five packages
@@ -405,9 +405,10 @@ Before that it printed a producer matrix under a producer/consumer heading:
 the root's empty string and no listener was recorded in any profile. `ForkScope`
 now stamps the plugin's own `apply.__module__` onto the activation scope.
 
-The 36 declared events, by mode: 17 `emit`, 16 `waterfall`, 2 `serial`, 1
-`parallel`. The `waterfall` majority is the design working — most extension
-points in pH are *policy interceptions* (`tools/pre-execute`, `agent/request`,
+The 46 declared events, by mode: 23 `emit`, 16 `waterfall`, 5 `serial`, 2
+`parallel`. Half are plain announcements. Of the 23 that wait for their
+listeners, 16 are waterfalls, and that is the design working — most extension points in
+pH are *policy interceptions* (`tools/pre-execute`, `agent/request`,
 `fs/write-intent`, `approval/request`, `system-prompt/assemble`), and a
 waterfall is the only mode where a plugin can veto.
 
@@ -1108,8 +1109,18 @@ success, and it refuses *one tool call* rather than ending a turn.
 **There is no global turn or request timeout**, no max-steps in the driver, no
 health check, no max-roots cap, and no per-root memory cap. `NON_GUARANTEES`
 (`supervisor.py`) states this rather than leaving it to be discovered, and
-`phern doctor` prints it — including that **after a restart roots are not
-re-mounted, so a schedule does not fire until something touches its root**.
+`phern doctor` prints it — including that **nothing fires while the daemon is
+down**, and that a new daemon does not mount every stored root on its own.
+
+What a new daemon does mount is narrower than "everything" and no longer
+nothing. `Supervisor.rehydrate` mounts a root whose schedule has come due, from
+an index rather than a scan of every log, and the ordinary `tick` then fires
+it: one run per missed window. `Supervisor.resume_owed` mounts the roots the
+live-roots index says still owe work — a cut-short turn, a pending prompt,
+children to readmit — when asked: `phern agents resume --all`, the
+`sessions/resume` verb, or `phern daemon --resume-owed`, which runs the pass
+once the door is open. Any other root is mounted from its log when a client
+asks for it.
 
 ---
 
@@ -1539,7 +1550,7 @@ makes hard to violate*, not as rules anyone remembers.
 
 ### I1 — Everything is a plugin; there is no privileged core to patch
 
-**Mechanism.** 80 plugins behind one entry-point group. The agent loop
+**Mechanism.** 110 plugins behind one entry-point group. The agent loop
 (`agent-loop`), the adapters, the tool registry, the session store and the
 persistence backend are all rows. A profile is a list of them; a patch addresses
 one by id.
@@ -1891,7 +1902,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 | `DowngradeReason` has one member and one producer; tier-driven narrowing records none (§6.6) | incomplete |
 | `_enforce`'s containment refusal (a scope outside the parent's) has **no test**; the no-scope branch does | untested |
 | Tool-call limit with `exit: "error"` — the "one failed `tool/result`, not a turn stop" reading is traced, not tested | untested |
-| Kernel-namespace rehydration: `kernel/snapshot` / `kernel/restored` exist as types but nothing wires them into the resume path | unwired |
+| **A kernel's namespace is restored lazily, and not after a crash.** `rlm-kernel-snapshot` records one `kernel/snapshot` per changed variable; `KernelManager._rehydrate` hands them to a freshly started kernel and records `kernel/restored`, naming what could not be read. That happens when the namespace runs its first cell after a resume, not at mount, so a resumed agent that never runs code restores nothing. A kernel restarted after it died mid-session starts empty on purpose: the model is told the namespace is gone | wired; lazy by design (`ph_rlm/kernel/manager.py`, `ph_rlm/snapshot.py`) |
 | **A staged attachment is not durable.** `session/stage` puts a reference on the root's shared tray so an upload becomes a chip in every attached composer — composer state, shared but transient, deliberately not in the log. A daemon restart loses the tray with the blob still in the store, so a person who dropped a file and then reopened has to drop it again | by decision, P7-06 |
 | **No chunked upload.** `attachment/put` carries the whole file in one frame, capped at 5 MiB; a larger one is refused by name rather than truncated. Both doors say so — the browser gets a sentence, `/attach` gets `attachment_too_large` | P7-06, stated |
 | **A screen a third-party row contributes is invisible to a remote front end.** `ScreenDefinition.build()` cannot travel, so `screens/list` is intersected with what the client can draw and everything else is silently not offered. Every screen pH ships is drawable; a row's own is not | P5-15, gated by `test_a_screen_this_build_cannot_draw_is_not_offered`; P7-07 closes it |
@@ -1907,7 +1918,7 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 
 - **Start at** `packages/ph-core/src/ph/cordis/context.py`. Everything else is
   built on the `Context` tree.
-- **Then** `ph/bundles/base.yaml` — 55 rows is the whole default harness, in
+- **Then** `ph/bundles/base.yaml` — 61 rows is the whole default harness, in
   order, with comments explaining each.
 - **Application code states the contract and the invariants; tests state why.**
   A docstring under `src/` says what a thing does, what it refuses, and which

@@ -1,4 +1,4 @@
-"""`clm-context` — the section map and the five context tools.
+"""`clm-context` — the section map and the seven context tools.
 
 The tools are the explicit front end of `ph_clm.edits`: the model names sections
 and says what to do with them, and the edit lands in the session log before the

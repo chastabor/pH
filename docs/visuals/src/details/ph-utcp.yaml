@@ -1,0 +1,1364 @@
+intro: |
+  One row, `utcp`, turns a UTCP manual into pH tools. The top half of the
+  diagram is discovery, which happens once at mount for each manual. The bottom
+  half is one tool call: it crosses the tool pipeline like any tool and ends as
+  one command that `ctx.shell` starts for the agent that made the call.
+
+  Click a participant for what it is and how it is configured, or a message for
+  what crosses it. The JSON, the script, the records and the refusal sentences
+  on this page were produced by running the code, against the manual that
+  `ph-code-graph` publishes.
+
+topics:
+  - id: configuring
+    title: Configuring a manual
+    summary: |
+      A manual is one entry in the `utcp` row's `manuals` list. Its `template`
+      is the UTCP manual call template, the object any UTCP harness registers.
+      Everything beside `template` is what pH needs to know and UTCP has no word
+      for: how the tools are named, whether they answer in an envelope, where
+      they may write, which variables they are handed, and what the scheduler
+      may assume about each tool.
+    blocks:
+      - title: Where the row comes from
+        text: |
+          The row ships in the `utcp` bundle (`ph_utcp/bundle.yaml`), switched on, with no manuals. Of the shipped profiles only `rlm-indexed` layers that bundle, ahead of `code-graph` and `text-index`, which add their own manuals to it. A profile of your own gets the row by extending `rlm-indexed`, as the example below does.
+
+          Mounted with nothing to discover, the row costs one idle UTCP client.
+      - row: utcp
+      - title: A profile with two manuals
+        lang: yaml
+        note: |
+          This entry composes (`phern --profile tools --dump-config`) and
+          validates against `ph_utcp:Config`. `weather-tools` and `ph-notes` are
+          stand-ins for a command on `PATH`; with neither installed the two
+          manuals are skipped and the session starts without their tools. A
+          patch replaces a row's whole config, so restate every manual you want
+          to keep. Options take the camelCase spelling shown or the Python
+          name (`pass_env`); keys inside `template` are UTCP's own and are
+          passed through as written.
+        code: |
+          # $PH_HOME/profiles/tools.yaml
+          extends: rlm-indexed
+          rows:
+            - id: utcp
+              config:
+                timeoutMs: 60000             # one call's budget, unless a tool's entry says
+                discoveryTimeoutMs: 20000
+                manuals:
+                  # a third-party command that prints a UTCP manual
+                  - template:
+                      name: weather
+                      call_template_type: cli
+                      commands:
+                        - command: weather-tools manual
+                    tools:                   # registered as weather_forecast
+                      forecast:
+                        concurrencySafe: true
+                        effectFree: true
+
+                  # a tool made with ph.toolcli: builds an index, needs a key
+                  - template:
+                      name: notes
+                      call_template_type: cli
+                      commands:
+                        - command: ph-notes manual
+                      inherit_env_vars: [PATH, HOME, PH_HOME, PH_CACHE, PH_TOOL_STATE]
+                    names: bare              # notes_search, not notes_notes_search
+                    envelope: true           # it answers {ok, value, text, error}
+                    state: notes             # $PH_TOOL_STATE=<agent scratch>/notes
+                    writable: [~/.cache/ph-notes/models]
+                    env:
+                      NOTES_LANG: en
+                    passEnv: [NOTES_API_KEY] # a variable NAME, read at each start
+                    background:
+                      command: [ph-notes, call]
+                      label: notes index
+                      tools: [notes_index]
+                      eager: true
+                      waitS: 5
+                    tools:
+                      notes_index:
+                        selfLimits: true
+                        timeoutMs: 600000
+                      notes_search:
+                        concurrencySafe: true
+                        effectFree: true
+                        selfLimits: true
+                        view: {card: search, title: Search notes, argument: query}
+      - title: Row config
+        struct: ph_utcp:Config
+      - title: One manual
+        struct: ph_utcp:Manual
+      - title: Per-tool traits (the `tools` table)
+        struct: ph_utcp:ToolTraits
+        note: |
+          The key is the tool's own name in the manual (`forecast`), not the
+          name pH registers. A tool with no entry gets every default: not safe
+          to overlap, has effects.
+      - title: A tool's card in a front end
+        struct: ph_utcp:ToolView
+        note: "`card` is one of `generic`, `terminal`, `diff`, `search`, `read`, `web`."
+      - title: Background runs
+        struct: ph_utcp:Background
+      - title: How names are formed
+        table:
+          columns: [setting, a tool `forecast` of manual `weather` is registered as]
+          rows:
+            - ["`names: prefixed` (default)", "`weather_forecast`: the UTCP name `weather.forecast` with every non-word character turned into `_`"]
+            - ["`names: bare`", "`forecast`: for a manual that is the only source of that name"]
+      - title: Checking what happened
+        lang: bash
+        note: |
+          The doctor section is titled "UTCP tools": one line a manual, with how
+          many tools it gave and every problem. A manual that gave none reads
+          `unavailable — <why>`.
+        code: |
+          phern --profile tools --dump-config    # the row as composed
+          phern config --row utcp                # the row's options
+          phern doctor --profile tools           # "UTCP tools": weather  unavailable — discovery failed: ...
+      - links:
+          - {to: "topic:publishing", label: "Publishing your own manual"}
+          - {to: "topic:bounds", label: "What bounds a UTCP tool"}
+          - {to: "topic:background", label: "Background runs"}
+
+  - id: publishing
+    title: Publishing your own manual
+    summary: |
+      A package that owns tools does not ask a person to write a manual entry.
+      It builds a command line from its rows with `ph.toolcli`, and a row of its
+      own hands the manual to `ctx.utcp.add` at mount. `ph-code-graph` and
+      `ph-text-index` both work this way. The tool bodies then run in the
+      package's command, not in the harness process.
+    blocks:
+      - title: The three parts
+        text: |
+          1. **An engine row** registers the tools in the ordinary way (`define_tool`). It is mounted only inside the command.
+          2. **A `ToolCli`** names the program, the manual and the engine rows. `ph.toolcli.main(CLI)` gives the console script its `call`, `tools`, `manual`, `status` and `install` subcommands. `call` mounts a small profile (the tool registry, `fs-local`, `subprocess-local`, `commands`, `diagnostics` and the package's rows) and runs one tool through the registry.
+          3. **A session row** injects `ctx.utcp`, builds a `Manual` and adds it. That row is what a profile mounts.
+      - title: The command line
+        struct: ph.toolcli:ToolCli
+      - title: The session row (from `ph_code_graph.row`, trimmed)
+        lang: python
+        note: |
+          `scope=ctx` makes the manual the adding row's: its tools are
+          unregistered and its name forgotten when that row unmounts.
+          `config_env` carries the row's own config to the command in
+          `$PH_TOOL_CONFIG`, as JSON by row id, with only what differs from the
+          defaults. If discovery fails the row stands down: no tools, no skill,
+          a doctor line saying why.
+        code: |
+          from ph.toolcli import config_env, manual_call_template
+          from ph_utcp import UTCP, Background, Manual, ToolTraits, ToolView
+
+          def manual(config: Config) -> Manual:
+              env, pass_env = config_env({ROW: config})
+              return Manual(
+                  template=manual_call_template(CLI),
+                  names="bare",
+                  envelope=True,
+                  state=STATE,                       # "code-graph"
+                  writable=[str(grammar_cache()), str(CLI.log_file().parent)],
+                  env=env,                           # {"PH_TOOL_CONFIG": "{\"code-graph\":{}}"}
+                  pass_env=pass_env,
+                  background=Background(
+                      command=[*CLI.invocation(), "call"],
+                      label="code graph",
+                      tools=["code_index"],
+                      eager=config.index.on_mount,
+                      wait_s=config.wait_s,
+                  ),
+                  tools={
+                      "code_index": ToolTraits(self_limits=True, ...),
+                      "code_graph": ToolTraits(concurrency_safe=True, self_limits=True, ...),
+                  },
+              )
+
+          @plugin(ROW, affects="environment", inject=[UTCP, FS, SHELL], config=Config)
+          async def apply(ctx: Context, config: Config) -> None:
+              state = await ctx.require(UTCP).add(manual(config), scope=ctx)
+              if state.available:
+                  offer_skills(ctx)
+      - title: The service, `ctx.utcp`
+        note: "Injected with `inject=[UTCP]`; the key is `ph_utcp.UTCP`. Its fields are under [the utcp row](node:utcp)."
+        table:
+          columns: [method, what it does]
+          rows:
+            - ["`await add(manual, *, scope=None) -> ManualState`", "discover a manual and register its tools on `scope`; never raises for a manual that cannot be reached"]
+            - ["`run_command(manual, argv, agent, *, timeout_ms) -> Awaitable[ShellResult]`", "run one of the manual's own commands as a person asked (`install`, `status`); unconfined"]
+            - ["`owner_of(agent) -> AgentHandle`", "the agent whose tree `agent`'s tools are about"]
+      - title: What `add` answers
+        struct: ph_utcp:ManualState
+      - title: What the template looks like
+        lang: json
+        note: |
+          Printed by `ph-code-graph manual --registration`
+          (`ph.toolcli.manual_call_template`). Any UTCP harness can register
+          the same object. Naming any variable in `inherit_env_vars` replaces
+          the UTCP client's default list, so the defaults are repeated beside
+          the pH roots.
+        code: |
+          {"name": "ph_code_graph",
+           "call_template_type": "cli",
+           "commands": [{"command": "/home/me/pH/.venv/bin/python3 -P -m ph_code_graph manual"}],
+           "inherit_env_vars": ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
+                                "SHELL", "TZ", "TERM", "PH_HOME", "PH_CACHE", "PH_RUNTIME",
+                                "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "PH_TOOL_CONFIG",
+                                "PH_TOOL_STATE", "TREE_SITTER_LANGUAGE_PACK_CACHE_DIR"]}
+      - title: What ph.toolcli handles for the cli protocol
+        list:
+          - "Each argument arrives as one string. A list arrives as Python's repr, a boolean as `True`, and an argument the model left out as the literal `MISSING_ARG_<name>`. `decode_argument` reads each by the tool's own schema."
+          - "The UTCP client merges stderr into stdout and ignores the exit code. So `call` prints exactly one JSON object, reports a failure inside it, logs to a file (`$PH_CACHE/logs/<program>.log`) and closes its own stderr for the length of the call."
+          - "The generated command is `python -P -m <module>`, run by the interpreter that printed the manual. `-P` keeps the working directory, which is the tree the tool is about, off `sys.path`."
+      - links:
+          - {to: "node:pkg", label: "The package row"}
+          - {to: "edge:manual-json", label: "What a manual's JSON looks like"}
+          - {to: "edge:envelope", label: "The envelope a call returns"}
+          - {to: "ph-code-graph", label: "ph-code-graph, a package published this way"}
+          - {to: "ph-text-index", label: "ph-text-index, another"}
+
+  - id: bounds
+    title: What bounds a UTCP tool
+    summary: |
+      A `cli` tool's command is started by `ctx.shell` for the agent that made
+      the call: in that agent's tree, under that agent's sandbox, ended by the
+      call's own cancellation. So a UTCP tool is bounded the way `bash` is
+      bounded, by the sandbox. The path rules of `permissions-fs` do not apply
+      to it.
+    blocks:
+      - title: Where the command runs and what confines it
+        tone: secure
+        list:
+          - "**Working directory**: the calling agent's root (`ctx.fs.root_for(agent)`). For a manual with `state`, the root of the agent that owns the tree; see [what a sub-agent gets](topic:subagents)."
+          - "**Confinement**: `ctx.shell` derives the agent's workspace policy and asks the sandbox seam to confine the command, when the agent holds a workspace and a backend is available. A call captured under `read-only` ran as `bwrap --die-with-parent --ro-bind / / --bind <agent scratch> <agent scratch> ...` and its result said `confined_by: bwrap`."
+          - "**Cancellation and time**: the call's own signal ends the command. pH's budget replaces the library's fixed 60 and 120 seconds: the row's `timeoutMs`, or the tool's own `timeoutMs`."
+          - "**A bypass is refused after the fact.** Each call records that its command went through `run_argv`. An answer whose command did not is withheld with `UTCP_UNCONFINED`, and the mount refuses (`MountRefusal`) when the installed `utcp-cli` no longer has the two methods `PhCliProtocol` overrides."
+          - "**Arguments are checked first.** The model's arguments are validated against the manual's `inputs` schema before anything runs; a mismatch is `UTCP_BAD_ARGUMENTS`."
+      - title: permissions-fs does not apply
+        tone: limit
+        list:
+          - "`permissions-fs` rules govern calls through `ctx.fs`. A subprocess is not one, so a `deny` rule on `**/.env` does not stop a UTCP tool from reading that file. What bounds its reads and writes is the sandbox."
+          - "`hitl` still sees the call on `tools/pre-execute`, by the tool's registered name. A UTCP tool cannot declare itself irreversible (`ToolTraits` has no such field), so the `declared` default never asks about one; an `interruptOn` rule by name does."
+      - title: Where it may write
+        table:
+          columns: [setting, what it gives, under `read-only`]
+          rows:
+            - ["(none)", "the workspace, when the session's mode is `workspace-write`; the agent's scratch always", "the scratch only"]
+            - ["`state: notes`", "`$PH_TOOL_STATE=<agent scratch>/notes` on every call. The scratch is `<scratch root>/<session id>/<agent id>`, so two agents never share it and the same agent gets the same directory after a restart", "writable"]
+            - ["`writable: [...]`", "paths outside the workspace that agents share: a grammar cache, model weights. Each is made a directory at mount, with `~` expanded and symlinks resolved", "writable"]
+            - ["temporary files", "a confined command gets `TMPDIR=<agent scratch>` from the shell seam, because the sandbox leaves it no writable `/tmp`", "writable"]
+      - title: The refusal when a grant overlaps the workspace
+        lang: text
+        note: |
+          Generated: a manual with `writable: [<workspace>/sub]`. A grant that
+          is the workspace root, is inside it, or contains it is refused
+          whatever the mode (`ph.seams.sandbox.grants_apart`), because honoring
+          it would make the repository writable in a read-only session. The
+          manual keeps its tools; the path is left out of the grant and the
+          sentence is logged as a warning and shown in `phern doctor`.
+          `ctx.shell` applies the same rule again on every call, against the
+          calling agent's own root, and logs it at debug only.
+        code: |
+          UTCP tools
+            ph_code_graph  2 tools — /home/me/repo/sub cannot be granted as writable: it overlaps the workspace /home/me/repo
+      - title: The environment a command gets
+        text: |
+          Built in layers by `ctx.shell.run_argv`:
+
+          1. The deployment's scrubbed environment, from the subprocess seam. It drops every variable whose name looks like a credential.
+          2. Narrowed to the names the template inherits (`inherit_env_vars`, or the UTCP client's default list). This selects from the scrubbed environment, so a template that names `HF_TOKEN` does not fetch it.
+          3. The workspace's redirection variables, and `TMPDIR` for a confined command.
+          4. What the call supplies, which wins: the template's own `env_vars`, the call's arguments, the manual's `env`, each `passEnv` variable read from the harness's environment at that moment, and `PH_TOOL_STATE`.
+      - title: Credentials
+        tone: secure
+        list:
+          - "**Nothing is stored.** `passEnv` holds names. Each value is read from the harness's own environment when a command is started, a tool call or a background run, and set on that one command."
+          - "An agent's `bash` starts from the scrubbed environment and does not have the variable."
+          - "**The command itself does have it.** A tool handed a key by `passEnv` runs with the key in its environment, inside the agent's sandbox. The key is kept from the model only as far as the tool does not print it."
+          - "If the deployment's scrub does not drop a name listed in `passEnv`, every command already has that variable and passing it protects nothing. The row says so as a problem of the manual, in the log and in `phern doctor`, and names the scrub marks to match."
+      - title: The protocol allowlist
+        tone: secure
+        list:
+          - "`protocols` is `[cli]` by default. A manual whose `call_template_type` is not listed is skipped before anything runs: `it uses the \"http\" protocol, which this deployment does not allow (the `utcp` row's `protocols` is ['cli'])`."
+          - "`cli` is the one protocol the row runs through pH's own doors. `http` or `mcp` runs inside the harness process, by the UTCP library's own client, outside the sandbox and its egress rules. Naming one in `protocols` (and installing `utcp-http` or `utcp-mcp`) is how a deployment says it means that."
+          - "The check reads the manual's own `call_template_type`. The row does not check each tool's own `tool_call_template` against `protocols`, and a tool whose template is not `cli` is not held to `require_ran`."
+      - title: Not confined
+        tone: limit
+        list:
+          - "**Discovery.** It runs at mount for no agent, so `ctx.shell` has no workspace to derive a policy from. The captured discovery ran with `agent: null` and `confined_by: null`, in the session's base root. A manual's `command` is run as written, by `bash -c`, when the row mounts."
+          - "**A person's provisioning command** (`/code-graph install`, `status`), through `UtcpSeam.run_command`: unconfined on purpose, because `install` needs the network and no model chose it."
+          - "**A session with no sandbox backend.** `ctx.shell` then runs the command unconfined and says so at debug. `phern doctor` reports whether a backend confines."
+          - "**An agent that holds no workspace.** No workspace, no policy."
+      - links:
+          - {to: "node:shell", label: "ctx.shell and run_argv"}
+          - {to: "security", label: "Security across the whole harness"}
+          - {to: "ph-stabilize#node:permissions-fs", label: "permissions-fs, and what it does bound"}
+
+  - id: background
+    title: Background runs
+    summary: |
+      Every call is one command; nothing stays up and nothing listens on a
+      socket. A manual can name tools whose work is long, an indexing run, and
+      the row then starts such a tool itself, as a job of the agent whose tree
+      it is about, and reads its progress from stderr.
+    blocks:
+      - struct: ph_utcp:Background
+      - title: When a run starts
+        table:
+          columns: [trigger, what happens]
+          rows:
+            - ["`eager: true`, a root agent's first step", "the row's `agent/pre-step` listener starts each of `tools` once with no arguments, then calls on. It does not wait: the step is not held up. Once per manual and agent for the life of the mount"]
+            - ["a call of one of `tools`", "starts a run with the call's arguments, or joins the same request already going, and waits `waitS` for it"]
+            - ["a sub-agent with a tree of its own", "no eager run; its first call starts one"]
+      - event: agent/pre-step
+        note: |
+          The listener is registered with `ctx.on("agent/pre-step", seam.eager)`
+          and always returns `await next_()`. It never rejects a step.
+      - title: The command a run is
+        lang: text
+        note: |
+          Started by `ctx.shell.run_argv` for the owner agent, with no time
+          limit and the job's token as its signal. The row adds the tool's
+          name, `--progress` and `--args-json` to `command`.
+        code: |
+          /home/me/pH/.venv/bin/python -P -m ph_code_graph call code_index --progress --args-json {}
+      - title: Its progress, on stderr (generated)
+        lang: json
+        note: |
+          JSONL: `working` lines as it goes and exactly one last line, `done`,
+          `busy` or `failed`. stdout still carries one envelope. A stream that
+          ends with no last line is a command that was killed or died.
+        code: |
+          {"state":"working","done":0,"total":2,"what":"files"}
+          {"state":"done","done":2,"total":2,"what":"files","changed":true,"note":"Indexed 1 file (1 already current), 1 symbol.\nThe graph holds 3 symbols and 3 references across 2 files (python)."}
+      - struct: ph.toolcli:Progress
+      - title: How a call of a background tool is answered
+        text: |
+          1. The call starts a run, or joins the one going for its tree, and waits `waitS`.
+          2. A run that was this call's and ended in time is the call's answer: the run's own envelope.
+          3. Past `waitS` the row runs the command once more with `--wait 0`. The command answers what it says while another run holds its work, `state: indexing` in the tool's own shape, and the row adds one line: `[The code graph is still working: 120/539 files.]`. The run goes on.
+          4. A different request during a run is not queued. It waits for the run that is going; if that ends within `waitS` its own run starts, otherwise it gets the same answer.
+      - title: How the agent is told a run ended
+        table:
+          columns: [ending, what the agent reads]
+          rows:
+            - ["last line `done`", "`The <label> is finished: <count>. Searches now cover all of it.` and the run's `note`. Only if a call was answered \"still going\", or an unasked run changed something"]
+            - ["last line `busy`", "`The <label> did not run: another run holds what it builds.` Only to an agent answered \"still going\""]
+            - ["last line `failed`", "`The <label> stopped: <the tool's own sentence>`, how far it got, and that running the tool again goes on from there"]
+            - ["no last line", "`The <label> stopped: its command ended (exit N) without finishing: <its last words>`"]
+            - ["never started", "`The <label> could not be started: <why>`. A call that was waiting for it fails with the same"]
+            - ["a call took the result", "nothing more"]
+      - title: The note in the log (generated)
+        record: user/message
+        example: |
+          {"type": "user/message", "seq": 22,
+           "data": {"id": "4d245267-...", "role": "user",
+                    "content": [{"type": "text",
+                                 "text": "The code graph is finished: 4 files. Searches now cover all of it.\nIndexed 1 file (0 already current), 1 symbol.\nThe graph holds 1 symbol and 0 references across 1 file (python)."}],
+                    "source": {"kind": "plugin", "plugin": "ph_utcp", "form": "notice",
+                               "summary": "The code graph is finished: 4 files"}},
+           "surfaceOp": "append"}
+      - title: Durability
+        tone: durable
+        list:
+          - "The note is `inject`ed: it waits for the agent's next step, starts no turn, and is a `user/message` in that agent's log."
+          - "What a run builds is on disk in `$PH_TOOL_STATE`. A run that is stopped loses nothing it finished; the next run does only what is left."
+      - title: Limits
+        tone: limit
+        list:
+          - "A run is a job (`ctx.jobs`, kind `utcp-run`) owned by the agent's scope. It ends when the agent does and when the manual's row unmounts. A daemon that restarts picks no run up."
+          - "A run leaves no record of its own in the log. Its progress is in memory, read by the footer field `utcp-runs` (\"code graph 120/539 files\")."
+          - "A background tool must answer in the envelope: the row runs the command itself and parses what `call` prints. Without `envelope: true` the tool is an ordinary call."
+          - "In a deployment with no job runner each call does the work itself, to its end."
+          - "One run a tree at a time. Two root agents on one checkout each have their own state directory and their own run."
+      - links:
+          - {to: "node:utcp", label: "The utcp row"}
+          - {to: "ph-code-graph", label: "ph-code-graph's indexing run"}
+
+  - id: subagents
+    title: What a sub-agent gets
+    summary: |
+      A child agent runs on its parent's mount, so the `utcp` row and every
+      manual it discovered are the same for the child. What differs is whose
+      tree and whose sandbox a command runs in, and whether the child builds its
+      own state or asks its parent's.
+    blocks:
+      - title: Tools and confinement
+        tone: secure
+        list:
+          - "A manual's tools are registered on the row's scope (or the adding row's), not per agent. A child holds the subset of its parent's tools the spawn granted; it cannot add a manual."
+          - "A call is started for the agent that made it. A child's command runs under the child's own workspace policy, so a child in a worktree may write that worktree and not its parent's checkout."
+          - "A child gets the same `env`, `passEnv` and `writable` grants as its parent. None of them can be narrowed for one agent."
+      - title: Whose state a call uses (`UtcpSeam.owner_of`)
+        table:
+          columns: [the child's workspace, owner of the tree, what its calls do]
+          rows:
+            - ["`shared`: its parent's checkout, the same root", "the parent (and so on up)", "run in the parent's tree with the parent's `$PH_TOOL_STATE`; one index, one run at a time"]
+            - ["`readonly-scratch`, `worktree-ephemeral`, `overlay-ephemeral`: granted only to read the project", "the parent", "the same. A fan-out of read-only children asks one index and none of them builds a copy"]
+            - ["`worktree`, `overlay`: a tree it writes for keeps, with a different root", "the child itself", "run in the child's tree with a state directory in the child's scratch; a run starts at its first call"]
+      - title: What sharing changes in a call
+        list:
+          - "The working directory is the owner's root, because the working directory is how a `ph.toolcli` command is told its tree."
+          - "`$PH_TOOL_STATE` is the owner's state directory. It is not under the child's scratch, so the row adds it to that call's writable grants."
+          - "The answer says so: `[Paths here are relative to <the owner's root>, the tree this was built from.]`"
+          - "A manual with no `state` never shares: its command runs in the calling agent's own root."
+      - title: Limits
+        tone: limit
+        list:
+          - "The owner is found by walking `delegating_parent` through the agents the registry still holds. A child whose parent has gone is its own owner."
+          - "A child that shares its parent's state can write that state directory. The index is shared in both directions."
+      - links:
+          - {to: "security", label: "What a sub-agent inherits, across the harness"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      The row keeps nothing in the log beyond what any tool call leaves. What a
+      tool built is on disk, in a directory the same agent is told again. What
+      the row itself knows, which manuals answered and which runs are going, is
+      rebuilt at mount.
+    blocks:
+      - title: Kept
+        tone: durable
+        list:
+          - "**Tool calls.** Each call leaves `tool/call` and `tool/result`, like any tool. The result record holds the text the model read."
+          - "**Completion notes.** A background run's note is a `user/message` with `source.plugin: ph_utcp`."
+          - "**A tool's state.** `$PH_TOOL_STATE` is `<scratch root>/<session id>/<agent id>/<state>`. A resumed session has the same ids, so its commands are told the same directory and find what they built."
+          - "**Shared paths.** What a manual keeps under `writable` (a grammar cache) is outside any session."
+      - title: Rebuilt at mount
+        list:
+          - "**Discovery runs again** for every manual at every mount. A provider that was down last time and is up now gives its tools; one that went away is skipped and named in the prompt."
+          - "**The eager run starts again** before a root agent's first step, because the set of trees already warmed is in memory. A run that finds everything current ends `done` with `changed: false`, and the agent is told nothing."
+      - title: Not kept
+        tone: limit
+        list:
+          - "A background run in flight. Its job dies with the daemon; the next run does what is left."
+          - "A call in flight. A UTCP tool has no `idempotency_key` and no `reconcile`, so after a crash the model reads that the call's outcome is unknown. Whether the command finished is not known to the harness."
+          - "The structured value. `tool/result` holds the content, not the `value` a program received."
+          - "A `ManualState`. Why a manual was skipped is in the daemon's log and in `phern doctor` for the running mount, not in the session log."
+      - links:
+          - {to: "durability", label: "Durability across the whole harness"}
+
+  - id: dispatch
+    title: Which transport carries each message
+    summary: |
+      Most of this diagram is not the bus. A manual is added by a service call,
+      the UTCP client is a library call, and a command is a process. The bus
+      carries the tool pipeline's three waterfalls and the row's one listener.
+    blocks:
+      - table:
+          columns: [message, carried by, mode]
+          rows:
+            - ["[ctx.utcp.add(manual)](edge:add-manual)", "service call on `ctx.utcp`", ""]
+            - ["[register_manual](edge:register-manual), [call_tool](edge:call-tool)", "library call into `UtcpClient`, in the harness process", ""]
+            - ["[run_argv](edge:discovery-run), [run_argv, agent](edge:call-run)", "service call on `ctx.shell`", ""]
+            - ["[the command](edge:sandboxed-command)", "a process, `/bin/bash -c <script>`", ""]
+            - ["[register(definition)](edge:register-tool)", "service call on `ctx.tools`", ""]
+            - ["[tool call](edge:model-call)", "`tools/pre-execute`", waterfall]
+            - ["[execute(args, run)](edge:execute)", "`tools/execute`, then `tools/body`", "waterfall, then serial"]
+            - ["[value and text](edge:present)", "return value, then `tools/post-execute`", waterfall]
+            - ["[tool result](edge:tool-result)", "`tools/result`, then the `tool/result` record", emit]
+            - ["the eager background run", "`agent/pre-step`", waterfall]
+      - title: The pipeline's events
+        events: tools
+      - links:
+          - {to: "dispatch", label: "The four dispatch modes"}
+
+  - id: invariants
+    title: How the five invariants show up
+    summary: |
+      The row is a small case of each.
+    blocks:
+      - table:
+          columns: [invariant, here]
+          rows:
+            - ["I1 Everything is a plugin", "UTCP support is one row. A package's tools arrive through a second row that adds a manual; neither is a parameter of the loop."]
+            - ["I2 Registrations unwind", "The UTCP client, each manual's tools, its state entry and its background runs are effects of the scope that added them. Unmounting `code-graph` takes `code_graph` out of the registry and deregisters the manual from the client."]
+            - ["I3 Model-visible means logged", "A UTCP tool's answer reaches the model only as a `tool/result`. A run's ending reaches it as a logged `user/message`, not as text slipped into a request."]
+            - ["I4 The log is append-only", "The row appends and never rewrites. What a tool builds is kept outside the log, in the agent's scratch."]
+            - ["I5 Seams have three roles", "`ph-utcp` defines and provides `ctx.utcp`; `code-graph` and `text-index` consume it. The row itself consumes `ctx.tools`, `ctx.shell` and `ctx.fs` without knowing which backend confines."]
+      - links:
+          - {to: "invariants", label: "The five invariants"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      What the row does not do, in the terms the code uses.
+    blocks:
+      - title: Bounds
+        tone: limit
+        list:
+          - "`permissions-fs` does not apply. The sandbox is the only bound on what a command reads and writes."
+          - "Discovery and a person's `install` or `status` command run unconfined."
+          - "With no sandbox backend, or for an agent with no workspace, the command runs unconfined."
+          - "A protocol other than `cli`, once allowed, runs in the harness process outside the sandbox and its egress rules."
+          - "A tool handed a credential by `passEnv` holds it in its own environment."
+      - title: What a manual cannot say
+        tone: limit
+        list:
+          - "UTCP describes a tool with a name, a description and two schemas. Whether two calls may overlap and whether a call has effects are the profile's to state, per tool. The defaults are the careful ones."
+          - "No idempotency key and no `reconcile`: a call a crash interrupted is an unknown to the model."
+          - "No way to declare a tool irreversible."
+      - title: The cli protocol
+        tone: limit
+        list:
+          - "The library ignores the exit code and returns stderr as the result. A plain tool that fails answers with a sentence where it declared an object; the row reports that as `UTCP_BAD_ANSWER` and quotes the first 600 characters."
+          - "A command that is not installed is not an error to the library either. Its shell's \"command not found\" is read as the manual, and discovery fails with `Could not parse UTCP manual from CLI provider '<name>' output`."
+          - "A manual that fails discovery is not retried while the mount lives. A mount is what tries again."
+          - "The row rests on two private methods of `utcp_cli`'s protocol class. It checks they exist at mount and that each call went through them."
+      - title: Runs
+        tone: limit
+        list:
+          - "No run survives a restart, and none is recorded in the log."
+          - "A different request made during a run is not queued."
+          - "A tool whose name the registry already holds is not registered. It is listed as a problem of the manual and the manual's other tools stay; `names: bare` makes such a collision more likely."
+      - links:
+          - {to: "topic:bounds", label: "What bounds a UTCP tool"}
+          - {to: "security", label: "Security across the whole harness"}
+
+nodes:
+  pkg:
+    title: A package row (for example code-graph)
+    summary: |
+      A row of a package that publishes its own tools as a manual. It injects
+      `ctx.utcp`, builds a `Manual` from its own config and adds it at mount. It
+      also offers what goes with the tools: a skill, a provisioning command and
+      a `phern doctor` section. A manual written by hand in the `utcp` row's
+      config takes this box's place for a third-party command.
+    blocks:
+      - title: The shipped example
+        row: code-graph
+      - title: In a profile
+        lang: yaml
+        note: |
+          `rlm-indexed` already layers `utcp`, `code-graph` and `text-index`.
+          The package row's own options travel to the command in
+          `$PH_TOOL_CONFIG`, so the command indexes with what the profile says.
+        code: |
+          # $PH_HOME/profiles/graph.yaml
+          extends: rlm-indexed
+          rows:
+            - id: code-graph
+              config:
+                languages: [python]
+                waitS: 30
+      - title: What it hands the utcp row
+        struct: ph_utcp:Manual
+        fields: [template, names, envelope, state, writable, env, passEnv, background, tools]
+      - title: What it does itself
+        list:
+          - "Offers its skill only when the manual gave tools, so no prompt names a tool the session does not have."
+          - "Registers `/code-graph install|status`, run through `UtcpSeam.run_command` for the agent that typed it."
+          - "Contributes the \"Code graph\" doctor section: the tools, the command, where the index is."
+      - title: Durability
+        tone: durable
+        list:
+          - "The row holds no state. The index is in the calling agent's scratch (`code-graph/graph.db`), found again after a restart."
+      - title: Limits
+        tone: limit
+        list:
+          - "It needs `ctx.utcp`. A profile that mounts it without the `utcp` row leaves it waiting on that service."
+          - "If discovery of its manual fails, the row stays mounted with no tools and no skill."
+      - links:
+          - {to: "topic:publishing", label: "Publishing your own manual"}
+          - {to: "ph-code-graph", label: "The ph-code-graph page"}
+
+  loop:
+    title: Agent loop (ph-core)
+    summary: |
+      The loop sends the model the registered tools, UTCP ones included, and
+      hands each tool call in the model's message to `ctx.tools`. It knows
+      nothing of UTCP: a tool from a manual has the same schema, the same
+      records and the same place in Code Mode's listing as any other.
+    blocks:
+      - title: What the model is sent for a UTCP tool
+        list:
+          - "Its name as registered (`weather_forecast`, or `code_graph` under `names: bare`)."
+          - "The manual's `description`, unchanged."
+          - "The manual's `inputs` as the parameter schema. A tool that declares no inputs takes an empty object."
+      - title: What the loop also hears from the row
+        table:
+          columns: [what, how]
+          rows:
+            - ["a manual that gave no tools", "the prompt section `utcp:unavailable`, assembled into the system prompt"]
+            - ["a background run that ended", "a `user/message` injected into the agent's inbox, read at its next step"]
+            - ["an eager run", "the row's `agent/pre-step` listener, which starts the run and calls on"]
+      - title: The prompt note for a skipped manual (generated)
+        lang: markdown
+        code: |
+          # Tools that are not available
+
+          These tool providers were configured for this session and could not be reached, so their tools are not in your tool list. Do not call them; say so if a task needs one.
+
+          - `gone`: discovery failed: Could not parse UTCP manual from CLI provider 'gone' output
+          - `remote`: it uses the "http" protocol, which this deployment does not allow (the `utcp` row's `protocols` is ['cli'])
+      - links:
+          - {to: "ph-core", label: "ph-core: the loop"}
+          - {to: "edge:model-call", label: "A tool call"}
+
+  tools:
+    title: ctx.tools, the tool pipeline
+    summary: |
+      The registry every tool is registered on and the pipeline every call
+      crosses. A UTCP tool is a `ToolDefinition` like any other, so the gates of
+      other rows (`limits`, `hitl`, offloading) apply to it by name with no
+      change.
+    blocks:
+      - title: The definition the row registers
+        struct: ph.tools.definition:ToolDefinition
+        fields: [name, description, parameters, output, timeout_ms, self_limits, arguments_disposable, effect_free, is_concurrency_safe]
+      - title: Where each trait is read
+        table:
+          columns: [trait, read by]
+          rows:
+            - ["`concurrencySafe`", "the batch scheduler: a call that is not safe to overlap is a barrier in its batch"]
+            - ["`effectFree`", "the checkpoint policy: a call that changes nothing skips the durability barrier when made from a code cell, and `/revert` never lists it"]
+            - ["`selfLimits`", "`tool-result-offload`: a tool that bounds its own output is never offloaded"]
+            - ["`argumentsDisposable`", "`compaction-summarize`: such a tool's arguments may be elided in kept history"]
+            - ["`timeoutMs`", "`tools-timeout` on `tools/execute`, and the command's own budget in `run_argv`"]
+      - title: The waterfalls one call crosses
+        events: tools
+      - title: What a call leaves in the log (generated)
+        record: tool/call
+        example: |
+          {"type": "tool/call", "seq": 20, "time": 1794883347540,
+           "data": {"turn": 1, "step": 2, "callId": "t2", "name": "code_graph",
+                    "arguments": "{\"mode\": \"search\", \"query\": \"greet\"}"}}
+      - record: tool/result
+        example: |
+          {"type": "tool/result", "seq": 21, "time": 1794883347860,
+           "data": {"turn": 1, "step": 2,
+                    "message": {"id": "9ab55113-...", "role": "user",
+                                "content": [{"type": "tool-result", "toolCallId": "t2", "isError": false,
+                                             "content": [{"type": "text",
+                                                          "text": "1 match for 'greet':\n  function   greet                    app.py:1-2"}]}],
+                                "source": {"kind": "tool", "callId": "t2"}}},
+           "sourceEventSeqs": [20], "surfaceOp": "append"}
+      - title: Limits
+        tone: limit
+        list:
+          - "A name the registry already holds is refused. The row lists it as a problem of the manual (`<name> was not registered: ...`) and registers the rest."
+      - links:
+          - {to: "ph-core#node:tools", label: "The pipeline in full"}
+          - {to: "ph-stabilize", label: "The rows on these waterfalls"}
+
+  utcp:
+    title: The utcp row (ctx.utcp, UtcpSeam)
+    summary: |
+      The row creates one UTCP client, publishes `ctx.utcp`, and runs discovery
+      for every manual in its config. Each tool a manual names becomes a
+      registered pH tool whose body validates the arguments, runs the call for
+      the calling agent, and turns the answer into a value and a text. A manual
+      that cannot be discovered is skipped; the mount goes ahead.
+    blocks:
+      - row: utcp
+      - title: In a profile
+        lang: yaml
+        note: "The full example, with every setting of a manual, is under [Configuring a manual](topic:configuring)."
+        code: |
+          - id: utcp
+            config:
+              protocols: [cli]
+              timeoutMs: 60000
+              manuals:
+                - template:
+                    name: weather
+                    call_template_type: cli
+                    commands:
+                      - command: weather-tools manual
+                  state: weather
+                  tools:
+                    forecast: {concurrencySafe: true, effectFree: true}
+      - title: The service it provides
+        struct: ph_utcp:UtcpSeam
+      - title: Its methods
+        table:
+          columns: [method, what it does]
+          rows:
+            - ["`await add(manual, *, scope=None) -> ManualState`", "discover a manual and register its tools on `scope`; never raises for a manual that cannot be reached"]
+            - ["`run_command(manual, argv, agent, *, timeout_ms) -> Awaitable[ShellResult]`", "run one of the manual's own commands as a person asked (`install`, `status`), with the manual's variables, state directory and tree; unconfined"]
+            - ["`owner_of(agent) -> AgentHandle`", "the agent whose tree `agent`'s tools are about: itself, or the nearest ancestor whose tree it shares"]
+            - ["`working(name, owner) -> str | None`", "the line added to an answer while a run for that tree is going"]
+            - ["`reading(session) -> StatusReading | None`", "the footer's phrase for a session's runs"]
+            - ["`report() -> list[tuple[str, str]]`", "the `phern doctor` section: each manual and what it gave"]
+            - ["`unavailable() -> str`", "the prompt note naming the manuals that gave no tools"]
+            - ["`await eager(request, next_) -> PreStepDecision`", "the `agent/pre-step` listener that starts eager runs"]
+      - title: What it registers at mount
+        table:
+          columns: [what, where, for]
+          rows:
+            - ["the UTCP client", "an effect of the row (`utcp-client`), closed at unmount", "one client serves every agent of the mount"]
+            - ["`ctx.utcp`", "`ctx.provide(UTCP, seam)`", "other rows add manuals"]
+            - ["each manual's tools", "`ctx.tools.register(definition, scope=...)`", "the model"]
+            - ["a prompt section `utcp:unavailable`", "`ctx.system_prompt`", "the model: which providers gave no tools"]
+            - ["a diagnostic `utcp` (\"UTCP tools\")", "`phern doctor`", "a person"]
+            - ["a listener on `agent/pre-step`", "the bus, waterfall", "eager background runs"]
+            - ["a footer field `utcp-runs`", "`ctx.tui_status`", "a person: how far a run has got"]
+      - title: What it listens to
+        event: agent/pre-step
+      - title: What became of each manual (generated)
+        lang: json
+        note: |
+          `UtcpSeam.states` after mounting three manuals: one good with an
+          overlapping `writable` path, one whose command does not exist, one
+          over a protocol that is not allowed.
+        code: |
+          {"ph_code_graph": {"tools": ["code_graph", "code_index"],
+                             "problems": ["/home/me/repo/sub cannot be granted as writable: it overlaps the workspace /home/me/repo"]},
+           "gone":          {"tools": [],
+                             "problems": ["discovery failed: Could not parse UTCP manual from CLI provider 'gone' output"]},
+           "remote":        {"tools": [],
+                             "problems": ["it uses the \"http\" protocol, which this deployment does not allow (the `utcp` row's `protocols` is ['cli'])"]}}
+      - struct: ph_utcp:ManualState
+      - title: The error codes a call can fail with
+        table:
+          columns: [code, when]
+          rows:
+            - ["`UTCP_BAD_ARGUMENTS`", "the model's arguments do not match the manual's `inputs`; nothing ran"]
+            - ["`UTCP_FAILED`", "the UTCP client raised, or a background run could not be started"]
+            - ["`UTCP_TIMEOUT`", "the command ran past its budget and was stopped"]
+            - ["`UTCP_BAD_ANSWER`", "a plain tool answered outside its declared `outputs`, an enveloped tool sent no envelope, or a command the row ran itself printed no JSON"]
+            - ["`UTCP_UNCONFINED`", "the command did not go through `run_argv`; the answer is withheld"]
+            - ["the tool's own code", "an envelope with `ok: false` is raised with its `error.code`, for example `CODE_GRAPH_FAILED`"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The row writes one kind of record itself: the `user/message` that tells an agent a background run ended. Everything else in the log is the pipeline's `tool/call` and `tool/result`."
+          - "`states`, `manuals`, `runs` and `warmed` are memory. A mount rebuilds them by running discovery again."
+      - title: Security
+        tone: secure
+        list:
+          - "Only the protocols in `protocols` are run. `cli` alone by default."
+          - "A manual's `writable` paths are checked against the session's root once, at `add`, and again by `ctx.shell` on each call against the calling agent's root."
+          - "It stores no credential. `passEnv` is a list of names."
+      - title: Limits
+        tone: limit
+        list:
+          - "Adding a name that is already held and gave tools changes nothing and answers with the state there is. A changed manual needs its owner's scope to unmount first."
+          - "A template with no `name` is skipped."
+          - "The client is typed `Any`: the library ships no types."
+      - links:
+          - {to: "topic:configuring", label: "Configuring a manual"}
+          - {to: "topic:background", label: "Background runs"}
+          - {to: "topic:subagents", label: "What a sub-agent gets"}
+
+  client:
+    title: UtcpClient with PhCliProtocol
+    summary: |
+      The UTCP library's client, in the harness process. It holds the manuals,
+      builds the shell script for a `cli` call and parses the answer.
+      `PhCliProtocol` is the library's `cli` protocol with one thing replaced:
+      how the script is started. The library would start `/bin/bash -c` itself
+      in the client's own directory; this starts it through
+      `ctx.shell.run_argv`, for the agent the call is for.
+    blocks:
+      - title: What is kept and what is replaced
+        table:
+          columns: [part, whose]
+          rows:
+            - ["building the script, substituting arguments", "the library's, unchanged: its security fixes live there"]
+            - ["`_prepare_environment`", "replaced: the template's inherited names are handed to `run_argv`, which selects them from the scrubbed environment; only the template's own values travel with the script"]
+            - ["`_execute_shell_script`", "replaced: `ctx.shell.run_argv((\"/bin/bash\", \"-c\", script), ...)`"]
+            - ["logging \"Missing argument\" at ERROR", "lowered to debug inside a pH call: every optional field the model left out would log one"]
+      - title: Who a call is for
+        struct: ph_utcp._library:Call
+        note: |
+          The library's `call_tool` has no parameter for the agent, and one
+          client serves every agent. So the `Call` travels in a `ContextVar`,
+          set by `calling(call)` for the span of one call and read a few frames
+          down in the same task. Outside such a span the protocol behaves as
+          the library's own.
+      - title: Failing closed
+        tone: secure
+        list:
+          - "`install()` registers `PhCliProtocol` as a factory for `cli`, which the library resolves ahead of a shared instance of the same type. It refuses the mount when either overridden method is missing from the library's class."
+          - "`Call.ran` is set when the script goes through `run_argv`. `require_ran` withholds an answer whose call did not, with `UTCP_UNCONFINED`."
+          - "The script is run by `/bin/bash -c`, not the login shell: `bash -lc` reads the person's profile, and what a profile prints would be parsed as the answer."
+      - title: Limits
+        tone: limit
+        list:
+          - "The override rests on two private methods of `utcp_cli`. `ph-utcp` pins the version it was written against."
+          - "Importing `utcp` calls `logging.basicConfig(level=INFO)`. The one module that imports it puts the root logger back and sets the library's loggers to WARNING."
+          - "The registry of protocols is process-wide, so `install()` is too. It stays in place for the life of the process."
+          - "A protocol other than `cli` is the library's own client, in the harness process."
+      - links:
+          - {to: "edge:call-run", label: "The run_argv call it makes"}
+          - {to: "node:shell", label: "ctx.shell"}
+
+  shell:
+    title: ctx.shell (run_argv)
+    summary: |
+      ph-core's shell seam. `run_argv` runs one argv for an agent: in the
+      agent's working directory, with the workspace's redirection variables, and
+      confined by the sandbox when a backend exists. `ph-utcp` uses it rather
+      than `run`, because `run` puts the login shell in front and a UTCP tool's
+      stdout is parsed as its answer.
+    blocks:
+      - title: The method
+        lang: python
+        note: "`ShellService` is published as `ctx.shell`. Its other methods are `run` (the login shell in front) and `run_recorded` (a person's `!` command, with its log records)."
+        code: |
+          async def run_argv(
+              self,
+              argv: tuple[str, ...],
+              *,
+              cwd: Path | None = None,
+              agent: AgentHandle | None = None,
+              timeout_ms: int | None = None,
+              policy: SandboxPolicy | None = None,
+              scope: Context | None = None,
+              signal: Cancellation | None = None,
+              keep_env: Collection[str] | None = None,
+              extra_env: Mapping[str, str] | None = None,
+              writable_extra: Sequence[str] = (),
+              on_stderr_line: Callable[[str], None] | None = None,
+          ) -> ShellResult
+      - title: The arguments ph-utcp passes
+        table:
+          columns: [argument, value]
+          rows:
+            - ["`argv`", "`(\"/bin/bash\", \"-c\", <script>)`"]
+            - ["`cwd`", "the tree the call is about; a template's relative `working_dir` is under it"]
+            - ["`agent`", "the calling agent, or `None` for discovery"]
+            - ["`timeout_ms`", "the row's or the tool's budget; `None` for a background run"]
+            - ["`signal`", "the call's cancellation, or a run's job token"]
+            - ["`keep_env`", "the names the template inherits"]
+            - ["`extra_env`", "the template's values, the call's arguments, the manual's `env`, `passEnv` values, `PH_TOOL_STATE`"]
+            - ["`writable_extra`", "the manual's `writable` paths, plus a shared state directory"]
+            - ["`on_stderr_line`", "only for a background run: each progress line as it is written"]
+      - title: What comes back
+        struct: ph.seams.shell:ShellResult
+      - title: The policy it derives
+        struct: ph.seams.sandbox:SandboxPolicy
+        note: |
+          Built by `workspace_policy(workspace)` from the agent's writable
+          roots, with the honored `writable_extra` added. It names no mode: the
+          sandbox seam fills that from the session's posture.
+      - title: Security
+        tone: secure
+        list:
+          - "Confinement is asked for only where something can enforce it. With a backend, `confine()` refuses rather than passing through, so a command either runs confined or does not run."
+          - "A grant in `writable_extra` holds under every mode, `read-only` included. One that overlaps the workspace is dropped."
+          - "`keep_env` selects from the scrubbed environment. Naming a dropped variable does not fetch it."
+          - "A confined command that failed has its output read for a refusal. A recognized one is recorded as `sandbox/denied` for that agent."
+      - title: Limits
+        tone: limit
+        list:
+          - "No backend, or no workspace for the agent: the command runs unconfined, and `confined_by` is `None`. Only a debug line says a workspace wanted confinement and got none."
+          - "A run through `run_argv` leaves no `shell/command` record. That pair is written for a person's `!` command only."
+      - links:
+          - {to: "ph-core", label: "ph-core: the seams"}
+          - {to: "security", label: "The sandbox and the containment ladder"}
+
+  cmd:
+    title: The command (the tool's cli)
+    summary: |
+      The outside party: a program on the machine that prints a UTCP manual when
+      asked and runs one tool per invocation. Nothing stays up between calls.
+      It may be any program in any language; one built with `ph.toolcli` also
+      answers in an envelope, takes `--progress` and reads `$PH_TOOL_STATE`.
+    blocks:
+      - title: The subcommands of a ph.toolcli program
+        lang: text
+        code: |
+          ph-code-graph call code_graph --mode define --query claim_slot --format text
+          ph-code-graph tools                    # the tools and their flags
+          ph-code-graph manual                   # the UTCP manual
+          ph-code-graph manual --registration    # the template a harness registers
+          ph-code-graph status                   # is the package ready
+          ph-code-graph install                  # fetch what it needs, now
+      - title: What the command is told
+        table:
+          columns: [how, what]
+          rows:
+            - ["working directory", "the tree it is about (its default `--root`)"]
+            - ["`$PH_TOOL_STATE`", "where it keeps what it builds; `state_dir()` reads it. Without it the tool uses `$PH_CACHE`, keyed by a digest of the workspace root"]
+            - ["`$PH_TOOL_CONFIG`", "the session row's config, JSON by row id"]
+            - ["`TMPDIR`", "the agent's scratch, when confined"]
+            - ["flags", "one `--name=value` per top-level argument"]
+      - title: Security
+        tone: secure
+        list:
+          - "For a tool call it is a child of the sandbox backend, started for the calling agent. Under `read-only` it can write the agent's scratch and the manual's `writable` paths and nothing else."
+          - "It sees the variables its template inherits from the scrubbed environment, plus what the manual sets and passes by name."
+      - title: Limits
+        tone: limit
+        list:
+          - "It is trusted as far as its sandbox reaches. `permissions-fs` rules do not apply to what it reads."
+          - "Discovery (`<cli> manual`) and a person's `status` or `install` run it unconfined."
+          - "A crash in it is a failed call, not a failed harness: the parser, the grammars or the model it loads live in its process."
+      - links:
+          - {to: "topic:publishing", label: "Publishing your own manual"}
+          - {to: "edge:manual-json", label: "The manual it prints"}
+          - {to: "edge:envelope", label: "The envelope it prints"}
+
+edges:
+  add-manual:
+    transport: service
+    summary: |
+      A package row calls `await ctx.utcp.add(manual, scope=ctx)` at mount. The
+      row hands over a `Manual`; the seam runs discovery, registers the tools on
+      the given scope and answers with a `ManualState`. A manual listed in the
+      `utcp` row's own config goes through the same method, with no scope.
+    blocks:
+      - title: The method
+        lang: python
+        code: |
+          async def add(self, manual: Manual, *, scope: Context | None = None) -> ManualState
+      - title: The argument
+        struct: ph_utcp:Manual
+      - title: The answer
+        struct: ph_utcp:ManualState
+      - title: What add does, in order
+        text: |
+          1. Takes the manual's name from `template.name`, with non-word characters turned into `_`. No name: skipped.
+          2. A name already held that gave tools: answers with the state there is. Nothing is discovered twice.
+          3. Makes each `writable` path a directory, and refuses one that overlaps the session's root.
+          4. Runs discovery and registers the tools.
+          5. Adds a problem for each `passEnv` name the deployment's scrub does not drop.
+          6. Registers an effect on the scope: unwinding it forgets the state, cancels the manual's runs and deregisters the manual from the client.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`add` never raises for a manual that cannot be reached. The state says why, each problem is logged as a warning, and the caller decides what to do without tools."
+          - "With no `scope`, the manual belongs to the `utcp` row and leaves when that row unmounts."
+
+  register-manual:
+    transport: call
+    summary: |
+      The seam validates the template with the library's
+      `CallTemplateSerializer`, deregisters any manual the client already holds
+      under that name, and calls `client.register_manual(call_template)` inside
+      `calling(call)`. The client answers with the tools it found, or with
+      errors.
+    blocks:
+      - title: The gate before it
+        tone: secure
+        list:
+          - "`template.call_template_type` must be in the row's `protocols`. Otherwise the manual is skipped here and nothing is run."
+      - title: Who the discovery call is for
+        struct: ph_utcp._library:Call
+        fields: [root, timeout_ms, env, writable, agent, ran]
+        note: |
+          For discovery `agent` is `None`, `root` is the session's base root and
+          `timeout_ms` is the row's `discoveryTimeoutMs`.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Any exception becomes `discovery failed: <error>` in the manual's state. A result with `success: false` becomes `discovery failed: <the library's reasons>`."
+          - "For a `cli` manual, a discovery that did not go through `run_argv` fails with the `UTCP_UNCONFINED` sentence."
+
+  discovery-run:
+    transport: service
+    summary: |
+      Inside `register_manual` the library builds a script from the template's
+      commands and `PhCliProtocol` starts it with `ctx.shell.run_argv`. There is
+      no agent yet, so nothing confines it. stdout comes back and the library
+      parses it as the manual.
+    blocks:
+      - title: The call as made (generated)
+        lang: python
+        note: |
+          Captured from a real mount. `keep_env` is the template's
+          `inherit_env_vars`; `extra_env` is the manual's `env`.
+        code: |
+          await ctx.shell.run_argv(
+              ("/bin/bash", "-c",
+               '#!/bin/bash\n# Variables to store command outputs\n'
+               'CMD_0_OUTPUT=$(/home/me/pH/.venv/bin/python -P -m ph_code_graph manual 2>&1)\n'
+               'echo "${CMD_0_OUTPUT}"'),
+              cwd=Path("/home/me/repo"),
+              agent=None,
+              timeout_ms=60000,
+              keep_env=("PATH", "HOME", "LANG", ..., "PH_TOOL_CONFIG", "PH_TOOL_STATE"),
+              extra_env={"PH_TOOL_CONFIG": '{"code-graph":{}}'},
+              writable_extra=(),
+          )
+          # -> ShellResult(exit_code=0, stdout='{"utcp_version":"1.2.0",...', confined_by=None, ...)
+      - struct: ph.seams.shell:ShellResult
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "**Unconfined.** `agent` is `None`, so `run_argv` derives no policy. Discovery runs a manual's command with the harness's own reach."
+          - "Past `discoveryTimeoutMs` the command is stopped and discovery fails with `the UTCP command ran past 60s and was stopped`."
+          - "`$PH_TOOL_STATE` is not set: there is no agent to have a scratch."
+
+  manual-command:
+    transport: process
+    summary: |
+      The shell seam starts `/bin/bash -c <script>` through the subprocess
+      seam. The script runs the template's command, here `<cli> manual`, with
+      stderr merged into stdout, and echoes what it printed.
+    blocks:
+      - title: The script the library builds (generated)
+        lang: bash
+        code: |
+          #!/bin/bash
+          # Variables to store command outputs
+          CMD_0_OUTPUT=$(/home/me/pH/.venv/bin/python -P -m ph_code_graph manual 2>&1)
+          echo "${CMD_0_OUTPUT}"
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The library reads the output whatever the exit code. A command that is not installed prints the shell's own complaint, which is not a manual; see [the reply](edge:manual-json)."
+          - "The `2>&1` is the library's. A `2>/dev/null` in the template would lose to it, which is why a `ph.toolcli` program closes its own stderr for a `manual` or a `call`."
+
+  manual-json:
+    transport: process
+    summary: |
+      The command prints its UTCP manual on stdout: a version, and for each tool
+      a name, a description, an `inputs` schema, an `outputs` schema and the
+      call template that runs it. The client parses it and hands the tools back
+      to the seam.
+    blocks:
+      - title: A manual (generated by `ph-code-graph manual`, trimmed)
+        lang: json
+        note: |
+          Two tools; one is shown, with its schemas cut short. `outputs` is the
+          envelope's schema with the tool's own output as `value`. The names are
+          the tool's own; the client prefixes each with the manual's name
+          (`ph_code_graph.code_graph`).
+        code: |
+          {"utcp_version": "1.2.0",
+           "manual_version": "0.12.0",
+           "tools": [
+             {"name": "code_graph",
+              "description": "Ask about a codebase's structure instead of reading it. ...",
+              "inputs": {"type": "object", "title": "GraphArgs", "additionalProperties": false,
+                         "properties": {
+                           "mode": {"type": "string", "default": "search",
+                                    "enum": ["search", "define", "callers", "callees", "impact", "entities"]},
+                           "query": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null},
+                           "limit": {"type": "integer", "default": 30, "minimum": 1, "maximum": 300}}},
+              "outputs": {"type": "object", "required": ["ok"],
+                          "properties": {
+                            "ok": {"type": "boolean", "description": "Whether the call succeeded."},
+                            "value": {"title": "GraphValue", "type": "object", "properties": {"...": {}}},
+                            "text": {"type": "string", "description": "The result as prose, written for a model to read."},
+                            "error": {"type": "object",
+                                      "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}},
+                          "$defs": {"SymbolValue": {"...": {}}}},
+              "tags": ["ph_code_graph"],
+              "tool_call_template": {
+                "call_template_type": "cli",
+                "commands": [{"command": "/home/me/pH/.venv/bin/python3 -P -m ph_code_graph call code_graph --format json --mode=UTCP_ARG_mode_UTCP_END --query=UTCP_ARG_query_UTCP_END --path=UTCP_ARG_path_UTCP_END --kind=UTCP_ARG_kind_UTCP_END --distance=UTCP_ARG_distance_UTCP_END --limit=UTCP_ARG_limit_UTCP_END --offset=UTCP_ARG_offset_UTCP_END"}],
+                "inherit_env_vars": ["PATH", "HOME", "...", "PH_TOOL_CONFIG", "PH_TOOL_STATE"]}}]}
+      - title: The call template
+        text: |
+          Each tool carries its own `tool_call_template`. For `cli` it is one command line with a placeholder a field: `--name=UTCP_ARG_name_UTCP_END`. One word a flag, so a value that starts with `-` is an argument and not a flag. A placeholder name takes letters, digits and underscores; `ph.toolcli` refuses to print a manual for a tool with a field a placeholder cannot name.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Output that is not a manual: `discovery failed: Could not parse UTCP manual from CLI provider 'gone' output`. This is what a command that is not installed produces."
+          - "A manual that names no tools gives the state `its manual names no tools`."
+          - "The manual is read once, at mount. A provider that changes its tools is seen at the next mount."
+
+  register-tool:
+    transport: service
+    summary: |
+      For each tool in the manual the seam builds a `ToolDefinition` and calls
+      `ctx.tools.register(definition, scope=scope)`. The scope is the one `add`
+      was given, so the tools leave with the row that added the manual.
+    blocks:
+      - title: How a manual's tool maps to a definition
+        table:
+          columns: [definition field, from]
+          rows:
+            - ["`name`", "`<manual>_<tool>`, or the tool's own name under `names: bare`"]
+            - ["`description`", "the manual's, unchanged"]
+            - ["`parameters`", "the manual's `inputs`, made an object schema"]
+            - ["`output`", "the manual's `outputs`; under `envelope: true`, the schema of the envelope's `value`"]
+            - ["`timeout_ms`", "the tool's `timeoutMs`, else the row's"]
+            - ["`is_concurrency_safe`, `effect_free`, `self_limits`, `arguments_disposable`", "the manual's `tools` table; every default is the careful answer"]
+            - ["`present_call`, `present_result`", "the tool's `view`, when it has one"]
+            - ["`execute`", "the body that makes the UTCP call"]
+      - struct: ph.tools.definition:ToolDefinition
+        fields: [name, description, parameters, output, timeout_ms, self_limits, arguments_disposable, effect_free, is_concurrency_safe]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The registry raises `ValueError` for a name it already holds. The seam records `<name> was not registered: <error>` and goes on with the manual's other tools."
+          - "A manual counts as available when at least one tool was registered."
+
+  model-call:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The model's message names a UTCP tool. The loop hands the call to
+      `ctx.tools`, which dispatches `tools/pre-execute` before anything runs.
+      Rows on that waterfall may allow, deny or ask, by the tool's registered
+      name. The `utcp` row is not a listener here.
+    blocks:
+      - event: tools/pre-execute
+        args:
+          - [execution, ToolExecution, "the call: its name, arguments, call id, agent, session and scope"]
+      - title: One call in flight
+        struct: ph.tools.definition:ToolExecution
+      - title: What is logged once the gates pass (generated)
+        record: tool/call
+        example: |
+          {"type": "tool/call", "seq": 12, "time": 1794883344014,
+           "data": {"turn": 1, "step": 1, "callId": "t1", "name": "code_index", "arguments": "{}"}}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A `Deny` comes back to the model as a failed result; the command never starts."
+          - "`limits.toolCalls.perTool` and `hitl.interruptOn` key on the registered name, so `weather_forecast` under the default naming."
+      - links:
+          - {to: "ph-stabilize", label: "The rows that gate a call"}
+
+  execute:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The pipeline dispatches `tools/execute` around the tool body, then
+      `tools/body`, then calls the definition's `execute(args, run)`. For a UTCP
+      tool that body is in the `utcp` row: it checks the arguments, finds the
+      owner of the tree, and makes the call.
+    blocks:
+      - event: tools/execute
+        args:
+          - [execution, ToolExecution, "the call; a wrapper may replace its `signal` for the body"]
+      - title: What the body is handed
+        struct: ph.tools.definition:ToolRunContext
+      - title: What the body does
+        text: |
+          1. Validates the arguments against the manual's `inputs` schema. A violation raises `UTCP_BAD_ARGUMENTS`.
+          2. Asks `owner_of(run.agent)` whose tree the call is about.
+          3. For a background tool, starts or joins a run (see [Background runs](topic:background)).
+          4. Otherwise builds a `Call` and calls `client.call_tool` inside `calling(call)`.
+          5. For a `cli` tool, checks the command went through `run_argv`.
+          6. Under `envelope: true`, unwraps the envelope. Otherwise checks the answer against the declared `outputs`.
+      - title: The listeners already on this waterfall
+        list:
+          - "`tools-timeout` bounds the body by the definition's `timeout_ms` and answers `tool \"<name>\" exceeded its <n> ms budget`."
+          - "The workspace seam's wrapper takes a restore point for a Code Mode cell. It does nothing for a UTCP call."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An exception from the body becomes a failed result with its code. The turn goes on."
+          - "A canceled call raises `Canceled` and is not turned into `UTCP_FAILED`."
+
+  call-tool:
+    transport: call
+    summary: |
+      The body calls `await client.call_tool("<manual>.<tool>", arguments)`
+      under `calling(call)`, where the `Call` says who the call is for. The
+      library substitutes the arguments into the tool's command and runs it
+      through `PhCliProtocol`. What comes back is the parsed answer.
+    blocks:
+      - title: Who the call is for
+        struct: ph_utcp._library:Call
+      - title: How the Call is filled for a tool call
+        table:
+          columns: [field, value]
+          rows:
+            - ["`root`", "the owner's root for a manual with `state`, else the calling agent's root"]
+            - ["`timeout_ms`", "the tool's budget"]
+            - ["`env`", "the manual's `env`, each `passEnv` value read now, and `PH_TOOL_STATE`"]
+            - ["`writable`", "the manual's `writable`, plus the owner's state directory when it is not in the caller's scratch"]
+            - ["`agent`, `signal`", "the calling agent and the call's cancellation"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Any exception other than a `HarnessError` or a cancellation becomes `<manual>.<tool> failed: <error>` with `UTCP_FAILED`."
+          - "The library returns stderr as the result and ignores the exit code. A failure of a plain tool is therefore seen one step later, as an answer in the wrong shape."
+
+  call-run:
+    transport: service
+    summary: |
+      `PhCliProtocol` starts the call's script with `ctx.shell.run_argv`, this
+      time for the calling agent. The shell seam places it in the agent's tree,
+      derives the workspace policy, adds the manual's writable grants and asks
+      the sandbox to confine it.
+    blocks:
+      - title: The call as made (generated)
+        lang: python
+        note: |
+          Captured under a `read-only` session with a `bwrap` backend. The
+          arguments travel as environment variables the script quotes, not as
+          text spliced into it. An argument the model left out is
+          `MISSING_ARG_<name>`, which a `ph.toolcli` command reads as absent.
+        code: |
+          await ctx.shell.run_argv(
+              ("/bin/bash", "-c", <script>),
+              cwd=Path("/home/me/repo"),
+              agent=<the calling agent>,
+              timeout_ms=120000,
+              signal=<the call's cancellation>,
+              keep_env=("PATH", "HOME", "LANG", ..., "PH_TOOL_CONFIG", "PH_TOOL_STATE"),
+              extra_env={
+                  "__UTCP_ARG_aceb813bed408afd_mode": "search",
+                  "__UTCP_ARG_aceb813bed408afd_query": "greet",
+                  "__UTCP_ARG_aceb813bed408afd_path": "MISSING_ARG_path",
+                  ...
+                  "PH_TOOL_STATE": "<scratch root>/<session id>/<agent id>/code-graph",
+              },
+              writable_extra=(),
+          )
+          # -> ShellResult(exit_code=0, confined_by="bwrap", cwd="/home/me/repo",
+          #                argv=("bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+          #                      "--bind", "<agent scratch>", "<agent scratch>", ...), ...)
+      - title: What comes back
+        struct: ph.seams.shell:ShellResult
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`canceled` raises `Canceled`. `timed_out` raises `UTCP_TIMEOUT`: `the UTCP command ran past 120s and was stopped`."
+          - "A sandbox that refuses to confine raises; the call fails with that error and the command does not run."
+          - "With no backend the same call runs unconfined."
+      - links:
+          - {to: "node:shell", label: "run_argv's signature and every argument"}
+
+  sandboxed-command:
+    transport: process
+    summary: |
+      The subprocess seam starts the confined argv: the sandbox backend, then
+      `/bin/bash -c <script>`, then the tool's command with its arguments. It
+      runs in the calling agent's tree and can write only what the session's
+      mode, the agent's scratch and the manual's grants allow.
+    blocks:
+      - title: The script for one call (generated)
+        lang: bash
+        code: |
+          #!/bin/bash
+          # Variables to store command outputs
+          CMD_0_OUTPUT=$(/home/me/pH/.venv/bin/python -P -m ph_code_graph call code_graph --format json \
+            --mode="$__UTCP_ARG_aceb813bed408afd_mode" --query="$__UTCP_ARG_aceb813bed408afd_query" \
+            --path="$__UTCP_ARG_aceb813bed408afd_path" --kind="$__UTCP_ARG_aceb813bed408afd_kind" \
+            --distance="$__UTCP_ARG_aceb813bed408afd_distance" --limit="$__UTCP_ARG_aceb813bed408afd_limit" \
+            --offset="$__UTCP_ARG_aceb813bed408afd_offset" 2>&1)
+          echo "${CMD_0_OUTPUT}"
+      - title: What it may write
+        table:
+          columns: [session mode, the workspace, the agent's scratch and `$PH_TOOL_STATE`, a `writable` path, anywhere else]
+          rows:
+            - ["`workspace-write`", "yes", "yes", "yes", "no"]
+            - ["`read-only`", "no", "yes", "yes", "no"]
+      - title: Security
+        tone: secure
+        list:
+          - "The table is what `test_under_a_sandbox_a_command_writes_only_what_the_session_and_its_manual_allow` holds, under a real backend."
+          - "A `writable` path inside the workspace does not reopen it: under `read-only` a write there fails like any other write to the tree."
+          - "The backend also bounds the network: a confined command reaches only the hosts the deployment allows."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A write the sandbox refuses is the command's own failure. If the backend's wording is recognized, the refusal is also recorded as `sandbox/denied`."
+          - "Reads are not narrowed by `permissions-fs`."
+      - links:
+          - {to: "topic:bounds", label: "What bounds a UTCP tool"}
+
+  envelope:
+    transport: process
+    summary: |
+      The command prints one JSON object on stdout and exits. For a manual with
+      `envelope: true` that object is `ph.toolcli`'s envelope:
+      `{ok, value, text, error}`. For a plain manual it is whatever the tool
+      declared as its `outputs`. The library parses it and returns it to the
+      row.
+    blocks:
+      - title: An envelope, success (generated)
+        lang: json
+        note: |
+          `ph-code-graph call code_graph --mode search --query greet --format json`,
+          in a scratch tree with one file. `value` is the tool's declared
+          output; `text` is the tool's own rendering, written in the command's
+          process.
+        code: |
+          {"ok": true,
+           "value": {"mode": "search", "query": "greet", "definitions": 0, "offset": 0,
+                     "indexed_files": 1, "indexing": false,
+                     "symbols": [{"name": "greet", "kind": "function", "path": "app.py",
+                                  "start_line": 1, "end_line": 2, "doc": null, "lines": 2}],
+                     "edges": [], "rings": [], "total": 1, "truncated": false},
+           "text": "1 match for 'greet':\n  function   greet                    app.py:1-2"}
+      - title: An envelope, failure (generated)
+        lang: json
+        note: |
+          The exit code was 0. A failure is reported inside the object, because
+          the UTCP client ignores exit codes.
+        code: |
+          {"ok": false,
+           "error": {"code": "CODE_GRAPH_FAILED",
+                     "message": "no code index exists for this workspace yet; run `code_index` first"}}
+      - title: Envelope or plain
+        table:
+          columns: ["", "`envelope: true`", "plain (the default)"]
+          rows:
+            - ["the tool's value", "the envelope's `value`", "the whole answer"]
+            - ["checked against", "the schema of `value` in the manual's `outputs`", "the manual's `outputs`"]
+            - ["what the model reads", "the envelope's `text`", "the value rendered: a string as it is, anything else as indented JSON"]
+            - ["a failure", "`ok: false` is raised with the tool's own `error.code` and `error.message`", "an answer outside the declared shape is `UTCP_BAD_ANSWER`, quoting the first 600 characters"]
+            - ["an object with no boolean `ok`", "`<tool> did not answer with an envelope: ...` (`UTCP_BAD_ANSWER`)", "not applicable"]
+      - title: Why it is stated, not detected
+        text: |
+          `envelope` is a setting of the manual. An object with an `ok` key is not a promise, so the row does not guess.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A plain `cli` tool that fails usually answers with a sentence, since the library hands back stderr. The sentence is quoted in the error, which is what the model needs."
+          - "Nothing but the one object may be on stdout. A dependency's warning on stderr would be merged in by the client, which is why `ph.toolcli` discards its own stderr during a call."
+
+  present:
+    transport: call
+    summary: |
+      The body returns the value to the pipeline. For an enveloped tool it first
+      calls `run.present(value, text_content(text))`, so the registry shows the
+      tool's own text for that value. The pipeline then dispatches
+      `tools/post-execute`, where a row may replace what the model reads.
+    blocks:
+      - event: tools/post-execute
+        args:
+          - [execution, ToolExecution, "the call"]
+          - [result, ToolExecutionResult, "the outcome so far: the value, the content, whether it is an error"]
+      - title: The frozen outcome
+        struct: ph.tools.definition:ToolExecutionResult
+      - title: What the row adds to the text
+        list:
+          - "`[Paths here are relative to <tree>, the tree this was built from.]` when the command ran in a tree other than the asking agent's own root."
+          - "`[The <label> is still working: 120/539 files.]` while a background run for that tree is going."
+      - title: Why present exists
+        text: |
+          The text was written by the tool's own `render` in another process, from the arguments and the value. This process cannot make it again: the information is not in the value. `ToolRunContext.present` gives the registry that text wherever it would have rendered the value, so every post-execute row sees and edits the content the model will read. A row that replaces the value gets the definition's own rendering of the replacement, because the text no longer describes it.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The value is still validated against the declared output."
+          - "`tool-result-offload` applies to a UTCP result as to any other, unless the tool's entry sets `selfLimits`."
+
+  tool-result:
+    transport: log
+    summary: |
+      The pipeline emits `tools/result` and the batch appends a `tool/result`
+      record: a message from the tool holding the content the model reads. The
+      loop sends it to the model in the next step.
+    blocks:
+      - record: tool/result
+        example: |
+          {"type": "tool/result", "seq": 13, "time": 1794883347539,
+           "data": {"turn": 1, "step": 1,
+                    "message": {"id": "d2dc428f-...", "role": "user",
+                                "content": [{"type": "tool-result", "toolCallId": "t1", "isError": false,
+                                             "content": [{"type": "text",
+                                                          "text": "Indexed 1 file (0 already current), 1 symbol.\nThe graph holds 1 symbol and 0 references across 1 file (python)."}]}],
+                                "source": {"kind": "tool", "callId": "t1"}}},
+           "sourceEventSeqs": [12], "surfaceOp": "append"}
+      - title: A failure, as the model reads it (generated)
+        table:
+          columns: [cause, text of the result, code]
+          rows:
+            - ["the tool's own failure, through the envelope", "`Error: no code index exists for this workspace yet; run `code_index` first`", "`CODE_GRAPH_FAILED`"]
+            - ["arguments outside the manual's schema", "`Error: mode: must be one of ['search', 'define', 'callers', 'callees', 'impact', 'entities']`", "`UTCP_BAD_ARGUMENTS`"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The record is the durable form of the answer. A resumed session reads the text from it; the command is not run again."
+          - "It cites the `tool/call` it answers in `sourceEventSeqs`."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The structured `value` is not in the record. Only the content is."
+          - "A call a crash interrupted has a `tool/call` and no `tool/result`. Repair closes it, and with no `reconcile` the model reads that its outcome is unknown."
+      - links:
+          - {to: "topic:durability", label: "What survives a restart"}

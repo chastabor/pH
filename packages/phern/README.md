@@ -32,7 +32,7 @@ bundles it deliberately does not depend on; see *Profiles* below.
 | `phern config [--row id] [--all]` | what every row accepts, its default, and what this profile sets. Composed, not mounted: it starts no agent and opens no session |
 | `phern --dump-config` | the composed rows in order, before anything runs |
 | `phern daemon` | run the supervisor |
-| `phern agents …` | the client that talks to it: bare (list roots), `status`, `attach`, `send`, `schedule`, `doctor`, `shutdown` |
+| `phern agents …` | the client that talks to it: bare (list roots), `status`, `attach`, `send`, `schedule`, `doctor`, `owed` (which stored roots still owe work), `resume` (mount them), `probe` (`startup`, `ready` or `live`, exit 0 for yes), `shutdown` |
 | `phern profiles …` | named profiles: `show [--full]`, `session <id>`, `fold`, and `diff` / `adopt` — what taking a profile's current version would change in each session on it, and taking it at their next start |
 | `phern workspaces gc` | the git trees agents left behind, across every stored session. Reports by default; collects with `--remove` |
 | `phern attachments gc` | media no stored session references. Same rule |
@@ -212,7 +212,8 @@ simply never compacts, which is what keeps the lean `uv tool install
 | `google` | `base` + Gemini (the one route declaring video, so `uploads` has a provider) | `GEMINI_API_KEY` |
 | `rlm` | `tui` + the `rlm` bundle | needs `ph-rlm` |
 | `rlm-stable` | `rlm` + `stabilize`, gates on | needs `ph-rlm`, `ph-stabilize` |
-| `rlm-indexed` | `rlm-stable` + `code-graph` + `text-index` | needs both plugin distributions too |
+| `rlm-indexed` | `rlm-stable` + `utcp` + `code-graph` + `text-index` | needs `ph-utcp`, `ph-code-graph` and `ph-text-index` too |
+| `rlm-clm` | `rlm` + the `clm` bundle: the model edits its own context. On `rlm`, not `rlm-stable` | needs `ph-rlm`, `ph-clm` |
 
 **A profile is offered only if every layer it names resolves.**
 `available_profiles()` asks exactly the question `resolve_profile` will answer,

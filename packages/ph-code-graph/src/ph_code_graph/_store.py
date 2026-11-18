@@ -14,7 +14,7 @@ measured. Against a real 40 MB CodeGraph database (11 396 nodes, 36 830 edges),
   is worse than a missing feature, and it is what makes the first two look like
   gaps rather than the same class of problem.
 
-Two of the five things this store does are exactly the two turso cannot do, so
+Two of the six queries this store answers are exactly the two turso cannot do, so
 it uses `sqlite3` from the standard library — SQLite 3.45, FTS5 compiled in, no
 dependency to add. If turso grows both, this is one import.
 

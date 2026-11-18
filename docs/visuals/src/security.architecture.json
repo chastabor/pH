@@ -1,0 +1,370 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "security: scopes, gates, sandbox",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "tool-call",
+        "label": "A tool call",
+        "focus": [
+          "agent",
+          "gates",
+          "seams",
+          "sandbox",
+          "effect"
+        ],
+        "note": "A call passes the gates, then a seam, then the OS sandbox. Each layer bounds something the one before it cannot see."
+      },
+      {
+        "id": "asking",
+        "label": "Asking a person",
+        "focus": [
+          "gates",
+          "person",
+          "log"
+        ],
+        "note": "A gate that returns Ask is routed to a front end. With nobody to answer, the call does not run."
+      },
+      {
+        "id": "spawning",
+        "label": "Spawning a child",
+        "focus": [
+          "agent",
+          "subagents",
+          "child",
+          "gates",
+          "workspace"
+        ],
+        "note": "The seam checks the grant against what the parent holds, then bounds the child's scope by restriction only."
+      },
+      {
+        "id": "kernel-boundary",
+        "label": "The OS sandbox",
+        "focus": [
+          "seams",
+          "sandbox",
+          "workspace",
+          "effect",
+          "egress"
+        ],
+        "note": "Writes land in the workspace and its scratch. The network is a proxy with a host list, or nothing."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "person",
+      "type": "frontend",
+      "label": "Person",
+      "sublabel": "answers each ask",
+      "pos": [
+        310,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "log",
+      "type": "database",
+      "label": "Session logs",
+      "sublabel": "one per agent",
+      "pos": [
+        850,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "agent",
+      "type": "backend",
+      "label": "Agent",
+      "sublabel": "isolated Context, tool view",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "gates",
+      "type": "security",
+      "label": "Gates",
+      "sublabel": "hitl, limits, guards",
+      "pos": [
+        310,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "seams",
+      "type": "backend",
+      "label": "ctx.fs, ctx.shell",
+      "sublabel": "path rules on intents",
+      "pos": [
+        580,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "sandbox",
+      "type": "security",
+      "label": "ctx.sandbox",
+      "sublabel": "mode, paths, network",
+      "pos": [
+        850,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "effect",
+      "type": "external",
+      "label": "Confined process",
+      "sublabel": "command or code kernel",
+      "pos": [
+        1120,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "subagents",
+      "type": "backend",
+      "label": "ctx.subagents",
+      "sublabel": "check_grant, _enforce",
+      "pos": [
+        40,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "child",
+      "type": "backend",
+      "label": "Child agent",
+      "sublabel": "subset, fixed at admission",
+      "pos": [
+        310,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "workspace",
+      "type": "database",
+      "label": "Workspace tier",
+      "sublabel": "containment picks the rung",
+      "pos": [
+        580,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "egress",
+      "type": "cloud",
+      "label": "Egress proxy",
+      "sublabel": "sandbox-allow host list",
+      "pos": [
+        850,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "daemon process",
+      "wraps": [
+        "agent",
+        "gates",
+        "seams",
+        "sandbox",
+        "subagents",
+        "child",
+        "workspace",
+        "egress"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "agent scope",
+      "wraps": [
+        "agent"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "child scope, inside its parent's",
+      "wraps": [
+        "child"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "OS sandbox: bwrap or Seatbelt",
+      "wraps": [
+        "effect"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "call",
+      "from": "agent",
+      "to": "gates",
+      "label": "tool call",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ask",
+      "from": "gates",
+      "to": "person",
+      "label": "Ask",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "allowed",
+      "from": "gates",
+      "to": "seams",
+      "label": "allowed",
+      "variant": "emphasis"
+    },
+    {
+      "id": "confine",
+      "from": "seams",
+      "to": "sandbox",
+      "label": "confine",
+      "variant": "emphasis"
+    },
+    {
+      "id": "wrapped",
+      "from": "sandbox",
+      "to": "effect",
+      "label": "wrapped argv",
+      "variant": "security"
+    },
+    {
+      "id": "root",
+      "from": "seams",
+      "to": "workspace",
+      "label": "root, scratch",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 50
+    },
+    {
+      "id": "denied",
+      "from": "sandbox",
+      "to": "log",
+      "label": "sandbox/denied",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "connect",
+      "from": "effect",
+      "to": "egress",
+      "label": "CONNECT",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "right"
+    },
+    {
+      "id": "spawn",
+      "from": "agent",
+      "to": "subagents",
+      "label": "spawn",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 50
+    },
+    {
+      "id": "grant",
+      "from": "subagents",
+      "to": "child",
+      "label": "grant",
+      "variant": "security"
+    },
+    {
+      "id": "child-call",
+      "from": "child",
+      "to": "gates",
+      "label": "same gates",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDy": -50
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Layers, outside in",
+      "items": [
+        "The OS sandbox bounds writes and the network at the kernel",
+        "The workspace tier decides which tree an agent works in",
+        "Gates and path rules see only calls that go through a seam"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "What filters down",
+      "items": [
+        "A child holds a subset of its parent's tools and skills",
+        "It runs on its parent's mount, so the same rows gate it",
+        "A spawn narrows by restriction and can never widen"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Stated limits",
+      "items": [
+        "Reads stay open inside the OS sandbox",
+        "No backend means commands run unconfined",
+        "A posture chosen for the root is not copied to a child"
+      ]
+    }
+  ]
+}

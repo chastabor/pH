@@ -1,0 +1,228 @@
+/* The drill-down layer `build.py` adds to each page: a launcher, and a panel that
+   opens on a node, an arrow or a topic. Colors are the page's own variables, so
+   the panel follows its light and dark themes. */
+
+.ph-drill {
+  --ph-accent: var(--guide-accent, #0891b2);
+  --ph-line: var(--panel-border, #e2e8f0);
+  --ph-soft: color-mix(in srgb, var(--text, #0f172a) 6%, transparent);
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(620px, 94vw);
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg, #fff);
+  color: var(--text, #0f172a);
+  border-left: 1px solid var(--ph-line);
+  box-shadow: -18px 0 48px rgba(2, 6, 23, 0.18);
+  font: 13px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  transform: translateX(102%);
+  transition: transform 0.2s ease;
+}
+.ph-drill.is-open { transform: none; }
+.ph-drill.is-instant { transition: none; }
+@media (prefers-reduced-motion: reduce) { .ph-drill { transition: none; } }
+
+.ph-drill code, .ph-drill pre, .ph-drill .ph-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.ph-drill code {
+  font-size: 0.92em;
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  background: var(--ph-soft);
+  overflow-wrap: anywhere;
+}
+.ph-drill pre code { padding: 0; border-radius: 0; background: none; font-size: inherit; overflow-wrap: normal; }
+.ph-drill a { color: var(--ph-accent); text-decoration: none; }
+.ph-drill a:hover { text-decoration: underline; }
+
+.ph-drill-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--ph-line);
+}
+.ph-drill-head h2 {
+  flex: 1;
+  margin: 0;
+  font-size: 17px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.ph-drill-kicker {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted, #64748b);
+}
+.ph-drill-btn {
+  flex: none;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--ph-line);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ph-drill-btn:hover { background: var(--ph-soft); }
+.ph-drill-btn:focus-visible, .ph-launch:focus-visible, .ph-drill-item:focus-visible {
+  outline: 2px solid var(--ph-accent);
+  outline-offset: 2px;
+}
+
+.ph-drill-body { flex: 1; overflow-y: auto; padding: 14px 16px 28px; }
+.ph-drill-body p { margin: 0 0 9px; }
+.ph-drill-body ul, .ph-drill-body ol { margin: 0 0 9px; padding-left: 20px; }
+.ph-drill-body li { margin-bottom: 4px; }
+
+.ph-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.ph-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border: 1px solid var(--ph-line);
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--text-muted, #64748b);
+}
+.ph-chip b { font-weight: 600; color: var(--text, #0f172a); }
+.ph-chip[data-tone="emit"] { border-color: #94a3b8; }
+.ph-chip[data-tone="serial"] { border-color: #f59e0b; }
+.ph-chip[data-tone="parallel"] { border-color: #8b5cf6; }
+.ph-chip[data-tone="waterfall"] { border-color: #06b6d4; }
+.ph-chip[data-tone="off"] { border-color: #f43f5e; }
+.ph-chip[data-tone="on"] { border-color: #10b981; }
+
+.ph-block { margin: 16px 0 0; }
+.ph-block > h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-muted, #64748b);
+}
+.ph-block > h3 code { text-transform: none; letter-spacing: 0; }
+.ph-block-lead { margin: 0 0 6px; font-weight: 600; overflow-wrap: anywhere; }
+.ph-note { color: var(--text-muted, #64748b); }
+
+.ph-drill pre {
+  margin: 0 0 9px;
+  padding: 10px 12px;
+  border: 1px solid var(--ph-line);
+  border-radius: 8px;
+  background: var(--ph-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.ph-pre { position: relative; }
+.ph-pre pre.is-wrapped { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ph-wrap {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--ph-line);
+  border-radius: 6px;
+  background: var(--bg, #fff);
+  color: var(--text-muted, #64748b);
+  font: 11px/1.5 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+.ph-fold { margin: 0 0 9px; }
+.ph-fold > summary {
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--ph-line);
+  border-radius: 8px;
+  color: var(--ph-accent);
+  cursor: pointer;
+}
+.ph-fold[open] > summary { color: var(--text-muted, #64748b); }
+.ph-table-wrap { overflow-x: auto; border: 1px solid var(--ph-line); border-radius: 8px; }
+.ph-drill table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.ph-drill th, .ph-drill td {
+  padding: 6px 9px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--ph-line);
+}
+.ph-drill tr:last-child td { border-bottom: 0; }
+.ph-drill th {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted, #64748b);
+  background: var(--ph-soft);
+}
+.ph-drill td code { overflow-wrap: break-word; white-space: normal; }
+.ph-field { font-weight: 600; white-space: nowrap; }
+.ph-type { display: block; color: var(--text-muted, #64748b); font-size: 11px; overflow-wrap: anywhere; }
+.ph-req { color: #e11d48; font-size: 10.5px; }
+.ph-method { font-size: 11.5px; overflow-wrap: anywhere; }
+
+.ph-callout {
+  padding: 9px 12px 3px;
+  border: 1px solid var(--ph-line);
+  border-left: 3px solid var(--ph-accent);
+  border-radius: 8px;
+}
+.ph-callout[data-tone="limit"] { border-left-color: #f59e0b; }
+.ph-callout[data-tone="secure"] { border-left-color: #f43f5e; }
+.ph-callout[data-tone="durable"] { border-left-color: #10b981; }
+
+.ph-drill-list { list-style: none; margin: 0; padding: 0; }
+.ph-drill-item {
+  display: block;
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--ph-line);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ph-drill-item:hover { background: var(--ph-soft); }
+.ph-drill-item strong { display: block; overflow-wrap: anywhere; }
+.ph-drill-item span { color: var(--text-muted, #64748b); font-size: 12px; }
+
+.ph-launch {
+  position: fixed;
+  left: 16px;
+  bottom: 16px;
+  z-index: 2147482000;
+  padding: 8px 14px;
+  border: 1px solid var(--panel-border, #e2e8f0);
+  border-radius: 999px;
+  background: var(--bg, #fff);
+  color: var(--text, #0f172a);
+  box-shadow: 0 6px 20px rgba(2, 6, 23, 0.14);
+  font: 600 12.5px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+.ph-launch small { font-weight: 400; color: var(--text-muted, #64748b); margin-left: 6px; }
+
+/* In the diagram: what can be opened says so. */
+svg [data-node-id].ph-has-detail { cursor: pointer; }
+svg .ph-mark { fill: var(--guide-accent, #0891b2); stroke: var(--bg, #fff); stroke-width: 1.5; pointer-events: none; }
+svg .relationship-hit-target { cursor: pointer; }
+svg .ph-is-open-target { filter: drop-shadow(0 0 5px var(--guide-accent, #0891b2)); }
+
+@media print { .ph-drill, .ph-launch { display: none; } }

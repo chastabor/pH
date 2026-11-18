@@ -1,0 +1,1583 @@
+intro: |
+  pH bounds an agent in layers, and each layer is a row a profile mounts. From
+  the outside in: an OS sandbox around every command and code kernel the harness
+  starts, a workspace tier that decides which tree an agent works in, path rules
+  on `ctx.fs`, gates on each tool call, and a person who answers what a gate
+  asks. A sub-agent runs inside its parent's scope and on its parent's mount, so
+  it meets the same layers and can only hold less.
+
+  The main path reads left to right: a tool call passes the gates, reaches a
+  seam, and is wrapped by the sandbox. The bottom row is a spawn. Click a box
+  for the rows behind it and their options, or an arrow for what crosses it.
+  Start with [What a sub-agent inherits](topic:inherits) or
+  [Limits and known gaps](topic:limits).
+
+topics:
+  - id: inherits
+    title: What a sub-agent inherits
+    summary: |
+      A child is admitted through one door, `ctx.subagents.start`. The seam
+      resolves the request, checks it against what the parent holds, lets the
+      provider build the child inside the parent's scope, writes the admission
+      into the child's own log and then bounds the child's scope. Everything a
+      child holds is its parent's or a subset of it, fixed at that moment.
+    blocks:
+      - title: What a child gets, and where it comes from
+        table:
+          columns: [what, a child gets, can a spawn change it]
+          rows:
+            - ["tools", "the names its parent sees when it is admitted, written out as an allow list (`Grant.tools`)", "narrow only: `tools=[...]`, a preset, or an assigned profile. A name the parent does not hold refuses the spawn"]
+            - ["skills", "the parent's reach, the same way (`Grant.skills`). A skill the spawn names is also put in the child's prompt", "narrow only, same refusal"]
+            - ["workspace", "its own, acquired by the provider with the parent's root as the base and released with the child's scope", "`access` is `read` unless the spawn says `write`; the mounted tier decides the kind"]
+            - ["containment rung", "`containment.childTier`, else `tier`; read from the child's session header (`origin: subagent`), not from an argument", "no. It is the deployment's choice"]
+            - ["sandbox backend", "the mount's. Every command and kernel started for the child is confined by the same backend", "no"]
+            - ["sandbox mode", "the last `sandbox/mode` record in the **child's own** log, else the row's `defaultMode`. A posture the person chose for the root is not copied", "no. An assigned profile whose `sandbox` row says `read-only` refuses `access: write`; one wider than the parent runs in is refused"]
+            - ["extra writable directories", "the parent's (`sandbox-allow.paths`)", "narrow only, through an assigned profile; recorded as `paths`"]
+            - ["network", "the mount's. One egress proxy serves every agent", "no. An assigned profile with a different network is refused"]
+            - ["model route", "the key the spawn names, else the one its skills name, else its parent's route with its parent's options", "a key the parent's `models` list holds; one this mount cannot run is refused"]
+            - ["limits", "the same `limits` row, counted in the child's own log", "no. Counts are per agent"]
+            - ["tool gates", "the same `hitl` rules and the same guards. The posture is read from the child's log, else the row's `mode`", "no"]
+            - ["path rules", "the same `permissions-fs` rules. `outside-workspace` is judged against the child's own workspace", "no"]
+            - ["approvals", "the same front end answers. The ask is recorded in the child's log and carries the child's `agentId`", "no"]
+            - ["delegation depth", "its parent's depth plus one, in its session header. `rlm-subagent-provider.maxDepth` (2 as shipped) refuses a spawn from that depth", "no"]
+            - ["code kernel", "its own Python process, an effect of the child's scope", "no"]
+            - ["credentials", "none. A child's model calls resolve a credential by name at the adapter, as the parent's do", "no"]
+      - title: The order of a spawn
+        text: |
+          1. `resolve_profile` reads an assigned profile as a narrowing of the parent's mount and writes what it gives into the request.
+          2. `resolve_preset` fills `skills` and `tools` from a named preset where the spawn left them unsaid.
+          3. `resolve_model` and `resolve_output` settle the route and the shape of the value the child owes.
+          4. Every `ctx.subagents.guard` is asked. The `limits` row's child ceiling is one. A refusal here leaves no session and no log.
+          5. The seam names the child, then `_delegating_boundary` and `held_by` read what the parent holds, and `check_grant` refuses anything beyond it.
+          6. The provider builds the child with `agents.create(..., parent=parent)`, so the child's `Context` is a node inside the parent's, and takes its workspace.
+          7. The seam writes `subagent/admitted` into the child's log, then `_enforce` checks `boundary.reaches(run.scope)` and applies the grant as restrictions on the child's scope.
+          8. The admission is flushed to the child's disk. Only then does the child's gate open and its first step run.
+      - title: The request
+        struct: ph.seams.subagents:SubagentRequest
+      - title: What a child may reach, once resolved
+        struct: ph.seams.subagents:Grant
+      - title: The rule that it cannot be widened
+        tone: secure
+        list:
+          - "A spawn narrows by restriction, never by registration. `Grant.apply` calls `ctx.tools.restrict`, `ctx.skills.restrict` and `ctx.sandbox.restrict_paths` on the child's scope. Filters only intersect, so no later filter restores a name."
+          - "A name the parent does not hold is refused, not silently dropped. The refusal names it and lists what the parent holds."
+          - "The ceiling is what the parent held when the child was admitted. A tool the parent gains later is visible to the parent and not to the child."
+          - "A parent whose scope cannot be read is refused. It is not treated as the deployment."
+          - "A provider that builds the child's scope outside its parent's is refused. A provider that hands back no scope is refused when the spawn narrows anything."
+          - "A readmission after a restart goes through `check_grant` and `grant_for` again, from the admission record. The spawn guards do not run again."
+          - "A child that is asked something after it settled gets a fresh scope, and the grant and the workspace access its admission recorded are applied again."
+      - title: A refusal, as the parent reads it
+        lang: text
+        note: Generated by running a spawn that named a tool and a preset the parent did not have. The code on the error is `SPAWN_REFUSED`.
+        code: |
+          a child cannot be granted tools its parent does not hold: nonesuch. Grant it to the parent first (the parent holds: attach, bash, edit, glob, grep, read, skill, task, write).
+          no subagent preset named "reviewer" is configured (configured: none)
+      - title: The admission, in the child's own log
+        record: subagent/admitted
+        example: |
+          {"type": "subagent/admitted",
+           "data": {"runId": "child-03bc1179ce87",
+                    "name": "subagent-review-the-diff-in-1401e2ff",
+                    "owner": "rlm-child",
+                    "prompt": "review the diff in src/",
+                    "modelProvider": "fake", "model": "fake-1",
+                    "requestedAccess": "read", "grantedAccess": "read",
+                    "skills": ["review"], "tools": ["read"]}}
+      - title: The record's fields
+        struct: ph.seams.subagents:Admission
+      - title: Presets, a menu a deployment writes
+        row: subagent-presets
+      - title: A preset in a profile
+        lang: yaml
+        note: |
+          A preset binds a name to `skills` and `tools` and nothing else. It
+          fills what a spawn left unsaid, and the resolved request still goes
+          through `check_grant`, so a preset naming something the parent lacks
+          is refused like any other spawn. The row ships with no presets.
+        code: |
+          - id: subagent-presets
+            config:
+              presets:
+                reviewer:
+                  skills: [code-review]
+                  tools: [read, grep, glob]
+      - struct: ph.seams.subagents:SubagentPreset
+      - title: A profile a parent assigns (profile="reviewer")
+        text: |
+          A child never gets a mount of its own. A named profile assigned to it is read row by row against the parent's mount (`ph.seams.subagent_profiles.narrowing`):
+
+          - a row the profile runs that the parent's mount does not is refused, naming the row
+          - a row the parent runs and the profile drops takes that row's tools and skills away from the child
+          - a row it keeps is asked of its own plugin, when that plugin declares `narrows=`
+      - table:
+          columns: [row, what its narrower allows]
+          rows:
+            - ["`models`", "the default must be a key the parent lists; it becomes the child's model"]
+            - ["`sandbox-policy`", "a `read-only` default refuses `access: write` for that child; a mode wider than the parent runs in is refused"]
+            - ["`skills-progressive`", "the paths must be a subset of the parent's; only skills found under them stay"]
+            - ["`sandbox-allow`", "the writable directories must be the parent's or inside them; the network must be the parent's exactly"]
+      - title: What one row may hold back
+        struct: ph.cordis.child_limit:ChildLimit
+      - title: Limits
+        tone: limit
+        list:
+          - "**The posture is per session.** `ctx.sandbox.mode_for(agent)` and the approval policy read the acting agent's own log. A person who switches the root to `read-only` does not tighten a child that is already running or one spawned later; the child runs at the row's `defaultMode`. Checked by running it: after `danger-full-access` on the root, the root resolved `danger-full-access` and its child `read-only`."
+          - "`ChildLimit.read_only` has one reader, the refusal of `access: write`. It does not set the mode the OS sandbox enforces for the child."
+          - "**`access: read` is a request.** With no workspace tier in force (no provider row, `tier: advisory`, or a directory that is not a repository), a `read` child gets the `shared` kind: its parent's own tree, writable. The admission says so as `grantedAccess: write`."
+          - "`DowngradeReason` has one member, `workspace-not-mounted`, and one producer: a profile with no workspace row at all. A narrowing a tier makes (asking `write`, getting `worktree-ephemeral`) records no reason; it shows only as `grantedAccess`."
+          - "No row of the `stabilize` bundle declares a narrower, so a child cannot be given tighter limits, a stricter approval posture or more path rules than its parent through a profile."
+          - "Limits are counted per agent. Ten children each get the full ceiling."
+          - "The Code Mode transport is never restricted by a grant. A child in Code Mode can always run a cell; what a cell may call is restricted at each binding."
+          - "A tool registered on a descendant's own scope is outside an ancestor's filter, so a grandchild can hold what its granting parent cannot see. This is why a spawn may only restrict."
+          - "`_enforce`'s refusal of a scope outside the parent's has no test; the no-scope branch does (DESIGN §8)."
+          - "`SubagentRun.dispose` has no production caller (DESIGN §8)."
+      - links:
+          - {to: "ph-stabilize#topic:subagents", label: "The stabilize rows inside a child"}
+          - {to: "ph-rlm#node:subagents", label: "The provider that runs a child"}
+          - {to: "topic:scopes", label: "Why a child's scope bounds it"}
+
+  - id: scopes
+    title: Scopes, isolation and visibility
+    summary: |
+      Every agent gets its own `Context`, created isolated. One rule,
+      `reaches()`, decides what a registration made in a scope applies to, and
+      event dispatch and every scoped registry share it. A child's scope is a
+      node inside its parent's, so containment is the shape of the tree and not
+      a list anybody maintains.
+    blocks:
+      - title: Three kinds of context
+        table:
+          columns: [kind, built by, provides into, its registrations reach]
+          rows:
+            - ["root", "`Context()`", "itself", "everything"]
+            - ["activation scope", "`reconcile()`, one per row", "the realm the row was mounted in", "everything: it is not isolated, so a row's listeners and tools are global"]
+            - ["isolated scope", "`ctx.scope()`, one per agent", "itself", "that agent and the agents nested inside it"]
+      - title: The rule
+        lang: python
+        note: |
+          `_isolation` is fixed when the context is built: itself when it is
+          isolated, else its parent's. A global registration has none and
+          reaches every target.
+        code: |
+          def reaches(self, target: Context) -> bool:
+              return self._isolation is None or self._isolation.is_ancestor_of(target)
+      - title: A parent and a child, measured
+        lang: text
+        note: |
+          Printed from a real spawn. The child's chain is what a scoped registry
+          walks to resolve a name: the innermost scope that registered one wins,
+          and the global layer is asked last.
+        code: |
+          child.ctx.isolation_chain():
+            root/plugin(agent)/agent:parent/agent:parent-child-03bc1179ce87
+            root/plugin(agent)/agent:parent
+            None                                   # the global layer
+          parent.ctx.reaches(child.ctx)  -> True
+          child.ctx.reaches(parent.ctx)  -> False
+      - title: What a registration is visible to
+        table:
+          columns: [registered on, seen by]
+          rows:
+            - ["a row's activation scope (`ctx.tools.register`, `ctx.on`)", "every agent of the mount, children included"]
+            - ["an agent's scope (`scope=agent.ctx`)", "that agent and its descendants. A same-named registration shadows the global one for them"]
+            - ["a child's scope", "the child and its own children. Its parent does not see it, and its parent's filter does not reach it"]
+            - ["a service provided in an agent's scope (`ctx.provide`)", "lookups from that scope and below; the chain is walked most specific first"]
+      - title: Per-agent tool views
+        text: |
+          `ctx.tools.view(scope)` resolves what one boundary sees: it walks the layers along `scope.isolation_chain()`, nearest first. A name a nearer layer registered shadows a farther one. A restriction filters names from every layer **outside** the scope that wrote it and nothing inside, so an agent's own registration cannot be masked from under it, while an ancestor's can.
+
+          `ctx.tools.restrict(ToolRestriction(allow=..., deny=...), scope=agent.ctx)` is the narrowing verb. Restrictions intersect. `ctx.tools.guard(check, scope=...)` adds a deny-only check that runs last on every call the scope can see. `ctx.tools.present_as(mode, scope=...)` gives one agent a different presentation (`native`, `code`, `both`).
+
+          The scope must be stated. `view`, `names` and a spawn's ceiling take a `Boundary`, which is a `Context` or `DEPLOYMENT`; there is no default, because the old default was the mount, the widest answer there is.
+      - title: One allow and deny rule, for tools and skills
+        struct: ph.seams._restriction:NameFilter
+      - title: The tools row
+        row: tools
+      - title: Realms and isolate rows
+        text: |
+          A row may ask for a private copy of another row's service. `isolate: [fs]` runs the row in a scope that is an isolation boundary and its own provisioning realm, and the loader mounts a second copy of the `fs` row inside it first. The isolating row and everything beneath it resolve the private `ctx.fs`; every other row keeps the shared one. The mapping form gives the private copy its own config, which is the case the feature exists for.
+
+          `isolate:` names row ids, not service keys, so a compose-time check can refuse an id that is not a row, a row isolating itself, or a copy of a row a later layer disabled. A private copy that did not activate is a refusal naming the key it lacks.
+      - title: An isolating row
+        lang: yaml
+        note: |
+          Composed with `phern --profile rlm --patch '<entry>' --dump-config`.
+          `tool-fs` then reads and writes through a private `fs-local` rooted at
+          `/srv/sealed`; `tool-bash` and every other row keep the shared one.
+        code: |
+          - id: tool-fs
+            isolate:
+              fs:
+                root: /srv/sealed
+      - title: What phern doctor then lists
+        lang: text
+        code: |
+          tool-fs       active · injects tools, fs · from cli
+          tool-fs/fs    active · injects nothing · private copy in realm:tool-fs · overridden config
+          isolated realms   root/realm:tool-fs
+      - title: The row entry
+        struct: ph.cordis.loader:Row
+      - title: What the tree gives for free
+        tone: secure
+        list:
+          - "Visibility inherits: a parent's layer is consulted when a child's tools are resolved, so the parent's restriction bounds the child."
+          - "Disposal cascades: `Context.dispose` unwinds children first, so a disposed parent takes its children, their workspaces and their kernels."
+          - "Containment is one way: a parent reaches its child and the child does not reach its parent."
+          - "An isolating row hears dispatches like any other row, and what it registers still unwinds with it. Its private copy does not hear them, so one event is not handled twice."
+          - "`scope-invariant` polls for a disposed scope a live parent still lists, and for effects a canceled teardown left behind."
+      - row: scope-invariant
+      - title: Limits
+        tone: limit
+        list:
+          - "**A realm's provider cannot be swapped mid-session.** The provider a realm holds is the one it was mounted with. Read-only is a `permissions-fs` rule or the `readonly-scratch` workspace kind, both fixed at mount. Deferred by decision until a use case shows up (DESIGN §8)."
+          - "`DEPLOYMENT` is the mount's own view. It is not a union over agents: a tool registered on one agent's scope is invisible under it."
+          - "Isolation is for agents and realms, not for rows. Two rows of one mount see each other's services and hear each other's events."
+          - "A scope is a boundary inside one Python process. It bounds what the harness resolves and dispatches; it is not memory isolation. `phern doctor` says the same of the daemon: one task per root, all in one process, and isolation between users is the operator's layer."
+          - "`LlmRuntime.register_adapter` takes no `scope=`. It is the one provider slot outside the ownership sweep (DESIGN §8)."
+      - links:
+          - {to: "ph-core", label: "ph-core: the loop, the log and the seams"}
+          - {to: "invariants", label: "I2: registrations unwind"}
+
+  - id: ladder
+    title: The containment ladder
+    summary: |
+      Containment is three rungs: `advisory`, `worktree`, `sandbox`. A rung is
+      what an agent is handed as its workspace. The `containment` row chooses a
+      rung for the root agent and one for its children, and the workspace seam
+      delivers the strongest kind the mounted provider can actually give. What
+      is recorded is what was obtained, never what was asked for.
+    blocks:
+      - table:
+          columns: [rung, kinds handed out, bounds, does not bound]
+          rows:
+            - ["`advisory`", "`shared`", "nothing: the agent works in the person's own checkout", "anything"]
+            - ["`worktree`", "`worktree`, `worktree-ephemeral`; or `overlay`, `overlay-ephemeral`", "every write through a tool and every relative-path write, since both resolve against the agent's cwd", "an absolute-path write: `open(\"/etc/passwd\", \"w\")` never consults a cwd"]
+            - ["`sandbox`", "`readonly-scratch`", "every write, absolute paths included, refused at the kernel; and network egress", "what an allowed request does at the far end"]
+      - row: containment
+      - title: In a profile
+        lang: yaml
+        note: |
+          This is what the `rlm` bundle ships: the person's agent stays in their
+          checkout and its children get a worktree each. `childTier` unset
+          follows `tier`. `tier` unset is no opinion, not `advisory`: a provider
+          that is mounted is then used. The bundle spells the option
+          `child_tier`; both spellings load.
+        code: |
+          - id: containment
+            config:
+              tier: advisory        # the root agent
+              childTier: worktree   # spawned children
+              strict: false
+      - title: What selects a rung
+        text: |
+          1. The role comes from the session, not from an argument: a child's header says `origin: subagent`. `ContainmentService.for_role` returns `childTier or tier` for a child and `tier` for the root.
+          2. `advisory` declines a mounted provider. Any other choice, and no choice at all, asks the one provider that is mounted, whatever its rung.
+          3. A provider that declines (not a repository, branch in use, path exists) or fails falls back to `shared`, and the agent is not contained. `acquire` never fails.
+
+          So each half can only lower the answer. `WorkspaceSeam.effective_tier` states the same rule for `phern doctor`.
+      - title: The workspace rows
+        table:
+          columns: [row, rung, what an agent gets, ships in]
+          rows:
+            - ["`workspace-shared`", "floor", "`shared`: the base directory itself, plus a scratch", "`base`, always"]
+            - ["`workspace-git-worktree`", "`worktree`", "a checkout on its own `ph/…` branch; `worktree-ephemeral` for `access: read`, discarded on release", "the `rlm` bundle"]
+            - ["`workspace-jj`", "`worktree`", "the same over Jujutsu; a child forks from the parent's work in progress", "no shipped profile"]
+            - ["`workspace-agentfs`", "`worktree`", "a copy-on-write overlay; the host sees none of the writes", "no shipped profile"]
+            - ["`workspace-readonly-scratch`", "`sandbox`", "a root inside the agent's own scratch; the repository is readable and writable nowhere", "no shipped profile"]
+      - row: workspace-shared
+      - row: workspace-lifecycle
+      - row: workspace-git-worktree
+      - row: workspace-readonly-scratch
+      - row: workspace-jj
+      - row: workspace-agentfs
+      - row: workspace-reconcile
+      - title: What a workspace is
+        struct: ph.seams.workspace:Workspace
+      - title: The strict option
+        text: |
+          `strict: true` refuses to start unless confinement is real. The check listens on `profile/mounted` (serial), so it runs after the whole profile is composed. It refuses when `tier` is not `sandbox`, when no sandbox backend is mounted, and when the backend's `enforcement` is not `full`. A partial boundary is a refusal, not a downgrade.
+      - title: The refusal
+        lang: text
+        note: "Printed by `phern doctor --profile rlm --patch '{id: containment, config: {tier: advisory, strict: true}}'`."
+        code: |
+          profile 'rlm' does not mount: containment.strict is set, so pH refuses to start unless confinement is real: containment.tier is "advisory", which enforces nothing. Mount a sandbox backend (sandbox-local, P6-04) and set containment.tier: sandbox, or unset containment.strict to run at the tier you have.
+      - event: profile/mounted
+      - title: What a downgrade records
+        text: |
+          The kind an agent actually got is on `workspace/acquired`, with `repoWritable`. When a tier was asked and could not serve, the record adds `declined` with a code: `not-a-repository`, `branch-in-use`, `path-exists`, `provider-failed` or `overlay-failed`. A provider that fails also writes an operator record, "workspace provider failed; the agent is not contained". For a child, the admission adds `requestedAccess`, `grantedAccess` and, in one case only, `downgradeReason`.
+      - record: workspace/acquired
+        example: |
+          {"type": "workspace/acquired",
+           "data": {"agentId": "parent-child-03bc1179ce87",
+                    "kind": "worktree-ephemeral",
+                    "root": "/home/me/.ph/worktrees/parent/parent-child-03bc1179ce87",
+                    "repoWritable": true,
+                    "ref": "ph/parent-child-03bc1179ce87/parent-child-03bc1179ce87"}}
+      - title: A tier that declined, in a real child's log
+        lang: json
+        note: |
+          Generated on the shipped `rlm` bundle, in a directory that is not a
+          git repository. The worktree tier was asked and declined, the child
+          got the shared tree, and its parent was told
+          `workspace access: write (requested read)`.
+        code: |
+          {"type": "workspace/acquiring", "data": {"agentId": "profile-child-af5f670e3f35", "kind": "worktree-ephemeral", "root": "…/worktrees/profile-child-af5f670e3f35/profile-child-af5f670e3f35", "ref": "ph/profile-child-af5f670e3f35/profile-child-af5f670e3f35"}}
+          {"type": "workspace/acquired", "data": {"agentId": "profile-child-af5f670e3f35", "kind": "shared", "root": "/home/me/notes", "repoWritable": true, "declined": "not-a-repository"}}
+          {"type": "subagent/admitted", "data": {"runId": "child-af5f670e3f35", "name": "reader", "owner": "rlm-child", "prompt": "summarize README.md", "modelProvider": "fake", "model": "fake-1", "requestedAccess": "read", "grantedAccess": "write", "callId": "c3:code:0"}}
+      - record: workspace/retained
+        example: |
+          {"type": "workspace/retained",
+           "data": {"agentId": "parent-child-03bc1179ce87",
+                    "retained": "the child has not settled cleanly",
+                    "ref": "ph/parent-child-03bc1179ce87/parent-child-03bc1179ce87"}}
+      - title: What phern doctor prints for the rlm profile
+        lang: text
+        note: Real output on a Linux host with `bwrap`. The workspace rung and the confined commands are two boundaries, reported side by side.
+        code: |
+          Containment
+            tier (effective)         advisory
+            tier for children        worktree
+            advisory bounds          nothing
+            advisory does NOT bound  anything — the whole host, at the user's own permissions
+            worktree bounds          every tool-mediated write, and every relative-path raw write
+            worktree does NOT bound  an absolute-path raw write — open("/etc/passwd", "w") never consults a cwd
+            confined commands        a sandbox backend is mounted and enforces "full"; every command the
+                                     harness wraps is bounded by the kernel, whatever the workspace rows
+                                     above say about the tree
+            strict                   no
+          Local confinement
+            backend                  bwrap
+            confines                 yes
+            because                  writes are bounded to the workspace; an absolute path was refused
+            egress                   proxy at /run/user/1000/ph/sandbox/egress-633937-1.sock; reachable
+                                     from inside; the proxy refused ph-egress-probe.invalid
+      - title: Limits
+        tone: limit
+        list:
+          - "**One provider slot.** A mount has one workspace provider, so the root and its children can differ only between `advisory` and that provider's rung. A profile cannot put the root on `worktree` and its children on `sandbox`."
+          - "`childTier: sandbox` over the git provider gives a worktree. The rung delivered is the provider's, and `phern doctor` prints the effective one."
+          - "The `worktree` rung moves the cwd. It bounds nothing about an absolute path or a process that changes directory. Only the OS sandbox does."
+          - "`workspace-readonly-scratch` claims its rung only when a backend is mounted and enforces `full`. On a host with neither `bwrap` nor Seatbelt there is no `sandbox` rung."
+          - "No shipped profile mounts `workspace-readonly-scratch`, `workspace-jj` or `workspace-agentfs`. A profile adds the row and switches `workspace-git-worktree` off."
+          - "A read-only kind points `TMPDIR` and tool caches into the scratch. A toolchain that insists on writing beside its sources still fails."
+          - "A workspace tree is not an intent kind: `WorkspaceSeam.reconcile` settles a tree a crash left, and repair leaves it alone (DESIGN §8)."
+      - links:
+          - {to: "node:workspace", label: "The workspace tier box"}
+          - {to: "node:sandbox", label: "The OS sandbox"}
+          - {to: "topic:settings", label: "A profile that puts children on the sandbox rung"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      Each layer bounds one thing and says what it does not. The harness cannot
+      intercept code a model writes: a cell's own `open()` and a subprocess are
+      bounded by the OS sandbox or by nothing. Read this list before relying on
+      a rule.
+    blocks:
+      - title: Containment is not interception (I8)
+        tone: limit
+        list:
+          - "`permissions-fs` sees only what goes through `ctx.fs`: the fs tools, a second editing tool, a Code Mode binding. A raw `open()` in a code cell and anything a subprocess does fire no intent and reach no rule."
+          - "`hitl` and the destructive classifier judge a call's arguments, not what the call then does. The classifier's tables do not claim to be complete."
+          - "A path that is textually inside the workspace is accepted without resolving it, so a symlink pointing out is not asked about."
+          - "`glob` and `grep` skip a path a rule would deny or interrupt; enumeration is not asked about."
+      - title: The OS sandbox
+        tone: limit
+        list:
+          - "**Reads stay open.** `bwrap` binds `/` read-only and the Seatbelt profile allows `file-read*`. A confined command can read any file the user can, including keys under the home directory. The read boundary is `ctx.fs`, one layer up, and it does not see raw code."
+          - "**No backend, no confinement.** `sandbox-local` declines on a host without `bwrap` or `sandbox-exec`, or when its canary write escapes. `ctx.shell` then runs commands unconfined and says so only at debug level; the code kernel does the same. `containment.strict` is the one setting that turns this into a refusal to start."
+          - "On Ubuntu 23.10 and later an unprofiled `bwrap` dies with `setting up uid map: Permission denied`; it needs an AppArmor profile at `/etc/apparmor.d/bwrap`."
+          - "**Landlock is unwritten.** The shipped backends are `bwrap` and Seatbelt."
+          - "`allowlist` without a working bridge means no network: no `socat` on a `bwrap` host, or a probe that got no answer."
+          - "The proxy filters on host and port only. TLS stays end to end. A command that ignores the proxy variables (`ssh`, a raw socket) reaches nothing."
+          - "The sandbox does not take back what an allowed request did at the far end."
+          - "A filesystem refusal is read from what the command printed, and only for a command that failed. A refusal the command swallowed leaves no `sandbox/denied`."
+          - "The first `/sandbox` edit freezes the host list for that session: a row's config is replaced whole."
+      - title: macOS
+        tone: limit
+        list:
+          - "Seatbelt denies; it does not unshare. There is no PID namespace, so a confined command can see other processes, and no equivalent of `--die-with-parent`: a shell child outlives a `SIGKILL` of pH until the next start's sweep."
+          - "The proxy listens on the host's loopback there. Any local process can name any agent in the proxy URL, which costs attribution only: it tunnels to hosts every local process can already reach."
+          - "The guest cannot set `RLIMIT_AS`, so a code kernel's address-space limit is not applied. `phern doctor` says so from the guests that started."
+          - "The orphan sweep's identity check reads a fixed `kinfo_proc` layout; a layout a later kernel moves reads as unverifiable and the stray is spared."
+      - title: Sub-agents
+        tone: limit
+        list:
+          - "A posture a person chose for the root session (`permission/preset`, `sandbox/mode`, `approval/policy`) is not copied to a child. See [What a sub-agent inherits](topic:inherits)."
+          - "`access: read` with no tier in force gives a child its parent's writable tree, recorded as `grantedAccess: write`."
+          - "Limits are per agent; no ceiling bounds a family's total. `rlm-subagent-provider.maxConcurrent` is a queue per parent, not a bound on the host."
+          - "A family member can read up to `observeMaxMessages` messages of another's transcript with `agent_observe.get`. A child can read its parent's and its siblings', not only the reverse."
+          - "A grandchild can hold a tool registered on its own scope that its granting parent cannot see."
+          - "`_enforce`'s containment refusal has no test (DESIGN §8)."
+      - title: Approvals
+        tone: limit
+        list:
+          - "Only `allowed-once` proceeds. There is no \"always allow\", and no remembered decision."
+          - "A session whose last `approval/policy` is `never` answers every ask `rejected` at once, recorded as automatic. The `danger-full-access` preset sets that policy, so under it a call a gate asks about does not run."
+          - "A turn parked on a person is closed as interrupted on resume, and its ask is not posed again (DESIGN §8)."
+          - "No shipped command switches the `hitl` posture; `set_mode` has no caller outside tests."
+      - title: The log
+        tone: limit
+        list:
+          - "**A writer can be forged on purpose.** Every write goes through a module's own writer, which refuses a type its row in `WRITERS` does not grant, so a third-party row appending `sandbox/mode` is refused at the write. A module that imports another's writer, builds a `LogWriter` or calls `Session._append` is not refused at run time; `test_log_writers.py` fails on all three."
+          - "A package's log type is known to a reader only once the package is imported, so a stored log with a required plugin type is refused by a reader that never mounted the plugin."
+          - "A tool-call limit with `exit: error` is traced, not tested (DESIGN §8)."
+      - title: Credentials and the process
+        tone: limit
+        list:
+          - "A credential a tool needs, such as an MCP token, is not checked or tracked."
+          - "A command that reads a secret from a file or a keychain logs it like any other output. The environment scrub covers names, not contents."
+          - "The daemon runs every root in one process. A segfault, an OOM kill or a `SIGKILL` ends every root at once."
+          - "Anyone holding the web token may run `!!`, the person's own shell with the person's own reach."
+      - links:
+          - {to: "ph-stabilize#node:permissions-fs", label: "permissions-fs in full"}
+          - {to: "ph-stabilize#node:hitl", label: "hitl in full"}
+          - {to: "invariants", label: "The five invariants"}
+
+  - id: settings
+    title: Settings that change the posture
+    summary: |
+      A deployment's posture is a handful of rows. A profile sets them; a person
+      can move three of them inside a session. Everything else is fixed when the
+      session's mount is built.
+    blocks:
+      - table:
+          columns: [setting, values, what it changes]
+          rows:
+            - ["`sandbox.defaultMode`", "`read-only`, `workspace-write`, `danger-full-access`", "what a confined process may write when the session's log says nothing. `base` ships `read-only`; the `tui` profile sets `workspace-write`"]
+            - ["`sandbox-allow.paths`", "directories", "writable beyond the workspace and its scratch; never added under `read-only`"]
+            - ["`sandbox-allow.network`", "`off`, `allowlist` + `hosts`, `full`", "what a confined process can reach; ships `allowlist` over 18 package and documentation hosts"]
+            - ["`sandbox-local`", "mounted or not", "the backend. Without it nothing is confined"]
+            - ["`containment.tier`, `childTier`", "`advisory`, `worktree`, `sandbox`", "which workspace rung the root and its children ask for"]
+            - ["`containment.strict`", "`true`, `false`", "refuse to start unless `tier: sandbox` and a `full` backend"]
+            - ["a workspace provider row", "git worktree, jj, agentfs, readonly-scratch", "which rung exists at all"]
+            - ["`workspace-lifecycle.access`", "`write`, `read`", "what the root agent asks of the project directory"]
+            - ["`permissions-fs.rules`", "ordered rules", "which paths a tool may read or write, deny or ask"]
+            - ["`hitl.mode`, `interruptOn`, `declared`", "`manual`, `auto`, `yolo`; rules", "which tool calls ask a person"]
+            - ["`limits`", "ceilings", "model calls, tool calls and children per turn and per session"]
+            - ["`subagent-presets.presets`", "name → skills, tools", "the kinds of child a parent may name"]
+            - ["`rlm-subagent-provider.maxDepth`, `maxConcurrent`", "numbers", "how deep delegation goes; how many of one parent's children run at once"]
+            - ["`tools-code-mode.maxSubagentSpawnsPerRun`", "a number", "how many children one cell may spawn (32 in the `rlm` bundle)"]
+            - ["`subprocess.scrub`, `keep`", "name fragments", "which environment variables a child process never inherits"]
+      - title: A hardened profile
+        lang: yaml
+        note: |
+          Checked with `phern doctor --profile hardened`, which reports
+          `tier (effective): advisory` and `tier for children: sandbox`. A patch
+          replaces a row's whole config, so `permissions-fs` restates the
+          shipped write rule last. `sandbox` is the id of the `sandbox-policy`
+          row.
+        code: |
+          # $PH_HOME/profiles/hardened.yaml
+          extends: rlm
+          rows:
+            - id: sandbox
+              config:
+                defaultMode: workspace-write
+            - id: sandbox-allow
+              config:
+                paths: [~/.cache/uv]
+                network:
+                  mode: allowlist
+                  hosts: [pypi.org, files.pythonhosted.org, github.com, "*.githubusercontent.com"]
+            - id: workspace-git-worktree       # one provider slot: swap the worktree tier out
+              disabled: true
+            - id: workspace-readonly-scratch   # the sandbox rung's workspace kind
+              name: workspace-readonly-scratch
+            - id: containment
+              config:
+                tier: advisory                 # the person's own agent stays in the checkout
+                childTier: sandbox             # a child gets a scratch root; the repository is read-only
+                strict: false
+            - id: permissions-fs
+              config:
+                rules:
+                  - operations: [read, write]
+                    paths: ["**/.env", "**/*.pem"]
+                    mode: deny
+                  - operations: [write]
+                    paths: ["**"]
+                    scope: outside-workspace
+                    mode: interrupt
+            - id: hitl
+              config:
+                mode: auto
+                interruptOn:
+                  bash: {preset: destructive, when: ["\\bsudo\\b"]}
+            - id: limits
+              config:
+                children: {turnLimit: 4, sessionLimit: 12}
+            - id: subagent-presets
+              config:
+                presets:
+                  reviewer: {skills: [code-review], tools: [read, grep, glob]}
+      - title: What a person can move inside a session
+        table:
+          columns: [how, writes, reaches]
+          rows:
+            - ["a posture preset (the TUI's picker, the daemon's preset request)", "`permission/preset`, `sandbox/mode` and `approval/policy` in one batch, in the root's log", "the root session only"]
+            - ["`/sandbox allow host|path`, `/sandbox revoke host|path`, `/sandbox network off|allowlist|full`", "a `profile/override` for the `sandbox-allow` row, then the row is re-applied", "every agent of the mount, from its next command"]
+            - ["`/profile use <name>`", "a new base for the session", "the session starts again on that profile"]
+      - title: The three presets
+        table:
+          columns: [preset, sandbox mode, approval policy, effect]
+          rows:
+            - ["`read-only`", "`read-only`", "`ask`", "a confined process writes only the scratch; asks are put to a person"]
+            - ["`workspace-write`", "`workspace-write`", "`ask`", "writes inside the workspace and scratch; asks are put to a person"]
+            - ["`danger-full-access`", "`danger-full-access`", "`never`", "`/` is writable and the host's network is open; nobody is prompted, and a call a gate asks about is answered `rejected`"]
+      - row: permission-presets
+      - struct: ph.seams.permission_presets:PermissionPreset
+      - record: permission/preset
+        example: |
+          {"type": "permission/preset", "data": {"preset": "danger-full-access"}}
+      - record: profile/override
+      - title: Checking what is in force
+        lang: bash
+        code: |
+          phern doctor --profile hardened      # Containment, Local confinement, Sandbox allowances, File permissions
+          phern --profile hardened --dump-config   # the rows as composed, with the layer that last set each
+          phern config --row containment       # one row's options
+          /sandbox                             # in a session: the posture in force and this session's refusals
+      - title: Limits
+        tone: limit
+        list:
+          - "A preset names a mode; it does not create a backend. On a host with no backend, `read-only` puts the approval half in force and the confinement half not."
+          - "A preset reaches the root session only. Its children keep the row's `defaultMode` and the `ask` policy."
+          - "No model-callable tool changes any of these. A row is mounted when a session starts, and a running session's rows change through `ph.session_profile.override`, which only `/sandbox`, `/model` and a start's own `--patch` reach."
+      - links:
+          - {to: "ph-stabilize#topic:configuring", label: "Configuring the stabilize bundle"}
+          - {to: "topic:ladder", label: "The containment ladder"}
+
+  - id: recorded
+    title: What is recorded where
+    summary: |
+      Each session owns its log. A child's admission, its starts, its ending,
+      its asks, its refusals and its workspace are in the child's log, and the
+      parent's log holds none of them. A parent finds its children by reading
+      their logs: a child's id starts with its parent's, and its header names
+      the parent.
+    blocks:
+      - table:
+          columns: [record, whose log, written by, says]
+          rows:
+            - ["`subagent/admitted`", "the child's", "`ph.seams.subagents`", "the run, the task, both accesses and the narrowing"]
+            - ["`subagent/status`", "the child's", "`ph.seams.subagents`", "`queued`, `running`, `done`, `error`, `canceled`"]
+            - ["`subagent/deleted`", "the child's", "`ph.seams.subagents`", "a revocation and its reason"]
+            - ["`workspace/acquired`, `workspace/disposed`, `workspace/retained`", "the agent's own", "`ph.seams.workspace`", "the kind it got, and what survived"]
+            - ["`approval/asked`, `approval/decided`", "the asking agent's", "`ctx.approval`, through the journal", "that a person was asked, and the answer"]
+            - ["`approval/policy`", "the session's", "`ph.seams.approval`", "`ask` or `never`"]
+            - ["`approval/mode`", "the session's", "`ph_stabilize.hitl`", "`manual`, `auto` or `yolo`"]
+            - ["`permission/preset`", "the root's", "`ph.seams.permission_presets`", "the posture a person picked"]
+            - ["`sandbox/mode`", "the session's", "`ph.seams.sandbox`", "the mode a confined process runs in"]
+            - ["`sandbox/denied`", "the agent's the command ran for", "`ph.seams.sandbox`", "one refused boundary and how to lift it"]
+            - ["`profile/override`", "the root's", "`ph.session_profile`", "a row's config changed in this session"]
+            - ["`skill/read`", "the reader's", "`ph.seams.skills`", "what of a skill reached a prompt; `via: brief` for a spawn"]
+            - ["`limits/exceeded`", "the agent's own", "`ph_stabilize.limits`", "which ceiling stopped it"]
+      - title: A child's header
+        lang: json
+        note: From a real spawn. `family` files the log beside its root; `parentSession` is the link every reader follows.
+        code: |
+          {"version": 4, "id": "parent-child-03bc1179ce87", "parentSession": "parent",
+           "family": "parent", "origin": "subagent", "delegationDepth": 1, "agentPreset": "rlm"}
+      - title: A child's life, in its own log
+        lang: json
+        note: From a real run. A status carries its own reason or none; nothing carries over to the next.
+        code: |
+          {"type": "subagent/admitted", "data": {"runId": "child-11d5fbd5e1e3", "name": "subagent-look-around-7088e513", "owner": "rlm-child", "prompt": "look around", "modelProvider": "fake", "model": "fake-1", "requestedAccess": "read", "grantedAccess": "write"}}
+          {"type": "subagent/status", "data": {"status": "running"}}
+          {"type": "subagent/status", "data": {"status": "done", "answerPreview": "ok",
+            "notice": {"text": "[rlm child subagent-look-around-7088e513 (child-11d5fbd5e1e3) completed without sending a reply. Last assistant text: ok]",
+                       "summary": "subagent-look-around-7088e513 finished without replying",
+                       "id": "48daa566-4a24-4435-8a08-e84b3cfb80a5"}}}
+      - record: subagent/status
+      - record: subagent/deleted
+        example: |
+          {"type": "subagent/deleted", "data": {"reason": "no longer needed"}}
+      - title: What a parent can see of a child
+        table:
+          columns: [through, what]
+          rows:
+            - ["`ctx.subagents.children(parent_id)`", "one `ChildState` per child, folded from that child's log: status, cause, detail, tokens, the value it returned, the answer preview"]
+            - ["the ending notice", "one message in the parent's inbox when a child ends: its last text, or why it failed. The resume sweep delivers one a crash kept back"]
+            - ["`agent_message.send`", "a message steered into the child, read at its next step"]
+            - ["`agent_observe.get(agent_id, limit)`", "the last messages of the child's transcript, as role and text, capped by `observeMaxMessages` (40)"]
+            - ["`SubagentRun.result()`", "the child's result, for a caller that chooses to block"]
+      - title: What a parent cannot do
+        tone: secure
+        list:
+          - "It cannot write into a child's log. The seam's doors are the only writers of the `subagent/*` types."
+          - "It cannot widen a child after admission. A parent that needs a child with more spawns a new one."
+          - "It cannot reach a grandchild by message: reach is the parent, direct children and siblings."
+          - "A child's spend is not copied into the parent's log. `ChildState.tokens` totals it from the child's own answers."
+      - links:
+          - {to: "durability", label: "What survives a restart"}
+          - {to: "ph-rlm#node:child", label: "The child agent in ph-rlm"}
+
+  - id: credentials
+    title: "Credentials: names, never values"
+    summary: |
+      Nothing above the adapter edge holds a secret value. A row's config names
+      an environment variable. Only the adapter about to build a request
+      resolves it, into a local that goes out of scope with the request. pH does
+      not store a credential anywhere.
+    blocks:
+      - row: credentials-env
+      - title: A reference
+        struct: ph.seams.credentials:CredentialRef
+      - title: In a profile
+        lang: yaml
+        note: "`apiKeyEnv` is the name of a variable. The value is never written into a profile, a log, a frame or a child's environment."
+        code: |
+          - id: llm-anthropic
+            config:
+              apiKeyEnv: ANTHROPIC_API_KEY
+      - title: What keeps a value out
+        tone: secure
+        list:
+          - "The resolved value hides itself in `repr` and `str`, so a traceback that formats its locals does not print it."
+          - "`ctx.subprocess` drops every environment variable whose name contains `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `CREDENTIAL` from every child process, a confined command and a code kernel included. `scrub` and `keep` on the `subprocess` row change the list."
+          - "A missing credential refuses with the variable named, for example `ANTHROPIC_API_KEY is not set, so provider \"anthropic\" cannot be called`."
+          - "A session whose route names a credential this deployment cannot supply is held, not failed: `credential/needed` records the name, no retry is spent, and `credential/supplied` lets it go on. A child is held the same way, in its own log."
+          - "A resolve reads at the moment it is needed, so a rotated secret takes effect on the next request."
+      - row: subprocess-local
+      - record: credential/needed
+      - title: Limits
+        tone: limit
+        list:
+          - "A credential given over the wire lives in the daemon's memory and is gone after a restart. The session waits for it by name."
+          - "A credential a tool needs is not known to the seam. The log records which tools were called, not which credential each would ask for."
+          - "The scrub matches names. A secret in a file the process can read is readable: reads are open inside the sandbox."
+      - links:
+          - {to: "phern", label: "phern: from a command to a model call"}
+
+  - id: invariants
+    title: I7 and I8, where they show
+    summary: |
+      Two of the three invariants pH added to the original five are security
+      statements. I7: the knowledge layer may only reference capability that
+      already exists. I8: containment is not interception, and no document may
+      blur them.
+    blocks:
+      - table:
+          columns: [invariant, here]
+          rows:
+            - ["I7", "A skill, a preset or a refinement names capability; none of them creates it. The subagent code glosses it as \"delegation must not be privilege escalation\": `check_grant` refuses a name the parent lacks, and a preset is a menu, never a grant."]
+            - ["I8", "A binding is governed per call: it passes the gates and the path rules. Raw Python a model writes is bounded by the tier and the OS sandbox, never gated. Each layer's description says what it does not bound, in `phern doctor` as well as here."]
+            - ["I2", "A grant, a workspace, a kernel and a child are effects of a scope. Disposing the scope takes them."]
+            - ["I3", "An ask, a refusal and a posture change are records before they take effect."]
+      - links:
+          - {to: "invariants", label: "How the five invariants show up"}
+          - {to: "topic:limits", label: "Limits and known gaps"}
+
+nodes:
+  person:
+    title: Person, through a front end
+    summary: |
+      A gate that returns `Ask` is put to a person. A front end registers an
+      answerer on the `approval/request` waterfall: the TUI's modal, the
+      daemon's request to an attached client, or a test's stub. The person also
+      picks the posture and edits the sandbox allowances with `/sandbox`.
+    blocks:
+      - row: approval
+      - title: What an answerer receives
+        struct: ph.seams.approval:ApprovalRequest
+      - title: What a person may answer
+        table:
+          columns: [answer, effect]
+          rows:
+            - ["`allowed-once`", "the call runs, this once"]
+            - ["`Edited(arguments)`", "the call runs with the arguments the person gave"]
+            - ["`Responded(message)`", "the call does not run; the model reads the message as the result"]
+            - ["`rejected`", "the model is told the user rejected it"]
+            - ["`canceled`", "the person stopped the turn while being asked"]
+            - ["`unavailable`", "nobody could answer, or the log could not be written"]
+      - title: Who answers for a child
+        text: |
+          The same answerer. A child's ask carries the child's `agentId` and is recorded in the child's log, so the person sees which agent is asking. A profile with no front end has no answerer, and every ask is `unavailable`: the right posture for `phern -p`, a scheduled tick or an unattended run.
+      - title: What it offers
+        tone: secure
+        list:
+          - "Fails closed. No answerer, an unmounted seam, a canceled prompt and an error inside an answerer all deny."
+          - "`approval/asked` is on disk before anybody is asked. A decision that lets something happen is on disk before it happens."
+          - "A guard runs after an approval and is final, so policy written as `ctx.tools.guard` overrides even an explicit yes."
+      - title: Limits
+        tone: limit
+        list:
+          - "There is one channel and no queue. A front end that has gone away produces `unavailable`, not a wait."
+          - "Nothing is remembered: `allowed-once` is the only grant."
+          - "An ask a crash left open is closed as interrupted on resume and not posed again. Within one daemon's life, an open ask is put to the next client that attaches."
+      - links:
+          - {to: "edge:ask", label: "What crosses to the person"}
+          - {to: "topic:settings", label: "What a person can move inside a session"}
+
+  log:
+    title: Session logs, one per agent
+    summary: |
+      Every security decision that takes effect is a record first. Each agent
+      writes to its own session's log; a child's log is filed in its parent's
+      family and names its parent in the header. A posture is read back from the
+      log, so a resumed session is in the posture it was left in.
+    blocks:
+      - record: sandbox/mode
+        example: |
+          {"type": "sandbox/mode", "data": {"mode": "danger-full-access"}}
+      - record: sandbox/denied
+        example: |
+          {"type": "sandbox/denied",
+           "data": {"kind": "network", "via": "proxy",
+                    "message": "Sandbox blocked network access to example.com:443. Allow it with /sandbox allow host example.com.",
+                    "host": "example.com", "port": 443, "agent": "s1"}}
+      - record: approval/asked
+        example: |
+          {"type": "approval/asked",
+           "data": {"toolName": "bash", "callId": "call_7",
+                    "reason": "bash needs approval — matched 'rm -rf build (removes a directory tree)'",
+                    "agentId": "parent", "allowedDecisions": ["approve", "reject"]}}
+      - record: approval/decided
+        example: |
+          {"type": "approval/decided",
+           "data": {"toolName": "bash", "outcome": "unavailable", "askSeq": 1, "callId": "call_7"}}
+      - record: approval/policy
+        example: |
+          {"type": "approval/policy", "data": {"policy": "never"}}
+      - title: What survives a restart
+        tone: durable
+        list:
+          - "The sandbox mode is the last `sandbox/mode` record, else the row's `defaultMode`."
+          - "The approval policy is the last `approval/policy`; the `hitl` posture is the last `approval/mode`."
+          - "A child's ceiling is derived again from its `subagent/admitted` record, against what the deployment holds then."
+          - "A `/sandbox` edit is a `profile/override` in the root's log; the session's next start puts it back."
+          - "A workspace a crash left open is closed by `workspace-reconcile` when the session is next opened."
+      - title: Who may write a record
+        tone: secure
+        list:
+          - "Every append goes through a module's own writer, `log_writer(__name__)`. The writer refuses a type its row in `WRITERS` does not grant."
+          - "`sandbox/mode` has one writer, `ph.seams.sandbox`; `approval/policy` one, `ph.seams.approval`; the `subagent/*` types one, `ph.seams.subagents`."
+      - title: Limits
+        tone: limit
+        list:
+          - "A module that imports another's writer, builds a `LogWriter` or calls `Session._append` is not stopped at run time. `test_log_writers.py` fails on each."
+          - "Facts across two logs are eventual, not atomic. A child's ending is on its own disk before its parent is handed the result."
+      - links:
+          - {to: "topic:recorded", label: "What is recorded where"}
+          - {to: "durability", label: "Durability across the whole harness"}
+
+  agent:
+    title: An agent and its scope
+    summary: |
+      An agent is a session, a loop and a `Context` of its own, created isolated
+      under the agent registry (`agent:<session id>`). What it can call is its
+      tool view: the global registrations, less what a restriction along its
+      scope chain removes, plus anything registered on its own scope.
+    blocks:
+      - title: How the scope is built
+        lang: python
+        note: "`ph/agent/registry.py`. With `parent=`, the scope hangs off the parent's `Context`; without it, off the registry."
+        code: |
+          owner = getattr(parent, "ctx", None)
+          base = owner if isinstance(owner, Context) else self.ctx
+          scope = base.scope(f"agent:{session.id}")
+      - title: What belongs to the scope
+        table:
+          columns: [thing, how it is held]
+          rows:
+            - ["the workspace", "`ctx.workspace.acquire(..., scope=agent.ctx)`; released with the scope"]
+            - ["the code kernel", "an effect labeled `code-runtime:<namespace>`"]
+            - ["a restriction or a guard", "`ctx.tools.restrict(..., scope=agent.ctx)`"]
+            - ["its children", "each child's scope is a node beneath it, and each child is an effect of it"]
+            - ["a narrowed path list", "`ctx.sandbox.restrict_paths(paths, scope=agent.ctx)`"]
+      - title: The root agent's workspace
+        text: |
+          `workspace-lifecycle` acquires the root agent's workspace on its behalf and points `ctx.fs` at it. `access` on that row is what the root asks of the project. A child that reaches its first step with no workspace is refused with `CHILD_WORKSPACE_MISSING`: the row never invents one for a child, because the base and the access are the parent's to decide.
+      - title: What it offers
+        tone: secure
+        list:
+          - "A registration made on an agent's scope reaches that agent and its descendants only."
+          - "Disposing the scope releases everything the agent took."
+          - "An agent's id is its session's id, so the parent link needs no side table."
+      - title: Limits
+        tone: limit
+        list:
+          - "A scope cannot filter its own registrations. Whatever is registered on an agent's own scope, that agent holds."
+          - "The root agent's ceiling is the mount: every tool and skill the profile registers."
+      - links:
+          - {to: "topic:scopes", label: "Scopes, isolation and visibility"}
+          - {to: "edge:call", label: "A tool call leaves the agent"}
+
+  gates:
+    title: Gates on a tool call
+    summary: |
+      Every tool call, a Code Mode binding call included, passes one pipeline
+      before its body runs: the `tools/pre-execute` waterfall, then the approval
+      seam if a listener returned `Ask`, then the deny-only guards. The gates
+      are rows; a profile without them lets every call through.
+    blocks:
+      - title: The order
+        text: |
+          1. `tools/pre-execute`, a waterfall. A listener returns `Allow`, `Deny`, `Ask` or `Respond`, or calls on.
+          2. An `Ask` goes to `ctx.approval.request`. `allowed-once` becomes `Allow`; an edit becomes an `Allow` that substitutes the arguments; a response becomes `Respond`; everything else is `Deny`.
+          3. Guards (`ctx.tools.guard`) run last, only on an `Allow`, from every layer the call's scope can see. The first reason returned denies. No later listener can re-permit.
+          4. `tool/call` is written after the gate, then the body runs.
+      - title: The rows that gate
+        table:
+          columns: [row, hooks, does]
+          rows:
+            - ["[hitl](ph-stabilize#node:hitl)", "`tools/pre-execute`", "returns `Ask` for a call its rules select; the default rule is the destructive classifier"]
+            - ["[limits](ph-stabilize#node:limits)", "`tools/pre-execute`, `agent/pre-step`, `ctx.subagents.guard`", "returns `Deny` past a ceiling; refuses a spawn past the child ceiling; trips a breaker after 5 failures in a row"]
+            - ["[rlm-messaging](ph-rlm#node:messaging)", "`ctx.tools.guard`", "denies an agent message outside the sender's family"]
+            - ["[permissions-fs](ph-stabilize#node:permissions-fs)", "`fs/*-intent`, one layer down", "path rules on what a tool then reads or writes"]
+      - row: hitl
+      - title: hitl in a profile
+        lang: yaml
+        note: "`interruptOn` keys Code Mode on the reserved name `run_code`, not the name the model sees."
+        code: |
+          - id: hitl
+            config:
+              mode: auto                    # manual | auto | yolo
+              interruptOn:
+                bash:
+                  preset: destructive
+                  when: ["\\bsudo\\b"]
+                run_code:
+                  preset: destructive
+                  allowedDecisions: [approve, reject]
+      - struct: ph_stabilize.hitl:Rule
+      - row: limits
+      - title: limits in a profile
+        lang: yaml
+        code: |
+          - id: limits
+            config:
+              toolCalls: {turnLimit: 100, perTool: {bash: {turnLimit: 20}}, exit: continue}
+              children: {turnLimit: 4, sessionLimit: 12}
+              breaker: {consecutiveFailures: 5}
+      - struct: ph_stabilize.limits:ChildLimits
+      - title: What a gate returns
+        struct: ph.tools.definition:Ask
+      - struct: ph.tools.definition:Deny
+      - title: Under Code Mode
+        text: |
+          A cell is one tool call, `run_code`, and each `await tools.x(...)` inside it is another: it re-enters this pipeline as its own execution. A denial ends the whole cell; a failure is the program's to handle. That is why the messaging rate limit is a tool error and not a guard.
+      - title: What it offers
+        tone: secure
+        list:
+          - "The gates belong to the mount, not to an agent. A child's calls pass the same listeners, and a grant cannot drop them."
+          - "A guard is monotonic: it can deny and never allow, and it runs after a person said yes."
+          - "An `Ask` with no approval seam, or on a call with no agent, denies."
+      - title: Limits
+        tone: limit
+        list:
+          - "A gate judges the call's arguments. What a command or a cell then does is the sandbox's to bound."
+          - "A `when:` pattern is a regex over each decoded string argument; it cannot match across two."
+          - "In `auto`, the `declared` rule asks only when the classifier finds something. `yolo` asks about nothing."
+          - "`limits` and `hitl` cannot be set per agent."
+      - links:
+          - {to: "ph-stabilize", label: "ph-stabilize: each row and the event it hooks"}
+          - {to: "dispatch", label: "Why a gate is a waterfall"}
+
+  seams:
+    title: "The seams a tool acts through: ctx.fs and ctx.shell"
+    summary: |
+      A tool does not open a file or start a process itself. `ctx.fs` fires an
+      intent before each read, write or edit, and `permissions-fs` judges it.
+      `ctx.shell` turns a command into an argv, places it in the agent's
+      workspace and asks `ctx.sandbox` to confine it. The code runtime starts
+      its kernel the same way.
+    blocks:
+      - row: permissions-fs
+      - title: Path rules in a profile
+        lang: yaml
+        note: First match wins and the default is allow. The last rule is the one the bundle ships; `rules` is replaced whole, so restate it.
+        code: |
+          - id: permissions-fs
+            config:
+              rules:
+                - operations: [read, write]
+                  paths: ["**/.env", "**/*.pem", "secrets/**"]
+                  mode: deny
+                - operations: [write]
+                  paths: ["**"]
+                  scope: outside-workspace
+                  mode: interrupt
+      - struct: ph_stabilize.permissions_fs:Rule
+      - title: What the seams dispatch
+        table:
+          columns: [event or call, dispatch, who answers]
+          rows:
+            - ["`fs/read-intent`, `fs/write-intent`, `fs/edit-intent`", waterfall, "`permissions-fs` returns a refusal sentence, asks a person, or calls on"]
+            - ["`ctx.fs.screen`", "service", "hides a denied path from `glob` and `grep`"]
+            - ["`ctx.sandbox.confine(argv, policy, agent=)`", "service", "the mounted backend, or `SandboxError`"]
+            - ["`ctx.subprocess.run(spec)`", "service", "starts the process with a scrubbed environment"]
+      - event: fs/write-intent
+      - title: What a write intent carries
+        struct: ph.seams.fs:WriteIntent
+      - row: fs-local
+      - row: shell-local
+      - title: What a command's result records
+        struct: ph.seams.shell:ShellResult
+      - title: How ctx.shell decides to confine
+        text: |
+          When the agent holds a workspace and a backend is mounted, the policy is `workspace_policy(workspace)`: the workspace root and the scratch, with no mode of its own. `ctx.sandbox.effective` then fills in the session's mode, the deployment's extra directories and the network. `confinedBy` on `shell/result` names the backend, or is null when nothing bounded the run.
+
+          The code kernel builds the same policy from the same function, so a deployment cannot end with `bash` confined and `run_code` not. Neither is gated on the containment tier.
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Every tool that reads or writes through `ctx.fs`, without the row knowing a tool name."
+          - "`outside-workspace` is judged against the acting agent's own workspace, its scratch and the sandbox's allowed directories, so a child in a worktree is asked about a write to its parent's checkout."
+          - "The prompt boundary and the enforced boundary read one definition, `writable_roots`, and every root is canonical at its source."
+          - "A requested confinement that cannot be given raises; it never runs the command unwrapped."
+      - title: Limits
+        tone: limit
+        list:
+          - "A raw `open()` in a code cell and a subprocess fire no intent. Only the OS sandbox bounds them."
+          - "With no backend, or an agent that holds no workspace, `ctx.shell` runs the command unconfined and logs that at debug level."
+          - "When the agent has no workspace, an `outside-workspace` rule does not apply."
+          - "With no rules, `permissions-fs` attaches no listener at all."
+      - links:
+          - {to: "ph-stabilize#node:permissions-fs", label: "permissions-fs in full"}
+          - {to: "edge:confine", label: "The policy that crosses to the sandbox"}
+
+  sandbox:
+    title: "ctx.sandbox: policy, backend, allowances"
+    summary: |
+      The sandbox seam turns an argv into one the kernel bounds. Three rows
+      share it: `sandbox-policy` holds the mode, `sandbox-local` is the backend
+      (`bwrap` on Linux, Seatbelt on macOS) and registers only after it has
+      proved itself, and `sandbox-allow` states what a confined process may
+      reach beyond its workspace. `confine()` never passes an argv through
+      unchanged.
+    blocks:
+      - row: sandbox-policy
+      - row: sandbox-local
+      - row: sandbox-allow
+      - row: sandbox-commands
+      - title: In a profile
+        lang: yaml
+        note: |
+          `sandbox` is the id of the `sandbox-policy` row. With no `config:` the
+          `sandbox-allow` row ships `allowlist` over 18 package and
+          documentation hosts and no extra directory. A directory that does not
+          exist is skipped and marked `missing` by `phern doctor`; `/` is
+          refused.
+        code: |
+          - id: sandbox
+            config:
+              defaultMode: workspace-write     # read-only | workspace-write | danger-full-access
+          - id: sandbox-allow
+            config:
+              paths: [~/.cache/uv]
+              network:
+                mode: allowlist                # off | allowlist | full
+                hosts: [pypi.org, files.pythonhosted.org, github.com, "*.githubusercontent.com"]
+      - title: What each mode lets a confined process write
+        table:
+          columns: [mode, writable, network]
+          rows:
+            - ["`read-only`", "the agent's scratch only. The workspace is not writable and the deployment's extra directories are not added", "as `sandbox-allow` says"]
+            - ["`workspace-write`", "the workspace root, the scratch and `sandbox-allow.paths`", "as `sandbox-allow` says"]
+            - ["`danger-full-access`", "everything: `/` is bound writable (still wrapped, so absence is never mistaken for confinement)", "the host's network, unfiltered"]
+      - title: Which mode applies
+        text: |
+          `narrower(policy.mode, mode_for(agent))`. The session's mode is the last `sandbox/mode` record in that agent's log, else `defaultMode`. A caller that states a mode can only ask for less; a caller that states none takes the session's whole. The same rule holds for the network: `refuse_network` is a veto, and there is no field that asks for more.
+      - title: What is probed at mount
+        text: |
+          1. The platform and the binary: `sandbox-exec` on macOS, `bwrap` on Linux. Anything else has no backend.
+          2. An escape attempt: one confined shell writes a file inside a probe workspace and one outside it by absolute path. The first must land and the host copy of the second must be unchanged. The probe reads the files, never the exit code.
+          3. The egress bridge: the proxy is started and one `CONNECT` to `ph-egress-probe.invalid` is sent from inside a confined command. The bridge is registered only if the proxy's own 403 comes back. On a `bwrap` host this needs `socat`.
+
+          A probe that fails means the row does not claim the slot. The verdict is not cached across processes, and `phern doctor` prints it either way.
+      - title: The argv bwrap is handed
+        lang: json
+        note: |
+          Generated with `Bubblewrap().confine(...)` for `workspace-write`, one
+          extra directory and the proxy door. The shim's shell text is
+          shortened here.
+        code: |
+          ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+           "--bind", "/home/me/repo", "/home/me/repo",
+           "--bind", "/home/me/.ph/scratch/s1/s1", "/home/me/.ph/scratch/s1/s1",
+           "--bind", "/home/me/.cache/uv", "/home/me/.cache/uv",
+           "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--new-session", "--unshare-net",
+           "--setenv", "HTTP_PROXY", "http://s1:ph@127.0.0.1:3128",
+           "--setenv", "HTTPS_PROXY", "http://s1:ph@127.0.0.1:3128",
+           "--setenv", "ALL_PROXY", "http://s1:ph@127.0.0.1:3128",
+           "--unsetenv", "NO_PROXY", "--unsetenv", "no_proxy",
+           "--", "/bin/sh", "-c", "socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/run/user/1000/ph/sandbox/egress-1.sock & ...; exec \"$@\"",
+           "ph-egress", "/bin/bash", "-lc", "pytest -q"]
+      - title: The Seatbelt profile for the same policy
+        lang: text
+        note: Generated with `seatbelt_profile(policy)`. Deny by default and allow back.
+        code: |
+          (version 1)
+          (deny default)
+          (allow process-exec process-fork signal)
+          (allow sysctl-read)
+          (allow file-read*)
+          (allow file-write-data (literal "/dev/null") (literal "/dev/stdout") (literal "/dev/stderr"))
+          (allow file-write* (subpath "/home/me/repo"))
+          (allow file-write* (subpath "/home/me/.ph/scratch/s1/s1"))
+          (allow file-write* (subpath "/home/me/.cache/uv"))
+          (allow network-outbound (remote ip "localhost:3128"))
+      - title: The request
+        struct: ph.seams.sandbox:SandboxPolicy
+      - title: The deployment's statement
+        struct: ph.seams.sandbox:Allowances
+      - struct: ph.seams.sandbox:NetworkAllowance
+      - title: What comes back
+        struct: ph.seams.sandbox:ConfinedArgv
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Every write, absolute paths included, for every command `ctx.shell` runs and every code kernel: the only layer that refuses `open(\"/etc/passwd\", \"w\")`."
+          - "Network egress, to the hosts `sandbox-allow` names and through the proxy only."
+          - "Under `bwrap`: a PID namespace of its own, a session of its own (no `TIOCSTI` into the person's terminal), and death with its parent."
+          - "A child an assigned profile narrowed binds only its own list of extra directories (`restrict_paths`), read outermost first so a grandchild holds no more than its parent does now."
+          - "Without `sandbox-allow` the seam fails closed: no extra directory and no network."
+      - title: Limits
+        tone: limit
+        list:
+          - "Reads are open under both backends."
+          - "No backend on this host means `confine()` raises and its callers run unconfined instead of asking. Only `containment.strict` refuses to start."
+          - "Both shipped backends declare `full`. `partial` exists in the vocabulary for a backend that would not, and `strict` refuses it."
+          - "Landlock is unwritten."
+          - "The mode is per session and is not inherited by a child."
+          - "One egress proxy serves every agent, so a child cannot be given fewer hosts than its parent."
+      - links:
+          - {to: "node:effect", label: "What runs inside"}
+          - {to: "node:egress", label: "The egress proxy"}
+          - {to: "topic:limits", label: "Limits and known gaps"}
+
+  effect:
+    title: A confined process
+    summary: |
+      What the sandbox wraps is a process the harness started for an agent: a
+      command from `ctx.shell` (`!!`, the `bash` tool, an autonomous gate) or
+      the Python kernel behind `run_code`. Inside, the filesystem is the host's,
+      read-only, with the workspace and the scratch punched back through.
+    blocks:
+      - title: What is confined, and to what
+        table:
+          columns: [started by, bounded to]
+          rows:
+            - ["`ctx.shell`", "the agent's workspace and scratch, from `workspace_policy(workspace)`"]
+            - ["`code-runtime-python`", "the same, per agent; the kernel is started once and holds the namespace"]
+      - title: What the process is given
+        list:
+          - "A scrubbed environment: no variable whose name marks a credential."
+          - "`TMPDIR` in the agent's scratch, because a confined process has no `/tmp` of its own. A read-only kind also points tool caches there."
+          - "The proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms) when the network mode is `allowlist` and a bridge is up; `NO_PROXY` is unset."
+          - "fd 3, for a kernel: the framed channel is an inherited descriptor and crosses both wrappers."
+      - title: A refusal becomes a record
+        text: |
+          The kernel refuses in silence. For a command that failed, the seam reads what it printed against the backend's own table of sentences (`Read-only file system`, `Network is unreachable`, the resolver texts under `bwrap`; `Operation not permitted` under Seatbelt) and appends `sandbox/denied` to the agent's session, with the `/sandbox` line that lifts it.
+      - record: sandbox/denied
+        example: |
+          {"type": "sandbox/denied",
+           "data": {"kind": "filesystem", "via": "output",
+                    "message": "A confined command reported \"touch: cannot touch '/etc/x': Read-only file system\". Writes outside the workspace are refused; allow a directory with /sandbox allow path <dir>.",
+                    "evidence": "touch: cannot touch '/etc/x': Read-only file system", "agent": "s1"}}
+      - title: Limits
+        tone: limit
+        list:
+          - "It can read whatever the user can."
+          - "A code cell's raw `open()` reaches no path rule; here it is refused by the OS or not at all."
+          - "`bwrap` does not forward signals, so a confined cell is canceled by a `cancel` frame, not by `SIGINT`. Under Seatbelt both routes work."
+          - "A kernel needs the agent to hold a workspace to be confined. `phern doctor`'s Code runtime section says which kernels are."
+      - links:
+          - {to: "ph-rlm#node:kernel", label: "The code kernel"}
+          - {to: "ph-runtime-guest", label: "One cell over fd 3, frame by frame"}
+
+  egress:
+    title: The egress proxy
+    summary: |
+      Under `allowlist`, a confined process has no network of its own and one
+      door: a filtering HTTP proxy the daemon runs on a unix socket under
+      `$PH_RUNTIME/sandbox/`. The proxy decides per connection, against the
+      allowances as they are now; the namespace enforces.
+    blocks:
+      - row: sandbox-allow
+      - title: The three network modes
+        table:
+          columns: [mode, a confined process gets]
+          rows:
+            - ["`off`", "a network namespace with loopback only (`--unshare-net`)"]
+            - ["`allowlist`", "the same namespace and the proxy. A `CONNECT host:443` is tunneled byte for byte or refused with the proxy's 403; a plain `http://` request is forwarded the same way"]
+            - ["`full`", "the host's network, unfiltered"]
+      - title: Two spellings for a host
+        table:
+          columns: [entry, matches]
+          rows:
+            - ["`example.com`", "that one host"]
+            - ["`*.example.com`", "every host under it, and not the apex"]
+            - ["`pypi.org:443`", "that host on that port only"]
+      - title: The door, per backend
+        text: |
+          `bwrap` unshares the network, so the door is a `socat` shim on the sandbox's own loopback (`127.0.0.1:3128`) forwarding to the proxy's socket, reached through the read-only bind of `/`. Seatbelt denies and does not unshare, so the proxy also listens on the host's loopback and the profile allows exactly `(remote ip "localhost:<port>")`.
+      - struct: ph.seams.sandbox:Egress
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The check is `ctx.sandbox.permits(host, port)`, asked per connection, so `/sandbox allow host` takes effect on the next request with nothing restarted."
+          - "The proxy URL carries the agent's id as its user, so a refusal is recorded in that agent's session."
+          - "`ph-egress-probe.invalid` is always refused; it is how the bridge proves itself."
+      - title: Limits
+        tone: limit
+        list:
+          - "It sees a host and a port, nothing past them."
+          - "A program that does not honor the proxy variables reaches nothing."
+          - "One proxy serves the whole mount: a child's host list is its parent's."
+          - "On macOS a local process outside the sandbox can use the loopback listener under any agent's name."
+      - links:
+          - {to: "edge:connect", label: "What a confined process sends"}
+
+  workspace:
+    title: The workspace tier
+    summary: |
+      A workspace is where an agent's writes land: its `root` is `ctx.fs`'s root
+      and a command's cwd, and its `scratch` is always writable. Which kind an
+      agent gets is the containment ladder's answer. The workspace also produces
+      the sandbox policy: the writable set is `(root, scratch)`.
+    blocks:
+      - row: containment
+      - row: workspace-lifecycle
+      - title: The kinds
+        table:
+          columns: [kind, the agent may write, reaches the project]
+          rows:
+            - ["`shared`", "the base directory itself", "yes, at once"]
+            - ["`worktree`", "its own checkout, on its own branch", "when somebody merges the branch"]
+            - ["`worktree-ephemeral`", "a full checkout, discarded on release", "no"]
+            - ["`overlay`", "a copy-on-write view; the delta is kept", "when exported onto a branch"]
+            - ["`overlay-ephemeral`", "the same, thrown away", "no"]
+            - ["`readonly-scratch`", "a root inside its own scratch; the repository is unwritable", "no"]
+      - struct: ph.seams.workspace:Workspace
+      - title: Request and guarantee
+        text: |
+          A caller asks for `access: write` or `read`. What comes back is a `kind` and `repo_writable`, and `repo_writable` is false only when a tier is enforcing it. `project_access(kind)` maps the kind back to what was granted of the project: `write` for `shared`, `worktree` and `overlay`, `read` for the ephemeral kinds and `readonly-scratch`. That, not the request, is `grantedAccess` on a child's admission.
+      - title: What survives
+        tone: durable
+        list:
+          - "`workspace/acquiring` is on disk before a tier makes a tree, and `workspace/acquired` follows with what it made. A tree with no `workspace/disposed` belonged to a process that is gone, and `workspace-reconcile` closes it at the next open."
+          - "A child that settles and is asked again gets the same branch back: release commits the checkout before removing it."
+          - "An ephemeral child's tree is retained until it settles cleanly (`workspace/retained`), so a failed child leaves evidence. `phern workspaces gc` collects, never automatically."
+      - title: Limits
+        tone: limit
+        list:
+          - "A workspace is not confinement. A `worktree` bounds a relative write by moving the cwd."
+          - "`/revert` restores a checkpointed tree. A tool that published a package or sent mail is listed as not covered."
+          - "There is always a workspace: a provider that cannot serve declines and the agent gets `shared`."
+      - links:
+          - {to: "topic:ladder", label: "The containment ladder"}
+
+  subagents:
+    title: "ctx.subagents: the spawn door"
+    summary: |
+      Every delegation passes `SubagentService.start`. The seam owns the
+      ceiling: it resolves what the spawn asks, refuses anything the parent does
+      not hold, and applies the grant itself, so no provider can skip it. The
+      seam ships with no provider; `rlm-subagent-provider` registers `rlm-child`.
+    blocks:
+      - row: subagents
+      - row: subagent-presets
+      - row: rlm-subagent-provider
+      - title: The provider in a profile
+        lang: yaml
+        note: What the `rlm` bundle ships. `maxConcurrent` queues; it does not refuse.
+        code: |
+          - id: rlm-subagent-provider
+            config:
+              maxDepth: 2
+              maxConcurrent: 4
+      - row: subagent-task
+      - title: The two ways a model spawns
+        table:
+          columns: [door, where, ships]
+          rows:
+            - ["`rlm.run(...)` in a cell", "the `rlm_run` tool, through the tool pipeline", "the `rlm` bundle"]
+            - ["the `task` tool", "`subagent-task`; registers nothing until a provider is mounted", "`base`; the `rlm` bundle switches it off"]
+      - title: The checks, in the seam
+        table:
+          columns: [function, refuses]
+          rows:
+            - ["`resolve_profile`", "a row the parent's mount does not run; a wider sandbox mode; a different network; `write` under a read-only profile"]
+            - ["`resolve_preset`", "a preset name that is not configured"]
+            - ["`resolve_model`", "a model key the spawn named that this mount cannot run; skills that name different models"]
+            - ["guards", "whatever a row registered, for example the `limits` child ceiling"]
+            - ["`_delegating_boundary`", "a parent whose scope cannot be read"]
+            - ["`check_grant`", "a tool or skill the parent does not hold"]
+            - ["`_enforce`", "a child scope outside the parent's; a provider with no scope when the spawn narrows"]
+            - ["the provider", "a spawn past `maxDepth`; an empty prompt; a parent with no session"]
+      - title: The handle a spawn returns
+        struct: ph.seams.subagents:SubagentRun
+      - title: Durability
+        tone: durable
+        list:
+          - "The admission is on the child's disk before its gate opens. A write that fails refuses the spawn."
+          - "After a restart the resume sweep reads every child's log, readmits a `queued` or `running` one through the provider its admission names, and derives the ceiling again from the record."
+          - "A child that ends takes what it left unfinished beneath it: each such descendant is tombstoned in its own log."
+      - title: Limits
+        tone: limit
+        list:
+          - "The seam does not bound spend or fan-out by itself; `ctx.goals` and the `limits` row do."
+          - "A readmission degrades where a spawn refuses: a model key the list has dropped runs the child on its parent's route, with a warning."
+          - "A refused child reads as admitted and then ended in its own log, because the admission is written before the ceiling is applied."
+      - links:
+          - {to: "topic:inherits", label: "What a sub-agent inherits"}
+          - {to: "ph-rlm#node:subagents", label: "rlm-subagent-provider in ph-rlm"}
+
+  child:
+    title: A child agent
+    summary: |
+      A child is an ordinary agent whose scope sits inside its parent's. It has
+      its own session log, its own workspace and its own code kernel. Its tools
+      and skills are the allow list its grant wrote, and every call it makes
+      passes the same gates as its parent's.
+    blocks:
+      - title: The child's scope, measured
+        lang: text
+        note: From a real spawn with `skills=("review",)` and `tools=("read",)`.
+        code: |
+          parent tools: attach, bash, edit, glob, grep, read, skill, task, write
+          child tools:  read
+          scope:        root/plugin(agent)/agent:parent/agent:parent-child-03bc1179ce87
+      - title: Who it can talk to
+        text: |
+          Reach is the nuclear family (`family_reach`): itself, its parent, its direct children and its siblings. A grandparent is out of reach. Two roots held by the same session service count as siblings. The roster the model reads (`agent_message.list_agents`) is derived from the same function as the guard that refuses a send, so the two cannot disagree.
+      - row: rlm-messaging
+      - title: Messaging in a profile
+        lang: yaml
+        code: |
+          - id: rlm-messaging
+            config:
+              maxMessageChars: 16384
+              maxPending: 20
+              rateCapacity: 3
+              rateRefillSeconds: 1.0
+      - title: How messaging is guarded
+        table:
+          columns: [check, mechanism, on refusal]
+          rows:
+            - ["the family boundary", "`ctx.tools.guard`: deny-only, runs last", "a denial: `Agent reach is limited to parent, siblings, and children`. Under Code Mode it ends the cell"]
+            - ["the rate limit", "a token bucket per sender and target, in the tool body", "a tool error the program may catch"]
+            - ["size and backlog", "`maxMessageChars`, `maxPending`", "a tool error"]
+            - ["reading a transcript", "`agent_observe.get`, the same family rule", "a tool error"]
+      - struct: ph_rlm.messaging:SendArgs
+      - title: What a child cannot do
+        tone: secure
+        list:
+          - "Hold a tool or a skill its parent did not hold when it was admitted."
+          - "Reach its parent's scope: `child.ctx.reaches(parent.ctx)` is false, so nothing it registers applies to its parent."
+          - "Outlive its parent's scope. Disposing the parent revokes it (`parent-teardown`)."
+          - "Spawn past the depth limit, or past the child ceiling it shares with every agent of the mount."
+          - "Get a workspace it was not admitted with: a child with none at its first step is refused, and one asked again is given the access its admission recorded."
+      - title: Limits
+        tone: limit
+        list:
+          - "It can read its parent's and its siblings' recent transcript through `agent_observe.get`."
+          - "Its sandbox mode and approval policy are its own log's, else the rows' defaults, whatever its parent's session chose."
+          - "With no tier in force it works in its parent's tree."
+      - links:
+          - {to: "topic:inherits", label: "What a sub-agent inherits"}
+          - {to: "ph-rlm#node:child", label: "The child agent in ph-rlm"}
+
+edges:
+  call:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The agent's loop hands each tool call to the registry, which dispatches
+      `tools/pre-execute` with the call as a `ToolExecution`. A listener passes
+      it on, rewrites it, or answers `Deny`, `Ask` or `Respond`. The decision
+      comes back up the chain to the registry.
+    blocks:
+      - event: tools/pre-execute
+      - title: What the listeners receive
+        struct: ph.tools.definition:ToolExecution
+      - title: Who listens
+        table:
+          columns: [row, returns]
+          rows:
+            - ["`hitl`", "`Ask(reason, allowed_decisions)`"]
+            - ["`limits`", "`Deny` past a ceiling or an open breaker"]
+            - ["`tool-todo`", "`Deny` for two `write_todos` in one message"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The dispatch is scoped: `scope=execution.scope`. A listener registered on one agent's scope hears only that agent and its descendants."
+          - "A listener that raises fails the call; it does not let it through."
+          - "A call whose turn was canceled is settled as aborted before any listener runs."
+
+  ask:
+    transport: service
+    summary: |
+      When a gate returns `Ask`, the registry calls `ctx.approval.request` for
+      the acting agent. The seam writes `approval/asked` to that agent's log,
+      routes the prompt on the `approval/request` waterfall to whichever front
+      end answers, and writes `approval/decided` with the answer.
+    blocks:
+      - title: Where the question goes
+        event: approval/request
+      - title: What an answerer receives
+        struct: ph.seams.approval:ApprovalRequest
+      - title: The pair it leaves, with nobody to answer
+        lang: json
+        note: Generated by asking on a mount with no answerer registered.
+        code: |
+          {"type": "approval/asked",
+           "data": {"toolName": "bash", "callId": "call_7",
+                    "reason": "bash needs approval — matched 'rm -rf build (removes a directory tree)'",
+                    "agentId": "parent", "allowedDecisions": ["approve", "reject"]}}
+          {"type": "approval/decided",
+           "data": {"toolName": "bash", "outcome": "unavailable", "askSeq": 1, "callId": "call_7"}}
+      - title: Under a never policy
+        lang: json
+        note: Generated after `set_policy(session, "never")`. Nobody is asked, and the answer is `rejected`.
+        code: |
+          {"type": "approval/asked", "data": {"toolName": "bash", "callId": "call_8", "reason": "bash needs approval", "agentId": "parent"}}
+          {"type": "approval/decided", "data": {"toolName": "bash", "outcome": "rejected", "askSeq": 4, "callId": "call_8", "automatic": true}}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No answerer, an error inside one, or a log that cannot be written: `unavailable`, and the call does not run."
+          - "A person stopping the turn while being asked closes the pair as `canceled`."
+          - "The call's arguments are shown to the person and not stored on `approval/asked`; the assistant message already holds them."
+          - "`permissions-fs` asks through the same seam with `toolName` `fs.read` or `fs.write`, offering approve and reject only."
+
+  allowed:
+    transport: call
+    summary: |
+      A call that passed the gates runs its body. `tool/call` is written after
+      the gate, so a call that was refused or left waiting on a person has none.
+      The body reaches the outside world only through a seam: `ctx.fs` for
+      files, `ctx.shell` for a command, the code runtime for a cell.
+    blocks:
+      - record: tool/call
+      - title: What the body is run with
+        struct: ph.tools.definition:ToolExecution
+      - title: Around the body
+        table:
+          columns: [event, dispatch, used by]
+          rows:
+            - ["`tools/execute`", waterfall, "`tools-timeout` and `workspace-checkpoint`"]
+            - ["`tools/body`", serial, "`session-checkpoint-policy`"]
+            - ["`tools/post-execute`", waterfall, "`tool-result-offload`"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An edit a person made to the arguments is applied before the body runs, and `tool/call` records what ran."
+          - "A tool that declares `effects_confined_to_workspace` false is listed by `/revert` as not covered."
+
+  confine:
+    transport: service
+    summary: |
+      `ctx.shell` and the code runtime call `ctx.sandbox.confine(argv, policy,
+      agent=)`. The seam merges the deployment's allowances and the session's
+      mode into the policy (`effective`) and hands it to the backend, which
+      builds the wrapped argv. It raises `SandboxError` when no backend is
+      mounted; it never returns the argv unchanged.
+    blocks:
+      - title: The policy a caller builds
+        struct: ph.seams.sandbox:SandboxPolicy
+      - title: A workspace as a policy, before and after the merge
+        lang: python
+        note: |
+          Generated with `ctx.sandbox.effective(...)` for a root whose person
+          picked `danger-full-access` and for its child, on a mount whose
+          `defaultMode` is `read-only`.
+        code: |
+          SandboxPolicy(workspace_root="/w")                      # what workspace_policy builds: no mode
+          # effective, for the root:
+          {"mode": "danger-full-access", "workspace_root": "/w", "refuse_network": False, "network": True}
+          # effective, for its child:
+          {"mode": "read-only", "workspace_root": "/w", "refuse_network": False, "network": False}
+      - title: What effective decides
+        table:
+          columns: [field, rule]
+          rows:
+            - ["`mode`", "the narrower of the caller's and the session's"]
+            - ["`writable_extra`", "the caller's, plus the directories `sandbox-allow` names for this agent, unless the mode is `read-only`"]
+            - ["`network`", "true under `danger-full-access`; false when the caller refused; true when the deployment says `full`"]
+            - ["`egress`", "the proxy door, when the deployment says `allowlist` and a bridge is registered"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`SandboxError` (`SANDBOX_UNAVAILABLE`) is a denial, not a failure. Under Code Mode it ends the program."
+          - "`ctx.shell` asks for confinement only when a backend is available, so on a host without one the command runs unwrapped."
+          - "A policy that reaches a backend without passing through the seam is closed: no mode means the extras alone, and `network` defaults to false."
+
+  wrapped:
+    transport: process
+    summary: |
+      The wrapped argv is started by `ctx.subprocess`. Under `bwrap` the command
+      runs in new mount, PID and network namespaces; under Seatbelt it runs
+      under a generated deny-by-default profile. What comes back is the
+      command's output and exit code, and for a kernel the fd 3 channel.
+    blocks:
+      - struct: ph.seams.sandbox:ConfinedArgv
+      - title: A read-only run
+        lang: json
+        note: Generated. Only the scratch is bound writable, and there is no proxy door.
+        code: |
+          ["bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+           "--bind", "/home/me/.ph/scratch/s1/s1", "/home/me/.ph/scratch/s1/s1",
+           "--dev", "/dev", "--proc", "/proc", "--unshare-pid", "--new-session", "--unshare-net",
+           "--", "/bin/bash", "-lc", "ls"]
+      - title: What a command leaves in the log
+        record: shell/result
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`forwards_signals` is false for `bwrap`: a signal kills the wrapper and the namespace with it, so a cell is canceled by frame."
+          - "A sandbox that fails to start prints its own words; the mount probe reports them as the reason it declined."
+          - "Output past the subprocess cap (8 MiB per stream by default) is dropped and counted."
+
+  root:
+    transport: service
+    summary: |
+      `ctx.fs.root_for(agent)` and `workspace_of(ctx, agent)` ask the workspace
+      seam where this agent's relative paths land and what it may write. The
+      answer is the `Workspace` the agent acquired: its root, its scratch, its
+      kind and whether the repository is writable.
+    blocks:
+      - struct: ph.seams.workspace:Workspace
+      - title: One definition of the writable set
+        lang: python
+        note: "`permissions-fs` prompts about what falls outside it; `workspace_policy` hands the same set to the backend to enforce."
+        code: |
+          def writable_roots(workspace: Workspace) -> tuple[Path, ...]:
+              return (workspace.root, workspace.scratch)
+      - record: workspace/acquired
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An agent that holds no workspace has no writable set: `ctx.shell` does not confine its commands and an `outside-workspace` rule does not apply."
+          - "A root is canonical at its source. A path spelled through a symlink (`/var` on macOS) would otherwise be refused its own writes."
+
+  denied:
+    transport: log
+    summary: |
+      A refused boundary is appended to the session of the agent the command
+      ran for. The proxy reports a host it refused (`via: proxy`). A filesystem
+      or socket refusal is read from what a failed command printed
+      (`via: output`).
+    blocks:
+      - record: sandbox/denied
+        example: |
+          {"type": "sandbox/denied",
+           "data": {"kind": "network", "via": "proxy",
+                    "message": "Sandbox blocked network access to example.com:443. Allow it with /sandbox allow host example.com.",
+                    "host": "example.com", "port": 443, "agent": "s1"}}
+      - record: sandbox/mode
+        example: |
+          {"type": "sandbox/mode", "data": {"mode": "read-only"}}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A denial with no session to charge it to is logged as a warning instead."
+          - "`sandbox/denied` is ignorable: an older reader may skip it."
+          - "A backend with no reader for its kernel's words leaves no filesystem record."
+
+  connect:
+    transport: http
+    summary: |
+      A confined process that honors the proxy variables sends `CONNECT
+      host:port` to `127.0.0.1:3128`. The proxy asks `ctx.sandbox.permits`, then
+      tunnels or answers 403. The agent's id travels as the proxy URL's user.
+    blocks:
+      - title: On the wire
+        lang: text
+        note: The 403 body for the probe host is the proxy's own; `ph` is a fixed placeholder password.
+        code: |
+          HTTPS_PROXY=http://s1:ph@127.0.0.1:3128
+
+          CONNECT pypi.org:443 HTTP/1.1
+          Host: pypi.org
+
+          CONNECT ph-egress-probe.invalid:443 HTTP/1.1      ->  403  ph sandbox: ph-egress-probe.invalid is the probe host; always refused
+      - struct: ph.seams.sandbox:Egress
+      - record: sandbox/denied
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A request the proxy cannot route is answered 400."
+          - "A raw socket gets `Network is unreachable` under `bwrap` and `Operation not permitted` under Seatbelt."
+          - "With no bridge registered there is no door, and `allowlist` means no network."
+
+  spawn:
+    transport: service
+    summary: |
+      A tool body calls `ctx.subagents.start(provider, SubagentRequest(...))`
+      with the delegating agent as `parent` and its scope as `scope`. `start`
+      returns a `SubagentRun` once the child is admitted; it does not wait for
+      an answer. A refusal raises `SubagentSpawnError` with code `SPAWN_REFUSED`.
+    blocks:
+      - struct: ph.seams.subagents:SubagentRequest
+      - title: What comes back
+        struct: ph.seams.subagents:SubagentRun
+      - title: The handle, on the wire
+        lang: json
+        note: From a real spawn.
+        code: |
+          {"runId": "child-03bc1179ce87", "name": "subagent-review-the-diff-in-1401e2ff",
+           "sessionId": "parent-child-03bc1179ce87", "parentId": "parent",
+           "modelProvider": "fake", "model": "fake-1",
+           "requestedAccess": "read", "grantedAccess": "read"}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A guard's refusal leaves no session, no log and no artifact."
+          - "A parent whose scope is disposed during the spawn refuses it; whatever the provider built is released."
+          - "Two spawns from one step are counted from the moment their guards pass, so both cannot slip under one ceiling, and both cannot take one name."
+
+  grant:
+    transport: call
+    summary: |
+      Once the provider has built the child, the seam writes the admission and
+      applies the grant to the child's scope: an allow list for tools, one for
+      skills, a path list for the sandbox when a profile narrowed it, and the
+      brief. Then it flushes the child's log and opens the child's gate.
+    blocks:
+      - struct: ph.seams.subagents:Grant
+      - title: What apply registers on the child's scope
+        lang: python
+        code: |
+          skills.restrict(SkillRestriction(allow=frozenset(self.skills)), scope=scope)
+          tools.restrict(ToolRestriction(allow=frozenset(self.tools)), scope=scope)
+          if self.paths is not None:
+              sandbox.restrict_paths(self.paths, scope=scope)
+          prompt.section(PromptSection(name="subagent:brief", text=self.brief, ...), scope=scope)
+      - record: subagent/admitted
+      - record: skill/read
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An admission that cannot be written refuses the spawn: the child is released and ended in its own log."
+          - "The restrictions are effects of the child's scope. When the child settles they go with it, and a rehydration applies them again from the run's grant."
+
+  child-call:
+    transport: bus
+    mode: waterfall
+    summary: |
+      A child's tool call is dispatched on `tools/pre-execute` with the child's
+      scope. The mount's listeners are global, so `hitl`, `limits` and every
+      guard hear it as they hear the root's. What differs is the session they
+      read: the child's own.
+    blocks:
+      - event: tools/pre-execute
+      - title: The same rows, read against the child
+        table:
+          columns: [row, reads]
+          rows:
+            - ["`hitl`", "the child's `approval/mode`, else the row's `mode`"]
+            - ["`limits`", "the child's own `turn/start`, `step/start` and `tool/call` records"]
+            - ["`permissions-fs`", "the child's workspace for `outside-workspace`"]
+            - ["`ctx.approval`", "the child's `approval/policy`; the ask is recorded in the child's log"]
+            - ["`ctx.sandbox`", "the child's `sandbox/mode`, else `defaultMode`"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "None of these rows can be configured differently for a child."
+          - "A posture recorded in the parent's log is not read here."
+      - links:
+          - {to: "ph-stabilize#topic:subagents", label: "The stabilize rows inside a child"}

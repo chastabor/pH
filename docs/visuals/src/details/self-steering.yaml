@@ -1,0 +1,1127 @@
+intro: |
+  A self-steering skill is an ordinary `SKILL.md` that also declares `steps:`.
+  Reading it puts those steps in the session's todo list as entries the model
+  may mark done and may not delete, and a row objects when a turn tries to end
+  with one of them still startable. Read the picture top to bottom: the skill is
+  read, the model works the list, and a turn that tries to end is either let end
+  or steered on.
+
+  Three rows make it work and none of them is on as shipped. Start with
+  [Switching it on](topic:switching-on), and for the question people ask first,
+  [Can the agent switch it on itself?](topic:dynamic)
+
+topics:
+  - id: switching-on
+    title: Switching it on
+    summary: |
+      Three rows. `skills-progressive` is mounted by ph-core's base bundle and
+      scans no directory until `paths` names one. `tool-todo` and `skill-steps`
+      are in the `stabilize` bundle with `disabled: true`. A fourth entry is
+      optional: a decision route in the adapter row, so the nudge is held when
+      the assistant is waiting for the person.
+    blocks:
+      - title: In a named profile
+        lang: yaml
+        note: |
+          `extends:` is the shipped profile the rest comes from. `rlm-stable`
+          already switches `tool-todo` on; no shipped profile switches
+          `skill-steps` on.
+        code: |
+          # $PH_HOME/profiles/steer.yaml
+          extends: rlm
+          rows:
+            - id: skills-progressive      # where skills are read from; empty by default
+              config:
+                paths:
+                  - ~/.ph/skills
+                  - ./.ph/skills          # a later path shadows an earlier one by name
+            - id: tool-todo               # write_todos and the list
+              disabled: false
+            - id: skill-steps             # the seeding and the nudge
+              disabled: false
+      - title: The --patch form
+        lang: bash
+        note: |
+          The same entries, as one-line YAML. `phern -p`, `phern --mode tui`,
+          `phern daemon`, `phern doctor` and `--dump-config` all take them.
+        code: |
+          phern --mode tui \
+            --patch '{id: skills-progressive, config: {paths: [~/.ph/skills]}}' \
+            --patch '{id: tool-todo, disabled: false}' \
+            --patch '{id: skill-steps, disabled: false}'
+      - title: With a decision model
+        lang: yaml
+        note: |
+          The route is one more entry in the profile's own
+          `llm-openai-compatible` row (`llm-llama` in the shipped `llama`
+          profile). A patch replaces a row's whole config, so the chat route is
+          restated. `apiKeyEnv` is the name of a variable; `local` is enough as
+          its value for a llama.cpp.
+        code: |
+          - id: llm-llama
+            config:
+              profiles:
+                - provider: llama
+                  baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
+                  apiKeyEnv: LLAMA_API_KEY
+                - provider: decision
+                  baseUrl: ${env:DECISION_BASE_URL:-http://127.0.0.1:9932/v1}
+                  apiKeyEnv: DECISION_API_KEY
+                  maxDecisionTokens: 8192     # the server's --ubatch-size; leave out for 512
+
+          - id: skill-steps
+            disabled: false
+            config:
+              maxNudges: 3
+              decision:
+                provider: decision
+                model: bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L
+                holdAt: 0.8
+                timeoutMs: 3000
+      - title: The three rows
+        row: skills-progressive
+      - row: tool-todo
+      - row: skill-steps
+      - title: Checking what you got
+        lang: bash
+        code: |
+          phern --profile steer --dump-config | grep -A4 -E 'id: (skills-progressive|tool-todo|skill-steps)'
+          phern doctor --profile steer      # "Skill steps": the decision route, and whether its adapter decides
+      - title: Then
+        text: |
+          Ask the agent to use the skill. The model calls the `skill` tool, the todo sidebar fills with the steps, and each step after the first shows as waiting on the one before it.
+      - links:
+          - {to: "topic:dynamic", label: "Can the agent switch it on itself?"}
+          - {to: "ph-stabilize#topic:configuring", label: "Configuring the stabilize bundle"}
+
+  - id: dynamic
+    title: Can the agent switch it on itself?
+    summary: |
+      No. Asking the agent to run a self-steering skill does not arm anything.
+      A row is mounted when a session starts, from the environment the session's
+      log records, and nothing the model can call changes that. A person turns
+      it on, and the session starts again to take it. The shortest way for a
+      session that is already open is two steps, below.
+    blocks:
+      - title: The shortest working path, for a session already open
+        text: |
+          1. Put the three rows in a named profile, for example `$PH_HOME/profiles/steer.yaml` as in [Switching it on](topic:switching-on). It can extend the profile the session is on now.
+          2. In the session, with the agent idle, type `/profile use steer`.
+
+          The command records the profile's current version in the session's log (`profile/adopted`) and the session's root starts again from its log on that version, at once. The conversation, the todo list and any overrides are kept. Then ask the agent to use the skill: reading it seeds the steps.
+
+          If the session is already on a named profile of yours, edit that file and type `/profile use <its name>`: `use` of the base's own name takes its current version.
+      - title: What /profile use writes
+        record: profile/adopted
+      - title: The other way, a --patch at a start
+        text: |
+          A `--patch` is a start option. When a session that already has a log starts, its mount is built from the log's base, then the overrides the log holds, then this start's options last. Opening the session then compares each option with what the log already says and logs every one that differs as a `profile/override` with source `cli`. So a `--patch` given when an existing session is started again does arm the row, and it stays armed on later starts without the patch.
+
+          Where the patch has to be given:
+
+          - `phern -p "..." --session <id> --patch ...` runs one turn on the stored session with the rows armed and records the overrides. It is refused (`SessionBusy`) while a daemon holds that session.
+          - `phern daemon --patch ...` applies the patch to every session that daemon starts, whatever profile each asked for.
+          - `phern --mode tui --session <id> --patch ...` passes the patch to the daemon **it starts**. If a daemon is already listening, the terminal connects to it and the patch is not sent.
+          - `session/new` and `session/attach`, the daemon's own verbs, carry no patch. `session/new` takes a `profile` name, and only for a session that has no log yet.
+
+          So for a terminal session on a running daemon, the patch route means stopping that daemon and starting again. `/profile use` does not.
+      - title: The override a start records
+        record: profile/override
+        example: |
+          {"type": "profile/override",
+           "data": {"row": "skill-steps",
+                    "entry": {"id": "skill-steps", "disabled": false},
+                    "source": "cli",
+                    "command": "--patch {id: skill-steps, disabled: false}"}}
+      - title: One override
+        struct: ph.session_profile:Override
+      - title: What happens if the skill is read with the rows off
+        table:
+          columns: [state, what reading a skill with steps does]
+          rows:
+            - ["`skills-progressive.paths` empty", "This row installs no skill. Unless another row registered one, there is no catalog in the prompt and no `skill` tool to call."]
+            - ["`skill-steps` off", "The `skill` tool returns the file, a `skill/read` record is written, and `skills/read` is emitted to no listener. No `todo/write`, no nudge. The model sees `steps:` as text in the file and nothing holds it to them."]
+            - ["`skill-steps` on, `tool-todo` off", "The steps are seeded into the log and the turn is nudged, but the model has no `write_todos` tool and no list in its prompt. It cannot mark a step done; the row spends its nudges (3) and stands down."]
+            - ["all three on, read before they were on", "Nothing is seeded after the fact. Seeding happens when the skill is read, so ask the agent to read it again."]
+      - title: Why nothing the model calls can do it
+        text: |
+          - **No tool mounts a row.** The `skill` tool reads a file and emits an event. `write_todos` writes a list. Neither touches the mount, and no shipped tool runs a slash command or edits a session's environment.
+          - **A skill is knowledge, not capability.** `skills-progressive` scans only the directories a profile names. A skill cannot install itself or another skill.
+          - **One door changes a running session's rows.** `ph.session_profile.override(ctx, session, row_id, config, source=, command=)` writes a `profile/override` record, waits for it to reach disk, and only then calls `Mount.reconfigure`. Its callers are `/sandbox`, `/model` (and the `session/model` verb), each for its own row. A start's `--patch` options are logged by the same module when the session opens.
+          - **That door cannot arm a row.** `Mount.reconfigure` replaces the config of a row that is running. For `tool-todo` or `skill-steps` as shipped it raises: `row "skill-steps" is disabled by ...; enable it in the profile before reconfiguring it`.
+      - title: What the other profile commands do, and when
+        table:
+          columns: [command, what it records, when it takes effect]
+          rows:
+            - ["`/profile use <name>`", "`profile/adopted`", "at once: the root starts again from its log. Refused while the agent is working. `--clear` drops the session's overrides too."]
+            - ["`phern profiles adopt <name>`", "`profile/adopted` in each session whose version differs", "at each session's next start. A running session is not interrupted. `--session <id>` names one session."]
+            - ["editing the profile file only", "nothing", "at the session's next start a front end that can answer is asked whether to take the new version; otherwise the saved version is kept and a note says so"]
+            - ["`/profile save <name>`", "`profile/saved`", "writes the session's environment as a named profile; changes nothing in the session"]
+      - title: What cannot be done
+        tone: limit
+        list:
+          - "The agent cannot turn it on, by reading a skill or any other way the harness offers."
+          - "It cannot be turned on without the session starting again. A row that is switched off cannot be mounted into a live session."
+          - "A `--patch` cannot be sent to a daemon that is already running."
+          - "A sub-agent cannot be given it separately. A child runs on its root's mount and has no environment of its own."
+          - "It cannot be turned on for one skill only. The rows are per session."
+      - title: What was checked, and how
+        text: |
+          The two switched-off rows of the table were run against the code: with `skill-steps` off the session's log held `skill/read` and nothing else; with `skill-steps` on and `tool-todo` off it held `todo/write` and `skill-steps/budget`, the turn was steered, and no `write_todos` tool was registered. The rest is read from `ph.session_profile` (`override`, `opened`, `rebuilt`), `ph.cordis.loader` (`Mount.reconfigure`), `ph_app.daemon.launch` (`ensure_daemon`), `ph_app.params` (`NewSessionParams`) and `ph_app.daemon.profile_command`.
+      - links:
+          - {to: "topic:switching-on", label: "The rows and the --patch form"}
+          - {to: "ph-stabilize#topic:self-steering", label: "The short version on the ph-stabilize page"}
+
+  - id: skill-file
+    title: The SKILL.md file
+    summary: |
+      A skill is a directory whose name equals the `name:` in its file's
+      frontmatter. The frontmatter is YAML between two `---` lines, parsed when
+      the row mounts. Everything after it is the body the model reads. `steps:`
+      is the one key that makes a skill self-steering.
+    blocks:
+      - title: A self-steering skill
+        lang: markdown
+        code: |
+          ---
+          name: port-a-feature
+          description: Port one feature from a vendored upstream onto pH's own seams.
+          version: 2
+          argument-hint: <upstream-path>
+          allowed-tools: [read, grep, glob, edit, write, bash]
+          parameters:
+            upstream:
+              type: string
+              required: true
+              hint: Path under sources/ holding the implementation to port.
+            gate:
+              type: string
+              default: "uv run pytest -q"
+          steps:
+            - "Read the upstream implementation under {{parameters.upstream}} and write down what it does."
+            - "Name what pH already has under another name, and what is missing."
+            - "Implement the missing half on pH's seams."
+            - "Run {{parameters.gate}} and report the result verbatim."
+          max-nudges: 5
+          ---
+
+          # Porting a feature
+
+          How to carry out each step: which files to read first, what a good gate is.
+      - title: Frontmatter keys
+        table:
+          columns: [key, required, rule]
+          rows:
+            - ["`name`", "yes", "a slug of at most 64 characters, equal to the directory name"]
+            - ["`description`", "yes", "1 to 1024 characters; this is what the catalog shows the model every turn"]
+            - ["`steps`", "no", "at most 32 non-empty, distinct strings; each waits on the one before it"]
+            - ["`max-nudges`", "no", "a non-negative integer; overrides the row's `maxNudges` for this procedure; `0` seeds and never steers"]
+            - ["`parameters`", "no", "at most 16 inputs, each `type` (`string`, `number`, `boolean`), `required`, `default`, `enum`, `hint`"]
+            - ["`argument-hint`", "no", "at most 200 characters; shown in the catalog as `Usage:`"]
+            - ["`allowed-tools`", "no", "at most 32 names; a declaration, not a boundary"]
+            - ["`version`", "no", "up to 32 characters; reported, never compared"]
+            - ["`model`, `effort`, `output`, `accepts`", "no", "only for a skill handed to a child agent: its model key, reasoning effort, result schema and media types"]
+      - title: The parsed skill
+        struct: ph.seams.skills:Skill
+      - title: How a skill is found
+        text: |
+          When `skills-progressive` mounts, it scans each directory in `paths`, in order, for `<name>/SKILL.md`. A skill found under a later path replaces one of the same name from an earlier path. Each valid skill is registered on `ctx.skills`; the catalog section of the system prompt lists name, description and usage; and the `skill` tool is registered only when at least one skill was found.
+
+          Installing a skill is putting its directory under a path the profile names. Nothing is scanned by default, on purpose: a well-known directory would make "install a skill" mean "drop a file somewhere".
+      - title: What is read when
+        tone: limit
+        list:
+          - "The frontmatter is read once, when the row mounts. A change to `steps:` or `max-nudges:` in a running session is not seen until the session starts again."
+          - "The body is read from disk at every `skill` call, so a change to the prose is seen at the next read."
+          - "A new skill directory is found at the next mount, not while a session runs."
+      - title: A skill that does not load
+        tone: limit
+        list:
+          - "A malformed value refuses the whole skill: a name that is not the directory's, a repeated step, an empty step, more than 32 steps, a `max-nudges` that is not a non-negative integer."
+          - "The refusal is a warning on the `ph.seams.skills` logger naming the file. The other skills still load."
+          - "A file over 10 MiB is refused, and the frontmatter must end within the first 64 KiB."
+          - "A step that renders to more than 500 characters loads but seeds nothing."
+      - links:
+          - {to: "node:skill", label: "The skill tool"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      The procedure is in the log, not in the row. A daemon that restarts, a
+      session that goes idle and comes back, and a fork all find it where it
+      stopped.
+    blocks:
+      - title: Read back from the log
+        tone: durable
+        list:
+          - "**The steps and their state** are the last `todo/write` record. Seeded entries carry `source: skill`."
+          - "**The budget** is the last `skill-steps/budget` record."
+          - "**The nudges spent** are counted from the log: every `user/message` after the last `todo/write` whose source names the plugin `ph_stabilize.skill_steps`."
+          - "**That the rows are on** is the session's environment: its `profile/base` and the `profile/override` records after it. A session is mounted from its own log, so a daemon whose default profile changed still starts it with the rows it had."
+          - "**Which skill text was read** is a `skill/read` record with the SHA-256 of the body."
+      - title: Not kept
+        tone: limit
+        list:
+          - "Which decision failures were already warned about, and until when a route that timed out is resting. Both are in the row's memory. After a restart the route is asked again at once."
+          - "The batch limit learned from a decision server's refusal. It is kept by `ctx.llm` until the daemon restarts; then the first oversized ask is refused and retried again."
+          - "A turn that was running when the daemon stopped is closed as interrupted. The steps it had not marked stay pending, and the next turn that tries to end is nudged as usual."
+      - links:
+          - {to: "ph-stabilize#topic:durability", label: "The whole bundle after a restart"}
+          - {to: "durability", label: "Durability across the harness"}
+
+  - id: subagents
+    title: What a sub-agent gets
+    summary: |
+      A child agent runs on its root's mount, so if the rows are on for the
+      root they are on for the child. The child's procedure is its own: its
+      steps, budget and nudges are in the child's log.
+    blocks:
+      - table:
+          columns: [question, answer]
+          rows:
+            - ["Does `skill-steps` hear a child's events?", "Yes. A row's listeners reach every agent on the mount. `skills/read` carries the child's session, and `agent/turn-stopping` carries the child's driver."]
+            - ["Whose todo list is seeded?", "The child's. The list is the last `todo/write` in the log of the agent that read the skill. A parent's list is untouched."]
+            - ["Can the child read the skill?", "Only a skill within its reach, and only if its grant includes the `skill` tool. A profile assigned to a child may scan fewer of the parent's skill directories, never others."]
+            - ["Can the child mark steps done?", "Only if its grant includes `write_todos`. Without it the child is in the same state as a session with `tool-todo` off."]
+            - ["A skill named in the spawn", "Its body is put in the child's prompt and recorded as `skill/read` with `via: brief`. It is not read through the tool, `skills/read` is not emitted, and nothing is seeded."]
+            - ["Whose spend is a decision?", "The child's. `llm/decided` is written to the session of the agent whose turn was stopping."]
+      - title: What a child cannot widen
+        tone: secure
+        list:
+          - "A child cannot switch the rows on or off. Its environment is its root's; the profile records are skipped for a sub-agent's log."
+          - "A child holds a subset of its parent's tools and skills, fixed when it is admitted."
+          - "`maxNudges` and the decision route are the mount's. A skill's own `max-nudges` is the only per-procedure setting."
+      - title: Limits
+        tone: limit
+        list:
+          - "The frontmatter keys `model`, `effort`, `output` and `accepts` matter only when a skill is handed to a child in a spawn, which is the path that seeds nothing."
+          - "A nudge inside a child keeps the child's turn going, so its parent waits longer for the result. The budget is the only bound this row adds."
+      - links:
+          - {to: "ph-stabilize#topic:subagents", label: "What a sub-agent inherits from the stabilize bundle"}
+
+  - id: limits
+    title: Limits
+    summary: |
+      What a self-steering skill does not do. Each of these is the code's own
+      statement, not a caveat added later.
+    blocks:
+      - tone: limit
+        list:
+          - "**A loop step is not a plan step.** `agent/turn-stopping` fires when a turn is about to end, and a plan step spans many turns. The row asserts that work remains which can begin. It never says which step is running."
+          - "**It holds the model to its own plan, not to reality.** Marking a step done is the model's word. `worked` shows a person when a step was ticked with no tool calls behind it; it refuses nothing. A gate that checks the world is `ctx.goals` or `ctx.approval`."
+          - "**`allowed-tools` is a declaration.** The `skill` tool reports which of them the caller cannot reach (`missing_tools`). Nothing is restricted."
+          - "**A skill cannot install itself**, and the agent cannot switch the rows on."
+          - "**Steps are seeded, not scheduled.** Nothing runs a step, times one out, or notices one that has been in progress for an hour. The only pressure is the nudge, and it stops after the budget."
+          - "**It does not know what `/autonomous` decided.** Both listen on `agent/turn-stopping`, in registration order, and neither returns a value. With a goal open and a procedure unfinished, this row can steer past the goal's budget."
+          - "**A decision model keeps the row from undoing a pause; it does not make the model pause.** A model that never asks is nudged as before."
+          - "**The model can leave a step.** The nudge tells it: if a step does not apply, mark it completed and say why."
+      - links:
+          - {to: "ph-stabilize#topic:limits", label: "Limits of the whole stabilize bundle"}
+
+nodes:
+  person:
+    title: Person
+    summary: |
+      The one who asks for the work, answers when the assistant stops to ask,
+      and is the only one who can switch self-steering on. The person sees the
+      same list the model sees, drawn in the todo sidebar.
+    blocks:
+      - title: What the person does
+        table:
+          columns: [act, how]
+          rows:
+            - ["switch it on", "a named profile and `/profile use <name>`, or `--patch` at a start"]
+            - ["start the procedure", "ask the agent to use the skill; the model calls the `skill` tool"]
+            - ["answer a held question", "type the answer; it starts the next turn"]
+            - ["end a procedure early", "tell the model a step does not apply; it may mark the step completed and say why"]
+      - title: What the person sees
+        text: |
+          The sidebar and the model's prompt are two renderings of one `todo/write` record. The sidebar marks a completed step `(no work seen)` when the harness counted no tool calls before it was ticked. A nudge appears in the transcript as a notice from the harness, not as the person's words.
+      - links:
+          - {to: "topic:dynamic", label: "Can the agent switch it on itself?"}
+          - {to: "topic:switching-on", label: "Switching it on"}
+
+  loop:
+    title: Agent loop
+    summary: |
+      The `agent-loop` row of ph-core. It runs a turn as steps and, when a step
+      ends with nothing more to do, dispatches `agent/turn-stopping` before it
+      closes the turn. If a message is waiting for the next step after that
+      dispatch, the turn goes on. The loop knows nothing about skills or plans.
+    blocks:
+      - row: agent-loop
+      - title: Where the turn can be kept alive
+        lang: text
+        code: |
+          step/end
+          if the step ended the turn and nothing waits for the next step:
+              serial  agent/turn-stopping (agent, turn)
+          if the step ended the turn and still nothing waits:
+              turn/end
+          else:
+              next step, starting with the waiting messages as user/message records
+      - title: Three ways to hand it a message
+        table:
+          columns: [call, lands at, wakes an idle agent, used here by]
+          rows:
+            - ["`agent.steer`", "the next step", "yes", "the nudge"]
+            - ["`agent.interject`", "the next step if a turn is running, else a new turn", "yes", "a prompt the person types"]
+            - ["`agent.followup`", "the next turn", "yes", ""]
+      - title: Durability
+        tone: durable
+        list:
+          - "A steered message becomes a `user/message` record when the next step claims it, so the nudge is in the log before the model reads it."
+      - links:
+          - {to: "ph-stabilize#node:loop", label: "The loop's events on the ph-stabilize page"}
+          - {to: "ph-core", label: "ph-core"}
+
+  model:
+    title: Model
+    summary: |
+      The session's chat model. It learns a skill exists from the catalog in its
+      system prompt, reads it with the `skill` tool, and tracks the procedure
+      with `write_todos`. It is told about unfinished steps only through its
+      prompt and the nudge.
+    blocks:
+      - title: What the model is shown
+        table:
+          columns: [what, from, when]
+          rows:
+            - ["the skill catalog: name, description, usage", "`skills-progressive`", "every request, in the cached prefix"]
+            - ["the skill's file, with `{{parameters.x}}` filled in", "the `skill` tool's result", "when it calls the tool"]
+            - ["`write_todos` and its guidance", "`tool-todo`", "every request"]
+            - ["the list as `[ ]`, `[~]`, `[x]`, with `(waiting on: ...)`", "`tool-todo`'s `todos` context", "every request, rebuilt from the log"]
+            - ["the nudge", "`skill-steps`", "when a turn tried to end with a step startable"]
+      - title: The list in its prompt
+        lang: text
+        code: |
+          ## Todo list
+
+          [x] read the plan row
+          [ ] survey the callers
+          [ ] port the row (waiting on: survey the callers)
+          [ ] gate it (waiting on: port the row)
+      - title: What the model may and may not do with seeded steps
+        table:
+          columns: [act, result]
+          rows:
+            - ["mark a seeded step `in_progress` or `completed`", "allowed"]
+            - ["add its own entries before, between or after them", "allowed"]
+            - ["reorder its own entries", "allowed"]
+            - ["delete a seeded step", "refused"]
+            - ["reorder seeded steps", "refused"]
+            - ["reword a seeded step", "refused; it reads as a delete and an add"]
+            - ["mark a step done while the one it waits on is not", "refused"]
+      - title: The refusals, as the model reads them
+        lang: text
+        note: Each is a failed tool result, and nothing is written.
+        code: |
+          this plan drops 1 step a skill set: 'port the row'. Keep them, in order — you may add your own entries around them and mark these done.
+
+          this plan reorders the 3 steps a skill set. Keep them in the order it declared: 'survey the callers', 'port the row', 'gate it'. You may add your own entries around them and mark these done.
+      - title: Limits
+        tone: limit
+        list:
+          - "The model never writes `source` or `worked`. Both are attached by the harness from the log."
+          - "A model that does not answer a nudge is nudged again, up to the budget, and then the turn ends."
+      - links:
+          - {to: "edge:mark", label: "write_todos"}
+          - {to: "edge:next-step", label: "The nudge the model reads"}
+
+  skill:
+    title: skill tool
+    summary: |
+      The `skill` tool and the catalog are the `skills-progressive` row of
+      ph-core. The catalog goes in the prompt; a skill's body stays on disk
+      until the model asks for it by name. When it does, the tool also emits
+      `skills/read`, which is how a row in another package learns a procedure
+      was read.
+    blocks:
+      - row: skills-progressive
+      - title: In a profile
+        lang: yaml
+        code: |
+          - id: skills-progressive
+            config:
+              paths: [~/.ph/skills, ./.ph/skills]
+      - title: The tool's arguments
+        struct: ph.seams.skills:SkillArgs
+      - title: What the tool returns
+        struct: ph.seams.skills:SkillValue
+      - title: What it does on a call
+        text: |
+          1. Looks the skill up in the caller's own scope. An unknown name is refused with the names that are available.
+          2. Reads the file from disk and fills in `{{parameters.x}}`, in the body and in each step, defaults first. A missing required input, a wrong type, a value outside an `enum` or an argument the skill never declared is refused, naming what the skill declares.
+          3. Writes a `skill/read` record.
+          4. Emits `skills/read`.
+          5. Returns the text, the version, the declared parameters, and `missing_tools`: which of `allowed-tools` this caller cannot reach.
+      - record: skill/read
+        example: |
+          {"type": "skill/read",
+           "data": {"name": "port-a-feature", "version": "2",
+                    "path": "/home/me/.ph/skills/port-a-feature/SKILL.md",
+                    "sha256": "c6d1a1bf194ae2cd1b4dd0da4e930d8874df2363e3af99af88a97b335f80ca19",
+                    "via": "tool"}}
+      - event: skills/read
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Only directories the profile names are scanned. The model cannot add one."
+          - "The catalog and the tool both answer for the caller's scope, so a narrowed child is not shown a skill it cannot read."
+          - "A child's assigned profile may scan fewer of its parent's directories and never others (`narrows`)."
+      - title: Limits
+        tone: limit
+        list:
+          - "The tool exists only when at least one skill was found at mount."
+          - "The frontmatter is parsed at mount; the body is read at each call."
+          - "The returned text is the whole file, frontmatter included."
+      - links:
+          - {to: "topic:skill-file", label: "The SKILL.md file"}
+          - {to: "edge:skills-read", label: "The skills/read event"}
+
+  steps:
+    title: skill-steps
+    summary: |
+      The row that makes the steps binding. It listens for a skill being read
+      and appends its steps to the todo list; it listens for a turn about to end
+      and steers the agent on while a seeded step can start. It has no state of
+      its own: every question it asks is answered from the log.
+    blocks:
+      - row: skill-steps
+      - title: In a profile
+        lang: yaml
+        code: |
+          - id: skill-steps
+            disabled: false
+            config:
+              maxNudges: 5
+              decision:
+                provider: decision
+                model: bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L
+                holdAt: 0.8
+                timeoutMs: 3000
+      - title: The decision option
+        struct: ph_stabilize.skill_steps:Decision
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`skills/read`", emit, "appends the skill's steps to the list and records the skill's budget"]
+            - ["`agent/turn-stopping`", serial, "decides whether a nudge is due, asks the decision model, steers or returns"]
+      - title: When a nudge is sent
+        text: |
+          At `agent/turn-stopping`, in this order. The first "no" lets the turn end.
+
+          1. Is any seeded step unfinished? Read from the last `todo/write`, without copying the list.
+          2. Is there budget left? The budget is the last skill's `max-nudges`, else the row's `maxNudges` (3). The count is the nudges since the last `todo/write`.
+          3. Can a seeded step start? One that is not completed and waits on nothing unfinished.
+          4. If a decision model is configured: is the assistant waiting for the person, at least `holdAt` likely? Then the nudge is held.
+
+          Otherwise the row calls `agent.steer` with the notice.
+      - title: The budget
+        table:
+          columns: [rule, effect]
+          rows:
+            - ["counted since the list last changed", "any `write_todos` earns fresh nudges; only a run going in circles reaches the budget"]
+            - ["the skill read last governs", "its `max-nudges` applies; a skill with none hands the row back to the profile's `maxNudges`"]
+            - ["`0`", "the steps are seeded and the row never steers"]
+            - ["a held nudge", "spends nothing"]
+      - title: What it writes to the log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`todo/write`", "the list with the steps appended"]
+            - ["`skill-steps/budget`", "in the same batch"]
+            - ["`skill-steps/decided`", "each answer from the decision model"]
+      - record: skill-steps/budget
+        example: |
+          {"type": "skill-steps/budget", "data": {"skill": "port-a-feature", "maxNudges": 5}}
+      - title: Services
+        list:
+          - "The row injects nothing, so a missing service cannot stop the seeding or the nudge."
+          - "`ctx.llm` is looked up only when a decision is asked for. If it is absent the nudge goes ahead."
+          - "It adds the *Skill steps* section to `phern doctor`: the route, and whether its adapter can decide."
+      - title: Durability
+        tone: durable
+        list:
+          - "The steps, the budget and the nudge count are all folded from the log. A restart loses none of them."
+      - title: Limits
+        tone: limit
+        list:
+          - "Ships switched off, because it can keep a turn going."
+          - "With `tool-todo` off it still seeds and nudges, and the model has nothing to answer with."
+          - "The nudge names at most three steps and counts the rest."
+      - links:
+          - {to: "edge:stopping", label: "agent/turn-stopping"}
+          - {to: "edge:decide", label: "The decision call"}
+          - {to: "edge:nudge", label: "The nudge"}
+          - {to: "ph-stabilize#node:skill-steps", label: "The row on the ph-stabilize page"}
+
+  todo:
+    title: Todo list
+    summary: |
+      The `tool-todo` row: the `write_todos` tool, the `todo/write` record and
+      the list in the model's prompt. The list is the last `todo/write` in the
+      session's log and nothing else, so `skill-steps`, the model, the sidebar
+      and a restarted daemon all read the same thing.
+    blocks:
+      - row: tool-todo
+      - title: One entry
+        struct: ph_stabilize.todo:TodoItem
+      - title: The tool's arguments
+        struct: ph_stabilize.todo:WriteTodosArgs
+      - record: todo/write
+        example: |
+          {"type": "todo/write",
+           "data": {"todos": [
+             {"content": "read the plan row", "status": "completed", "requires": [], "worked": 2},
+             {"content": "survey the callers", "status": "pending", "requires": [], "source": "skill"},
+             {"content": "port the row", "status": "pending", "requires": ["survey the callers"], "source": "skill"},
+             {"content": "gate it", "status": "pending", "requires": ["port the row"], "source": "skill"}]}}
+      - title: Two writers, one record
+        table:
+          columns: [writer, when, what it adds]
+          rows:
+            - ["`skill-steps`", "a skill is read", "the steps at the end, `status: pending`, each `requires` the step before it, `source: skill`"]
+            - ["`write_todos`", "the model updates the list", "the whole list; `source` and a seeded step's `requires` are put back from the log; `worked` is attached to an entry that was just completed"]
+      - title: What it refuses
+        tone: secure
+        list:
+          - "A write that drops, reorders or rewords a seeded step."
+          - "A `requires` that names nothing, a cycle, two entries with the same text."
+          - "An entry in progress or completed while something it waits on is not completed."
+          - "Two `write_todos` calls in one assistant message (native tool calling)."
+      - title: Limits
+        tone: limit
+        list:
+          - "At most 100 entries, 500 characters each. A skill whose steps would pass either bound seeds nothing."
+          - "The whole list is replaced on every write. There are no partial updates."
+      - links:
+          - {to: "ph-stabilize#node:todo", label: "The row on the ph-stabilize page"}
+
+  decider:
+    title: Decision model
+    summary: |
+      A model server that is asked typed questions about a state and answers
+      with probabilities. Here it is asked one yes-or-no question: did the
+      assistant stop to wait for the person? It is optional. Without it, and
+      whenever it cannot be asked, every unfinished procedure is nudged.
+    blocks:
+      - title: The route, in the adapter row
+        lang: yaml
+        note: |
+          `provider` is the name `skill-steps.decision.provider` refers to.
+          `maxDecisionTokens` is the server's `--ubatch-size`.
+        code: |
+          - id: llm-llama                       # the profile's own llm-openai-compatible row
+            config:
+              profiles:
+                - provider: llama               # the chat route, restated
+                  baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
+                  apiKeyEnv: LLAMA_API_KEY
+                - provider: decision
+                  baseUrl: ${env:DECISION_BASE_URL:-http://127.0.0.1:9932/v1}
+                  apiKeyEnv: DECISION_API_KEY
+                  maxDecisionTokens: 8192
+      - title: The adapter row
+        row: llm-openai-compatible
+      - title: How much it is shown
+        table:
+          columns: [limit, from, effect]
+          rows:
+            - ["`maxDecisionTokens`", "the route's entry in the adapter row", "the most tokens one decision may carry"]
+            - ["a learned limit", "a refusal that names the batch the server reads", "kept by `ctx.llm.decision_limit` until the daemon restarts; the smaller of the two wins"]
+            - ["512", "nothing says", "a llama.cpp's default batch"]
+            - ["175 tokens", "fixed", "set aside for the model's framing and the question"]
+            - ["120 bytes a step", "fixed", "how much of each named step is shown"]
+            - ["200 to 4000 bytes", "fixed", "the least and the most of the assistant's last message that is shown, from its end"]
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The credential is resolved inside the adapter. The row hands over a state and a question and never holds a key."
+          - "It is sent the names of up to three steps and the end of the assistant's last message, nothing else from the session."
+      - title: Limits
+        tone: limit
+        list:
+          - "A llama.cpp reads a decision in one batch, so the limit is `--ubatch-size`, not the context window, and the server does not publish it."
+          - "About 770 bytes of the message fit at 512 tokens with one step named."
+          - "It judges a message. It stops no tool call and checks nothing in the world."
+      - links:
+          - {to: "edge:decide", label: "The request"}
+          - {to: "edge:answer", label: "The answer"}
+          - {to: "ph-stabilize#node:decider", label: "The decision model on the ph-stabilize page"}
+
+edges:
+  ask:
+    transport: socket
+    summary: |
+      The person's front end sends `session/prompt` to the daemon. The daemon
+      hands the text to the session's agent with `agent.interject`: a running
+      turn takes it at its next step, an idle agent starts a new turn. Nothing
+      about a skill is in this message; the model decides to read one.
+    blocks:
+      - title: The verb's parameters
+        struct: ph_app.params:PromptParams
+      - title: What it leaves in the log
+        lang: json
+        code: |
+          {"type": "user/message",
+           "data": {"role": "user", "source": {"kind": "user"},
+                    "content": [{"type": "text", "text": "Port the retry feature from sources/x using the port-a-feature skill."}]}}
+      - title: Limits
+        tone: limit
+        list:
+          - "A prompt typed while the agent works joins the running turn. It does not reset the nudge count; only a change to the todo list does."
+          - "After a held nudge the turn has ended, so the person's answer starts a new turn."
+
+  call-skill:
+    transport: call
+    summary: |
+      The model calls the `skill` tool with a name and, where the skill declares
+      inputs, arguments. It is an ordinary tool call: it crosses the tool
+      pipeline's waterfalls like any other, and its result comes back as
+      [instructions](edge:instructions).
+    blocks:
+      - title: The call
+        lang: json
+        code: |
+          {"name": "skill",
+           "arguments": {"name": "port-a-feature",
+                         "arguments": {"upstream": "sources/x"}}}
+      - title: The arguments
+        struct: ph.seams.skills:SkillArgs
+      - title: The waterfall every tool call crosses first
+        event: tools/pre-execute
+      - title: Refused before the body is handed over
+        tone: limit
+        list:
+          - "An unknown name: `no readable skill named 'x'; available: ...`."
+          - "Arguments the declaration does not accept: `skill 'port-a-feature' arguments: ...; It declares: gate, upstream`."
+          - "A placeholder in the file naming an input the frontmatter never declared."
+          - "A refused call writes no `skill/read` and emits no `skills/read`, so nothing is seeded."
+
+  skills-read:
+    transport: bus
+    mode: emit
+    summary: |
+      `skills-progressive` emits `skills/read` once the body is rendered and
+      about to be returned. `skill-steps` is the only listener, and only when it
+      is switched on. An `emit` ignores what a listener returns and logs what it
+      raises, so a failure in the row never un-reads the skill.
+    blocks:
+      - event: skills/read
+      - title: What is emitted
+        lang: python
+        note: The event declares no payload class. This is the dict the tool builds.
+        code: |
+          {"skill": Skill(name="port-a-feature", steps=[...], max_nudges=5, ...),
+           "steps": ["Read the upstream implementation under sources/x and write down what it does.",
+                     "..."],             # {{parameters.x}} already filled in
+           "max_nudges": 5,              # the skill's own budget, or None
+           "session": Session(...)}      # the session of the agent that called the tool
+      - title: The skill object
+        struct: ph.seams.skills:Skill
+      - title: Limits
+        tone: limit
+        list:
+          - "With `skill-steps` off there is no listener and the event goes nowhere."
+          - "A skill handed to a child in a spawn's brief does not emit this event."
+          - "The listener reads the rendered steps off the payload, because it does not have the call's arguments."
+
+  seed:
+    transport: log
+    summary: |
+      Not a call between two rows. `skill-steps` appends one `todo/write` record
+      holding the current list with the skill's steps at the end, and one
+      `skill-steps/budget` record, in a single batch. `tool-todo` reads the list
+      back from the log like every other reader.
+    blocks:
+      - record: todo/write
+        example: |
+          {"type": "todo/write",
+           "data": {"todos": [
+             {"content": "read the plan row", "status": "completed", "requires": [], "worked": 2},
+             {"content": "survey the callers", "status": "pending", "requires": [], "source": "skill"},
+             {"content": "port the row", "status": "pending", "requires": ["survey the callers"], "source": "skill"},
+             {"content": "gate it", "status": "pending", "requires": ["port the row"], "source": "skill"}]}}
+      - record: skill-steps/budget
+        example: |
+          {"type": "skill-steps/budget", "data": {"skill": "port-a-feature", "maxNudges": null}}
+      - title: The rules of seeding
+        table:
+          columns: [rule, effect]
+          rows:
+            - ["appended, not merged", "the model's own entries stay where it put them"]
+            - ["sequential", "each step `requires` the one before it, within one skill only"]
+            - ["idempotent by content", "reading the skill again adds nothing; a step already in the list is not added twice"]
+            - ["all or nothing", "if any step cannot be an entry, none is seeded"]
+            - ["one batch", "the list and the budget that governs it land together"]
+      - title: When nothing is seeded
+        tone: limit
+        list:
+          - "A step longer than 500 characters once its parameters are filled in."
+          - "A list that would pass 100 entries."
+          - "A step whose text equals an entry the model already wrote."
+          - "Each case logs a warning in the daemon's log and leaves the list as it was. The skill is still read."
+
+  instructions:
+    transport: call
+    summary: |
+      The tool's result goes back to the model through the tool pipeline: the
+      file's text as content, and a structured value beside it. The steps are
+      already in the todo list by the time the model reads this.
+    blocks:
+      - title: The value
+        struct: ph.seams.skills:SkillValue
+      - title: As JSON
+        lang: json
+        code: |
+          {"name": "port-a-feature",
+           "path": "/home/me/.ph/skills/port-a-feature/SKILL.md",
+           "instructions": "---\nname: port-a-feature\n...\n---\n\n# Porting a feature\n...",
+           "parameters": ["gate", "upstream"],
+           "version": "2",
+           "allowed_tools": ["read", "grep", "glob", "edit", "write", "bash"],
+           "missing_tools": []}
+      - title: Limits
+        tone: limit
+        list:
+          - "The model reads `instructions` as the tool's text. The other fields are the structured value."
+          - "`missing_tools` is information. No tool is taken away or added."
+
+  mark:
+    transport: call
+    summary: |
+      The model calls `write_todos` with the whole list. The row puts `source`
+      and the seeded steps' `requires` back from the log, checks the plan, counts
+      the tool calls since the previous write, and appends a new `todo/write`.
+      This is the only way a step becomes done.
+    blocks:
+      - title: The call
+        lang: json
+        note: The model sends no `source` and no `worked`.
+        code: |
+          {"name": "write_todos",
+           "arguments": {"todos": [
+             {"content": "read the plan row", "status": "completed"},
+             {"content": "survey the callers", "status": "completed"},
+             {"content": "port the row", "status": "in_progress", "requires": ["survey the callers"]},
+             {"content": "gate it", "status": "pending"}]}}
+      - title: The arguments
+        struct: ph_stabilize.todo:WriteTodosArgs
+      - title: What is written
+        record: todo/write
+        example: |
+          {"type": "todo/write",
+           "data": {"todos": [
+             {"content": "read the plan row", "status": "completed", "requires": [], "worked": 2},
+             {"content": "survey the callers", "status": "completed", "requires": [], "source": "skill", "worked": 6},
+             {"content": "port the row", "status": "in_progress", "requires": ["survey the callers"], "source": "skill"},
+             {"content": "gate it", "status": "pending", "requires": ["port the row"], "source": "skill"}]}}
+      - title: The gate it crosses
+        event: tools/pre-execute
+      - title: Why this matters to the nudge
+        tone: durable
+        list:
+          - "Every `todo/write` resets the nudge count, because the count starts at the last one."
+          - "`worked` is the number of tool calls the harness saw between the previous `todo/write` and this one, not counting `write_todos`."
+
+  written:
+    transport: call
+    summary: |
+      The tool answers with the list as it was written, or with a refusal. A
+      refusal is a `PlanError` raised by the tool body: the model reads it as a
+      failed result, can fix the plan on its next call, and the log is left
+      alone.
+    blocks:
+      - title: Accepted
+        lang: text
+        code: |
+          Updated todo list to [{'content': 'read the plan row', 'status': 'completed', 'requires': [], 'worked': 2}, ...]
+      - title: Refused
+        lang: text
+        code: |
+          this plan drops 1 step a skill set: 'port the row'. Keep them, in order — you may add your own entries around them and mark these done.
+
+          this plan reorders the 3 steps a skill set. Keep them in the order it declared: 'survey the callers', 'port the row', 'gate it'. You may add your own entries around them and mark these done.
+
+          'port the row' is in_progress but waits on 'survey the callers', which is not completed
+
+          Error: The `write_todos` tool should never be called multiple times in parallel. Please call it only once per model invocation to update the todo list.
+      - title: Limits
+        tone: limit
+        list:
+          - "A refused write changes nothing, so it does not reset the nudge count."
+          - "Rewording a seeded step is reported as a dropped step."
+
+  stopping:
+    transport: bus
+    mode: serial
+    summary: |
+      When a step ends the turn and no message is waiting, the loop dispatches
+      `agent/turn-stopping` to its listeners in registration order and awaits
+      each. A listener returns nothing. One that wants the turn to go on steers
+      the agent, and the loop finds the message waiting when the dispatch
+      returns.
+    blocks:
+      - event: agent/turn-stopping
+      - title: What a listener is called with
+        text: |
+          `(agent, turn)`: the agent's driver and the turn number. The event declares no payload class. `skill-steps` reads the session from `agent.session`, and calls `agent.steer` on the same object.
+      - title: Who else listens
+        list:
+          - "`/autonomous`, which steers while a goal's gates fail."
+          - "The subagent seam, which reminds an agent of results it is owed."
+          - "Neither returns a value and neither can outrank the other."
+      - title: Limits
+        tone: limit
+        list:
+          - "It fires once per turn that tries to end, for every agent on the mount. A session that never read a skill pays one lookup."
+          - "It does not fire for a turn that was canceled, that failed with an error, or that `agent/pre-step` rejected."
+
+  fold:
+    transport: log
+    summary: |
+      Before it asks anyone anything, the row reads the session's log three
+      times: the last `todo/write` for the unfinished seeded steps, the last
+      `skill-steps/budget` for the budget, and the records after the last
+      `todo/write` for the nudges already sent. Nothing is kept between turns.
+    blocks:
+      - title: The three questions
+        table:
+          columns: [question, read from, function]
+          rows:
+            - ["Is a seeded step unfinished?", "last `todo/write`: entries with `source: skill` not `completed`", "`todo.outstanding_steps`"]
+            - ["What is the budget?", "last `skill-steps/budget`: `maxNudges`, else the row's `maxNudges`", "`latest_skill_budget`"]
+            - ["How many nudges since the list changed?", "`user/message` records after that `todo/write` whose `source.plugin` is `ph_stabilize.skill_steps`", "`nudges_since`"]
+            - ["Which steps can start?", "entries not completed whose `requires` are all completed", "`todo.startable`"]
+      - title: How a nudge is recognized
+        lang: json
+        note: The tag on the message is the record. There is no separate counter to keep in step with it.
+        code: |
+          {"type": "user/message",
+           "data": {"role": "user",
+                    "source": {"kind": "plugin", "plugin": "ph_stabilize.skill_steps", "form": "notice",
+                               "summary": "a skill's procedure is unfinished"},
+                    "content": [{"type": "text", "text": "A skill you read set out a procedure and it is not finished: ..."}]}}
+      - title: Durability
+        tone: durable
+        list:
+          - "A counter on the listener would start at zero after a restart. The fold does not."
+          - "The walk stops as soon as the count reaches the budget, so a run that stood down does not rescan a growing log."
+      - title: Limits
+        tone: limit
+        list:
+          - "The count is per session and covers every seeded skill together. A nudge names whatever can start; it is not charged to one skill."
+
+  decide:
+    transport: service
+    summary: |
+      If a nudge is due and the profile names a decision model, the row calls
+      `ctx.llm.decide(request, session=, timeout_s=)`. The `llm` service finds
+      the adapter registered for the route's provider and the adapter posts the
+      request to the server's `/systemone`. The cost of the ask is recorded in
+      the session by the service; what was answered is recorded by the row.
+    blocks:
+      - title: The request
+        struct: ph.llm.adapter:DecisionRequest
+      - title: The question
+        struct: ph.llm.adapter:Noul
+      - title: On the wire
+        lang: json
+        note: |
+          Built by `_systemone_body`. `model` is left out when the route names
+          none. The state is the steps that can start and the end of the
+          assistant's last message.
+        code: |
+          POST {baseUrl}/systemone
+          {"state": "An assistant is following a procedure and has not finished it: 'survey the callers' can be started now. 2 further steps wait on these.\n\nThe assistant ended its turn with this message:\nI have read the upstream. Before I change anything: do you want the port to keep the upstream's config names?",
+           "questions": {
+             "waiting": {"type": "noul",
+                         "instructions": "Did the assistant stop to wait for the person: a question it needs answered, or an approval or confirmation it asked for, before it goes on with the procedure?"}},
+           "model": "bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L"}
+      - title: How the state is sized
+        text: |
+          The row asks `ctx.llm.decision_limit(provider, model)` for the most tokens one decision may carry: the route's `maxDecisionTokens`, or what an earlier refusal taught, whichever is less, and 512 when neither says. It sets 175 tokens aside for framing and the question, subtracts the steps, and shows that many bytes from the end of the message: at least 200, at most 4000.
+
+          A server that still refuses the input as too long says how many tokens it was sent and how many it reads. The row asks once more with the tail cut in that proportion and a quarter more. If the cut would leave under 200 bytes it does not ask again.
+      - title: Time
+        table:
+          columns: [setting, value, effect]
+          rows:
+            - ["`timeoutMs`", "3000 by default", "how long the ending turn waits, both tries together"]
+            - ["the rest", "60 seconds, fixed", "after a timeout the row does not ask this route again; turns are nudged without asking"]
+      - title: When it is not asked
+        list:
+          - "No `decision` in the row's config."
+          - "The route is resting after a timeout."
+          - "The assistant's last message has no text, for example a turn that ended on tool calls."
+          - "No nudge was due in the first place."
+      - record: llm/decided
+        example: |
+          {"type": "llm/decided",
+           "data": {"provider": "decision",
+                    "model": "bartowski/Cloudflare_clef-GGUF:Cloudflare_clef-Q6_K_L",
+                    "questions": 1,
+                    "usage": {"inputTokens": 412, "outputTokens": 0}}}
+      - record: llm/decision-failed
+        example: |
+          {"type": "llm/decision-failed",
+           "data": {"provider": "decision", "model": "", "questions": 1,
+                    "code": "TIMEOUT",
+                    "reason": "provider \"decision\" did not decide within 3 s"}}
+      - title: Failure
+        table:
+          columns: [code, when, what the row does]
+          rows:
+            - ["`NO_ADAPTER`", "no adapter is registered for the provider", "nudges"]
+            - ["`NO_DECISIONS`", "the adapter for that provider cannot decide", "nudges"]
+            - ["`CONTEXT_WINDOW_EXCEEDED`", "the server refused the input as too long", "asks once more with less, then nudges"]
+            - ["`BAD_DECISION`", "the reply has no answer, or one of another kind", "nudges"]
+            - ["`TIMEOUT`", "no answer within what was left of `timeoutMs`", "nudges, and rests the route for 60 seconds"]
+            - ["a status from the server", "it is down, or has no `/systemone`", "nudges"]
+      - title: Limits
+        tone: limit
+        list:
+          - "Each failure code is warned about once in the daemon's log, not once a turn. The `llm/decision-failed` record is written every time."
+          - "A decision that cannot be had costs the exception, never the feature: the nudge the row always sent goes ahead."
+
+  answer:
+    transport: http
+    summary: |
+      The server replies with one answer for each question, under the question's
+      name. For a `noul` that is a single probability. The adapter reads it into
+      a typed answer, the service checks that every question got the kind of
+      answer it is owed, and the row compares the number with `holdAt`.
+    blocks:
+      - title: On the wire
+        lang: json
+        code: |
+          200
+          {"answers": {"waiting": {"noul": 0.97}},
+           "usage": {"input_tokens": 412}}
+      - title: The typed answer
+        struct: ph.llm.adapter:Decisions
+      - title: One answer
+        struct: ph.llm.adapter:NoulAnswer
+      - record: skill-steps/decided
+        example: |
+          {"type": "skill-steps/decided", "data": {"waiting": 0.97, "holdAt": 0.8}}
+      - title: The rule over the number
+        table:
+          columns: [answer, example readings against Clef, result]
+          rows:
+            - ["`waiting >= holdAt`", "a request to approve, a choice put to the person, a missing password: 0.98 to 0.99", "the nudge is held"]
+            - ["`waiting < holdAt`", "a report and a stop: 0.01; a sign-off: 0.03 to 0.07; unsure of its own result with no question: 0.3 to 0.4", "the nudge is sent"]
+      - title: Limits
+        tone: limit
+        list:
+          - "A value that is not a number from 0 to 1 is refused as `BAD_DECISION`."
+          - "`holdAt` is 0.8 by default and must be above 0 and at most 1. Lower it to end a turn sooner than risk walking past a question."
+
+  hold:
+    transport: bus
+    mode: serial
+    summary: |
+      The decision model said the assistant is waiting for the person, at least
+      `holdAt` likely. The listener returns without steering. Nothing is waiting
+      for the next step, so the loop ends the turn.
+    blocks:
+      - event: agent/turn-stopping
+      - title: What is in the log for a held nudge
+        lang: json
+        note: No `user/message` from the plugin follows, which is why a held nudge spends none of the budget.
+        code: |
+          {"type": "llm/decided", "data": {"provider": "decision", "model": "...", "questions": 1, "usage": {"inputTokens": 412, "outputTokens": 0}}}
+          {"type": "skill-steps/decided", "data": {"waiting": 0.97, "holdAt": 0.8}}
+      - title: The same return, for other reasons
+        list:
+          - "No seeded step is unfinished: the procedure is done."
+          - "The budget is spent: the row stands down and logs it at info level."
+          - "No seeded step can start: a guard, since a chain the row wrote always has one."
+      - title: Limits
+        tone: limit
+        list:
+          - "A held nudge is not remembered. The next turn that tries to end is asked about afresh."
+          - "Holding is a judgement about the last message. It does not record that an approval was asked or given."
+
+  wait:
+    transport: log
+    summary: |
+      The turn ends as any turn does. The steps stay in the list as they were,
+      on show in the sidebar and in the model's next prompt. The person's answer
+      arrives as a new [prompt](edge:ask) and starts the next turn, where the
+      model can carry on with the step that was startable.
+    blocks:
+      - title: Three endings
+        table:
+          columns: [ending, what the log shows, what happens next]
+          rows:
+            - ["the procedure finished", "every seeded entry `completed` in the last `todo/write`", "the row has nothing to object to, in this turn or any later one"]
+            - ["the nudge was held", "`skill-steps/decided` with `waiting` at or above `holdAt`", "the person answers; the next turn end is judged afresh"]
+            - ["the budget ran out", "as many plugin `user/message` records as the budget since the last `todo/write`", "the row is silent until the list changes; any `write_todos` earns fresh nudges"]
+      - title: Durability
+        tone: durable
+        list:
+          - "An unfinished procedure outlives the turn, the terminal and the daemon. It is the last `todo/write`."
+      - title: Limits
+        tone: limit
+        list:
+          - "After the budget runs out nothing tells the person in the transcript. The sidebar still shows the unfinished steps."
+
+  nudge:
+    transport: call
+    summary: |
+      The row calls `agent.steer(message)` on the agent whose turn was stopping.
+      The message is a user message whose source is the plugin, so the
+      transcript shows it as a notice from the harness and not as the person's
+      words. A steer lands at the next step and keeps the turn alive.
+    blocks:
+      - title: The text
+        lang: text
+        note: |
+          Built by `steer_text`. It names up to three steps that can start,
+          counts the rest, and says how many more wait on them.
+        code: |
+          A skill you read set out a procedure and it is not finished: 'survey the callers' can be started now. 2 further steps wait on these. Continue with it, or if a step genuinely does not apply, mark it completed and say why in your next message.
+      - title: The source
+        lang: python
+        code: |
+          PluginSource(plugin="ph_stabilize.skill_steps", form="notice",
+                       summary="a skill's procedure is unfinished")
+      - struct: ph.llm.types:PluginSource
+      - title: Limits
+        tone: limit
+        list:
+          - "At most `maxNudges` (or the skill's `max-nudges`) while the list does not change."
+          - "The nudge is a pointer. It does not repeat the plan; the model has the list in its prompt."
+          - "It tells the model how to leave a step that does not apply, so a procedure cannot trap a session."
+
+  next-step:
+    transport: log
+    summary: |
+      The loop finds the steered message waiting, does not end the turn, and
+      starts another step. Claiming the message writes it to the log as a
+      `user/message`; the next request to the model is derived from the log and
+      so includes it.
+    blocks:
+      - title: The record
+        lang: json
+        code: |
+          {"type": "user/message",
+           "data": {"id": "e0f6e683-1f76-4a16-8bd4-7977b2236770",
+                    "role": "user",
+                    "content": [{"type": "text",
+                                 "text": "A skill you read set out a procedure and it is not finished: 'survey the callers' can be started now. 2 further steps wait on these. Continue with it, or if a step genuinely does not apply, mark it completed and say why in your next message."}],
+                    "source": {"kind": "plugin", "plugin": "ph_stabilize.skill_steps",
+                               "form": "notice", "summary": "a skill's procedure is unfinished"}}}
+      - title: Durability
+        tone: durable
+        list:
+          - "This record is what the next turn end counts. The nudge and the count of nudges are the same fact."
+          - "The step is still subject to `agent/pre-step`: a `limits` ceiling can reject it, and then the turn ends as blocked."
+      - title: Limits
+        tone: limit
+        list:
+          - "The nudged step is an ordinary step. It spends model calls and tokens on the session's account."
+          - "With `/autonomous` open as well, the model can get two notices for one step."

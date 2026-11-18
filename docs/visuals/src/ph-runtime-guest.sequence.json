@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "ph-runtime-guest: a cell run",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      592
+    ],
+    "column_fit": "spread",
+    "views": [
+      {
+        "id": "boot",
+        "label": "Boot",
+        "focus": [
+          "kernel",
+          "reader"
+        ],
+        "note": "The host owns every default: boot carries each limit, and a protocol mismatch is refused before boot-ack."
+      },
+      {
+        "id": "binding-call",
+        "label": "A binding call",
+        "focus": [
+          "cell",
+          "kernel",
+          "codemode",
+          "reader"
+        ],
+        "note": "await tools.read(...) is one call frame out and one reply frame back, through ph-core's whole tool pipeline."
+      },
+      {
+        "id": "settle",
+        "label": "Output and done",
+        "focus": [
+          "cell",
+          "kernel",
+          "codemode"
+        ],
+        "note": "log frames stream capped output; snapshot frames come before done, so done is the last frame of a run."
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "codemode",
+      "type": "external",
+      "label": "ph-core Code Mode",
+      "sublabel": "run_code, DispatchBridge"
+    },
+    {
+      "id": "kernel",
+      "type": "backend",
+      "label": "Kernel",
+      "sublabel": "ph_rlm.kernel.manager"
+    },
+    {
+      "id": "reader",
+      "type": "security",
+      "label": "Runner.serve",
+      "sublabel": "guest: reads fd 3"
+    },
+    {
+      "id": "cell",
+      "type": "security",
+      "label": "Cell task",
+      "sublabel": "guest: Runner._execute"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 226,
+      "label": "Start"
+    },
+    {
+      "from": 234,
+      "to": 310,
+      "label": "Run"
+    },
+    {
+      "from": 318,
+      "to": 422,
+      "label": "Binding call"
+    },
+    {
+      "from": 430,
+      "to": 506,
+      "label": "Settle"
+    }
+  ],
+  "messages": [
+    {
+      "id": "runtime-run",
+      "from": "codemode",
+      "to": "kernel",
+      "y": 160,
+      "label": "runtime.run(CodeRunRequest)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "boot",
+      "from": "kernel",
+      "to": "reader",
+      "y": 188,
+      "label": "boot: protocol 4, limits, namespaces",
+      "variant": "security"
+    },
+    {
+      "id": "boot-ack",
+      "from": "reader",
+      "to": "kernel",
+      "y": 216,
+      "label": "boot-ack: python, limits applied",
+      "variant": "return"
+    },
+    {
+      "id": "run",
+      "from": "kernel",
+      "to": "reader",
+      "y": 244,
+      "label": "run: id, program",
+      "variant": "emphasis"
+    },
+    {
+      "id": "begin",
+      "from": "reader",
+      "to": "cell",
+      "y": 272,
+      "label": "create_task(_execute)",
+      "variant": "default"
+    },
+    {
+      "id": "log",
+      "from": "cell",
+      "to": "kernel",
+      "y": 300,
+      "label": "log: stream, text",
+      "variant": "dashed"
+    },
+    {
+      "id": "call",
+      "from": "cell",
+      "to": "kernel",
+      "y": 328,
+      "label": "call: id, run, global, name, args",
+      "variant": "emphasis"
+    },
+    {
+      "id": "dispatch",
+      "from": "kernel",
+      "to": "codemode",
+      "y": 356,
+      "label": "binding.dispatch(args)",
+      "variant": "security"
+    },
+    {
+      "id": "reply",
+      "from": "kernel",
+      "to": "reader",
+      "y": 384,
+      "label": "reply: id, ok, value or message",
+      "variant": "return"
+    },
+    {
+      "id": "resolve",
+      "from": "reader",
+      "to": "cell",
+      "y": 412,
+      "label": "future.set_result",
+      "variant": "return"
+    },
+    {
+      "id": "snapshot",
+      "from": "cell",
+      "to": "kernel",
+      "y": 440,
+      "label": "snapshot: one changed variable",
+      "variant": "dashed"
+    },
+    {
+      "id": "done",
+      "from": "cell",
+      "to": "kernel",
+      "y": 468,
+      "label": "done: value, truncated, dropped",
+      "variant": "emphasis"
+    },
+    {
+      "id": "result",
+      "from": "kernel",
+      "to": "codemode",
+      "y": 496,
+      "label": "CodeRunResult",
+      "variant": "return"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "codemode",
+      "from": 160,
+      "to": 502,
+      "type": "external"
+    },
+    {
+      "participant": "kernel",
+      "from": 160,
+      "to": 502,
+      "type": "backend"
+    },
+    {
+      "participant": "reader",
+      "from": 188,
+      "to": 418,
+      "type": "security"
+    },
+    {
+      "participant": "cell",
+      "from": 272,
+      "to": 474,
+      "type": "security"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One channel, two tasks",
+      "items": [
+        "A frame is one line of JSON on fd 3",
+        "Runner.serve reads frames; the cell runs in its own task",
+        "So a cell awaiting a reply never blocks the reader"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Capped output",
+      "items": [
+        "print leaves as capped log frames",
+        "Past maxLogBytes a write is counted and not sent",
+        "done carries truncated and the dropped byte total"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "No harness inside",
+      "items": [
+        "It imports neither ph-core nor ph-rlm",
+        "_characters.py and _json.py are copies of ph-core's code",
+        "test_protocol_mirror.py fails when a copy or a frame drifts"
+      ]
+    }
+  ]
+}

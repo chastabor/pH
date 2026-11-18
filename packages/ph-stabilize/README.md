@@ -37,12 +37,13 @@ until configured. `phern doctor` reports which of them actually activated.
 | `compaction-summarize` | the conversation replaced by a summary when it stops fitting | on |
 | `command-compact` | `/compact`, the human verb for the same thing | on |
 | `limits` | model-call, tool-call and child ceilings, plus a consecutive-failure breaker | on, every ceiling unset |
-| `hitl` | a person between the model and what it cannot take back | on, asking about nothing |
+| `hitl` | a person between the model and what it cannot take back | on, asking only about a destructive command |
 | `permissions-fs` | path rules over `ctx.fs` | on, with one default write rule |
 
 **"On" mostly means "inert."** Layering this bundle must not, by itself, change
 what a deployment does: `limits` mounts with every ceiling unset, `hitl` with an
-empty `interruptOn`, `permissions-fs` with rules that allow everything inside
+empty `interruptOn` and one curated rule for the tools that declare themselves
+irreversible, `permissions-fs` with rules that allow everything inside
 the workspace. A harness that starts asking on first run teaches its user to
 approve without reading, and a limit nobody chose is a limit that fires on
 somebody's longest legitimate turn.
@@ -53,11 +54,15 @@ inherits. `rlm-stable` is the profile that chooses it — and the reason the
 bundle reaching every profile does not thereby give every deployment a todo
 tool.
 
-The one row that is **not** inert on arrival is `permissions-fs`: it ships a
-rule sending writes outside the agent's workspace to `interrupt`. That is E6's
-intended default rather than an oversight, but it is a behavior change a
-deployment should know it inherited — `phern config --row permissions-fs` prints
-what is in force.
+Two rows are **not** inert on arrival. `permissions-fs` ships a rule sending
+writes outside the agent's workspace to `interrupt`. That is E6's intended
+default rather than an oversight, but it is a behavior change a deployment
+should know it inherited — `phern config --row permissions-fs` prints what is
+in force. And `hitl` ships its `declared` rule as the `destructive` preset: a
+tool that declares itself irreversible — `bash`, a code cell — asks when the
+parsed classifier finds something it cannot take back (`rm -rf`, `DROP TABLE`,
+`shutil.rmtree`, `curl | sh`), and runs unasked otherwise. With no approval
+answerer mounted, an ask is a refusal.
 
 ## The tool, and the command
 
@@ -116,7 +121,7 @@ phern --patch '{insert: [{id: tool-result-offload, name: tool-result-offload}]}'
 | `input-offload` | `tokenLimit` | `50000` |
 | `compaction-summarize` | `auto`, `triggerFraction`, `keepFraction`, `triggerTokens`, `keepMessages`, `maxTokens`, `summaryInputTokens`, `truncateArgs`, `overflowClipTokens` | `0.85` / `0.10` of a known window; `170000` tokens / `6` messages when it is not — upstream's numbers |
 | `limits` | `modelCalls` (`exit: end \| error`), `toolCalls` (plus `perTool`, `exit: continue \| end \| error`), `children`, `breaker.consecutiveFailures` — each budget takes `turnLimit` and `sessionLimit` | all ceilings unset; breaker `5` |
-| `hitl` | `mode` (`manual` \| `auto` \| `yolo`), `declared`, `interruptOn` | `auto`, nothing configured |
+| `hitl` | `mode` (`manual` \| `auto` \| `yolo`), `declared`, `interruptOn` | `auto`; `declared` is `{preset: destructive}`, so `bash` and a code cell ask when the classifier finds a destructive command and run unasked otherwise; `interruptOn` empty |
 | `permissions-fs` | `rules` — each `operations`, `paths`, `scope` (`anywhere` \| `outside-workspace`), `mode` (default `deny`), `description` | one rule: `write` anywhere `outside-workspace` → `interrupt` |
 | `skill-steps` | `maxNudges`, `decision` (`provider`, `model`, `holdAt`, `timeoutMs`) | `3`; no decision model, so every unfinished procedure is nudged. With one, a turn ending to wait for a person is let end, and a route that times out rests a minute — [docs/skills](../../docs/skills/README.md#asking-a-decision-model-first) |
 | `tool-todo`, `command-compact` | — | no configuration |
@@ -183,11 +188,15 @@ escape hatch, but it is matched against the decoded strings.
   at mount and carries the sentence on `ctx.fs_permissions.reach`, so the
   statement toggles with the sandbox rather than being a paragraph in a README
   that is wrong half the time.
-- **Offloading never deletes.** Both directions are a surface `replace`: the log
-  keeps every event, `derive_messages()` yields the preview, and `transcript()`
-  still shows the person what they sent. Rewriting a message *before* logging it
-  was the alternative and is refused — the log would then attribute
-  harness-authored text to the human.
+- **Offloading never deletes, and each direction keeps the original its own
+  way.** A paste is a surface `replace`: the log keeps the `user/message` as it
+  was sent, `derive_messages()` yields the preview, and `transcript()` still
+  shows the person what they sent. Rewriting a message *before* logging it was
+  the alternative and is refused — the log would then attribute
+  harness-authored text to the human. A tool result is harness-authored already,
+  so it is swapped before it is logged: `tool/result` carries the preview the
+  model saw, the full text is in the spill store, and `offload/spilled` records
+  where it went.
 - **Offloading fails open.** If the spill write fails, the original result is
   kept: an offload that cannot store the content must not be the reason the
   model loses it.

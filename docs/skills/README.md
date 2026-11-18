@@ -204,8 +204,11 @@ rather than a plan rewritten underneath somebody. `requires` chains **within one
 skill only** — two procedures read in one session are two orderings, not one
 queue.
 
-Seeding is **idempotent by content**. Re-reading a skill adds nothing; editing a
-skill to add a step mid-session adds only the new one. If the model has already
+Seeding is **idempotent by content**. Re-reading a skill adds nothing. A step
+added to a skill's `steps:` mid-session is not seen: the frontmatter is parsed
+once, when the row that offers the skill mounts, and only the body is read from
+disk again on each `skill` call. The first read after the session next starts
+seeds the new step, and only that one. If the model has already
 written a todo whose text is identical to one of the steps, the skill seeds
 *nothing* and logs why — `requires` names entries by their content, so two
 entries with one name is a plan the next `write_todos` cannot reproduce.

@@ -1,0 +1,1105 @@
+intro: |
+  One cell run, frame by frame. The two right-hand lifelines are one process:
+  the guest, `python -m ph_runtime`, started by `ph_rlm.kernel` for one agent
+  and reached over a socket pair the child inherits as fd 3. A frame is one
+  line of JSON. Click an arrow for the frame it carries, its fields and a real
+  line captured from a running guest.
+
+  The guest registers no row and appears in no profile. Everything a person
+  can set is on the host's `code-runtime-python` row, which sends the limits in
+  `boot`: see [Configuring it](topic:configuring). Fifteen frames exist and
+  the diagram draws eight; the other seven are under
+  [Frames not drawn](topic:frames-not-drawn).
+
+topics:
+  - id: frames-not-drawn
+    title: Frames not drawn
+    summary: |
+      The protocol is version 4 and has fifteen frames: seven the host sends
+      and eight the guest sends. The diagram follows one ordinary run, so it
+      leaves out `restore`, `cancel`, `shutdown`, `ping`, `pong`, `fault` and
+      `display`. The table is read from `ph_runtime.protocol.FRAME_FIELDS`; the
+      lines under it were captured from a real guest.
+    blocks:
+      - title: Every frame
+        frames: all
+      - title: restore (host to guest)
+        frame: restore
+        note: |
+          One frame for each variable, because `maxSnapshotBytes` bounds one
+          value and the guest's reader is sized for one. `more` marks every
+          frame but the last. The guest unpickles each batch as it lands and
+          answers once, on the frame without `more`, with a `done` whose `value`
+          lists the names that came back and the names that did not.
+        example: |
+          -> {"type":"restore","id":9,"variables":[{"var":"answer","blob":"gAVLKS4="}],"more":true}
+          -> {"type":"restore","id":9,"variables":[{"var":"broken","blob":"AAAA"}],"more":false}
+          <- {"type": "done", "id": 9, "value": {"restored": ["answer"], "failed": ["broken"]}}
+      - struct: ph_rlm.kernel.protocol:RestoreFrame
+      - title: cancel (host to guest)
+        frame: cancel
+        note: |
+          The reader task cancels the cell's task and waits for it. The run
+          then settles with an `aborted` error. `id` is sent and the guest does
+          not read it: there is only one run to cancel.
+        example: |
+          -> {"type":"cancel","id":3}
+          <- {"type": "done", "id": 3, "error": {"kind": "aborted", "message": "the run was canceled"}}
+      - title: shutdown (host to guest)
+        frame: shutdown
+        note: |
+          The guest cancels any running cell, settles it, closes the channel and
+          exits with status 0. The host waits `shutdownGraceSeconds` (5) and
+          then kills the process group.
+        example: |
+          -> {"type":"shutdown"}
+      - title: ping (host to guest) and pong (guest to host)
+        frame: ping
+        note: |
+          Sent every `probeSeconds` (1) while a run is open, one outstanding at
+          a time. The reader task answers, so the round trip measures how far
+          behind the guest's event loop is. `phern doctor` prints the worst
+          one and a count of stalls under *Code runtime*; nothing is killed on
+          a late answer. `run` is the run the host is waiting for. A guest that
+          is neither running it nor owes it a `done` sends that `done` at once,
+          which is how a lost terminal frame is repaired.
+        example: |
+          -> {"type":"ping","id":1,"run":3}
+          <- {"type": "pong", "id": 1}
+
+          a ping about a run the guest does not know:
+          -> {"type":"ping","id":2,"run":99}
+          <- {"type": "pong", "id": 2}
+          <- {"type": "done", "id": 99, "error": {"kind": "aborted", "message": "the run ended without settling"}}
+      - struct: ph_rlm.kernel.protocol:PingFrame
+      - frame: pong
+      - title: fault (guest to host)
+        frame: fault
+        note: |
+          Sent once, in place of `boot-ack`, when `boot.protocol` is not the
+          guest's own version. The guest then exits with status 2. The host
+          raises `KernelDied` with the message, and the cell fails with it.
+        example: |
+          -> {"type":"boot","protocol":3,"cpuSeconds":30, ...}
+          <- {"type": "fault", "message": "protocol 3 is not 4; the runtime venv is stale — delete $PH_CACHE/runtime-venv"}
+      - title: display (guest to host)
+        frame: display
+        note: |
+          Defined and never sent. The host decodes it, collects it on
+          `CodeRunResult.displays` and the code cell's card counts it, but the
+          cell namespace has no `display()` to produce one.
+          `ph_runtime.protocol.UNPRODUCED_FRAMES` names it, and the conformance
+          suite fails if that set is emptied without a producer.
+      - title: What a host does with a frame it cannot read
+        tone: secure
+        list:
+          - "Before `boot-ack` only `boot-ack` and `fault` are accepted. Any other line, readable or not, fails the start with the line quoted."
+          - "After it, `ph_rlm.kernel.codec.decode` rebuilds each frame from its declared fields. An unknown frame type, a missing required field or a field of the wrong shape makes the whole frame `None`, and it is dropped."
+          - "A field the frame does not declare is not copied, so a forged key never reaches a handler."
+          - "An integer field (`id`, `run`, `protocol`, `dropped`) larger than 2^53 - 1 is refused. An integer inside `done.value` or `boot-ack.limits` is not inspected."
+          - "A `done` or `snapshot` whose `id` is not the open run settles and records nothing."
+          - "More than `frame_cap` bytes with no newline closes the channel and the guest is torn down. `frame_cap` is the larger of 64 MiB and twice `maxSnapshotBytes` plus 1 MiB."
+
+  - id: configuring
+    title: Configuring it
+    summary: |
+      Nothing is configured in the guest. The host's `code-runtime-python` row
+      holds every number, and `boot` carries each one as a required field, so
+      the guest has no defaults of its own. A profile changes the row; the next
+      kernel that starts gets the new values.
+    blocks:
+      - row: code-runtime-python
+      - title: In a profile
+        lang: yaml
+        note: |
+          A patch replaces the row's whole config, so restate what you keep.
+          `python: managed` builds `$PH_CACHE/runtime-venv` with `uv`; `host`
+          runs the guest on pH's own interpreter, which puts `ph-core` on the
+          cell's `sys.path`.
+        code: |
+          # $PH_HOME/profiles/long-cells.yaml
+          extends: rlm
+          rows:
+            - id: code-runtime-python
+              config:
+                python: managed
+                cpuSeconds: 120            # per cell, re-armed at each run
+                idleCpuSeconds: 2          # between cells; a breach ends the guest
+                addressSpaceBytes: 4294967296
+                maxLogBytes: 131072        # per stream, per run
+                maxValueBytes: 65536       # the cell's value, sent to the model
+                maxSnapshotBytes: 33554432 # one variable, sent to the log
+                cancelGraceSeconds: 5
+                probeSeconds: 1
+      - title: Which option becomes which boot field
+        table:
+          columns: [row option, boot field, default, enforced by]
+          rows:
+            - ["`cpuSeconds`", "`cpuSeconds`", "30", "`RLIMIT_CPU`, re-armed from the CPU already used when each run starts; `SIGXCPU` raises `CpuBudgetExceeded` in the cell or cancels its task"]
+            - ["`idleCpuSeconds`", "`idleCpuSeconds`", "2", "`RLIMIT_CPU`, armed after each `done`; a breach with no run open ends the process with status 3"]
+            - ["`addressSpaceBytes`", "`addressSpaceBytes`", "2 GiB", "`RLIMIT_AS`, once, before `boot-ack`; `boot-ack.limits` reports what took effect"]
+            - ["`maxLogBytes`", "`maxLogBytes`", "65 536", "the cell's `sys.stdout` and `sys.stderr`, each; the host applies the same cap to the process's own fd 1 and fd 2"]
+            - ["`maxValueBytes`", "`maxValueBytes`", "65 536", "the JSON size of the cell's value; over it the value is sent as a bounded `repr`"]
+            - ["`maxSnapshotBytes`", "`maxSnapshotBytes`", "16 MiB", "the pickled size of one variable; over it the variable is reported `too-large`"]
+            - ["`skills`", "`skills`", "empty", "import names bound as callables before any cell runs"]
+            - ["(the agent's bindings)", "`namespaces`", "", "one proxy for each namespace declared; nothing in the guest lists them"]
+            - ["(the agent id)", "`namespaceId`", "", "optional; stored and not used by the guest"]
+      - title: Options that stay on the host
+        table:
+          columns: [option, default, meaning]
+          rows:
+            - ["`python`", "`managed`", "which interpreter runs the guest: the managed venv or pH's own"]
+            - ["`interpreter`", "none", "a path to use instead; `$PH_RUNTIME_PYTHON` does the same"]
+            - ["`bootTimeoutSeconds`", "30", "how long the host waits for `boot-ack`, and for the answer to a restore"]
+            - ["`shutdownGraceSeconds`", "5", "how long after `shutdown` before the process group is killed"]
+            - ["`cancelGraceSeconds`", "2", "how long a canceled cell has before the guest is killed"]
+            - ["`probeSeconds`", "1", "the `ping` interval; `null` sends none"]
+            - ["`sweepOrphans`", "true", "read and ignored; the `subprocess-local` row sweeps"]
+      - title: Two things passed in the environment, not in boot
+        list:
+          - "`PH_RUNTIME_FD`: the number of the inherited descriptor. `pass_fds` keeps the parent's number, so the host names it. 3 when unset."
+          - "`PH_RUNTIME_FRAME_BYTES`: the largest line the guest's reader will assemble, the host's `frame_cap`. It is needed before any frame is read. 64 MiB when unset."
+      - title: Checking what is in force
+        lang: bash
+        code: |
+          phern --profile long-cells --dump-config   # the row as composed
+          phern config --row code-runtime-python     # the option table
+          phern doctor --profile long-cells          # Code runtime: interpreter, limits as applied, guest loops, confinement
+      - links:
+          - {to: "ph-rlm#node:kernel", label: "The kernel on the ph-rlm page"}
+
+  - id: output-caps
+    title: Output caps and the dropped total
+    summary: |
+      A cell's `print` does not go to fd 1. The runner swaps `sys.stdout` and
+      `sys.stderr` for capped streams that leave as `log` frames. Each stream
+      keeps `maxLogBytes` for a run, and everything past it is counted and not
+      sent. The count reaches the host on `done`.
+    blocks:
+      - title: What happens to a write
+        text: |
+          1. Under the cap: the text is buffered. A buffer goes out as one `log` frame when it holds 8 KiB or when 50 ms have passed since the last one, checked at each write. `print(flush=True)` sends it at once.
+          2. The write that crosses the cap is cut in bytes, between characters. The kept part is followed by the marker, and that frame carries `truncated: true`. The marker has no number, because the stream is still running.
+          3. Past the cap a write is only counted in `dropped`.
+          4. At settle both streams are flushed, then `done` goes out with `truncated: true` and `dropped`, the bytes both streams threw away.
+      - title: The marker, both forms
+        lang: text
+        note: |
+          From `truncation_marker(None, 65536)` and `truncation_marker(154, 65536)`.
+          The guest writes the first where a stream was cut. The host appends
+          the second to the run's logs once, with the run's whole total.
+        code: |
+          [ph: output truncated — the rest is not kept, cap 65536 bytes]
+          [ph: output truncated — 154 bytes dropped, cap 65536 bytes]
+      - title: A run with a 64-byte cap
+        lang: json
+        note: |
+          Captured with `maxLogBytes: 64`. The cell printed 17 bytes, then 200
+          bytes and a newline: 47 were kept, 153 and 1 dropped.
+        code: |
+          <- {"type": "log", "stream": "stdout", "text": "reading notes.md\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n[ph: output truncated — the rest is not kept, cap 64 bytes]\n", "truncated": true}
+          <- {"type": "done", "id": 1, "value": 3, "truncated": true, "dropped": 154}
+      - title: The cell's value
+        text: |
+          The last expression of a cell is its value. It is sent as JSON when its encoding fits `maxValueBytes`. Otherwise `done.value` is a `repr` cut to the cap (at most 64 items of a container, 6 levels deep) and `truncated` is set. A value that is too large drops no output, so `dropped` stays absent.
+      - title: The process's own fd 1 and fd 2
+        text: |
+          What a subprocess the cell started writes arrives on the guest's real stdout and stderr, which are pipes to the host. The host reads them for the length of a run, appends them to the same ordered log, and applies the same cap with the same marker. Bytes it skips are added to the same total.
+      - title: Limits
+        tone: limit
+        list:
+          - "The cap is per stream and per run, not per cell line. One early megabyte of output hides everything printed after it."
+          - "A run that is killed sends no `done`, so the guest's share of the dropped total is lost. The host's own count from the pipes is still reported."
+          - "`log` frames are not paired to a run by id. The host appends whatever arrives while a run is open."
+      - links:
+          - {to: "edge:log", label: "The log frame"}
+          - {to: "edge:done", label: "The done frame"}
+
+  - id: cell-rules
+    title: What a cell may and may not do
+    summary: |
+      A cell is plain Python compiled into one `async def`. It may `await` and
+      `return` at the top level, and the names it binds persist into the next
+      cell. It has no IPython escapes, cannot catch a refusal, and does not keep
+      the tasks it starts.
+    blocks:
+      - title: How a cell is compiled
+        text: |
+          `ph_runtime.cell.compile_cell` parses the program, turns a trailing expression into `return <expr>`, and wraps the body in `async def __ph_cell__()`. Every name the top level binds is declared `global` first, so an assignment inside the wrapper still lands in the namespace. The bound names come from the AST: assignments, `import`, `def`, `class`, `for`, `with ... as`, `except ... as`, `match` captures, the walrus operator and `del`. The file name is `<cell>`, which is also what a traceback is trimmed to.
+      - title: Refused
+        tone: secure
+        list:
+          - "**IPython magics.** A program that starts with `%%`, `%` or `!` (`MAGIC_PREFIXES`) does not parse, and the `SyntaxError` carries `MAGIC_HINT`. A `%%bash` cell would have been a shell no gate saw; `await tools.bash(command=...)` is the governed route."
+          - "**Catching a refusal.** A reply with `fatal: true` raises `RunStopped`, a `BaseException` whose name is not in the namespace. A cell can still write `except BaseException`; what ends the run then is the host's cancel ladder, not the exception."
+          - "**Catching the CPU budget.** `CpuBudgetExceeded` is a `BaseException` too."
+          - "**Keeping a task.** Every task the cell started and every call it left pending is canceled when the run settles. A task that survives and calls a binding is stamped with its old run and refused by the host."
+          - "**A second program.** A `run` while one is open is answered with `done` and error kind `busy`."
+      - title: The refusal a magic gets
+        lang: json
+        code: |
+          -> {"type":"run","id":4,"program":"%%bash\nls"}
+          <- {"type": "done", "id": 4, "error": {"kind": "SyntaxError", "message": "invalid syntax. IPython magics are not available: pH runs plain Python, so there is no `%%bash` to bypass the tool pipeline. Use `await tools.bash(command=...)` for a shell, and ordinary Python for the rest."}}
+      - title: Allowed, and worth knowing
+        list:
+          - "`ToolFailed` is in the namespace and is the cell's to catch: a timeout, a bad argument, a missing file."
+          - "A binding takes positional arguments in the order `boot` declared its parameters, and keywords by name."
+          - "An unknown binding raises `AttributeError` naming the ones that exist."
+          - "A `Path`, a `datetime`, a `set`, a `Decimal` and a pydantic model are given a JSON form on the way out (`ph_runtime.channel.jsonable`). Anything else is sent as its `repr`."
+          - "Raw `open()`, `subprocess` and `import` work. No frame is involved, so no tool gate sees them. The sandbox bounds them."
+      - title: The error kinds a done can carry
+        table:
+          columns: [kind, when]
+          rows:
+            - ["`SyntaxError`", "the program did not parse; the message is the sentence, not a traceback"]
+            - ["an exception's class name", "the cell raised; the message is the traceback from the `<cell>` frame down"]
+            - ["`stopped`", "a `fatal` reply: a denial or a budget"]
+            - ["`cpu`", "the cell used `cpuSeconds`; the message is `this cell used its CPU budget`"]
+            - ["`aborted`", "canceled by a `cancel` frame or `SIGINT`, or the run ended without settling"]
+            - ["`busy`", "a `run` arrived while another was open"]
+      - links:
+          - {to: "topic:cancellation", label: "How a cell is stopped"}
+          - {to: "edge:reply", label: "The reply frame and `fatal`"}
+
+  - id: cancellation
+    title: How a cell is stopped
+    summary: |
+      Three mechanisms cover three situations. A cell that is awaiting is
+      canceled through the event loop. A cell spinning in Python is reached only
+      by the CPU budget. A cell that answers neither is killed, and the
+      namespace goes with it.
+    blocks:
+      - table:
+          columns: [the cell is, what stops it, the run settles as]
+          rows:
+            - ["awaiting a reply or a sleep", "a `cancel` frame read by the reader task, or `SIGINT` delivered as a loop callback; either cancels the cell's task", "`done` with error `aborted`"]
+            - ["executing Python and never yielding", "`SIGXCPU` from `RLIMIT_CPU`, raised in the cell's own frame as `CpuBudgetExceeded`", "`done` with error `cpu`"]
+            - ["not stopped `cancelGraceSeconds` after it was asked", "the host kills the process group and starts a new guest for the next cell", "`the program did not stop when canceled and the runtime was killed; the namespace is gone`"]
+      - title: The host's ladder
+        text: |
+          1. The clock starts first (`_ActiveRun.begin_abort`), in a call that cannot block.
+          2. The host sends `cancel`, then `SIGINT` to the process. Under a wrapper that does not forward signals (`bwrap`) the signal is skipped, because it would kill the wrapper and the namespace with it.
+          3. At `cancelGraceSeconds` the host kills the group, settles the run with the sentence above, and marks the kernel for a reset notice.
+
+          The same ladder runs when a binding call is refused: the host replies `fatal`, and then cancels whether or not the cell unwinds by itself.
+      - title: What the model reads after a kill
+        lang: text
+        note: Prefixed to the logs of the first cell that runs in the new guest (`RESET_NOTICE`).
+        code: |
+          <runtime_reset> the runtime restarted; the namespace is empty.
+      - title: Limits
+        tone: limit
+        list:
+          - "Nothing preempts straight-line Python except the CPU budget. Statements after a caught refusal run until the cell next yields, so a refusal bounds the damage to about one cell, not exactly one."
+          - "After a crash or a kill the namespace is not restored from the log. The next cell starts empty and says so."
+          - "With `probeSeconds: null` a run whose `done` was lost waits until somebody cancels it."
+      - links:
+          - {to: "topic:frames-not-drawn", label: "The cancel, ping and shutdown frames"}
+
+  - id: boundary
+    title: The process boundary as a security property
+    summary: |
+      Model-written code runs in a separate process that holds none of the
+      harness. The only way from a cell to a capability is a `call` frame, and
+      the host runs that call through the same tool pipeline as any other. The
+      host treats every byte the guest writes as hostile.
+    blocks:
+      - title: What the boundary gives
+        tone: secure
+        list:
+          - "**No harness inside.** `ph_runtime` imports neither `ph-core` nor `ph-rlm`. Its one dependency is `dill`, imported only when a value needs it. In the managed venv a cell cannot import the harness either."
+          - "**One door.** A binding proxy has no dispatch of its own. It sends `call` and waits; the host looks the binding up in the namespaces it declared for this run and answers `is not available` for anything else."
+          - "**No provider keys.** The host starts the guest with `scrub_env`, so the child does not inherit environment variables whose names look like credentials."
+          - "**No terminal.** The guest starts in its own session with stdin closed, so a cell cannot open the person's terminal."
+          - "**Confined when a sandbox is mounted.** The host wraps the guest's command line with `ctx.sandbox.confine` using the agent's workspace policy, the same policy `tool-bash` gets. fd 3 crosses the wrapper."
+          - "**Bounded resources.** CPU per cell, CPU between cells, address space, output, value size and snapshot size, all sent in `boot`."
+          - "**Hostile-peer decoding.** The host rebuilds each inbound frame from a declared spec and never raises on a forged one."
+      - title: The copies, and the test that holds them
+        text: |
+          Two sides that may not import each other need some things twice. `packages/ph-rlm/tests/test_protocol_mirror.py` fails when any of them drifts:
+
+          - every frame's required and optional field set: `ph_runtime.protocol.FRAME_FIELDS` against the host's models and TypedDicts
+          - `truncation_marker`, byte for byte, against `ph.text`'s
+          - `ph_runtime/_json.py` (`as_str`) against `ph.json`'s definition
+          - `ph_runtime/_characters.py`, the rule for cutting text between characters, against `ph.characters`
+
+          `PROTOCOL_VERSION`, `PROTOCOL_FD` and the three environment variable names are not copies. The guest declares them and the host imports them, and the same test checks that.
+      - title: How the guest dies with its host
+        table:
+          columns: [platform, mechanism, reported in boot-ack as]
+          rows:
+            - ["Linux", "`prctl(PR_SET_PDEATHSIG, SIGKILL)`, set by the guest before `boot-ack`", "`pdeathsig`"]
+            - ["macOS", "a daemon thread blocked on a kqueue `NOTE_EXIT` event for the parent, then `os._exit`", "`kqueue-exit`"]
+            - ["under `bwrap`", "the wrapper's `--die-with-parent`; the guest's parent is the sandbox's init", "`pdeathsig`"]
+            - ["every platform", "the socket's EOF ends `Runner.serve` when the cell is not blocking the loop", ""]
+            - ["every platform", "the host journals the child's pid (`ph.orphans`); the `subprocess-local` row sweeps the journal at the next start", ""]
+      - title: Limits
+        tone: limit
+        list:
+          - "The boundary bounds what code can reach in the harness. It does not bound the file system or the network: a raw `open()` in a cell fires no `ctx.fs` intent. With no sandbox backend, or an agent with no workspace, `phern doctor` reports that cells are confined by nothing."
+          - "`python: host` runs the guest on pH's own interpreter, so `ph-core`, pydantic and Textual are importable from a cell. The process boundary still holds; the import surface is wider."
+          - "A cell holds fd 3 and can write to it directly. The host's decoder is what stands behind that, not the guest."
+          - "On Windows the guest reports `job-object` and sets nothing. No code in ph-rlm or ph-core creates a Job Object, so only the socket's EOF and the orphan journal apply there."
+          - "The scrubbed environment removes names, not values a cell can read from a file the sandbox lets it open."
+      - links:
+          - {to: "security.html", label: "Containment, the sandbox and what a child inherits"}
+          - {to: "ph-rlm#node:kernel", label: "The host half"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      The guest keeps nothing on disk. Its namespace is memory in a process
+      that dies with the daemon. What comes back is what the host recorded: one
+      `kernel/snapshot` record for each variable that changed, written before
+      the cell's result.
+    blocks:
+      - title: Kept
+        tone: durable
+        list:
+          - "**Variables.** After each run the guest sends a `snapshot` frame for every changed variable, before `done`. The host's `rlm-kernel-snapshot` row writes the blob, then the record. A payload up to `inlineBlobMax` (64 KiB) lives in the record; a larger one goes to the spill store and the record names it."
+          - "**A restore.** The first cell after a daemon restart starts a new guest. Before `run`, the host folds the session's `kernel/snapshot` records and sends each variable back in a `restore` frame. `kernel/restored` records which names came back."
+          - "**Binding calls.** Each `call` the host serves leaves `tool/code-dispatch-start` and `tool/code-dispatch` in the log. They are the host's records; the guest knows nothing of them."
+      - title: Not kept
+        tone: limit
+        list:
+          - "Anything that cannot be pickled, by the C pickler or by `dill`: open files, sockets, running threads, generators. It is recorded once as cleared with reason `unpicklable`."
+          - "A variable whose pickle is over `maxSnapshotBytes`: recorded as cleared with reason `too-large`."
+          - "Imported modules and names that start with `_`. A restored cell imports again."
+          - "The binding proxies and skills. They are rebuilt from `boot`, never pickled."
+          - "A cell that was running. It is not resumed; the turn is repaired as interrupted."
+          - "The namespace after the guest crashed or was killed inside a live daemon. That path restores nothing and tells the model the namespace is empty."
+          - "The managed venv is a cache. `.ph-runtime.json` records the protocol version, the guest package version, the Python version and a digest of the skill list; any difference rebuilds it."
+      - links:
+          - {to: "durability#node:kernel", label: "The kernel on the durability page"}
+          - {to: "durability#edge:kernel-blobs", label: "Blobs first, then records"}
+          - {to: "edge:snapshot", label: "The snapshot frame"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      What the guest does not do, in the code's own terms.
+    blocks:
+      - title: Protocol
+        tone: limit
+        list:
+          - "`display` is defined on both sides and nothing sends it."
+          - "`boot.namespaceId` is sent and stored; the guest never reads it again."
+          - "`cancel.id` is sent and not read. There is one run, so there is nothing to choose."
+          - "`log` carries no run id."
+          - "The version gate refuses a mismatch; it does not negotiate. A guest one version behind sends `fault` and exits."
+          - "A line the guest cannot parse is skipped without a word. The host is trusted for content."
+      - title: Execution
+        tone: limit
+        list:
+          - "One namespace, one program at a time. Two `run_code` calls on one agent queue on the host's lock."
+          - "The CPU budget is the only clock. A cell that sleeps for an hour is stopped by nobody until a person cancels."
+          - "The CPU budget is process-wide. A thread the cell started spends the cell's budget."
+          - "`RLIMIT_AS` is refused by macOS. `boot-ack.limits.addressSpaceBytes` is then `null`, and `phern doctor` says the address-space limit was not applied."
+          - "A snapshot failure does not fail the cell. It is written to the cell's stderr, and the variables not yet sent are not recorded."
+      - title: Snapshots
+        tone: limit
+        list:
+          - "Change is detected by digest of the pickle, after serializing. Only `bytes`, `str`, `int`, `float`, `complex`, `bool` and `None` are skipped by identity; every other variable is pickled after every cell."
+          - "Without `dill` in the venv, a cell-defined function, class or lambda is reported `unpicklable`."
+          - "A refusal is reported once. A variable that stays too large is not mentioned again."
+      - title: Where a doc and the code differ
+        tone: limit
+        list:
+          - "The package README says macOS watches `os.getppid()`. The code waits on a kqueue exit event."
+          - "The README's sample row comments `maxValueBytes` as *per snapshotted variable*. It caps the cell's value; `maxSnapshotBytes` caps a variable."
+          - "The README says the mirror test compares `PROTOCOL_VERSION`. The host now imports it from the guest, and the test checks that it is the same object."
+      - links:
+          - {to: "topic:boundary", label: "The process boundary"}
+          - {to: "topic:durability", label: "What survives a restart"}
+
+nodes:
+  codemode:
+    title: ph-core Code Mode
+    summary: |
+      The `tools-code-mode` row of ph-core. It registers `run_code`, the one
+      tool a Code Mode model calls, and for each call builds a `DispatchBridge`
+      that turns the cell's binding calls back into governed tool calls. It
+      talks to a code runtime through `ctx.code_runtime`; it never sees a frame.
+    blocks:
+      - row: tools-code-mode
+      - title: In a profile
+        lang: yaml
+        note: These bound one program, not the turn. A breach ends the run with a `fatal` reply.
+        code: |
+          - id: tools-code-mode
+            config:
+              maxDispatchesPerRun: 200      # 256 by default
+              maxSubagentSpawnsPerRun: 8    # 32 by default
+              maxParallelSubCalls: 10       # the default
+      - title: What it hands the runtime
+        struct: ph.seams.code_runtime:CodeRunRequest
+      - title: One binding
+        struct: ph.seams.code_runtime:CodeBinding
+      - title: What the model's tool call returns
+        struct: ph.tools.code_mode:CodeCellValue
+      - title: The event it dispatches
+        table:
+          columns: [event, dispatch, when]
+          rows:
+            - ["`tools/code-dispatch-log`", waterfall, "a binding call has settled; a listener may replace an oversized result before it is logged"]
+            - ["`tools/pre-execute`, `tools/post-execute`", waterfall, "for every binding call, through `ctx.tools.execute`, as for a native call"]
+      - title: What it writes to the log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`tool/code-dispatch-start`", "before a binding's body runs, with the arguments"]
+            - ["`tool/code-dispatch`", "when it settles, with the content the cell was given"]
+      - title: Durability
+        tone: durable
+        list:
+          - "A dispatch is an intent pair. A start with no settle is closed by repair on resume as interrupted."
+          - "The sub-call id is `<parent call id>:code:<n>`, counted from 0 in submission order, so a reader pairs the two records without a timestamp."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Every binding call crosses the same gates as a native tool call: `hitl`, `limits`, `permissions-fs` through `ctx.fs`."
+          - "A denial, a spent budget or a result that ends the turn becomes `CodeRunFailure`. The program is not offered it to catch."
+          - "The `tools` namespace is built from the tools visible in the calling agent's scope, so a child granted fewer tools gets fewer bindings."
+      - links:
+          - {to: "edge:runtime-run", label: "runtime.run"}
+          - {to: "edge:dispatch", label: "binding.dispatch"}
+          - {to: "ph-core#node:tools", label: "The tool pipeline in ph-core"}
+
+  kernel:
+    title: Kernel (ph_rlm.kernel.manager)
+    summary: |
+      The host half. `PythonCodeRuntime` is what the `code-runtime-python` row
+      registers on `ctx.code_runtime`; it keeps one `Kernel` for each agent
+      namespace. A `Kernel` owns one child process: it spawns it, sends `boot`,
+      runs one program at a time, serves the child's `call` frames, and kills it
+      when it will not stop.
+    blocks:
+      - row: code-runtime-python
+      - title: The limits it sends
+        struct: ph_rlm.kernel.manager:KernelLimits
+      - title: How it starts a guest
+        text: |
+          1. Make a socket pair. The child's end is passed with `pass_fds` and named in `PH_RUNTIME_FD`.
+          2. Build the environment with `scrub_env`, adding the workspace's variables, `NO_COLOR`, `PYTHONUNBUFFERED` and `PH_RUNTIME_FRAME_BYTES`.
+          3. If a sandbox backend is available and the agent has a workspace, wrap the command line with `ctx.sandbox.confine`.
+          4. Start `<python> -m ph_runtime` in its own session, with stdin closed, stdout and stderr as pipes, and the workspace root as its directory.
+          5. Record the pid in the orphan journal.
+          6. Send `boot` and wait up to `bootTimeoutSeconds` for `boot-ack`, reading the pipes meanwhile so the child cannot block on them.
+          7. If the session's log holds `kernel/snapshot` records and this is not a restart after a crash, send them back with `restore`.
+
+          A kernel is started by the first cell an agent runs, not at mount. It is closed when the agent's scope is disposed.
+      - title: What one run collects
+        table:
+          columns: [frame, what the host does]
+          rows:
+            - ["`call`", "starts a task that runs `binding.dispatch(**args)` and answers with `reply`"]
+            - ["`log`", "appends `text` to the run's logs; notes `truncated`"]
+            - ["`snapshot`", "awaits `SnapshotPolicy.record` before reading on, so the record precedes the result"]
+            - ["`pong`", "books the round trip if the id is the outstanding probe"]
+            - ["`display`", "appends it to the run's displays"]
+            - ["`done`", "settles the run, first writer wins; adds `dropped`"]
+            - ["end of stream", "settles the run as `the runtime exited before the program finished` and tears the child down"]
+      - title: What it gives back
+        struct: ph.seams.code_runtime:CodeRunResult
+      - title: What it needs to keep a namespace
+        struct: ph_rlm.kernel.manager:SnapshotPolicy
+      - title: Durability
+        tone: durable
+        list:
+          - "The kernel itself holds no durable state. The pid is in the orphan journal until the child is reaped, so a daemon that was killed leaves a record the next start can sweep."
+          - "Snapshots are written by the `rlm-kernel-snapshot` row through `SnapshotPolicy`; without that row a restart brings back an empty namespace."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "A parent and its children share one runtime and never one kernel: the namespace is the agent id, and each kernel's directory, environment and confinement are that agent's workspace."
+          - "A call from a run that has already settled is answered `the program that made this call has finished` and not served."
+          - "A refused sandbox write in a failed cell is reported through `ctx.sandbox.report_denial`, so it leaves the same `sandbox/denied` record a refused `bash` does."
+      - title: Limits
+        tone: limit
+        list:
+          - "Runs on one kernel are serialized by a lock."
+          - "A guest that dies costs the namespace. The next cell gets a new guest and a reset notice."
+          - "`phern doctor` reports the weakest live kernel: one agent without a workspace makes the confinement line read `nothing`."
+      - links:
+          - {to: "topic:configuring", label: "Configuring it"}
+          - {to: "ph-rlm#node:kernel", label: "The kernel on the ph-rlm page"}
+          - {to: "durability#node:kernel", label: "The kernel on the durability page"}
+
+  reader:
+    title: Runner.serve (the guest's reader task)
+    summary: |
+      The guest's main coroutine. After `boot` it loops on the channel and
+      handles one frame at a time: it starts a cell for `run`, resolves a
+      pending call for `reply`, cancels for `cancel`, unpickles for `restore`
+      and answers `ping`. It never runs model code itself, which is why a cell
+      waiting on a reply can always be answered.
+    blocks:
+      - title: Start-up, before the loop
+        text: |
+          `python -m ph_runtime` runs `ph_runtime.runner._serve`:
+
+          1. Open the channel on the descriptor named by `PH_RUNTIME_FD`, as a non-blocking socket.
+          2. Read one frame. If it is not `boot`, exit with status 1.
+          3. If `boot.protocol` is not `PROTOCOL_VERSION`, send `fault` and exit with status 2.
+          4. Arrange to die with the parent, apply the address-space limit, build the namespaces and import the skills.
+          5. Install the `SIGINT` and `SIGXCPU` handlers.
+          6. Send `boot-ack`, then serve until `shutdown` or end of stream.
+      - title: What it does with each frame
+        table:
+          columns: [frame, handler, effect]
+          rows:
+            - ["`run`", "`_begin`", "starts `_execute` as a task, or answers `busy`"]
+            - ["`reply`", "`_resolve`", "sets the result or the exception of the future the call is awaiting"]
+            - ["`cancel`", "`_abort_run`", "cancels the cell's task, waits for it, makes sure a `done` went out"]
+            - ["`restore`", "`_restore`", "unpickles into the namespace; answers on the last batch"]
+            - ["`ping`", "`_pong`", "sends `pong`; settles the named run if nobody will"]
+            - ["`shutdown`", "`_abort_run`, then return", "the process exits with status 0"]
+            - ["anything else", "", "ignored"]
+      - title: The channel
+        text: |
+          `ph_runtime.channel.Channel` is newline-delimited JSON over the inherited socket. `json.dumps` never writes a literal newline, so a line is a frame and nothing is length-prefixed. `send` is synchronous and buffered, so `print` inside a cell can call it; it swallows a broken pipe, because a dead host is the die-with-parent mechanism's business. `receive` returns `None` at end of stream and skips a line that does not parse.
+      - title: What the guest holds in memory
+        table:
+          columns: [state, what it is]
+          rows:
+            - ["`globals`", "the one namespace every cell runs in"]
+            - ["`_pending`", "call id to the future a cell is awaiting"]
+            - ["`_run`", "the cell's task, or none"]
+            - ["`_owed`", "the run whose `done` has not been sent"]
+            - ["`_protected`", "the names the bootstrap put in `globals`; never snapshotted"]
+            - ["`_snapshotter`", "the digest of each variable as last sent"]
+      - title: Durability
+        tone: durable
+        list:
+          - "Nothing here is durable. Every run is written to send exactly one `done`, with two fallbacks, because the host has no wall clock on a run and waits for that frame."
+      - title: Limits
+        tone: limit
+        list:
+          - "The reader shares one event loop with the cell. A cell spinning in Python starves it: no `cancel`, `reply` or `ping` is read until the cell yields."
+          - "An unknown frame type is ignored without an answer."
+      - links:
+          - {to: "node:cell", label: "The cell task"}
+          - {to: "topic:frames-not-drawn", label: "restore, cancel, ping, shutdown"}
+
+  cell:
+    title: Cell task (Runner._execute)
+    summary: |
+      One task for one program. It arms the CPU budget, swaps in the capped
+      output streams, compiles the program and awaits it in the persistent
+      namespace. On the way out it cancels what the cell left behind, sends a
+      `snapshot` frame for each changed variable, and sends `done` last.
+    blocks:
+      - title: One run, in order
+        text: |
+          1. Stamp the run id in a context variable, so every task the cell starts carries it.
+          2. Arm `RLIMIT_CPU` at the CPU used so far plus `cpuSeconds`.
+          3. Compile. A `SyntaxError` settles at once with its sentence.
+          4. `exec` the wrapper and await `__ph_cell__()` with `sys.stdout` and `sys.stderr` redirected.
+          5. In `finally`: cancel every pending call and every task the cell started.
+          6. Send one `snapshot` frame for each variable that changed.
+          7. Flush both streams, then send `done`.
+          8. Arm `RLIMIT_CPU` again at `idleCpuSeconds`, for the time until the next run.
+      - title: What the cell sees in its namespace
+        table:
+          columns: [name, what it is]
+          rows:
+            - ["one name for each namespace in `boot`, such as `tools`", "a `Namespace` proxy; every attribute is an async function that sends `call`"]
+            - ["`rlm`", "an `RlmNamespace`: callable, and it validates a pydantic `output` class when `rlm.wait` returns"]
+            - ["one name for each skill in `boot`", "the imported module wrapped as a callable, or a stub that says why the import failed"]
+            - ["`ToolFailed`", "the exception a failed call raises"]
+            - ["its own variables", "whatever earlier cells bound"]
+      - title: The two failures a call can raise
+        table:
+          columns: [exception, base, raised when, the cell may catch it]
+          rows:
+            - ["`ToolFailed`", "`Exception`", "a `reply` with `ok: false`", "yes"]
+            - ["`RunStopped`", "`BaseException`", "a `reply` with `ok: false` and `fatal: true`", "it is given no name to catch it by"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The namespace persists across cells in memory only. What a restart brings back is what the `snapshot` frames carried."
+          - "Snapshots are sent before `done`, so the host has the variables in the log before the model reads the result."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "A proxy's arguments are round-tripped through JSON before they are sent, so no object rides along."
+          - "The proxies, the skills and `ToolFailed` are in `_protected`: they are never pickled into a snapshot and never restored from one."
+          - "A traceback is trimmed to the cell's own frames, so the model reads its program, not the runner."
+      - title: Limits
+        tone: limit
+        list:
+          - "A thread the cell starts is not a task and is not canceled. If it burns CPU after the run, the idle budget ends the whole guest."
+          - "A cell can rebind `tools` or delete a proxy. The next cell sees that; a new guest gets fresh ones."
+      - links:
+          - {to: "topic:cell-rules", label: "What a cell may and may not do"}
+          - {to: "topic:output-caps", label: "Output caps"}
+
+edges:
+  runtime-run:
+    transport: service
+    summary: |
+      `run_code` calls `ctx.code_runtime.require().run(CodeRunRequest)`. The
+      request carries the program, the agent it runs as, the binding namespaces
+      with their dispatch closures, and a cancel token. The call returns when
+      the guest's `done` arrives, with a `CodeRunResult`. No frame is sent yet:
+      this is a Python call inside the daemon.
+    blocks:
+      - title: The argument
+        struct: ph.seams.code_runtime:CodeRunRequest
+      - title: A namespace of bindings
+        struct: ph.seams.code_runtime:CodeBindingNamespace
+      - title: What the kernel does with it
+        list:
+          - "`namespace` is the agent id, so the agent's kernel is found or built."
+          - "On a kernel with no live child, the namespaces are reduced to names and parameter lists and sent in `boot`."
+          - "The dispatch closures stay on the host, keyed by `(namespace, binding)`, for the length of this run."
+          - "`token` is watched by a sibling task; a cancel starts the stop ladder."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "With no runtime registered, `require()` raises and the model reads a failed tool call."
+          - "A guest that cannot start raises `KernelDied` with the child's first line of stderr, for example `the runtime exited before reporting ready; ... could not start ph_runtime: ...`."
+          - "A `CodeRunFailure` recorded by a refused binding is raised out of `run` once the program has unwound, so the model reads the refusal as the reason the cell produced nothing."
+          - "Runs on one agent queue. The second waits on the kernel's lock."
+
+  boot:
+    transport: frame
+    summary: |
+      The first frame on a new channel, host to guest, sent once. It carries
+      the protocol version, every limit, the binding namespaces as names and
+      parameter lists, and the Python skills to import. The guest answers with
+      `boot-ack`, or with `fault` when the version is not its own.
+    blocks:
+      - frame: boot
+        note: One line on the wire; wrapped here to be read. Built by `KernelLimits().to_boot(...)` and `codec.encode`.
+        example: |
+          {"type":"boot","protocol":4,
+           "cpuSeconds":30,"idleCpuSeconds":2,"addressSpaceBytes":2147483648,
+           "maxLogBytes":65536,"maxValueBytes":65536,"maxSnapshotBytes":16777216,
+           "namespaces":[{"name":"tools","description":"The agent's tools",
+             "bindings":[{"name":"read","description":"Read a file",
+                          "parameters":["path","offset","limit"]}]}],
+           "namespaceId":"agent-7f3a","skills":[]}
+      - title: The typed side
+        struct: ph_rlm.kernel.protocol:BootFrame
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`protocol`", "`PROTOCOL_VERSION`, 4. A guest with another number refuses the boot."]
+            - ["`cpuSeconds`", "CPU one cell may use"]
+            - ["`idleCpuSeconds`", "CPU the process may use between cells"]
+            - ["`addressSpaceBytes`", "`RLIMIT_AS`; 0 or less applies none"]
+            - ["`maxLogBytes`", "cap on each of the cell's two output streams, per run"]
+            - ["`maxValueBytes`", "cap on the JSON size of the cell's value"]
+            - ["`maxSnapshotBytes`", "cap on one pickled variable"]
+            - ["`namespaces`", "a list of `{name, description, bindings: [{name, description, parameters}]}`; `parameters` is the parameter names in the order the SDK listing shows them"]
+            - ["`namespaceId`", "the kernel's namespace, which is the agent id; left out when there is none"]
+            - ["`skills`", "import names to bind as callables; always sent, empty when there are none"]
+      - title: Why every limit is required
+        text: |
+          The protocol is declared on both sides, so a default written on both sides could differ. The host owns every default and sends every value; a guest reading a `boot` without one raises before `boot-ack`, and the start fails instead of running with a guessed number.
+      - title: Version history
+        table:
+          columns: [version, what moved it]
+          rows:
+            - ["4", "`restore` became one frame for each variable, with a required `more`"]
+            - ["3", "`boot` gained a required `idleCpuSeconds`"]
+            - ["2", "`call` gained a required `run`"]
+            - ["earlier", "`boot` gained `skills` and `reply` gained `name`; the docstring says both were recorded as bumps and neither gated anything"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A first frame that is not `boot` makes the guest exit with status 1 and no frame."
+          - "The number is moved only for a change a mismatched pair would misread: a required field added or removed, or a frame's meaning changed. An unknown key is ignored."
+          - "The managed venv's marker file holds the version, so a bump rebuilds the venv before a stale guest is ever booted."
+      - links:
+          - {to: "topic:configuring", label: "Where a person sets these"}
+
+  boot-ack:
+    transport: frame
+    summary: |
+      The guest's answer to `boot`, sent after it has applied its limits,
+      arranged to die with its parent, built the namespaces and installed its
+      signal handlers. It reports the Python version and the limits as they
+      took effect, which may differ from what was asked.
+    blocks:
+      - frame: boot-ack
+        example: |
+          {"type": "boot-ack", "protocol": 4, "python": "3.12.3", "limits": {"addressSpaceBytes": 2147483648, "cpu": "per-run", "dieWithParent": "pdeathsig"}}
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`protocol`", "the guest's `PROTOCOL_VERSION`; the host refuses a different one"]
+            - ["`python`", "the interpreter's version, `sys.version.split()[0]`"]
+            - ["`limits.addressSpaceBytes`", "the `RLIMIT_AS` in force: the request, a lower hard limit, or `null` when the platform refused it"]
+            - ["`limits.cpu`", "always `per-run`: the CPU limit is armed at each run, not once"]
+            - ["`limits.dieWithParent`", "`pdeathsig`, `kqueue-exit`, `job-object` or `none`"]
+      - title: What the host does with it
+        list:
+          - "Logs `ph_rlm.kernel: <namespace> ready on python <version>, limits <limits>`."
+          - "Keeps `limits` as `Kernel.applied_limits`; `phern doctor` prints the limits from there, not from the config."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No `boot-ack` within `bootTimeoutSeconds` (30): `the runtime did not report ready within 30.0s (...)`, with the child's first line of output."
+          - "Any other frame first, or a line that does not decode, fails the start with that frame or line quoted. Nothing is skipped before `boot-ack`."
+          - "A `fault` in its place fails the start with the fault's message."
+
+  run:
+    transport: frame
+    summary: |
+      Host to guest: one program to run. `id` is the kernel's run counter, and
+      every `call`, `snapshot` and `done` of this run carries it back. The
+      guest answers with exactly one `done`.
+    blocks:
+      - frame: run
+        example: |
+          {"type":"run","id":1,"program":"print(\"reading notes.md\")\ntext = await tools.read(\"notes.md\")\nwords = len(text.split())\nwords"}
+      - title: The typed side
+        struct: ph_rlm.kernel.protocol:RunFrame
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`id`", "the run's number on this kernel, counted from 1; a restore uses the same counter"]
+            - ["`program`", "the cell's source, as the model wrote it"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A `run` while another is open is answered `{\"type\": \"done\", \"id\": <id>, \"error\": {\"kind\": \"busy\", \"message\": \"a program is already running\"}}`. The host's lock means it does not send one."
+          - "A `run` whose `id` is not an integer is ignored."
+          - "The frame size is bounded by the guest's reader limit, `PH_RUNTIME_FRAME_BYTES`."
+
+  begin:
+    transport: call
+    summary: |
+      Inside the guest, `Runner._begin` schedules `Runner._execute(run_id,
+      program)` as a new task on the same event loop and goes back to reading.
+      This is the split the design depends on: the reader stays free to deliver
+      the `reply` the cell will wait for.
+    blocks:
+      - title: What _begin does
+        text: |
+          1. Refuse with `busy` if a run task is alive.
+          2. Record the run as owed a `done` (`_owed`).
+          3. `create_task(self._execute(...))`.
+          4. Add a done-callback, `_answer_if_owed`, bound to this run id.
+      - title: Why the callback
+        text: |
+          `create_task` only schedules. A `cancel` in the same read as the `run` cancels a coroutine whose first line never ran, so none of its own exits send `done`. The callback covers that and anything raised outside the task's own `try`: if the run is still owed, it sends `done` with an `aborted` error.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Nothing is returned to the reader; the cell reports through frames."
+          - "The task shares the reader's event loop and thread. It is concurrency, not isolation."
+
+  log:
+    transport: frame
+    summary: |
+      Guest to host: a piece of the cell's output. The cell's `sys.stdout` and
+      `sys.stderr` are capped streams that coalesce writes and send them as
+      `log` frames. The host appends `text` to the run's one ordered log, which
+      becomes `CodeRunResult.logs`.
+    blocks:
+      - frame: log
+        example: |
+          {"type": "log", "stream": "stdout", "text": "read failed: no such file: missing.md\n"}
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`stream`", "`stdout` or `stderr`"]
+            - ["`text`", "everything buffered since the last frame of this stream"]
+            - ["`truncated`", "present and `true` on the frame that holds the truncation marker"]
+      - title: When a frame goes out
+        list:
+          - "When 8 KiB are buffered, or 50 ms have passed since the last flush, checked at each write."
+          - "On `print(flush=True)`."
+          - "At settle, after the `snapshot` frames and before `done`. A short cell's whole output arrives there."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No run id: the host appends a `log` to whichever run is open."
+          - "Past `maxLogBytes` nothing is sent; the bytes are counted and reported on `done`."
+          - "The host does not act on `stream`. Both streams land in one log in arrival order."
+      - links:
+          - {to: "topic:output-caps", label: "Output caps and the dropped total"}
+
+  call:
+    transport: frame
+    summary: |
+      Guest to host: the cell awaited a binding, for example
+      `await tools.read("notes.md")`. The proxy sends one `call` frame and the
+      cell's task waits on a future. The host answers with one `reply` that
+      carries the same `id`.
+    blocks:
+      - frame: call
+        example: |
+          {"type": "call", "id": 1, "run": 1, "global": "tools", "name": "read", "args": {"path": "notes.md"}}
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`id`", "the call's number in this guest, counted from 1 across runs; the `reply` echoes it"]
+            - ["`run`", "the run that issued the call, read from a context variable so a task carries the run that started it"]
+            - ["`global`", "the namespace, such as `tools` or `rlm`"]
+            - ["`name`", "the binding"]
+            - ["`args`", "the arguments by name; positional ones were bound to `boot`'s parameter order in the proxy"]
+      - title: How arguments are made JSON
+        text: |
+          The proxy round-trips the arguments through `json.dumps(..., default=jsonable)` before sending. A `Path` becomes its string, a `datetime` its ISO form, a `set` or `tuple` a list, a `Decimal` a string, a pydantic instance its JSON, a pydantic model class its JSON Schema. Anything else becomes its `repr`, which the tool's own schema then refuses in readable words.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A `run` that is not the open one is answered `the program that made this call has finished`."
+          - "A binding the host did not declare for this run is answered `<namespace>.<name> is not available`."
+          - "Calls may overlap: `asyncio.gather` over ten bindings sends ten frames. The host runs up to `maxParallelSubCalls` (10) at once."
+          - "Too many positional arguments, or one given both ways, raises `TypeError` in the cell and sends nothing."
+
+  dispatch:
+    transport: service
+    summary: |
+      For each `call`, the kernel looks up the binding by `(global, name)` and
+      awaits `binding.dispatch(**args)`. That closure is the
+      `DispatchBridge`, which runs the call through `ctx.tools.execute` as a
+      sub-call of `run_code`: the same gates, approvals and limits as a native
+      tool call. What comes back is the tool's value, or one of two exceptions.
+    blocks:
+      - title: What the bridge does for one call
+        text: |
+          1. Refuse at once if this program already failed fatally.
+          2. Count the call against `maxDispatchesPerRun`, and a spawning binding against `maxSubagentSpawnsPerRun`.
+          3. Name the sub-call `<call id>:code:<n>`.
+          4. Run `ctx.tools.execute` under a limiter of `maxParallelSubCalls`, writing `tool/code-dispatch-start` before the body.
+          5. Pass the result through the `tools/code-dispatch-log` waterfall and write `tool/code-dispatch`.
+      - event: tools/code-dispatch-log
+      - title: The identity the two records share
+        struct: ph.tools.code_mode:CodeDispatchRef
+      - record: tool/code-dispatch-start
+        example: |
+          {"type": "tool/code-dispatch-start",
+           "data": {"rootCallId": "call_12", "parentCallId": "call_12",
+                    "subCallId": "call_12:code:0", "name": "read",
+                    "arguments": {"path": "notes.md"}, "restoreCovered": false}}
+      - record: tool/code-dispatch
+        example: |
+          {"type": "tool/code-dispatch",
+           "data": {"rootCallId": "call_12", "parentCallId": "call_12",
+                    "subCallId": "call_12:code:0", "name": "read", "isError": false,
+                    "content": [{"type": "text", "text": "alpha beta gamma\n"}]}}
+      - title: What comes back to the kernel
+        table:
+          columns: [outcome, raised or returned, the reply it becomes]
+          rows:
+            - ["the tool's value", "returned", "`ok: true`, `value`"]
+            - ["the call failed", "`ToolCallError`", "`ok: false`, `message`, `name`"]
+            - ["denied, over a budget, or the result ended the turn", "`CodeRunFailure`", "`ok: false`, `message`, `fatal: true`, and the stop ladder starts"]
+            - ["any other exception", "", "`ok: false`, `message`, `name`"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A dispatch that is canceled or raises is settled `outcome-unknown` in the intent journal, so its card does not read as running."
+          - "Only a binding call is governed here. What the cell does without a binding is the sandbox's to bound."
+      - links:
+          - {to: "ph-core#node:tools", label: "The tool pipeline"}
+          - {to: "dispatch", label: "The four dispatch modes"}
+
+  reply:
+    transport: frame
+    summary: |
+      Host to guest: the answer to one `call`, matched by `id`. On success it
+      carries the tool's value. On failure it carries a message, and `fatal`
+      says whether the cell may handle it.
+    blocks:
+      - frame: reply
+        example: |
+          {"type":"reply","id":1,"ok":true,"value":"alpha beta gamma\n"}
+          {"type":"reply","id":2,"ok":false,"message":"no such file: missing.md","name":"read"}
+          {"type":"reply","id":3,"ok":false,"message":"read denied by permissions-fs: /etc/shadow","fatal":true}
+      - title: The typed side
+        struct: ph_rlm.kernel.protocol:ReplyFrame
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`id`", "the `call` this answers"]
+            - ["`ok`", "whether the call returned a value"]
+            - ["`value`", "the value, as JSON; left out when it is `None`"]
+            - ["`message`", "why it failed"]
+            - ["`name`", "the binding's name, echoed so `ToolFailed` can say what failed"]
+            - ["`fatal`", "the run is over: a denial, a budget, or a result that ended the turn"]
+      - title: How it is encoded
+        text: |
+          `ph_rlm.kernel.codec.encode` dumps the model with camelCase keys, compact separators and `exclude_none`, so an unset optional field is not on the wire. A value JSON cannot represent is written as its `repr`.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A `reply` whose `id` matches no pending call is ignored by the guest."
+          - "Writes are serialized by a lock: the run loop and each call's task share one socket. A guest that has stopped reading blocks the write, which is why the stop clock starts before the fatal reply is sent."
+          - "A large value is one line. It must fit the guest's reader limit."
+
+  resolve:
+    transport: call
+    summary: |
+      Inside the guest, the reader's `_resolve` pops the future the call is
+      awaiting and completes it. `ok` sets the result, so the `await` in the
+      cell returns the value. Otherwise it sets an exception, which the `await`
+      raises in the cell.
+    blocks:
+      - title: What the await gets
+        table:
+          columns: [reply, the future gets, in the cell]
+          rows:
+            - ["`ok: true`", "`set_result(value)`", "the call returns `value`"]
+            - ["`ok: false`", "`set_exception(ToolFailed(name, message))`", "raises `read failed: no such file: missing.md`; catchable"]
+            - ["`ok: false`, `fatal: true`", "`set_exception(RunStopped(message))`", "raises a `BaseException` the cell has no name for; the run settles with error kind `stopped`"]
+      - title: A failed call and a fatal one, end to end
+        lang: json
+        note: Captured. The cell caught the first failure and printed it; the second ended the run.
+        code: |
+          <- {"type": "call", "id": 2, "run": 2, "global": "tools", "name": "read", "args": {"path": "missing.md"}}
+          -> {"type":"reply","id":2,"ok":false,"message":"no such file: missing.md","name":"read"}
+          <- {"type": "call", "id": 3, "run": 2, "global": "tools", "name": "read", "args": {"path": "/etc/shadow"}}
+          -> {"type":"reply","id":3,"ok":false,"message":"read denied by permissions-fs: /etc/shadow","fatal":true}
+          <- {"type": "log", "stream": "stdout", "text": "read failed: no such file: missing.md\n"}
+          <- {"type": "done", "id": 2, "error": {"kind": "stopped", "message": "read denied by permissions-fs: /etc/shadow"}}
+      - title: rlm is a special case
+        text: |
+          `rlm.run(..., output=Sort)` sends the class's JSON Schema and remembers the class for the child it admitted. `rlm.wait(handle)` then returns `Sort.model_validate(value)`, so the cell gets an instance.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A future that is already done, because the run settled and canceled it, is left alone."
+          - "A missing `message` reads `the call was refused`; a missing `name` reads `the call`."
+
+  snapshot:
+    transport: frame
+    summary: |
+      Guest to host, after the cell and before `done`: one frame for each
+      variable that changed since the last run. The host hands each to the
+      snapshot policy, which writes a `kernel/snapshot` record. This is the
+      only state of the guest that outlives the process.
+    blocks:
+      - frame: snapshot
+        example: |
+          {"type": "snapshot", "id": 1, "variables": [{"var": "words", "digest": "f20eca1c87acdcf3a9f44026687be53c96b2f817533b8d55da475996e5bacdc1", "bytes": 5, "blob": "gAVLAy4="}]}
+          {"type": "snapshot", "id": 8, "variables": [{"var": "words", "skipped": "deleted"}]}
+      - title: One entry of variables
+        table:
+          columns: [key, meaning]
+          rows:
+            - ["`var`", "the variable's name"]
+            - ["`digest`", "SHA-256 of the pickled payload, in hex"]
+            - ["`bytes`", "the payload's size before base64"]
+            - ["`blob`", "the payload, base64: standard pickle, or `dill` for what the C pickler refuses"]
+            - ["`skipped`", "in place of the three above: `deleted`, `too-large` or `unpicklable`"]
+            - ["`reason`", "with `unpicklable`: the first 200 characters of the pickler's error"]
+      - title: What is considered
+        list:
+          - "Every top-level name that does not start with `_`, is not a module, and was not put there by the bootstrap."
+          - "A value of an immutable scalar type that is the same object as last time is skipped without pickling."
+          - "Everything else is pickled into a sink that gives up at `maxSnapshotBytes`, and sent only if its digest moved."
+          - "A name that has gone is sent once as `deleted`."
+      - title: What the host writes
+        record: kernel/snapshot
+        example: |
+          {"type": "kernel/snapshot",
+           "data": {"namespace": "agent-7f3a", "run": 1,
+                    "record": {"kind": "snap", "var": "words",
+                               "digest": "f20eca1c87acdcf3a9f44026687be53c96b2f817533b8d55da475996e5bacdc1",
+                               "bytes": 5, "blob": "gAVLAy4=",
+                               "tag": "5c71eee0bf7c48a7f74ae36a540179ace63b3d9d9e717ca081a70e68a53b9b51"}}}
+          {"type": "kernel/snapshot",
+           "data": {"namespace": "agent-7f3a", "run": 8,
+                    "record": {"kind": "clear", "var": "words", "reason": "deleted"}}}
+      - title: The record's payload
+        struct: ph_rlm.snapshot:SnapshotRecord
+      - title: Durability
+        tone: durable
+        list:
+          - "One frame holds one variable, so the cap on a value and the cap on a frame are the same bound."
+          - "The host awaits the policy before it reads the next frame. A blob is on disk before the record that names it, and the records of one cell are one batch."
+          - "`tag` is an HMAC of the payload keyed by the session id. A restore refuses a blob whose tag does not match, so a blob from another session is not unpickled."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A snapshot whose `id` is not the open run is dropped."
+          - "With no `rlm-kernel-snapshot` row mounted the frames are read and nothing is recorded."
+          - "If the snapshot step raises, the cell's stderr says `the namespace could not be snapshotted: ...` and the run still settles."
+      - links:
+          - {to: "topic:durability", label: "What survives a restart"}
+          - {to: "durability#edge:kernel-blobs", label: "Blobs first, then records"}
+
+  done:
+    transport: frame
+    summary: |
+      Guest to host: the run has ended, and this is its last frame. It carries
+      the cell's value or an error, whether anything was cut, and how many bytes
+      of output were dropped. The host has no wall clock on a run; it waits for
+      this frame, so every path out of a run sends one.
+    blocks:
+      - frame: done
+        example: |
+          {"type": "done", "id": 1, "value": 3, "truncated": true, "dropped": 154}
+          {"type": "done", "id": 5, "error": {"kind": "ZeroDivisionError", "message": "Traceback (most recent call last):\n  File \"<cell>\", line 1, in __ph_cell__\nZeroDivisionError: division by zero\n"}}
+          {"type": "done", "id": 3, "error": {"kind": "aborted", "message": "the run was canceled"}}
+      - title: What each field means
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`id`", "the run this settles"]
+            - ["`value`", "the cell's last expression as JSON, or a bounded `repr` when it is over `maxValueBytes`; left out when it is `None` or there was an error"]
+            - ["`error`", "`{kind, message}`; the host keeps the message"]
+            - ["`truncated`", "the value was replaced by a `repr`, or output was dropped"]
+            - ["`dropped`", "bytes of stdout and stderr thrown away past the cap; left out when zero"]
+      - title: Who sends it
+        table:
+          columns: [path, body]
+          rows:
+            - ["the ordinary settle", "value or error, plus `truncated` and `dropped`"]
+            - ["settling itself raised", "error `the run could not be settled: ...`"]
+            - ["the task ended without settling (`_answer_if_owed`)", "error kind `aborted`"]
+            - ["a `ping` named a run nobody owes", "error `the run ended without settling`"]
+            - ["a `run` while busy", "error kind `busy`"]
+            - ["the last batch of a `restore`", "`value: {restored: [...], failed: [...]}`"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A `done` for another run settles nothing on the host."
+          - "The first outcome wins. A `done` that arrives after the host killed the guest does not overwrite `the runtime was killed`."
+          - "After the frame is sent the guest arms the idle CPU budget. A thread still burning past it ends the process."
+          - "If the channel closes first, the host settles the run as `the runtime exited before the program finished`."
+      - links:
+          - {to: "topic:output-caps", label: "The dropped total"}
+          - {to: "topic:cell-rules", label: "The error kinds"}
+
+  result:
+    transport: service
+    summary: |
+      `Kernel.run` returns a `CodeRunResult` to `run_code`, built from what the
+      frames carried: the logs in arrival order, the value or the error, the
+      truncation flag and the dropped total. `run_code` turns it into the
+      `CodeCellValue` the model reads as the tool's result.
+    blocks:
+      - title: The result
+        struct: ph.seams.code_runtime:CodeRunResult
+      - title: Where each field comes from
+        table:
+          columns: [field, source]
+          rows:
+            - ["`logs`", "every `log` frame's `text` and the process's own fd 1 and fd 2, in arrival order; a reset notice in front after a restart; the dropped-total marker at the end"]
+            - ["`value`", "`done.value`"]
+            - ["`error`", "`done.error.message`, or the host's own sentence when the guest died or was killed"]
+            - ["`truncated`", "any `log.truncated`, `done.truncated`, or the host's own pipe cap"]
+            - ["`dropped`", "`done.dropped` plus what the host skipped on the pipes"]
+            - ["`reset`", "this run got a new guest after the last one died"]
+            - ["`displays`", "every `display` frame; empty today"]
+      - title: What the model's tool call returns
+        struct: ph.tools.code_mode:CodeCellValue
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A refusal does not come back as a result. `CodeRunFailure` is raised instead and the tool call fails with the refusal's message."
+          - "The result is not written by the runtime. `run_code`'s `tool/result` record holds it, after the tool pipeline's post-execute policy."
+          - "`reset` is a field, not text, so a cell that prints the reset notice cannot forge it."

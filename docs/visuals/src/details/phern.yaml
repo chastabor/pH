@@ -1,0 +1,1530 @@
+intro: |
+  `phern` is the application: the command line, the daemon that holds sessions,
+  the terminal UI that attaches to it, and the three model adapters. Its import
+  name is `ph_app`. Click a box for what it is and how it is configured, or an
+  arrow for the structure of what crosses it.
+
+  Two arrows are wires with a published format. The daemon socket speaks
+  JSON-RPC, one line a frame, with a typed and closed set of verbs: see
+  [The daemon protocol at a glance](topic:protocol). The adapters speak three
+  provider wires over HTTP and turn each one's stream into the same seven
+  chunk types: see [Model servers](node:models) and
+  [Configuring a model route](topic:model-route).
+
+topics:
+  - id: protocol
+    title: The daemon protocol at a glance
+    summary: |
+      `$PH_RUNTIME/daemon.sock` speaks JSON-RPC 2.0, one JSON object on one
+      line. The protocol version is 10. Every method is a `Verb` in
+      `ph_app.verbs`: a name, a params model and a reply model, all
+      `extra="forbid"`. There are 38 methods; six of them are mutations that
+      take an idempotence key. `--mode rpc` speaks the same envelope over stdio
+      with a smaller method table.
+    blocks:
+      - title: The daemon itself
+        table:
+          columns: [method, params, result]
+          rows:
+            - ["`initialize`, `daemon/hello`", "`capabilities?`: what this client can do", "`CapabilityBlock`: `protocolVersion`, `capabilities`"]
+            - ["`daemon/status`", "none", "`DaemonStatusReply`: pid, socket, uptime, roots, `startsOn`, `passivateAfter`, `socketWatch`, `unwritten`, `probe`, doctor sections"]
+            - ["`daemon/config`", "none", "`DaemonConfigReply`"]
+            - ["`daemon/lifetime`", "none", "`DaemonLifetime`: `mode`, `holds`, `clients`, `keepAliveMs`"]
+            - ["`daemon/probe`", "`name`: `startup`, `ready` or `live`", "`ProbeReply`"]
+            - ["`shutdown`", "none", "no reply; sent as a notification"]
+      - title: Roots
+        table:
+          columns: [method, params, result]
+          rows:
+            - ["`sessions/list`", "none", "`RootListing`: the mounted roots"]
+            - ["`sessions/browse`", "`cwd?`", "`SessionBrowse`: stored sessions, mounted or not"]
+            - ["`sessions/owed`", "`rebuild?`", "`OwedListing`: stored roots that still owe work, and why"]
+            - ["`sessions/resume`", "`sessions?`, `allOwed?`, `force?`", "`ResumeReport`: what became of each"]
+            - ["`session/new`", "`sessionId?`, `cwd?`, `trust?`, `choice?`, `profile?`", "`NewSessionReply`: the root's description and its log `header`"]
+            - ["`session/attach`", "`sessionId`", "`AttachReply`: the description and the footer `readings`"]
+            - ["`session/detach`", "`sessionId`", "`SessionDetached`: `detached`"]
+            - ["`session/status`", "`sessionId`", "`RootStatusReply`: the description, the retry ladder, the schedules"]
+            - ["`session/cancel`", "`sessionId`", "`RootDescription`"]
+            - ["`session/snapshot`", "`sessionId`, `cursor?`", "`SnapshotPage`: up to 2048 events, `from`, `cursor`, `more`"]
+            - ["`session/adopt`", "`sessionId`, `version`", "`RootDescription`"]
+      - title: Mutations (take `clientId` and `commandId`)
+        table:
+          columns: [method, params, result]
+          rows:
+            - ["`session/prompt`", "`prompt?`, `attachments?`", "`RootDescription`"]
+            - ["`session/command`", "`line?`: one `/name argument` line", "`CommandShown`"]
+            - ["`session/stage`", "`attachment`", "`SessionStagedNotice`"]
+            - ["`session/shell`", "`command?`, `surface?`", "`ShellReply`"]
+            - ["`session/preset`", "`preset`", "`PresetApplied`"]
+            - ["`session/model`", "`choice`", "`RootDescription`"]
+      - title: Read-only projections of one root (params `sessionId`)
+        table:
+          columns: [method, result]
+          rows:
+            - ["`session/readings`", "`SessionReadingsReply`: the footer"]
+            - ["`session/children`", "`SessionChildrenNotice`: every sub-agent, from their own logs"]
+            - ["`commands/list`", "`SessionCommandsNotice`"]
+            - ["`screens/list`", "`SessionScreensNotice`"]
+            - ["`tools/list`", "`SessionToolsReply`"]
+            - ["`skills/list`", "`SessionSkillsReply`"]
+            - ["`presets/list`", "`SessionPresetsReply`"]
+            - ["`models/list`", "`SessionModelsReply`: the profile's listed models, default first"]
+            - ["`schedule/list`", "`SessionSchedulesReply`"]
+            - ["`credentials/held`", "`CredentialsHeldReply`: names only"]
+      - title: Attachments, credentials, schedules
+        table:
+          columns: [method, params, result]
+          rows:
+            - ["`attachment/put`", "`sessionId`, `contentB64?`, `name?`, `mime?`", "`AttachmentStored`"]
+            - ["`credentials/store`", "`sessionId`, `name`, `value`", "`CredentialStored`"]
+            - ["`schedule/create`", "`sessionId`, `scheduleId`, `kind`, `spec`, `prompt`", "`Schedule`"]
+            - ["`schedule/cancel`", "`sessionId`, `scheduleId`", "`ScheduleCanceled`"]
+      - title: Notifications a client receives
+        table:
+          columns: [method, sent when, params]
+          rows:
+            - ["`session.event`", "an attached root appends a log record", "`sessionId`, `event`, `presentation?`"]
+            - ["`session.status`", "an attached root's status or footer moves", "`sessionId`, `status?`, `lastTurn?`, `readings?`, `provider?`, `model?`, `modelKey?`"]
+            - ["`session.children`", "a sub-agent's row moves", "`sessionId`, `children`"]
+            - ["`session.commands`", "the root's command list changes", "`sessionId`, `commands`"]
+            - ["`session.screens`", "the root's screen list changes", "`sessionId`, `screens`"]
+            - ["`session.staged`", "the composer's shared tray changes", "`sessionId`, `staged`"]
+            - ["`ask.settled`", "another client answered an ask", "`sessionId`, `askId`"]
+            - ["`daemon.lifetime`", "why the daemon is still up changed", "`mode`, `holds`, `clients`, `keepAliveMs`"]
+      - title: Requests the daemon sends to a client that declared `asks`
+        note: The id is a string, `s1`, `s2`, ... A client's own ids are integers, so the two cannot collide.
+        table:
+          columns: [method, params, the client answers with]
+          rows:
+            - ["`approval/ask`", "`sessionId`, `askId`, `request`", "`ApprovalAskReply`: `answer`"]
+            - ["`question/ask`", "`sessionId`, `askId`, `question`", "`QuestionAskReply`"]
+            - ["`profile/ask`", "`sessionId`, `askId`, `name`, `listing`", "`ProfileAskReply`: `adopt`, `keep` or `later`"]
+      - title: Refusals, by `error.data.reason`
+        table:
+          columns: [reason, meaning]
+          rows:
+            - ["`unknown_method`", "this daemon does not serve that name; usually an older daemon"]
+            - ["`invalid_params`", "a missing field, a field the method does not take, or a value of the wrong shape"]
+            - ["`no_such_session`", "the root is not mounted (a read does not mount one)"]
+            - ["`not_a_root`", "the id is a sub-agent's log; the message names its root"]
+            - ["`untrusted_project`", "`session/new` named a `cwd` nobody has trusted"]
+            - ["`session_already_active`", "another process holds the session's lease"]
+            - ["`seam_absent`", "this root's profile did not mount the seam the method needs"]
+            - ["`schedule_unavailable`", "no schedule seam on this root"]
+            - ["`attachment_too_large`", "over 5 MiB in one frame"]
+            - ["`attachment_unknown`", "a reference the store does not hold"]
+            - ["`root_start_abandoned`", "the daemon is shutting down and will not mount it"]
+            - ["`daemon_unavailable`", "the socket could not be bound"]
+      - links:
+          - {to: "edge:tui-socket", label: "Framing, the handshake and real frames"}
+          - {to: "edge:socket-supervisor", label: "How a verb is dispatched"}
+
+  - id: model-route
+    title: Configuring a model route
+    summary: |
+      A route is two things in a profile: an adapter row that knows how to reach
+      a provider, and an entry in the `models` row that names a provider and a
+      model. `--model fast` picks a listed entry by key; `--provider p --model m`
+      runs on an exact route. A credential is always the name of an environment
+      variable.
+    blocks:
+      - title: A named profile with three adapters
+        lang: yaml
+        note: |
+          Checked with `phern --profile work --dump-config`. `apiKeyEnv` is a
+          variable name; the value is read when a request is sent. One
+          `llm-openai-compatible` row holds every OpenAI-shaped route in its
+          `profiles` list: a second row of that kind in one profile collides.
+        code: |
+          # $PH_HOME/profiles/work.yaml
+          extends: rlm
+          rows:
+            - insert:
+                - id: llm-anthropic
+                  name: llm-anthropic
+                  config:
+                    provider: anthropic
+                    apiKeyEnv: ANTHROPIC_API_KEY
+                    contextWindow: 200000
+                    defaultMaxTokens: 8192
+                    cacheControl: true
+                - id: llm-google
+                  name: llm-google
+                  config:
+                    provider: google
+                    apiKeyEnv: GEMINI_API_KEY
+                    contextWindow: 1048576
+                    uploads: [video/mp4, application/pdf]
+                - id: llm-local
+                  name: llm-openai-compatible
+                  config:
+                    profiles:
+                      - provider: llama
+                        baseUrl: ${env:LLAMA_BASE_URL:-http://127.0.0.1:9931/v1}
+                        apiKeyEnv: LLAMA_API_KEY
+                        contextWindow: 32768
+                        defaultMaxTokens: 4096
+                        samplingExtras: [topK, minP]
+                      - provider: decision
+                        baseUrl: http://127.0.0.1:9932/v1
+                        apiKeyEnv: DECISION_API_KEY
+                        maxDecisionTokens: 8192
+            - id: models
+              config:
+                default: main
+                models:
+                  main: {provider: anthropic, model: claude-sonnet-5}
+                  wide: {provider: google, model: gemini-2.5-pro}
+                  local: {provider: llama, model: qwen}
+      - title: The models row
+        row: models
+      - title: Picking a route
+        lang: bash
+        code: |
+          phern --profile work -p "hello"                        # models.default
+          phern --profile work --model local -p "hello"          # a listed key
+          phern --profile work --provider llama --model other -p "hello"   # an exact route
+          phern --mode tui --profile work --model wide           # this terminal's sessions only
+          /model local                                           # inside a session: session/model
+      - title: What a client sends to choose
+        struct: ph.seams.models:ModelChoice
+      - title: The shipped provider profiles
+        table:
+          columns: [profile, adapter row, credential variable, models]
+          rows:
+            - ["`anthropic`", "`llm-anthropic`", "`ANTHROPIC_API_KEY`", "`main`, `deep`, `fast`"]
+            - ["`google`", "`llm-google`", "`GEMINI_API_KEY`", "`main` (`$GEMINI_MODEL`), `fast`"]
+            - ["`deepseek`", "`llm-deepseek` (`llm-openai-compatible`)", "`DEEPSEEK_API_KEY`", "`main`, `reasoner`"]
+            - ["`llama`", "`llm-llama` (`llm-openai-compatible`)", "`LLAMA_API_KEY`", "`main` (`$LLAMA_MODEL`)"]
+            - ["`headless`, `tui`, `rlm` and the profiles built on them", "`llm-fake`", "none", "`main`: `fake`/`fake-1`, which answers `ok`"]
+      - title: Retries
+        row: llm-retry
+      - title: Limits
+        tone: limit
+        list:
+          - "A patch replaces a row's whole config. Restating the `models` row means restating every entry you keep."
+          - "A missing credential is not a mount failure. The route mounts; the first request raises `MISSING_CREDENTIAL`, and a daemon root reports `needs-credential` until `credentials/store` supplies one."
+          - "`rlm`, `tui` and `headless` ship the fake adapter as their default model. A profile that extends one of them and adds no route answers `ok` to everything."
+          - "The context window of an OpenAI-compatible route is `contextWindow` unless a `contextWindowProbes` entry gets an answer from the server at mount."
+      - links:
+          - {to: "node:adapters", label: "The three adapter rows"}
+          - {to: "edge:adapters-models", label: "What each adapter sends"}
+
+  - id: client-visibility
+    title: What a client can and cannot see
+    summary: |
+      A client holds no session state. It reads no session file, mounts no
+      profile and holds no credential. Everything it shows came over the socket,
+      and everything it changes is a verb the daemon checks. The socket itself
+      is the security boundary: whoever can open it can drive every root.
+    blocks:
+      - title: What guards the socket
+        tone: secure
+        list:
+          - "The socket is `chmod 0600` right after it is bound, and `$PH_RUNTIME` is created `0700`. Only the same user can connect."
+          - "There is no authentication on the socket beyond that. A process running as the user is trusted with every root."
+          - "It is a unix socket. Nothing listens on TCP unless `--probe-bind` is given, and that port answers the three probes only."
+          - "`--mode web` serves the terminal in a browser on `127.0.0.1:8000` by default, behind a token in the URL."
+      - title: What the daemon checks on each call
+        tone: secure
+        list:
+          - "**Params are closed.** Every params model forbids extra fields; a field a method does not take is `invalid_params` naming it."
+          - "**A session id must be usable as a path component**: letters, digits, dots, dashes and underscores, starting with a letter or digit. `../x` is refused before anything is opened."
+          - "**A project must be trusted.** `session/new` with a `cwd` checks `$PH_HOME/trust.json`; an unknown directory is `untrusted_project` unless the client sends `trust: once` or `always` after asking the person. The daemon enforces it because the daemon mounts."
+          - "**A sub-agent's log is not a root.** Attaching to one is `not_a_root`."
+          - "**A credential value is write-only.** `credentials/store` takes a value and keeps it in daemon memory; `credentials/held` returns names. It is never logged or echoed."
+          - "**Asks go only to a front end.** A client is put in front of a person's approval only if it declared `asks` at `initialize`. A follower such as `phern agents attach` watches and is never asked."
+      - title: What a client does see
+        list:
+          - "Every log record of a root it attached to, as `session.event`, including tool arguments, tool results and file contents the agent read."
+          - "The stored sessions of every project under this `$PH_HOME` (`sessions/browse`), and any of them by id."
+          - "The profile's tools, skills, models and commands."
+      - title: What a client never sees
+        tone: secure
+        list:
+          - "A credential value, the provider's request headers, or the session files themselves."
+          - "Another user's daemon: the socket path is per user and per boot."
+      - title: Limits
+        tone: limit
+        list:
+          - "There are no per-client scopes. Two clients of one daemon are equals: either may prompt, cancel, run `!` shell commands or shut the daemon down."
+          - "`session/shell` runs the person's own command in the session's workspace. It is a verb any connected client may call."
+          - "The protocol version is reported and not enforced. An upgraded client can meet an older daemon; the mismatch shows as `invalid_params` or `unknown_method`."
+          - "A watcher that falls 1024 frames behind is dropped from the root's subscribers. It must attach again and page forward with `session/snapshot`."
+      - links:
+          - {to: "security.html", label: "Scopes, isolation and the sandbox across the harness"}
+          - {to: "edge:tui-socket", label: "The frames themselves"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      The daemon keeps no session state of its own. A root is rebuilt from its
+      log: the profile it ran on, its conversation, its inbox, its schedules and
+      its sub-agents. What the daemon adds on disk is small: an index of roots
+      that owe work, an index of schedules, and a lease for each mounted session.
+    blocks:
+      - title: Where things are
+        table:
+          columns: [path, what it is]
+          rows:
+            - ["`$PH_HOME/sessions/<family>/<id>.jsonl`", "one session's log, in its family's directory; the header names the family"]
+            - ["`$PH_HOME/sessions/.leases/<id>.lock`", "held while a process has the session mounted; a second process is refused `session_already_active`"]
+            - ["`$PH_HOME/live.json`", "the live-roots index: which stored roots owe work and why (`sessions/owed`)"]
+            - ["`$PH_HOME/schedules.json`", "the schedule index: when each root's next appointment is due"]
+            - ["`$PH_HOME/profiles/<name>.yaml`", "a person's named profiles"]
+            - ["`$PH_HOME/daemon.yaml`", "the host's own rows (`deployment` kind) and paths"]
+            - ["`$PH_HOME/trust.json`", "the project directories a person trusted"]
+            - ["`$PH_HOME/logs/daemon.log`", "the daemon's own log"]
+            - ["`$PH_RUNTIME/daemon.sock`", "the socket; gone at reboot"]
+            - ["`$PH_RUNTIME/processes.jsonl`", "the orphan journal: child processes to sweep at the next start"]
+      - title: Kept
+        tone: durable
+        list:
+          - "**A prompt.** `session/prompt` is answered after the message, its idempotence key and the key's settle are flushed. A client that has its reply never needs to send again."
+          - "**A retried mutation.** The key is a `client/command` record. A retry after a crash is answered `repeated: true` with `outcome: settled` or `unknown`."
+          - "**The profile a session runs on.** `profile/base` is the first record of a root's log, and each later change is `profile/override`. A resumed root mounts what its log says, whatever `--profile` the daemon was given."
+          - "**A released root.** Passivation writes `supervisor/passivated`, flushes and unmounts. Any verb that names the root mounts it again from its log."
+          - "**Owed work.** `phern daemon --resume-owed`, `phern agents resume --all` and `phern service start` mount every stored root the index says owes work."
+      - title: Not kept
+        tone: limit
+        list:
+          - "Credential values: daemon memory only. After a restart a root that needs one reports `needs-credential`."
+          - "The composer's staged attachments. The blobs stay in the attachment store."
+          - "Which clients were attached. A client attaches again and pages from its cursor."
+          - "A turn that was running. Repair closes it as interrupted; whether it is continued is the resume pass's decision."
+          - "Schedules fire only while a daemon runs. On start it catches up, one run for each missed window."
+      - links:
+          - {to: "durability", label: "The restart story in full"}
+          - {to: "durability#node:supervisor", label: "The supervisor on the durability page"}
+          - {to: "node:supervisor", label: "Roots, passivation and resume"}
+
+  - id: profiles-howto
+    title: Profiles, layers and who may set what
+    summary: |
+      A profile is an ordered list of YAML documents. Each row declares what
+      its settings shape (`affects`), and each layer a person writes may set one
+      kind. A row set in the wrong layer is refused, naming the file it belongs
+      in.
+    blocks:
+      - title: The three kinds, and their owners
+        table:
+          columns: [affects, what it shapes, who sets it]
+          rows:
+            - ["`environment`", "what the agent sees or can do: model, tools, skills, sandbox, workspace, posture", "`$PH_HOME/profiles/<name>.yaml`, `--patch`, and overrides logged during a session"]
+            - ["`deployment`", "the host's machinery: persistence, telemetry, invariants, the credential source", "`rows:` in `$PH_HOME/daemon.yaml`, and the daemon's own flags"]
+            - ["`presentation`", "how a front end draws: screens and footer readings", "the TUI's `$PH_HOME/tui.json`; no profile layer"]
+      - title: Commands
+        lang: bash
+        code: |
+          phern profiles show work           # what the named profile sets
+          phern profiles show work --full    # everything it runs with
+          phern profiles diff work           # what taking its current version would change in each session on it
+          phern profiles adopt work          # take it at those sessions' next start
+          phern profiles fold work           # fold drop-ins and the old list format into the named file
+          phern profiles session <id>        # the environment a session ran in, at any point of its log
+          phern --profile work --dump-config # the composed rows, with the layer that last set each
+          phern config --row models          # one row's options and kind
+      - title: Inside a session
+        table:
+          columns: [command, effect]
+          rows:
+            - ["`/profile show [--full]`", "the base, the overrides in order, and what differs"]
+            - ["`/profile diff`", "the named profile as it composes now against the version this session runs on"]
+            - ["`/profile save <name> [--replace]`", "the base merged with the overrides, written as a sparse named profile"]
+            - ["`/profile use <name> [--clear]`", "another named profile as the base; the root starts again from its log once the command is durable"]
+            - ["`/profile clear [row]`", "one override, or all of them, no longer applied"]
+      - links:
+          - {to: "node:profiles", label: "The shipped profile table"}
+          - {to: "ph-core#node:profile", label: "Rows and composition in ph-core"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      What phern does not do, mostly in the daemon's own words
+      (`ph_app.daemon.supervisor.NON_GUARANTEES`, printed by `phern agents doctor`).
+    blocks:
+      - title: The daemon
+        tone: limit
+        list:
+          - "One anyio task per root, all in one process. Not a process per root."
+          - "Per-root memory is not capped. A root that allocates without bound takes every other root with it."
+          - "Crash containment is per root, not per process. A segfault in a C extension, an OOM kill or `SIGKILL` ends every root at once."
+          - "CPU is shared. Only ph-rlm's kernels run model code in child processes with limits of their own."
+          - "The daemon does not restart itself. An init system or `phern service` does."
+          - "Nothing fires while the daemon is down."
+          - "A daemon a UI started exits when nothing needs it. A logout reap or a reboot takes it and its appointments until a UI opens again."
+          - "On Linux, logind removes `$XDG_RUNTIME_DIR` at logout for a user who is not lingering. A daemon can keep running and lose its socket. `phern doctor` says so in advance; `loginctl enable-linger` is the fix."
+      - title: The protocol
+        tone: limit
+        list:
+          - "`PROTOCOL_VERSION` is reported in `initialize` and nothing compares it."
+          - "Every JSON-RPC error carries code `-32000`. The name is in `error.data.reason`."
+          - "`session/attach` does not replay. Catch-up is `session/snapshot`, 2048 events a page."
+          - "One frame is at most 8 MiB, so one attachment is at most 5 MiB."
+          - "There are no per-client permissions."
+      - title: The adapters
+        tone: limit
+        list:
+          - "Only the Anthropic adapter writes prompt-cache markers. The other two rely on whatever caching the server does by itself."
+          - "Only the OpenAI-compatible adapter can ask a decision model (`/systemone`)."
+          - "Anthropic has no `response_format`; a structured reply there is an instruction and a validation, not a wire guarantee. Google is sent `responseMimeType: application/json` without the schema."
+          - "A mid-stream error type no table maps becomes `PROVIDER_ERROR`, which is not retried."
+          - "The request timeout is fixed in code: 600 s for the request, 15 s to connect."
+      - title: The package
+        tone: limit
+        list:
+          - "`ph_app` never imports `ph_rlm` or `ph_stabilize`; their rows arrive through the `ph.bundles` entry-point group. A profile whose bundle is not installed is not offered."
+          - "The web UI is the terminal in a canvas, not an HTML renderer."
+          - "`--mode rpc` serves one session over stdio: `initialize`, `session/new`, `session/prompt`, `session/events`, `tools/list` and `shutdown`."
+      - links:
+          - {to: "topic:client-visibility", label: "What a client can and cannot see"}
+          - {to: "topic:durability", label: "What survives a restart"}
+
+nodes:
+  person:
+    summary: |
+      Whoever starts `phern`: a person at a terminal, a browser tab on
+      `--mode web`, or a script reading stdout. The person is also who answers
+      an approval, a question from the agent, a project-trust prompt and a
+      profile-moved prompt, each of which reaches them through a front end.
+    blocks:
+      - title: What reaches a person, and how
+        table:
+          columns: [what, carried by]
+          rows:
+            - ["an approval for a tool call", "`approval/ask`, a request from the daemon to a client that declared `asks`"]
+            - ["a question the agent asks", "`question/ask`"]
+            - ["a named profile that moved since the session started", "`profile/ask`, answered `adopt`, `keep` or `later`"]
+            - ["whether to trust a project directory", "the front end's own modal; the answer travels as `trust` on `session/new`"]
+            - ["a missing credential", "the root's status `needs-credential`; the value goes in with `credentials/store`"]
+      - title: Limits
+        tone: limit
+        list:
+          - "With no front end attached an ask waits. The log holds it, and a root parked on a person reads `waiting`."
+          - "A script on `-p` has nobody to ask. The `headless` profile's posture decides without a person."
+      - links:
+          - {to: "topic:client-visibility", label: "What a client can and cannot see"}
+
+  cli:
+    title: phern CLI (ph_app.cli)
+    summary: |
+      A Typer application. With no subcommand it runs a prompt in one of seven
+      output modes, or prints the composed configuration. The mode decides
+      whether the harness runs in this process or in the daemon.
+    blocks:
+      - title: Output modes
+        table:
+          columns: ["--mode", what it does, where the harness runs]
+          rows:
+            - ["`text` (default, with `-p`)", "one prompt, the assistant's text on stdout, the session id and log path on stderr", "this process"]
+            - ["`json`", "the session log's own records, one line each, as they commit", "this process"]
+            - ["`transcript`", "what a person saw, from `session.transcript()`", "this process"]
+            - ["`rpc`", "JSON-RPC over stdio until `shutdown` or end of input", "this process"]
+            - ["`tui`", "the Textual terminal UI", "the daemon; one is started if none listens"]
+            - ["`web`", "the terminal UI in a browser tab; needs the `web` extra", "the daemon"]
+            - ["`trajectory`", "audits a stored log named by `--session`", "nowhere; nothing is mounted"]
+      - title: Options that shape a run
+        table:
+          columns: [option, meaning]
+          rows:
+            - ["`-p`, `--print <prompt>`", "run one prompt"]
+            - ["`--profile <name|path>`", "a shipped or named profile, or a path to a `.yaml`; `headless` by default"]
+            - ["`--patch '<yaml>'`", "a profile patch, repeatable, applied last as the `cli` layer; environment rows only"]
+            - ["`--session <id>`", "create or resume this session; with `-p`, one more turn of the same conversation"]
+            - ["`--model <key>`, `--provider <p> --model <m>`", "a listed model, or an exact route"]
+            - ["`-a`, `--attach <file>`", "a file sent with the prompt, repeatable"]
+            - ["`--resume <id>`, `--new`", "which session a UI opens"]
+            - ["`--no-spawn`, `--keep-daemon`, `--keep-alive 5m`", "whether a UI may start a daemon, and how long that daemon stays"]
+            - ["`--dump-config`", "print the composed rows and exit"]
+      - title: Examples
+        lang: bash
+        code: |
+          phern -p "summarize README.md" --profile anthropic
+          phern -p "and the tests?" --session notes-1 --profile anthropic
+          phern --mode json -p "hello" | jq .type
+          phern --mode tui --profile rlm --patch '{id: tool-todo, disabled: false}'
+          phern --profile rlm --dump-config
+      - title: Subcommands
+        table:
+          columns: [command, what it does]
+          rows:
+            - ["`phern daemon`", "run the supervisor in the foreground"]
+            - ["`phern agents`", "the client for a running daemon: list, `send`, `attach`, `status`, `schedule`, `owed`, `resume`, `probe`, `doctor`, `shutdown`"]
+            - ["`phern service`", "`start`, `stop`, `restart`, `status`, `resume`, `watch`; exit 0 ready, 1 down, 2 degraded"]
+            - ["`phern profiles`", "`show`, `session`, `diff`, `adopt`, `fold`"]
+            - ["`phern doctor`", "the path roots, then mount a profile and report what activated"]
+            - ["`phern config`", "what every row accepts and what a profile sets; composes, mounts nothing"]
+            - ["`phern events`", "the event producer and consumer matrix"]
+            - ["`phern revisions`", "every revision to what the model saw"]
+            - ["`phern workspaces gc`, `phern attachments gc`", "account for what stored sessions left behind"]
+      - title: Exit status of a one-shot
+        list:
+          - "0 when the turn completed."
+          - "1 when the turn ended in an error; stderr says `the turn failed:` and why."
+          - "2 for a refusal before the turn: a profile that does not load, a session another process holds, an attachment that cannot be read."
+      - title: Limits
+        tone: limit
+        list:
+          - "`--patch` given to a terminal reaches the daemon that terminal starts. A daemon already running does not receive it."
+          - "`--profile` names what a new session is created on. A session with a log runs on what its log records."
+          - "`phern doctor` reports what this invocation would produce. `phern agents doctor` reports what is in force in the running daemon."
+      - links:
+          - {to: "edge:cli-oneshot", label: "What a one-shot does"}
+          - {to: "edge:cli-tui", label: "What the terminal UI does"}
+
+  tui:
+    title: Textual TUI (PHTuiApp, DaemonSession)
+    summary: |
+      The terminal UI. It is a client: it mounts no profile and opens no
+      session file. `DaemonSession` answers every question the app asks by
+      calling the daemon, and it keeps a mirror of the root's log that it
+      extends as `session.event` frames arrive.
+    blocks:
+      - title: What it does at start
+        text: |
+          1. Find the socket. If none exists and `--no-spawn` was not given, start `phern daemon --ephemeral` with this run's `--profile` and `--patch`, under a lock so two terminals start one daemon.
+          2. `initialize` with `capabilities: ["asks"]`.
+          3. Offer this directory's previous sessions (`sessions/browse` with `cwd`) unless `--new`.
+          4. `session/new`, asking the person about an untrusted directory first, then `session/attach`.
+          5. Page history with `session/snapshot` from sequence 0 (`ph_app.daemon.follow`), then follow `session.event`.
+          6. Read the projections: `commands/list`, `screens/list`, `tools/list`, `skills/list`, `models/list`, `presets/list`, `session/children`, `daemon/lifetime`.
+      - title: Its own configuration
+        text: |
+          `$PH_HOME/tui.json` holds what only a terminal cares about: the theme, key bindings and which screens are hidden. It is not a profile layer. `/model` and `/theme` are the terminal's own commands; every other `/command` is sent as `session/command`.
+      - title: What it holds
+        tone: secure
+        list:
+          - "No session state of record. Closing the terminal detaches; the root keeps running."
+          - "No credential. A key typed into its prompt is sent with `credentials/store` and not kept."
+          - "A mirror `Session`, built from the `header` in the `session/new` reply and the events it is sent, so a screen can be drawn from it."
+      - title: Limits
+        tone: limit
+        list:
+          - "A daemon it started is ephemeral: it exits on the last detach unless a turn is running, a schedule is on the books or `--keep-alive` was given."
+          - "A modal is answered by one client. The others are told `ask.settled` and take theirs down."
+          - "Textual is pinned `>=8.2.5,<9`."
+      - links:
+          - {to: "edge:tui-socket", label: "The frames it sends and receives"}
+          - {to: "topic:client-visibility", label: "What a client can and cannot see"}
+
+  socket:
+    title: daemon.sock
+    summary: |
+      A unix socket at `$PH_RUNTIME/daemon.sock`, bound by `phern daemon`. Each
+      connection is one `Peer`: a reader, a writer with a bounded outbox, and a
+      table of requests awaiting replies. Both ends may ask; a frame with a
+      `method` is a question and a frame without one is an answer.
+    blocks:
+      - title: Framing
+        table:
+          columns: [rule, value]
+          rows:
+            - ["one frame", "one JSON object on one line, UTF-8"]
+            - ["largest line", "8 MiB (`ph.framing.MAX_LINE`)"]
+            - ["largest attachment in one frame", "5 MiB before base64"]
+            - ["a frame that does not parse", "ends the connection; after a bad frame the next boundary is unknown"]
+            - ["outbox", "1024 frames queued for one peer; past that the root drops the watcher"]
+            - ["requests handled at once for one peer", "64"]
+            - ["ids", "a client counts integers; the daemon mints `s1`, `s2`, ... for its own asks"]
+      - title: The envelope
+        struct: ph_app.protocol:RequestFrame
+      - title: An error
+        struct: ph_app.protocol:ErrorBody
+      - title: How it is bound
+        text: |
+          1. A socket file left by a crashed daemon is removed; one that answers is another daemon, and the start is refused (`daemon_unavailable`).
+          2. `anyio.create_unix_listener`, then `chmod 0600`.
+          3. The socket's inode is remembered. A watch (inotify or kqueue) tells the daemon when the path stops being its socket; it then writes `supervisor/unreachable` into each root's log.
+          4. With `--probe-bind host:port` a second, TCP listener answers `startup`, `ready` and `live` over HTTP.
+      - title: Security
+        tone: secure
+        list:
+          - "Mode `0600` in a `0700` directory: the user who started the daemon, and nobody else."
+          - "Per boot and per user. It is under the runtime root so a synced home directory never carries it to another machine."
+      - title: Limits
+        tone: limit
+        list:
+          - "The path must fit `AF_UNIX`'s 107 bytes. A deep `$PH_RUNTIME` fails the bind."
+          - "A knock (connect and close) is not a client. Only a connection that sent a frame counts toward keeping an ephemeral daemon up."
+      - links:
+          - {to: "topic:protocol", label: "Every verb"}
+          - {to: "edge:tui-socket", label: "Real frames"}
+
+  supervisor:
+    summary: |
+      The daemon's core: a table of roots. A root is a mounted profile, a
+      session, an agent and a wake channel, driven by one anyio task whether or
+      not a client is attached. Clients name a root by session id; attaching
+      subscribes, detaching unsubscribes, and neither starts or stops the work.
+    blocks:
+      - title: The life of a root
+        text: |
+          1. **Started** by any verb that names it through `Supervisor.start`: `session/new`, `session/attach`, a mutation, a schedule coming due, or a resume pass. Two callers naming one new root share one mount.
+          2. **Mounted** by `ph_app.runtime.mount_session` in the environment its own log records, under the session's lease.
+          3. **Driven**: a prompt is spliced into the agent's inbox (logged first), the doorbell rings, the root's task runs the turn.
+          4. **Watched**: every record is published to subscribers as `session.event`; status changes as `session.status`.
+          5. **Released** (passivated) after `--passivate-after` minutes of quiet (90 by default) when nothing holds it: `supervisor/passivated` is written, the log is flushed, the mount is unwound and the lease released.
+          6. **Resumed** by the next verb that names it. The same path as a first start; the log is the only input.
+      - title: What holds a root mounted
+        list:
+          - "It is doing something: any status outside `idle`, `waiting`, `failed`, `needs-credential`, `needs-profile-decision`. `retrying` counts as work."
+          - "A client is attached."
+          - "A sub-agent beneath it is still working, read from the child's own log."
+          - "It has a live schedule."
+      - title: A root as a client sees it
+        struct: ph_app.payloads:RootDescription
+      - title: Statuses
+        table:
+          columns: [status, meaning]
+          rows:
+            - ["`idle`, `running`", "the agent's own phase; a prompt in the inbox already reads `running`"]
+            - ["`waiting`", "an approval or question is open and nobody has answered"]
+            - ["`retrying`", "between attempts on the crash-retry ladder"]
+            - ["`failed`", "the retry ladder gave up (`supervisor/failed`); nothing moves it again unasked"]
+            - ["`needs-credential`", "a route's credential is not set; the name is in the log"]
+            - ["`needs-profile-decision`", "its named profile moved and a person has not said `adopt`, `keep` or `later`"]
+            - ["`passivated`", "published once as the root is released"]
+      - title: What it writes to a root's log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`profile/base`", "a new session's first record: the environment rows it starts on"]
+            - ["`client/command`, `client/command-settled`", "around a keyed mutation"]
+            - ["`supervisor/retry`, `supervisor/recovered`, `supervisor/failed`", "the crash-retry ladder"]
+            - ["`supervisor/passivated`", "before a release, with `idleMs`"]
+            - ["`supervisor/unreachable`", "the socket path stopped being this daemon's"]
+            - ["`supervisor/violated`", "an invariant check found drift"]
+            - ["`credential/needed`, `credential/supplied`", "a hold on a missing credential, and its end"]
+      - record: supervisor/passivated
+        example: |
+          {"type": "supervisor/passivated", "data": {"idleMs": 5400000}}
+      - title: phern daemon
+        table:
+          columns: [flag, default, meaning]
+          rows:
+            - ["`--profile`", "`headless`", "the profile new sessions start on"]
+            - ["`--patch`", "", "environment patches for the sessions this daemon starts"]
+            - ["`--provider`, `--model`", "", "the route new roots run on, in place of the profile's default"]
+            - ["`--max-concurrent-children`", "", "sub-agents running at once across every root; the rest queue"]
+            - ["`--passivate-after`", "90", "minutes of quiet before a root is released, or `off`"]
+            - ["`--ephemeral`", "off", "exit once no client, root or appointment needs it"]
+            - ["`--keep-alive`", "0", "stay this long after the last client leaves; implies `--ephemeral`"]
+            - ["`--probe-bind host:port`", "", "answer startup, readiness and liveness over HTTP"]
+            - ["`--resume-owed`", "off", "mount every stored root that owes work once the socket is up"]
+            - ["`--continue-interrupted`", "off", "on resume, also continue a person's cut-short turn"]
+      - title: phern service
+        text: |
+          The client an orchestrator drives on a host with no init system. `start` spawns `phern daemon --resume-owed` with whatever options follow, waits for readiness and prints the resume pass. `stop` sends `shutdown` and waits for the process to go. `status` is the readiness answer and the owed table. `watch` loops: start when down, resume when ready, report when degraded. Each exits 0 when the daemon is ready, 1 when it is down, 2 when it is degraded. It passes no environment and reads no files; `contrib/` has a systemd unit and a manifest for hosts that have an init system.
+      - title: Durability
+        tone: durable
+        list:
+          - "The supervisor holds nothing that is not in a log or one of its two indexes. A restarted daemon serves the same roots from the same files."
+          - "A keyed mutation is on disk before its reply is sent."
+          - "A release is recorded before it happens, so a quiet root's log does not read as a crash."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "One process holds a session at a time: the lease refuses a second with `session_already_active`."
+          - "A project directory is mounted only after the trust check."
+          - "Each root has its own `Context`, so one root's rows, tools and credentials references are not another's."
+      - title: Limits
+        tone: limit
+        list:
+          - "All roots share one process, its memory and its CPU."
+          - "A read verb such as `session/status` does not mount a root; a released root answers `no_such_session` until something starts it."
+          - "The staged-attachment tray does not survive a release or a restart. Held credential values do not survive a restart."
+      - links:
+          - {to: "topic:durability", label: "What survives a restart"}
+          - {to: "durability#node:supervisor", label: "The supervisor on the durability page"}
+          - {to: "topic:limits", label: "The daemon's stated non-guarantees"}
+
+  oneshot:
+    title: One-shot modes (text, json, transcript, rpc)
+    summary: |
+      Four modes that run the harness inside the `phern` process and exit.
+      `text`, `json` and `transcript` share one sequence
+      (`ph_app.runtime.prompted`): mount, open a session, drive one prompt to
+      idle, flush. `rpc` mounts once and serves JSON-RPC on stdio.
+    blocks:
+      - title: What each writes
+        table:
+          columns: [mode, stdout, stderr]
+          rows:
+            - ["`text`", "the assistant's text", "`session <id> · <n> events · <log path>`"]
+            - ["`json`", "every log record as it commits, one JSON object a line, camelCase: the same envelopes the stored JSONL holds", ""]
+            - ["`transcript`", "the conversation as the person saw it, including turns a compaction has since replaced for the model", ""]
+            - ["`rpc`", "JSON-RPC replies and `session.event` / `session.status` notifications", ""]
+      - title: One record, as json mode prints it
+        lang: json
+        note: The same shape a daemon client receives inside `session.event`.
+        code: |
+          {"type":"user/message","seq":8,"time":1794882335014,"data":{"id":"4fb47fb5-6657-48c1-a239-eb9788cc3e8c","role":"user","content":[{"type":"text","text":"hello"}],"source":{"kind":"user"}},"surfaceOp":"append","batch":{"first":6,"count":3}}
+      - title: The rpc method table
+        table:
+          columns: [method, note]
+          rows:
+            - ["`initialize`, `daemon/hello`", "answers `CapabilityBlock` with `sessions`, `streaming` and `tools`; none of the supervising capabilities"]
+            - ["`session/new`", "opens or resumes the one session"]
+            - ["`session/prompt`", "queues a turn"]
+            - ["`session/events`", "every event of the session this process opened"]
+            - ["`tools/list`", "the profile's tools"]
+            - ["`shutdown`", "ends the process"]
+      - title: Durability
+        tone: durable
+        list:
+          - "A one-shot opens a session, it does not create one over an existing log. `phern -p --session x` twice is two turns of one conversation."
+          - "The log is flushed before the process exits. If a write failed, the exit status says so."
+          - "A resumed session mounts in its own log's environment, whatever `--profile` this run was given."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "It takes the session's lease. A session the daemon has mounted is refused, not written to by two processes."
+          - "A sub-agent's log is refused as a session to open."
+      - title: Limits
+        tone: limit
+        list:
+          - "Nobody is attached, so nothing can be asked. The profile's posture answers."
+          - "It ends when the turn ends. A schedule or a goal that wants another turn needs a daemon."
+      - links:
+          - {to: "edge:oneshot-runtime", label: "How it mounts"}
+
+  runtime:
+    title: ph_app.runtime (mount_session)
+    summary: |
+      The one place that knows how a pH process starts. The daemon's roots,
+      `phern -p` and `--mode rpc` all mount through it, so no mode can drift
+      from the profile semantics. It takes a composed profile and what the
+      session's log says, and returns a mounted `Context`.
+    blocks:
+      - title: What it does
+        text: |
+          1. `read_start(session_id)`: read the stored log, off the event loop, for the environment it records and for whether it is a sub-agent's.
+          2. Refuse a sub-agent's log (`SESSION_IS_SUBAGENT`).
+          3. `session_profile(requested, environment)`: a new session gets the requested profile; a stored one gets its own `profile/base` and overrides, with the host's deployment rows.
+          4. `mounted(profile)`: a fresh `Context`, `ctx.named_profiles` provided, then `Profile.mount`. On exit, `ctx.drain()` and `ctx.dispose()`, each shielded.
+          5. If the profile's own refusal stops the mount and the session had adopted a new version, write `profile/withdrawn`, and mount the version it had.
+      - title: What a session's log says about its start
+        struct: ph_app.sessions:RecordedStart
+      - title: The profile a session starts on
+        struct: ph_app.profiles:StartingProfile
+      - title: Durability
+        tone: durable
+        list:
+          - "A version of a named profile that does not mount is withdrawn in the log, so the session opens on the version it had and is not refused at every later start."
+          - "Disposal is structural: every lease, worktree and kernel the mount took unwinds with its scope."
+      - title: Limits
+        tone: limit
+        list:
+          - "Only the profile's own refusals withdraw an adoption: a row that does not resolve, one that declines, a config its model rejects. A full disk fails the start."
+          - "Repeated mounts of one profile never share a `Context`."
+      - links:
+          - {to: "edge:runtime-core", label: "Profile.mount"}
+
+  profiles:
+    title: Profile table (ph_app.profiles)
+    summary: |
+      `PROFILES` maps a name to an ordered tuple of layers. A layer is a YAML
+      path this package can name, or a `Bundle` another distribution provides
+      through the `ph.bundles` entry-point group. A person's named profile
+      `extends` one of these and holds only the rows that differ.
+    blocks:
+      - title: The shipped table
+        table:
+          columns: [profile, layers, model route]
+          rows:
+            - ["`base`", "ph-core `base`, `stabilize`*", "none"]
+            - ["`headless` (default)", "`base`, `headless`, `stabilize`*", "the fake adapter"]
+            - ["`tui`", "`headless` layers + `tui.yaml`", "the fake adapter"]
+            - ["`anthropic`", "`base`, `stabilize`*, `anthropic.yaml`", "`llm-anthropic`"]
+            - ["`google`", "`base`, `stabilize`*, `google.yaml`", "`llm-google`"]
+            - ["`deepseek`", "`base`, `stabilize`*, `deepseek.yaml`", "`llm-openai-compatible`"]
+            - ["`llama`", "`base`, `stabilize`*, `llama.yaml`", "`llm-openai-compatible` on localhost"]
+            - ["`rlm`", "`tui` layers + bundle `rlm`", "the fake adapter until a profile adds one"]
+            - ["`rlm-stable`", "`rlm` layers + `stabilize` (required) + `rlm-stable.yaml`", "as `rlm`"]
+            - ["`rlm-indexed`", "`rlm-stable` layers + bundles `utcp`, `code-graph`, `text-index`", "as `rlm`"]
+            - ["`rlm-clm`", "`rlm` layers + bundle `clm`", "as `rlm`"]
+      - title: About the asterisk
+        text: |
+          `stabilize`* is `Bundle("stabilize", required=False)`: every shipped profile layers it, and an install without `ph-stabilize` composes the same profile without compaction. A required bundle that does not resolve removes the profile from the offered list, and the refusal names the package to install. `presentation.yaml` (the trajectory and diff screens) is layered into every named profile outside this table.
+      - title: One layer
+        struct: ph_app.profiles:Bundle
+      - title: A named profile
+        lang: yaml
+        note: Sparse. `extends` names a shipped profile, one level. Rows here may set `environment` rows only.
+        code: |
+          # $PH_HOME/profiles/work.yaml
+          extends: rlm
+          rows:
+            - id: models
+              config:
+                default: main
+                models:
+                  main: {provider: anthropic, model: claude-sonnet-5}
+      - title: A named profile, read
+        struct: ph_app.named_profiles:NamedProfile
+      - title: Order of composition
+        text: |
+          1. the shipped layers of the profile it extends
+          2. `rows:` of `$PH_HOME/daemon.yaml` (deployment rows)
+          3. the named profile's rows, then any unfolded drop-ins in `$PH_HOME/profiles/<name>.d/`
+          4. `--patch` entries, as the `cli` layer
+          5. during a session: `profile/override` records, applied in log order
+
+          An entry that names a row by `id` is a patch. It may set `disabled`, replace `config`, `insert` or `remove`. A patch replaces the row's whole config.
+      - title: Durability
+        tone: durable
+        list:
+          - "A session records the environment it started on (`profile/base`). Editing a named profile does not change a running session; `phern profiles diff` shows how far behind each one is, and `adopt` or `/profile use` moves it at its next start."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "A row set in the wrong layer is refused by `compose_rows`: a named profile cannot change persistence or the credential source."
+          - "A name must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` to be saved as a file."
+      - title: Limits
+        tone: limit
+        list:
+          - "`extends` is one level and names a shipped profile, never another person's file."
+          - "A name in `$PH_HOME/profiles/` shadows a shipped profile of the same name."
+          - "What a profile does depends on which bundles are installed. `phern doctor` reports what activated."
+      - links:
+          - {to: "topic:profiles-howto", label: "Layers and who may set what"}
+          - {to: "topic:model-route", label: "Configuring a model route"}
+
+  adapters:
+    title: Adapters (llm-anthropic, llm-google, llm-openai-compatible)
+    summary: |
+      Three rows, each of which registers a provider on `ctx.llm`. An adapter
+      turns a `GenerateOptions` into its provider's request body, posts it, and
+      turns the provider's SSE stream into `StreamChunk`s. It is the only code
+      that turns a credential name into a header.
+    blocks:
+      - row: llm-anthropic
+      - row: llm-google
+      - row: llm-openai-compatible
+      - title: One route of the OpenAI-compatible row
+        struct: ph_app.adapters.openai_compatible:ProviderProfile
+      - title: In a profile
+        lang: yaml
+        note: See [Configuring a model route](topic:model-route) for a whole profile.
+        code: |
+          - insert:
+              - id: llm-anthropic
+                name: llm-anthropic
+                config:
+                  provider: anthropic
+                  apiKeyEnv: ANTHROPIC_API_KEY     # the name of a variable
+                  contextWindow: 200000
+                  defaultMaxTokens: 8192
+                  cacheControl: true
+                  uploads: [application/pdf]       # send PDFs by reference through the Files API
+      - title: What the loop hands an adapter
+        struct: ph.llm.types:GenerateOptions
+      - title: What an adapter says about a route
+        struct: ph.llm.adapter:ResolvedModel
+      - title: How the three differ
+        table:
+          columns: ["", Anthropic, Google, OpenAI-compatible]
+          rows:
+            - ["endpoint", "`{baseUrl}/messages`", "`{baseUrl}/models/{model}:streamGenerateContent?alt=sse`", "`{baseUrl}/chat/completions`"]
+            - ["credential header", "`x-api-key`", "`x-goog-api-key`", "`Authorization: Bearer`"]
+            - ["system prompt", "`system`, a marked block list", "`systemInstruction`", "a `system` message"]
+            - ["tool schema", "`tools[].input_schema`", "`tools[].functionDeclarations[]`", "`tools[].function.parameters`"]
+            - ["max tokens", "`max_tokens`, always sent", "`generationConfig.maxOutputTokens`", "`max_tokens`, when known"]
+            - ["structured reply", "not on the wire", "`responseMimeType: application/json`", "`response_format` with `strict: true`"]
+            - ["prompt-cache markers", "four `cache_control` breakpoints", "none", "none"]
+            - ["uploads", "Files API under a beta header", "resumable upload, polled until ready", "`/files`, PDF only"]
+            - ["decision model", "no", "no", "`/systemone`"]
+      - title: Prompt-cache markers (Anthropic)
+        text: |
+          With `cacheControl: true` (the default) the adapter spends Anthropic's four breakpoints as: the last tool, the system block, and two message checkpoints. A checkpoint is not the newest message, because that index changes with every request and would never be read back. It advances every four messages (`CHECKPOINT_EVERY`), and the previous checkpoint is kept so the step is paid once. Set `cacheControl: false` for a gateway that refuses the field; the system prompt is then sent as a plain string.
+      - title: Uploads
+        text: |
+          A MIME type listed in `uploads` is sent once through the provider's Files API and referenced by id afterwards, so a PDF is not re-encoded on every step. Handles are kept by `ctx.uploads`. When a provider says a referenced file is gone, the adapter forgets the handle and raises `FILE_EXPIRED`, which is a transient code: the retry uploads again.
+      - title: Services
+        list:
+          - "Needs `ctx.llm` to register on. Reads `ctx.credentials` when a request is sent, and `ctx.attachments` and `ctx.uploads` when a message carries media."
+          - "Each row owns one `httpx.AsyncClient`, closed with the row's scope."
+          - "The OpenAI-compatible row asks a server for its context window at mount (`contextWindowProbes`, 2 s each) and contributes a `phern doctor` section with the answer."
+      - title: Durability
+        tone: durable
+        list:
+          - "An adapter keeps nothing. The request it built is rebuilt from the log at each step."
+          - "A stream that fails halfway is not kept as an answer: an error finish ends the stream and the loop's retry policy decides."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "`apiKeyEnv` is a name. `resolve_secret` reads the value through `ctx.credentials` at the edge, into a local that goes out of scope with the request. No config, log record or frame holds it."
+          - "A child agent calls the same adapters as its parent: they belong to the mount."
+      - title: Limits
+        tone: limit
+        list:
+          - "Every OpenAI-shaped route goes in one `llm-openai-compatible` row's `profiles` list. A second row of that kind in one profile collides."
+          - "Sampling settings a wire does not take are dropped with a warning; `samplingExtras` adds `topK` and `minP` for servers that take them."
+          - "Pixel limits and accepted MIME types are declared per route, not discovered."
+      - links:
+          - {to: "edge:adapters-models", label: "Bodies, streams, errors"}
+          - {to: "edge:core-adapters", label: "How ph-core calls an adapter"}
+          - {to: "topic:model-route", label: "Configuring a model route"}
+
+  models:
+    title: Model servers
+    summary: |
+      Outside parties: Anthropic's messages API, Google's Gemini API, and any
+      server that speaks the OpenAI chat-completions shape (OpenAI, DeepSeek,
+      llama.cpp, vLLM, Ollama). A decision model is a second kind of server
+      endpoint, `/systemone`, that answers typed questions with probabilities.
+    blocks:
+      - title: What a chat server is sent, and what it sends back
+        table:
+          columns: [provider, request, stream]
+          rows:
+            - ["Anthropic", "`POST /messages` with `stream: true`", "named SSE events: `message_start`, `content_block_start`, `content_block_delta`, `content_block_stop`, `message_delta`, `error`"]
+            - ["Google", "`POST /models/<model>:streamGenerateContent?alt=sse`", "SSE payloads with `candidates[].content.parts[]`, `finishReason`, `usageMetadata`"]
+            - ["OpenAI-compatible", "`POST /chat/completions` with `stream: true` and `stream_options.include_usage`", "SSE payloads with `choices[].delta`, `finish_reason`, a final `usage`"]
+      - title: What a decision server is sent
+        lang: json
+        note: Built by `_systemone_body`. `model` is left out when empty. One request for every question; the reply is whole, not a stream.
+        code: |
+          POST {baseUrl}/systemone
+          {"state": "assistant: I have finished step 2. Shall I continue?",
+           "questions": {
+             "waiting": {"type": "noul", "instructions": "Is the assistant waiting for the user?"},
+             "next": {"type": "choice", "instructions": "What should happen next?",
+                      "criteria": {"continue": "carry on with the plan", "stop": null}},
+             "risk": {"type": "score", "instructions": "How risky is the next step?",
+                      "criteria": ["none", "some", "high"]}},
+           "model": "clef"}
+      - title: Limits
+        tone: limit
+        list:
+          - "A llama.cpp reads a decision in one batch, so what it takes is bounded by its `--ubatch-size` (512 unless raised), not its context window. `maxDecisionTokens` on the route says what the server was started with."
+          - "A server without `/systemone`, or one serving a chat model there, answers with a status and its own sentence; that is the error."
+          - "A local server's context window is per slot. The `llama` profile asks `/props` for it and falls back to `LLAMA_CONTEXT_WINDOW`, 32768."
+      - links:
+          - {to: "edge:adapters-models", label: "The request bodies and the stream mapping"}
+          - {to: "self-steering#node:decider", label: "The decision model on the self-steering page"}
+
+  core:
+    title: ph-core
+    summary: |
+      The harness: the cordis `Context` that rows mount into, the seams, the
+      agent loop and the session log. phern adds a front door and three adapter
+      rows; everything an agent does happens here. `ph_app` composes ph-core's
+      `base` and `headless` documents into every profile it ships.
+    blocks:
+      - title: What phern uses from it
+        table:
+          columns: [service or module, used for]
+          rows:
+            - ["`ph.cordis.Profile`, `Context`", "composing documents into rows and mounting them"]
+            - ["`ph.persistence.open_session`", "opening or resuming a session under its lease"]
+            - ["`ctx.agents`, the `AgentDriver`", "prompting, steering and canceling the root agent"]
+            - ["`ctx.llm`", "where the adapter rows register"]
+            - ["`ctx.credentials`", "turning a credential name into a value at request time"]
+            - ["`ph.session_profile`", "a session's base, overrides and adoptions, all as log records"]
+            - ["`ph.framing`", "JSON lines, shared with the session's tool commands"]
+            - ["the `session/event` bus event", "what the daemon relays to clients as `session.event`"]
+      - event: session/event
+      - title: Rows phern ships on top
+        bundle: ph_app/profiles/presentation.yaml
+      - links:
+          - {to: "ph-core", label: "ph-core: the loop, the log and the seams"}
+          - {to: "overview", label: "How the nine packages fit"}
+
+edges:
+  person-cli:
+    transport: process
+    summary: |
+      A person runs `phern` with arguments. Typer parses them; the callback
+      either hands off to a subcommand, starts a front end, or runs one prompt.
+      What comes back is text on stdout and stderr and an exit status.
+    blocks:
+      - title: The forms
+        lang: bash
+        code: |
+          phern -p "<prompt>" [--profile P] [--session ID] [--model K] [-a FILE]
+          phern --mode json|transcript -p "<prompt>"
+          phern --mode rpc
+          phern --mode tui|web [--resume ID | --new] [--no-spawn] [--keep-alive 5m]
+          phern --mode trajectory --session <id|path>
+          phern --dump-config [--profile P] [--patch '<yaml>']
+          phern daemon | agents | service | profiles | doctor | config | events
+      - title: A patch on the command line
+        lang: bash
+        note: YAML flow syntax. Repeatable; each is an entry of the `cli` layer and may set environment rows only.
+        code: |
+          --patch '{id: fs, config: {root: /tmp/x}}'
+          --patch '{id: tool-todo, disabled: false}'
+          --patch '{id: hitl, remove: true}'
+          --patch '{insert: [{id: llm-local, name: llm-openai-compatible, config: {profiles: [{provider: llama}]}}]}'
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "With no `-p` and no mode that runs without one, the help is printed."
+          - "An unknown profile, or one whose bundle is not installed, exits 2 and names the package to install."
+          - "`SIGINT` and `SIGTERM` stop a one-shot through the same path as a normal end, so the log is flushed."
+
+  cli-tui:
+    transport: call
+    summary: |
+      `--mode tui` calls `run_tui` in the same process. The CLI passes the
+      command line a daemon should be started with, the model choice, the
+      profile name and the session to open. It does not compose the profile:
+      the daemon will.
+    blocks:
+      - title: What is handed over
+        table:
+          columns: [argument, from]
+          rows:
+            - ["`daemon_argv`", "`phern daemon --ephemeral --profile ... --patch ...`, with `--keep-alive` when asked; `--keep-daemon` drops `--ephemeral`"]
+            - ["`model_choice`", "`--model`, `--provider`"]
+            - ["`profile`", "`--profile`, sent as `profile` on `session/new`"]
+            - ["`session_id`", "`--session` or `--resume`"]
+            - ["`spawn`", "false with `--no-spawn`"]
+            - ["`offer_sessions`", "false with `--new`"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "No socket and `--no-spawn`: the UI refuses to start (`daemon_absent`)."
+          - "A socket that exists and does not answer is not replaced. It is the aftermath of a crash or a logout reap, and starting a second daemon there would meet the first one's leases."
+          - "`--mode web` is the same hand-off behind a small web server; each browser tab runs the terminal against the same session."
+
+  cli-oneshot:
+    transport: call
+    summary: |
+      With `-p`, the CLI composes the profile itself (`profile_or_exit`) and
+      calls the mode's runner: `run_print`, `run_json` or `run_transcript`.
+      `--mode rpc` calls `run_rpc` with the composed profile and no prompt. The
+      runner returns a small result the CLI prints from.
+    blocks:
+      - title: The call
+        lang: python
+        code: |
+          composed = profile_or_exit(profile, patch)          # documents -> Profile, or exit 2
+          route = partial(_MODES[mode], composed, prompt,
+                          choice=choice, session_id=session_id, attachments=attach or [])
+          outcome = run_until_signaled(route, on_stop=_say_stopped)
+      - title: What is refused before a turn
+        table:
+          columns: [error, cause]
+          rows:
+            - ["`MountRefusal`", "a row declined to mount"]
+            - ["`LoaderError`", "a document or a row did not load"]
+            - ["`ModelChoiceError`", "`--model` names a key the profile does not list"]
+            - ["`SessionBusy`", "another process holds the session"]
+            - ["`SessionForkError`", "the id is a sub-agent's log"]
+            - ["`AttachmentUnavailable`", "an `-a` file cannot be read or is not accepted"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Each of those exits 2 with one line on stderr."
+          - "A turn that ends in an error exits 1 in `text` mode."
+
+  cli-profiles:
+    transport: file
+    summary: |
+      `--profile` is resolved to an ordered list of YAML documents, read from
+      disk and composed into a `Profile`: rows with their config, each tagged
+      with the layer that last set it. Nothing is mounted by this step.
+    blocks:
+      - title: How a name resolves
+        text: |
+          1. A value that is a path to a `.yaml` is used directly.
+          2. `$PH_HOME/profiles/<name>.yaml`, if present: its `extends` names the shipped profile to compose over.
+          3. Otherwise the shipped `PROFILES[name]`.
+          4. Each `Bundle` layer is resolved through the `ph.bundles` entry-point group.
+      - title: What `--dump-config` prints
+        lang: yaml
+        note: From `phern --profile work --dump-config`. `layer` is the document that last set the row.
+        code: |
+          - id: llm-anthropic
+            name: llm-anthropic
+            config:
+              provider: anthropic
+              apiKeyEnv: ANTHROPIC_API_KEY
+              contextWindow: 200000
+              defaultMaxTokens: 8192
+              cacheControl: true
+            layer: <PH_HOME>/profiles/work.yaml
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A row in a layer that may not set its kind is refused, naming the configuration it belongs in."
+          - "`${env:NAME:-default}` is the only interpolation in a document. `--dump-config` prints it unexpanded."
+          - "Config is validated against the row's model at mount. `phern config` shows the options without mounting."
+      - links:
+          - {to: "node:profiles", label: "The shipped table and named profiles"}
+
+  tui-socket:
+    transport: socket
+    summary: |
+      The TUI (or `phern agents`, or any client) writes JSON-RPC requests on the
+      socket and reads replies and notifications from it. The daemon also sends
+      requests of its own when a turn needs a person. Every line below was
+      captured from a real `phern daemon --profile headless`.
+    blocks:
+      - title: The handshake
+        lang: json
+        note: |
+          Optional but needed for asks: a client that never declares `asks` is
+          served and is never put in front of a person. `daemon/hello` is the
+          same call. The reply's capabilities are all `true`; one that is not
+          served is absent.
+        code: |
+          -> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":["asks"]}}
+          <- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":10,"capabilities":{"sessions":true,"streaming":true,"roots":true,"attach":true,"cursors":true,"snapshots":true,"asks":true,"browse":true,"browse-cwd":true,"projections":true,"attachments":true,"staging":true,"shell":true}}}
+      - struct: ph_app.params:InitializeParams
+      - struct: ph_app.protocol:CapabilityBlock
+      - title: session/new
+        lang: json
+        note: The first reply is the trust gate. The id was left out, so the daemon named the session. The directory is shortened to `/work/app` here.
+        code: |
+          -> {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/work/app","trust":"","choice":{"key":"","provider":"","model":""},"profile":""}}
+          <- {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"/work/app has not been trusted; ask, then send trust","data":{"reason":"untrusted_project"}}}
+          -> {"jsonrpc":"2.0","id":22,"method":"session/new","params":{"cwd":"/work/app","trust":"once","choice":{"key":"","provider":"","model":""},"profile":""}}
+          <- {"jsonrpc":"2.0","id":22,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","watchers":0,"cursor":{"generation":"1794882334990","sequence":1},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","header":{"version":4,"id":"20261117T022534-fa5c9a","createdAt":1794882334990,"cwd":"/work/app","family":"c04137-20261117T022534-fa5c9a"}}}
+      - struct: ph_app.params:NewSessionParams
+      - struct: ph_app.payloads:NewSessionReply
+      - title: session/attach
+        lang: json
+        note: Attach subscribes to what happens next and does not replay. `cursor` says where the live stream begins.
+        code: |
+          -> {"jsonrpc":"2.0","id":4,"method":"session/attach","params":{"sessionId":"20261117T022534-fa5c9a"}}
+          <- {"jsonrpc":"2.0","id":4,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","watchers":1,"cursor":{"generation":"1794882334990","sequence":1},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","readings":[{"id":"posture","slot":"line","text":"read-only accepted","level":"normal"},{"id":"sandbox-mode","slot":"session","text":"sandbox read-only","level":"normal"}]}}
+      - struct: ph_app.protocol:SessionParams
+      - struct: ph_app.payloads:AttachReply
+      - title: A cursor
+        struct: ph_app.protocol:Cursor
+      - title: session/prompt, and what a watcher is sent
+        lang: json
+        note: |
+          The reply (id 5) arrives after the key, the message and the settle are
+          on disk, and by then the turn had already begun. Eighteen
+          `session.event` frames were sent for this turn; four are shown, with
+          the footer readings and one message id cut short.
+        code: |
+          -> {"jsonrpc":"2.0","id":5,"method":"session/prompt","params":{"sessionId":"20261117T022534-fa5c9a","clientId":"tui-1","commandId":"c1","prompt":"hello","attachments":[]}}
+          <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"client/command","seq":1,"time":1794882335010,"data":{"command":"tui-1:c1"},"ignorable":true}}}
+          <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"agent/inbox/spliced","seq":2,"time":1794882335011,"data":{"target":"next-turn","start":0,"inserted":[{"id":"4fb47fb5-...","role":"user","content":[{"type":"text","text":"hello"}],"source":{"kind":"user"}}]}}}}
+          <- {"jsonrpc":"2.0","method":"session.status","params":{"status":"running","readings":[...],"sessionId":"20261117T022534-fa5c9a"}}
+          <- {"jsonrpc":"2.0","id":5,"result":{"sessionId":"20261117T022534-fa5c9a","status":"running","watchers":1,"cursor":{"generation":"1794882334990","sequence":3},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":""}}
+          <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"assistant/chunk","seq":12,"time":1794882335018,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"text-delta","index":0,"text":"ok"}}}}}
+          <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"turn/end","seq":18,"time":1794882335019,"data":{"turn":1,"reason":{"kind":"completed"}}}}}
+          <- {"jsonrpc":"2.0","method":"session.status","params":{"status":"idle","lastTurn":"completed","readings":[...],"sessionId":"20261117T022534-fa5c9a"}}
+      - struct: ph_app.params:PromptParams
+      - struct: ph_app.payloads:RootDescription
+      - title: The same prompt sent again
+        lang: json
+        note: A client that reconnects cannot know whether its first send landed. The same key is answered, not acted on.
+        code: |
+          -> {"jsonrpc":"2.0","id":6,"method":"session/prompt","params":{"sessionId":"20261117T022534-fa5c9a","clientId":"tui-1","commandId":"c1","prompt":"hello","attachments":[]}}
+          <- {"jsonrpc":"2.0","id":6,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","lastTurn":"completed", ..., "repeated":true,"outcome":"settled"}}
+      - struct: ph_app.payloads:MutationRepeated
+      - title: The session.event notification
+        struct: ph_app.payloads:SessionEventNotice
+      - title: The session.status notification
+        struct: ph_app.payloads:SessionStatusNotice
+      - title: Catching up
+        lang: json
+        note: With no cursor the page starts at 0. `from` is where the read began; a cursor from another incarnation of the log also reads from 0.
+        code: |
+          -> {"jsonrpc":"2.0","id":7,"method":"session/snapshot","params":{"sessionId":"20261117T022534-fa5c9a"}}
+          <- {"jsonrpc":"2.0","id":7,"result":{"sessionId":"20261117T022534-fa5c9a","from":0,"cursor":{"generation":"1794882334990","sequence":19},"more":false,"events":[{"type":"profile/base","seq":0, ...}, ...]}}
+      - struct: ph_app.payloads:SnapshotPage
+      - title: Refusals
+        lang: json
+        code: |
+          <- {"jsonrpc":"2.0","id":8,"error":{"code":-32000,"message":"unknown method \"session/frobnicate\"","data":{"reason":"unknown_method"}}}
+          <- {"jsonrpc":"2.0","id":9,"error":{"code":-32000,"message":"session/status: sessionId: Field required","data":{"reason":"invalid_params"}}}
+          <- {"jsonrpc":"2.0","id":10,"error":{"code":-32000,"message":"no session \"nope\"","data":{"reason":"no_such_session"}}}
+          <- {"jsonrpc":"2.0","id":11,"error":{"code":-32000,"message":"session/attach: sessionId: Value error, sessionId must be alphanumerics, dots, dashes and underscores, starting with a letter or a digit","data":{"reason":"invalid_params"}}}
+          <- {"jsonrpc":"2.0","id":12,"error":{"code":-32000,"message":"session/prompt: bogus: Extra inputs are not permitted","data":{"reason":"invalid_params"}}}
+      - title: Leaving
+        lang: json
+        note: "`shutdown` has no id and gets no reply. Detaching twice is not an error."
+        code: |
+          -> {"jsonrpc":"2.0","id":21,"method":"session/detach","params":{"sessionId":"20261117T022534-fa5c9a"}}
+          <- {"jsonrpc":"2.0","id":21,"result":{"sessionId":"20261117T022534-fa5c9a","detached":true}}
+          -> {"jsonrpc":"2.0","method":"shutdown","params":{}}
+      - title: An ask, daemon to client
+        struct: ph_app.payloads:ApprovalAsk
+      - title: The answer to it
+        struct: ph_app.payloads:ApprovalAskReply
+      - title: Records the exchange leaves
+        table:
+          columns: [record, when]
+          rows:
+            - ["`client/command`", "the key of a keyed mutation, claimed before the act"]
+            - ["`agent/inbox/spliced`", "the prompt, queued for the next turn"]
+            - ["`client/command-settled`", "the act finished; a key with no settle is answered `outcome: unknown`"]
+      - record: client/command
+        example: |
+          {"type":"client/command","seq":1,"time":1794882335010,"data":{"command":"tui-1:c1"},"ignorable":true}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A method's failure is that call's failure: an error frame comes back and the connection stays open. A framing error ends the connection."
+          - "The connection closing without an answer is `DaemonGone` on the client (`connection_closed`), which is not a refusal."
+          - "A mutation sent without `clientId` and `commandId` always acts. It has no guard against a double send."
+          - "`session/attach` after a gap does not send the gap. Page it with `session/snapshot` from the last cursor."
+      - links:
+          - {to: "topic:protocol", label: "Every verb, notification and refusal"}
+          - {to: "topic:client-visibility", label: "What a client can and cannot see"}
+
+  socket-supervisor:
+    transport: call
+    summary: |
+      Each parsed request is dispatched by method name through one of two
+      tables in `ph_app.daemon.server`: `MUTATIONS` for the six verbs that take
+      an idempotence key, `METHODS` for the rest. The handler gets its own
+      parsed params type and returns the verb's reply model, which is dumped to
+      camelCase JSON at one place.
+    blocks:
+      - title: One request
+        text: |
+          1. `Peer` reads a line, and runs the handler as a task (at most 64 at once for a peer).
+          2. The method is looked up. A miss raises `UnknownMethod`.
+          3. `verb.parse(params)` validates against the params model. A failure raises `InvalidParams` naming the field.
+          4. The handler runs. A mutation goes through `_mutate`; a read asks the supervisor or a root.
+          5. `respond` turns the returned model, or the raised exception, into a result or error frame. An exception's `code` attribute becomes `error.data.reason`.
+      - title: A mutation, step by step
+        text: |
+          1. Parse, so a malformed call mounts nothing.
+          2. `Supervisor.start(session_id)`: acting on a released root brings it back.
+          3. `prepare`: resolve what the act needs and refuse here if it cannot work. A refusal consumes no key.
+          4. Claim the key `<clientId>:<commandId>` in the intent journal (`client/command`). A key already claimed answers `MutationRepeated`.
+          5. `act`, then settle the key (`client/command-settled`).
+          6. Flush the root's session. Only then is the reply sent.
+          7. `after`, for `session/command` only: a command that moved the root's environment (`/profile use`) restarts the root from its log.
+      - title: A verb
+        struct: ph_app.protocol:Verb
+      - title: One mutation row
+        struct: ph_app.daemon.server:Mutation
+      - title: What a mutation's params all carry
+        struct: ph_app.params:MutationParams
+      - title: Subscribing
+        list:
+          - "`session/attach` adds the connection's `notify` to the root's subscriber set, and seats the client at the root's ask desk if it declared `asks`."
+          - "`session/detach`, or the connection ending, removes both."
+          - "The root publishes each notice to every subscriber. One whose outbox is full raises, and the root removes it."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An act that raises settles its key `unknown`. The retry is told so; it is not silently refused or silently repeated."
+          - "If the flush after an act fails, the reply is still sent: the act happened. The root is marked unwritten and reported in `daemon/status`."
+          - "`session/cancel`, `session/new`, `attachment/put`, `credentials/store` and `session/adopt` take no key. Each is idempotent by construction."
+          - "A handler is canceled when its client's socket closes. A mount in progress is the supervisor's task and finishes anyway."
+
+  supervisor-runtime:
+    transport: call
+    summary: |
+      To start a root the supervisor calls `read_start`, `mount_session` and
+      `open_root` from `ph_app.runtime`: the same three calls a one-shot makes.
+      It gets back a mounted `Context` and a `Session`, wraps them in a `Root`,
+      and starts the root's task.
+    blocks:
+      - title: What the supervisor adds around the mount
+        list:
+          - "The mount runs as a task of the supervisor's own task group, so a client hanging up mid-mount does not cancel it."
+          - "It is serialized by session id: two clients asking for one new root get the same root."
+          - "The `cwd` from `session/new` becomes the mount's project directory."
+          - "The requested profile is the daemon's `--profile`, or the `profile` named on `session/new`. A stored session ignores both and mounts what its log says."
+          - "After the mount it registers `/profile` and the ask desk on the root, resumes its sub-agents, and checks whether the route's credential is set."
+      - title: The start, as read from the log
+        struct: ph_app.sessions:RecordedStart
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A profile that will not mount fails the verb that asked, with the loader's sentence."
+          - "A lease held by another process is `session_already_active`."
+          - "During shutdown a start is refused: `root_start_abandoned`."
+          - "A root that crashes is retried on a ladder (`supervisor/retry`, delays of 0.25 s, 1 s and 5 s). When the ladder gives up the root reads `failed`."
+      - links:
+          - {to: "node:runtime", label: "mount_session"}
+          - {to: "durability#edge:resumed-root", label: "A resumed root on the durability page"}
+
+  oneshot-runtime:
+    transport: call
+    summary: |
+      A one-shot calls `prompted(profile, prompt, ...)`, which mounts through
+      `mount_session`, opens the session, drives one prompt until the agent is
+      idle, flushes and yields the `Context` and `Session` for the mode to read
+      its output from.
+    blocks:
+      - title: The sequence
+        text: |
+          1. `read_start(session_id)`, then `mount_session`.
+          2. `open_root`: create the session, or resume the stored one under its lease.
+          3. Resolve the model: `--model`, `--provider`, else the profile's default.
+          4. Ingest `-a` files into the attachment store and build the message.
+          5. Prompt the root agent and wait for idle.
+          6. Flush. On exit the mount is drained and disposed.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A kept note is printed on stderr when a resumed session ignored this run's `--profile` because its log names another."
+
+  runtime-core:
+    transport: call
+    summary: |
+      `await profile.mount(ctx, project=project)` hands the composed rows to
+      cordis. Each row's plugin runs in order against one `Context`, providing
+      and requiring services. What comes back is the context, with `ctx.mount`
+      describing what activated.
+    blocks:
+      - title: What phern provides before the rows
+        list:
+          - "`ctx.named_profiles`: where named profiles live on this host, so a child agent assigned one can be narrowed by it."
+          - "The project directory, passed to `Profile.mount`, which provides it beside `ctx.mount`."
+      - title: What phern reads back
+        table:
+          columns: [key, used for]
+          rows:
+            - ["`ctx.sessions`, `ctx.session_persistence`", "opening the session and flushing it"]
+            - ["`ctx.agents`", "creating and driving the root agent"]
+            - ["`ctx.commands`, `ctx.tools`", "the `commands/list` and `tools/list` projections"]
+            - ["`ctx.schedule`, `ctx.goals`, `ctx.subagents`", "what holds a root and what it owes"]
+            - ["`ctx.mount`", "the `phern doctor` report"]
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`LoaderError`, `MountRefusal` and a config `ValidationError` are the profile's own refusals. Anything else is a start failing."
+          - "A row whose required service is missing does not activate; `phern doctor` lists it."
+          - "On any exit the context is drained and disposed, children first."
+      - links:
+          - {to: "ph-core#edge:profile-rows", label: "Rows into cordis, on the ph-core page"}
+          - {to: "invariants", label: "I1 and I2: plugins and unwinding"}
+
+  core-adapters:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The agent loop asks `ctx.llm` to stream a request. `ctx.llm` resolves the
+      route to the adapter that registered its provider and dispatches
+      `llm/stream`, a waterfall whose innermost step is the adapter's own
+      `stream(options)`. Rows such as `llm-retry` wrap it. What comes back is
+      an async iterator of `StreamChunk`s.
+    blocks:
+      - event: llm/stream
+      - event: llm/send
+      - title: The request
+        struct: ph.llm.types:GenerateOptions
+      - title: The seven chunk types
+        table:
+          columns: [chunk, wire `type`, carries]
+          rows:
+            - ["`BlockStart`", "`block-start`", "`index`, `blockType`: `text`, `reasoning` or `tool-call`"]
+            - ["`TextDelta`", "`text-delta`", "`index`, `text`"]
+            - ["`ReasoningDelta`", "`reasoning-delta`", "`index`, `text`"]
+            - ["`ToolCallDelta`", "`tool-call-delta`", "`index`, `id`, `name`, `argumentsDelta`"]
+            - ["`BlockEnd`", "`block-end`", "`index`, the whole `block`"]
+            - ["`UsageChunk`", "`usage`", "`usage`: `inputTokens`, `outputTokens`, `cacheReadTokens?`, `cacheWriteTokens?`, `reasoningTokens?`"]
+            - ["`Finish`", "`finish`", "`reason.kind`: `stop`, `tool-calls`, `max-tokens`, `aborted` or `error`; with `error`, `reason.failure`"]
+      - struct: ph.llm.types:Finish
+      - struct: ph.llm.types:TokenUsage
+      - title: What the loop logs
+        note: Each chunk is one `assistant/chunk` record; the whole message is `assistant/message`. Captured from the fake adapter.
+        lang: json
+        code: |
+          {"type":"assistant/chunk","seq":11,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"block-start","index":0,"blockType":"text"}}}
+          {"type":"assistant/chunk","seq":12,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"text-delta","index":0,"text":"ok"}}}
+          {"type":"assistant/chunk","seq":13,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"block-end","index":0,"block":{"type":"text","text":"ok"}}}}
+          {"type":"assistant/chunk","seq":14,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"usage","usage":{"inputTokens":1,"outputTokens":1}}}}
+          {"type":"assistant/chunk","seq":15,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"finish","reason":{"kind":"stop"}}}}
+      - title: A decision, the other call
+        text: |
+          `ctx.llm.decide(DecisionRequest)` is a plain service call, not a bus event. It reaches an adapter that implements `DecisionAdapter`; of the three only the OpenAI-compatible one does.
+      - struct: ph.llm.adapter:DecisionRequest
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A route whose provider no adapter registered fails the request before anything is sent."
+          - "An adapter raises `LlmError` with a code. `llm-retry` retries the transient codes, up to `maxAttempts` (3), backing off from `baseDelayMs` (500) to `maxDelayMs` (20 000)."
+          - "An error that arrives inside a stream is a `Finish` with `kind: error`, not an exception. The adapter stops there and does not append a second finish."
+      - links:
+          - {to: "ph-core#edge:llm-wire", label: "The same call from ph-core's side"}
+          - {to: "dispatch", label: "The four dispatch modes"}
+
+  adapters-models:
+    transport: http
+    summary: |
+      One HTTPS POST for each model call, answered by a server-sent event
+      stream. The adapter builds the body from `GenerateOptions`, adds the
+      credential header, and maps each SSE payload to chunks. The bodies and
+      chunks below were produced by the real builders and stream states; the
+      provider events fed to them are illustrative.
+    blocks:
+      - title: Anthropic, the request body
+        lang: json
+        note: |
+          From `AnthropicAdapter._body` for a user message, an assistant tool
+          call and its result. Headers: `x-api-key`, `anthropic-version:
+          2023-06-01`, and `anthropic-beta` only on a request that references
+          an uploaded file. The four `cache_control` marks are the last tool,
+          the system block and the message checkpoints.
+        code: |
+          POST {baseUrl}/messages
+          {"model": "claude-sonnet-5", "max_tokens": 1024, "stream": true,
+           "messages": [
+             {"role": "user", "content": [{"type": "text", "text": "List the Python files under src.",
+                                           "cache_control": {"type": "ephemeral"}}]},
+             {"role": "assistant", "content": [
+               {"type": "text", "text": "I will look."},
+               {"type": "tool_use", "id": "call_1", "name": "glob", "input": {"pattern": "src/**/*.py"}}]},
+             {"role": "user", "content": [
+               {"type": "tool_result", "tool_use_id": "call_1",
+                "content": [{"type": "text", "text": "src/app.py\nsrc/util.py"}]}]}],
+           "system": [{"type": "text", "text": "You are a careful assistant.",
+                       "cache_control": {"type": "ephemeral"}}],
+           "tools": [{"name": "glob", "description": "Find files by pattern.",
+                      "input_schema": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]},
+                      "cache_control": {"type": "ephemeral"}}],
+           "temperature": 0.2}
+      - title: Anthropic, events to chunks
+        table:
+          columns: [SSE event, becomes]
+          rows:
+            - ["`message_start`", "nothing yet; its `usage` is kept"]
+            - ["`content_block_start` (`text`, `thinking`, `tool_use`)", "`block-start` with `text`, `reasoning` or `tool-call`"]
+            - ["`content_block_delta` `text_delta`", "`text-delta`"]
+            - ["`content_block_delta` `thinking_delta`", "`reasoning-delta`; a `signature_delta` is kept for replay and not emitted"]
+            - ["`content_block_delta` `input_json_delta`", "`tool-call-delta` with the tool's id and name"]
+            - ["`content_block_stop`", "`block-end` with the whole block"]
+            - ["`message_delta`", "nothing yet; `stop_reason` and `usage` are kept"]
+            - ["`error`", "`finish` with `kind: error`; the stream ends"]
+            - ["end of stream", "`usage`, then `finish`"]
+      - title: Anthropic, the chunks for a text block and a tool call
+        lang: json
+        code: |
+          {"type": "block-start", "index": 0, "blockType": "text"}
+          {"type": "text-delta", "index": 0, "text": "Two files."}
+          {"type": "block-end", "index": 0, "block": {"type": "text", "text": "Two files."}}
+          {"type": "block-start", "index": 1, "blockType": "tool-call"}
+          {"type": "tool-call-delta", "index": 1, "id": "toolu_01", "argumentsDelta": "{\"path\": \"src/app.py\"}", "name": "read"}
+          {"type": "block-end", "index": 1, "block": {"type": "tool-call", "id": "toolu_01", "name": "read", "arguments": "{\"path\": \"src/app.py\"}"}}
+          {"type": "usage", "usage": {"inputTokens": 312, "outputTokens": 41, "cacheReadTokens": 280}}
+          {"type": "finish", "reason": {"kind": "tool-calls"}}
+      - title: OpenAI-compatible, the request body
+        lang: json
+        note: |
+          From `OpenAiCompatibleAdapter._body`, same conversation. Header:
+          `Authorization: Bearer <value of apiKeyEnv>`. With a response schema
+          it adds `response_format: {type: json_schema, json_schema: {name:
+          reply, schema, strict: true}}`.
+        code: |
+          POST {baseUrl}/chat/completions
+          {"model": "qwen",
+           "messages": [
+             {"role": "system", "content": "You are a careful assistant."},
+             {"role": "user", "content": "List the Python files under src."},
+             {"role": "assistant", "content": "I will look.",
+              "tool_calls": [{"id": "call_1", "type": "function",
+                              "function": {"name": "glob", "arguments": "{\"pattern\": \"src/**/*.py\"}"}}]},
+             {"role": "tool", "tool_call_id": "call_1", "content": "src/app.py\nsrc/util.py"}],
+           "stream": true, "stream_options": {"include_usage": true},
+           "tools": [{"type": "function", "function": {"name": "glob", "description": "Find files by pattern.",
+                      "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}}}],
+           "temperature": 0.2, "max_tokens": 1024}
+      - title: OpenAI-compatible, payloads to chunks
+        table:
+          columns: [in the payload, becomes]
+          rows:
+            - ["`choices[].delta.content`", "`block-start` (once) and `text-delta`"]
+            - ["`choices[].delta.tool_calls[]`", "`block-start` (once for each call) and `tool-call-delta`"]
+            - ["`choices[].finish_reason`", "kept; `tool_calls` becomes `tool-calls`, `length` becomes `max-tokens`"]
+            - ["`usage`", "kept; cached prompt tokens are reported as `cacheReadTokens`"]
+            - ["a top-level `error`", "`finish` with `kind: error`"]
+            - ["end of stream", "a `block-end` for each open block, `usage`, `finish`"]
+      - title: Google, the request body
+        lang: json
+        note: |
+          From `GoogleAdapter._body`. Header: `x-goog-api-key`. A tool result
+          is a `functionResponse` named by the tool, since this wire has no
+          call ids.
+        code: |
+          POST {baseUrl}/models/gemini-2.5-pro:streamGenerateContent?alt=sse
+          {"contents": [
+             {"role": "user", "parts": [{"text": "List the Python files under src."}]},
+             {"role": "model", "parts": [{"text": "I will look."},
+                                         {"functionCall": {"name": "glob", "args": {"pattern": "src/**/*.py"}}}]},
+             {"role": "user", "parts": [{"functionResponse": {"name": "glob",
+                                         "response": {"output": "src/app.py\nsrc/util.py"}}}]}],
+           "systemInstruction": {"parts": [{"text": "You are a careful assistant."}]},
+           "tools": [{"functionDeclarations": [{"name": "glob", "description": "Find files by pattern.",
+                      "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}}]}],
+           "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024}}
+      - title: Google, payloads to chunks
+        table:
+          columns: [in the payload, becomes]
+          rows:
+            - ["`candidates[].content.parts[].text`", "`block-start` (once) and `text-delta`"]
+            - ["`candidates[].content.parts[].functionCall`", "`block-start` and one `tool-call-delta` holding the whole arguments; the id is empty"]
+            - ["`candidates[].finishReason`", "kept: `STOP` is `stop`, `MAX_TOKENS` is `max-tokens`; a reply with a call finishes `tool-calls`"]
+            - ["`usageMetadata`", "kept"]
+            - ["a top-level `error`", "`finish` with `kind: error`"]
+      - title: The decision request and its answer
+        lang: json
+        note: |
+          The request is built by `_systemone_body`; the reply shape is what
+          `_answers` accepts (a reply with probabilities in another place is
+          refused as `BAD_DECISION`). Not a stream.
+        code: |
+          POST {baseUrl}/systemone
+          {"state": "assistant: I have finished step 2. Shall I continue?",
+           "questions": {"waiting": {"type": "noul", "instructions": "Is the assistant waiting for the user?"},
+                         "next": {"type": "choice", "instructions": "What should happen next?",
+                                  "criteria": {"continue": "carry on with the plan", "stop": null}}},
+           "model": "clef"}
+
+          200
+          {"answers": {"waiting": {"noul": 0.91},
+                       "next": {"choice": "stop", "probabilities": {"continue": 0.2, "stop": 0.8}, "confidence": 0.7}},
+           "usage": {"input_tokens": 212}}
+      - title: The answer, typed
+        struct: ph.llm.adapter:Decisions
+      - title: An HTTP status, classified
+        note: From `failure_from_status`. A body that reads as an overflow wins over the status.
+        table:
+          columns: [status, code, retried by `llm-retry`]
+          rows:
+            - ["429", "`RATE_LIMIT`", "yes"]
+            - ["529", "`OVERLOADED`", "yes"]
+            - ["any other 5xx", "`SERVER_ERROR`", "yes"]
+            - ["401, 403", "`AUTHENTICATION`", "no"]
+            - ["any other 4xx", "`REQUEST_FAILED`", "no"]
+            - ["a body that says the context is too long", "`CONTEXT_WINDOW_EXCEEDED`", "no; compaction answers it"]
+            - ["a body that says a referenced file is gone", "`FILE_EXPIRED`", "yes, after the handle is forgotten"]
+      - title: A failure with no status
+        table:
+          columns: [what happened, code, retried]
+          rows:
+            - ["a read or connect ran out of time (`httpx.TimeoutException`)", "`TIMEOUT`", "yes"]
+            - ["a dropped or refused connection", "`CONNECTION_ERROR`", "yes"]
+            - ["a mid-stream `overloaded_error`, `rate_limit_error`, `RESOURCE_EXHAUSTED`, `UNAVAILABLE` ...", "the same codes as the status path", "yes"]
+            - ["a mid-stream `DEADLINE_EXCEEDED` (Google)", "`TIMEOUT`", "yes"]
+            - ["a mid-stream error type nothing maps", "`PROVIDER_ERROR`", "no"]
+            - ["the credential variable is not set", "`MISSING_CREDENTIAL`", "no"]
+      - title: A failure, as it is carried
+        struct: ph.llm.types:LlmFailure
+      - title: An error frame inside a 200, as a chunk
+        lang: json
+        note: |
+          From feeding `{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}` to the Anthropic stream state.
+        code: |
+          {"type": "finish", "reason": {"kind": "error", "failure": {"message": "Overloaded", "code": "OVERLOADED"}}}
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The credential value exists in the request headers and nowhere else. The log's `request/header` record holds the provider and model, not the key."
+          - "The request body is built from the log, so everything the model is sent is something the log already holds."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The client timeout is 600 s for the request and 15 s to connect, fixed in `_http.CLIENT_TIMEOUT`."
+          - "A non-2xx response is raised before any payload is yielded, so a consumer never sees half a stream from a refused request."
+          - "A stream that dies halfway raises `CONNECTION_ERROR` or `TIMEOUT`, both transient, so the request is retried as a new attempt."
+          - "The provider events in the tables above are the shapes the code handles. A field a provider adds is ignored."
+      - links:
+          - {to: "node:adapters", label: "The adapter rows and their options"}
+          - {to: "ph-stabilize#node:compaction", label: "What answers CONTEXT_WINDOW_EXCEEDED"}
+          - {to: "self-steering#edge:decide", label: "The decision request on the self-steering page"}

@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "phern: from a command to a model call",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "interactive",
+        "label": "Interactive turn",
+        "focus": [
+          "person",
+          "cli",
+          "tui",
+          "socket",
+          "supervisor",
+          "runtime",
+          "core"
+        ],
+        "note": "The TUI is a client. The harness runs in the daemon, so closing the terminal does not end the turn."
+      },
+      {
+        "id": "one-shot",
+        "label": "One-shot run",
+        "focus": [
+          "person",
+          "cli",
+          "oneshot",
+          "runtime",
+          "core"
+        ],
+        "note": "phern -p and the json, transcript and rpc modes mount the profile in their own process."
+      },
+      {
+        "id": "composition",
+        "label": "Composition",
+        "focus": [
+          "cli",
+          "profiles",
+          "runtime",
+          "core"
+        ],
+        "note": "A profile name resolves to ordered YAML layers; the rows mount into one cordis Context."
+      },
+      {
+        "id": "model-call",
+        "label": "Model call",
+        "focus": [
+          "core",
+          "adapters",
+          "models"
+        ],
+        "note": "ph-core's loop calls an adapter row; only the adapter turns a credential name into a header."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "tui",
+      "type": "frontend",
+      "label": "Textual TUI",
+      "sublabel": "PHTuiApp, DaemonSession",
+      "pos": [
+        480,
+        90
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "socket",
+      "type": "messagebus",
+      "label": "daemon.sock",
+      "sublabel": "JSON-RPC, a line per frame",
+      "pos": [
+        820,
+        90
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "supervisor",
+      "type": "backend",
+      "label": "Supervisor",
+      "sublabel": "one anyio task per root",
+      "pos": [
+        1110,
+        90
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "person",
+      "type": "external",
+      "label": "Person",
+      "sublabel": "terminal, browser, script",
+      "pos": [
+        40,
+        280
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "phern CLI",
+      "sublabel": "Typer, ph_app.cli",
+      "pos": [
+        270,
+        280
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "oneshot",
+      "type": "frontend",
+      "label": "One-shot modes",
+      "sublabel": "text, json, transcript, rpc",
+      "pos": [
+        480,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "ph_app.runtime",
+      "sublabel": "mount_session",
+      "pos": [
+        1110,
+        280
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "profiles",
+      "type": "database",
+      "label": "Profile table",
+      "sublabel": "YAML layers, ph.bundles",
+      "pos": [
+        270,
+        470
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "models",
+      "type": "external",
+      "label": "Model servers",
+      "sublabel": "chat and decision models",
+      "pos": [
+        480,
+        470
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "adapters",
+      "type": "backend",
+      "label": "Adapters",
+      "sublabel": "anthropic, google, openai-compatible",
+      "pos": [
+        800,
+        470
+      ],
+      "size": [
+        220,
+        64
+      ]
+    },
+    {
+      "id": "core",
+      "type": "external",
+      "label": "ph-core",
+      "sublabel": "Context, seams, loop, session log",
+      "pos": [
+        1100,
+        470
+      ],
+      "size": [
+        200,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "phern daemon: outlives its clients",
+      "wraps": [
+        "socket",
+        "supervisor"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "person-cli",
+      "from": "person",
+      "to": "cli",
+      "label": "phern",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cli-tui",
+      "from": "cli",
+      "to": "tui",
+      "label": "--mode tui",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "cli-oneshot",
+      "from": "cli",
+      "to": "oneshot",
+      "label": "-p"
+    },
+    {
+      "id": "cli-profiles",
+      "from": "cli",
+      "to": "profiles",
+      "label": "--profile",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 75
+    },
+    {
+      "id": "tui-socket",
+      "from": "tui",
+      "to": "socket",
+      "label": "session/prompt",
+      "variant": "emphasis"
+    },
+    {
+      "id": "socket-supervisor",
+      "from": "socket",
+      "to": "supervisor",
+      "label": "typed verbs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "supervisor-runtime",
+      "from": "supervisor",
+      "to": "runtime",
+      "label": "mounts each root",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 75
+    },
+    {
+      "id": "oneshot-runtime",
+      "from": "oneshot",
+      "to": "runtime",
+      "label": "mounts one session"
+    },
+    {
+      "id": "runtime-core",
+      "from": "runtime",
+      "to": "core",
+      "label": "Profile.mount",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 75
+    },
+    {
+      "id": "core-adapters",
+      "from": "core",
+      "to": "adapters",
+      "label": "stream"
+    },
+    {
+      "id": "adapters-models",
+      "from": "adapters",
+      "to": "models",
+      "label": "HTTP, SSE"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "The daemon owns the work",
+      "items": [
+        "A root is a mounted profile, a session, an agent and a queue",
+        "Attaching subscribes to session.event; detaching stops nothing",
+        "The TUI starts an ephemeral daemon when the socket is absent"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "One way to mount",
+      "items": [
+        "The daemon and the one-shot modes all mount through ph_app.runtime",
+        "A profile is offered only if every layer it names resolves",
+        "ph_app never imports ph_rlm or ph_stabilize; bundles arrive by entry point"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Adapters are rows",
+      "items": [
+        "llm-anthropic, llm-google and llm-openai-compatible register on ctx.llm",
+        "decide posts /systemone beside /chat/completions for a decision model",
+        "An apiKeyEnv is a name, resolved only when the request is sent"
+      ]
+    }
+  ]
+}

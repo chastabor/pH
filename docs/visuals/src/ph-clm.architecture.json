@@ -1,0 +1,333 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ph-clm: how a context edit lands",
+    "quality_profile": "showcase",
+    "legend": {
+      "entries": {
+        "external": {
+          "label": "Model"
+        },
+        "backend": {
+          "label": "ph-clm"
+        },
+        "database": {
+          "label": "Stored"
+        },
+        "frontend": {
+          "label": "Request"
+        },
+        "security": {
+          "label": "ph-stabilize"
+        }
+      }
+    },
+    "views": [
+      {
+        "id": "explicit-tools",
+        "label": "Tool edits",
+        "focus": [
+          "model",
+          "tools",
+          "editor",
+          "log",
+          "next"
+        ],
+        "note": "The model names sections; the edit is in the log before the call returns, and the next request reads it."
+      },
+      {
+        "id": "context-file",
+        "label": "File edits",
+        "focus": [
+          "next",
+          "file",
+          "model",
+          "editor"
+        ],
+        "note": "The surface is written to a file before each request and read back after the call that touched it."
+      },
+      {
+        "id": "sections",
+        "label": "Sections",
+        "focus": [
+          "log",
+          "map",
+          "editor"
+        ],
+        "note": "The map is folded from the log once per event; every edit names whole sections from it."
+      },
+      {
+        "id": "readouts",
+        "label": "Readouts",
+        "focus": [
+          "compaction",
+          "readouts",
+          "model"
+        ],
+        "note": "A tool result that crosses a share of the window ends with one line on the context's size."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "readouts",
+      "type": "backend",
+      "label": "Readouts",
+      "sublabel": "budget.py, remindAt shares",
+      "pos": [
+        40,
+        100
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "compaction",
+      "type": "security",
+      "label": "ctx.compaction",
+      "sublabel": "ph-stabilize engine",
+      "pos": [
+        330,
+        100
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "map",
+      "type": "backend",
+      "label": "Section map",
+      "sublabel": "sections.py, ids like S412",
+      "pos": [
+        630,
+        100
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "Model",
+      "sublabel": "edits its own context",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        180,
+        64
+      ]
+    },
+    {
+      "id": "tools",
+      "type": "backend",
+      "label": "context_* tools",
+      "sublabel": "clm-context row",
+      "pos": [
+        330,
+        300
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "editor",
+      "type": "backend",
+      "label": "Editor",
+      "sublabel": "ctx.clm, edits.py",
+      "pos": [
+        630,
+        300
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "log",
+      "type": "database",
+      "label": "Session log",
+      "sublabel": "ph-core, append-only",
+      "pos": [
+        970,
+        300
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "file",
+      "type": "database",
+      "label": "Context file",
+      "sublabel": "clm-mirror row, in scratch",
+      "pos": [
+        630,
+        500
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "next",
+      "type": "frontend",
+      "label": "Next request",
+      "sublabel": "the surface the model reads",
+      "pos": [
+        970,
+        500
+      ],
+      "size": [
+        190,
+        64
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "model-calls-tools",
+      "from": "model",
+      "to": "tools",
+      "label": "context_* calls",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tools-to-editor",
+      "from": "tools",
+      "to": "editor",
+      "label": "edit verbs",
+      "variant": "emphasis"
+    },
+    {
+      "id": "editor-to-log",
+      "from": "editor",
+      "to": "log",
+      "label": "replace + clm/revised",
+      "variant": "emphasis"
+    },
+    {
+      "id": "log-to-next",
+      "from": "log",
+      "to": "next",
+      "label": "derive_messages()",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 80
+    },
+    {
+      "id": "next-to-file",
+      "from": "next",
+      "to": "file",
+      "label": "render at agent/request",
+      "variant": "dashed"
+    },
+    {
+      "id": "model-edits-file",
+      "from": "model",
+      "to": "file",
+      "label": "edit, sed, Python cell",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [
+        [
+          130,
+          532
+        ]
+      ]
+    },
+    {
+      "id": "file-read-back",
+      "from": "file",
+      "to": "editor",
+      "label": "read-back",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "log-to-map",
+      "from": "log",
+      "to": "map",
+      "label": "fold per event",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right",
+      "via": [
+        [
+          1065,
+          132
+        ]
+      ]
+    },
+    {
+      "id": "map-to-editor",
+      "from": "map",
+      "to": "editor",
+      "label": "whole sections",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 80
+    },
+    {
+      "id": "compaction-to-readouts",
+      "from": "compaction",
+      "to": "readouts",
+      "label": "trigger_fraction",
+      "variant": "dashed"
+    },
+    {
+      "id": "readouts-to-model",
+      "from": "readouts",
+      "to": "model",
+      "label": "size line on a result",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 80
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "One door for every edit",
+      "items": [
+        "The tools and the context file both land through ctx.clm",
+        "An edit is one surface replace plus a clm/revised record",
+        "Both commit in one Session.batch()"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Sections",
+      "items": [
+        "A section is the run between two balanced cuts",
+        "Its id is the seq of its first event, which never moves",
+        "The step in flight is protected from edits"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "The log keeps the originals",
+      "items": [
+        "context_recall and context_diff read them back",
+        "context_restore undoes a section's latest edit, one level",
+        "A file change no tool call made is declined, then rewritten"
+      ]
+    }
+  ]
+}

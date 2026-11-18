@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "ph-text-index: files to search hits",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1080,
+      520
+    ],
+    "views": [
+      {
+        "id": "index-a-tree",
+        "label": "Index a tree",
+        "focus": [
+          "utcp",
+          "tindex",
+          "chunk",
+          "embed",
+          "sidecar",
+          "tvim"
+        ],
+        "note": "text_index reads documents, cuts them into passages, embeds them and saves vectors beside their text."
+      },
+      {
+        "id": "ask",
+        "label": "Ask a question",
+        "focus": [
+          "utcp",
+          "tsearch",
+          "embed",
+          "tvim",
+          "sidecar",
+          "hits"
+        ],
+        "note": "text_search embeds the question, takes the nearest vectors and answers with the passages they stand for."
+      },
+      {
+        "id": "session-side",
+        "label": "Session side",
+        "focus": [
+          "rows",
+          "utcp",
+          "tindex",
+          "tsearch"
+        ],
+        "note": "A session's rows add the manual; ph-utcp runs each call as the ph-text-index command."
+      }
+    ],
+    "legend": {
+      "entries": {
+        "emphasis": {
+          "label": "main data path"
+        },
+        "default": {
+          "label": "other data"
+        },
+        "dashed": {
+          "label": "manual, encode"
+        },
+        "database": {
+          "label": "on disk"
+        }
+      }
+    }
+  },
+  "stages": [
+    {
+      "label": "Session"
+    },
+    {
+      "label": "Tools"
+    },
+    {
+      "label": "Cut and embed"
+    },
+    {
+      "label": "Index on disk"
+    },
+    {
+      "label": "Answer"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "rows",
+      "type": "backend",
+      "label": "text-index rows",
+      "sublabel": "row.py",
+      "stage": 0,
+      "row": 0,
+      "tag": "manual",
+      "width": 140
+    },
+    {
+      "id": "utcp",
+      "type": "messagebus",
+      "label": "ph-utcp",
+      "sublabel": "runs the command",
+      "stage": 0,
+      "row": 1,
+      "tag": "ctx.shell"
+    },
+    {
+      "id": "tindex",
+      "type": "backend",
+      "label": "text_index",
+      "sublabel": "reads via ctx.fs",
+      "stage": 1,
+      "row": 0,
+      "tag": "digests"
+    },
+    {
+      "id": "tsearch",
+      "type": "backend",
+      "label": "text_search",
+      "sublabel": "takes no lock",
+      "stage": 1,
+      "row": 2,
+      "tag": "query"
+    },
+    {
+      "id": "chunk",
+      "type": "backend",
+      "label": "_chunk.py",
+      "sublabel": "paragraph cuts",
+      "stage": 2,
+      "row": 0,
+      "tag": "line spans"
+    },
+    {
+      "id": "embed",
+      "type": "cloud",
+      "label": "Embedder",
+      "sublabel": "_embed.py",
+      "stage": 2,
+      "row": 1,
+      "tag": "token limit"
+    },
+    {
+      "id": "model",
+      "type": "external",
+      "label": "Embedding model",
+      "sublabel": "local or endpoint",
+      "stage": 2,
+      "row": 2,
+      "tag": "vectors",
+      "width": 140
+    },
+    {
+      "id": "sidecar",
+      "type": "database",
+      "label": "chunks.json",
+      "sublabel": "text, path, lines",
+      "stage": 3,
+      "row": 0,
+      "tag": "sidecar"
+    },
+    {
+      "id": "tvim",
+      "type": "database",
+      "label": "index.tvim",
+      "sublabel": "turbovec file",
+      "stage": 3,
+      "row": 1,
+      "tag": "vectors"
+    },
+    {
+      "id": "hits",
+      "type": "frontend",
+      "label": "Search hits",
+      "sublabel": "path:start-end",
+      "stage": 4,
+      "row": 1,
+      "tag": "score"
+    }
+  ],
+  "flows": [
+    {
+      "id": "manual",
+      "from": "rows",
+      "to": "utcp",
+      "label": "manual",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "call-index",
+      "from": "utcp",
+      "to": "tindex",
+      "label": "call: paths",
+      "variant": "emphasis"
+    },
+    {
+      "id": "call-search",
+      "from": "utcp",
+      "to": "tsearch",
+      "label": "call: query"
+    },
+    {
+      "id": "document-text",
+      "from": "tindex",
+      "to": "chunk",
+      "label": "document text",
+      "variant": "emphasis"
+    },
+    {
+      "id": "passages",
+      "from": "chunk",
+      "to": "embed",
+      "label": "passages",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "passage-records",
+      "from": "chunk",
+      "to": "sidecar",
+      "label": "text + lines"
+    },
+    {
+      "id": "question",
+      "from": "tsearch",
+      "to": "embed",
+      "label": "question"
+    },
+    {
+      "id": "encode",
+      "from": "embed",
+      "to": "model",
+      "label": "encode",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "vectors",
+      "from": "embed",
+      "to": "tvim",
+      "label": "vectors",
+      "variant": "emphasis"
+    },
+    {
+      "id": "nearest",
+      "from": "tvim",
+      "to": "hits",
+      "label": "nearest ids",
+      "variant": "emphasis"
+    },
+    {
+      "id": "passage-text",
+      "from": "sidecar",
+      "to": "hits",
+      "label": "passage text",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          960,
+          157
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Two processes",
+      "items": [
+        "A session's rows add the manual with ctx.utcp.add",
+        "The tools, turbovec and the model run in ph-text-index",
+        "ph-utcp starts that command under the agent's sandbox"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "A passage fits its embedder",
+      "items": [
+        "Cuts land between paragraphs and keep 1-based line spans",
+        "Packed by max_chars and by the embedder's token limit",
+        "A question past the limit is searched by its head"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "The index",
+      "items": [
+        "index.tvim holds vectors; chunks.json holds the passages",
+        "A digest per document skips unchanged text",
+        "In a session it sits in the calling agent's scratch"
+      ]
+    }
+  ]
+}

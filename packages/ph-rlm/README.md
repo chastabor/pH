@@ -52,7 +52,7 @@ Each is a listener on a seam that already exists; the bundle
 |---|---|
 | `code-runtime-python` | the runtime: one CPython child per agent, fd 3 as the framed channel, resource limits applied in the child |
 | `rlm-presentation` | the transport renamed to `python`, and how a settled cell reads |
-| `rlm-bindings` | the `rlm` namespace — `rlm_run`, `rlm_list_subagents`, `rlm_delete_subagent` |
+| `rlm-bindings` | the `rlm` namespace — `rlm_run`, `rlm_wait`, `rlm_list_subagents`, `rlm_delete_subagent` |
 | `rlm-subagent-provider` | `rlm()` as a `ctx.subagents` provider: admission logged, the handle returns before the child answers |
 | `rlm-messaging` | `agent_message` and `agent_observe` — `agent_message_send`, `agent_message_list_agents`, `agent_observe_list`, `agent_observe_get` |
 | `rlm-prompt` | the doctrine, plus the volatile facts (depth, cwd, family, workspace tier) as a post-cache `context()` snapshot |

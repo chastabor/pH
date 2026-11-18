@@ -1,0 +1,1192 @@
+intro: |
+  ph-rlm is Code Mode. The model sees one callable, `python`, and writes a
+  program. The program runs in a Python process of the agent's own, and every
+  capability it reaches is a `call` frame back to the harness, where it passes
+  the whole tool pipeline and is logged. One cell is one tool call; forty calls
+  inside it are forty governed, recorded dispatches.
+
+  Each box is a row of the `rlm` bundle or a part of ph-core the bundle drives.
+  Click a box for its row entry and options, or an arrow for what crosses it.
+  The rows the diagram does not draw are under [Configuring it](topic:configuring).
+
+topics:
+  - id: configuring
+    title: Configuring it
+    summary: |
+      `rlm` is the `tui` profile plus this bundle. The bundle registers itself,
+      so an install without ph-rlm is simply not offered the `rlm` profiles. A
+      profile changes a row by naming its id; a patch replaces that row's whole
+      config, so restate what you want to keep.
+    blocks:
+      - title: Every row the bundle mounts
+        bundle: ph_rlm/bundle.yaml
+      - title: What the bundle changes in rows it does not own
+        table:
+          columns: [row, change, why]
+          rows:
+            - ["`tools`", "`mode: code`", "the model is shown one transport instead of every tool"]
+            - ["`jobs`", "`concurrency.subagent: 8`", "how many child drives the host carries at once, beside the per-parent `maxConcurrent`"]
+            - ["`containment`", "`tier: advisory`, `child_tier: worktree`", "the person's agent stays in the checkout; each child gets a worktree"]
+            - ["`subagent-task`", "`disabled: true`", "`rlm.run` is the same capability; two ways to delegate make the model guess"]
+            - ["`workspace-git-worktree`, `workspace-checkpoint`, `workspace-commands`, `workspace-revert`", "added", "the worktree rung, restore points, `/workspaces` and `/revert`"]
+      - title: A profile that adjusts it
+        lang: yaml
+        note: |
+          `code-runtime-python` restates the bundle's values because a patch
+          replaces the whole config. `rlm-context-loader` ships switched off;
+          `disabled: false` and at least one source arm it.
+        code: |
+          # $PH_HOME/profiles/my-rlm.yaml
+          extends: rlm
+          rows:
+            - id: code-runtime-python
+              config:
+                python: managed
+                cpuSeconds: 120
+                addressSpaceBytes: 2147483648
+                maxLogBytes: 65536
+                maxValueBytes: 65536
+                maxSnapshotBytes: 16777216
+                skills: ["acme-websearch"]
+            - id: rlm-skills-python
+              config:
+                paths: ["~/.ph/skills", "./.ph/skills"]
+            - id: rlm-subagent-provider
+              config:
+                maxDepth: 2
+                maxConcurrent: 2
+            - id: tools-code-mode
+              config:
+                maxDispatchesPerRun: 256
+                maxSubagentSpawnsPerRun: 8
+                maxParallelSubCalls: 10
+            - id: rlm-context-loader
+              disabled: false
+              config:
+                sources:
+                  - {kind: path, value: "docs/**/*.md"}
+                minChars: 200000
+      - title: One row from the command line
+        lang: bash
+        code: |
+          phern --profile rlm --patch '{id: code-runtime-python, config: {python: host}}' -p "…"
+          phern --profile rlm --dump-config        # the rows as composed
+          phern doctor --profile rlm               # Code runtime: interpreter, limits, live kernels, confinement
+      - title: Rows not drawn
+        text: |
+          Four rows of the bundle have no box.
+      - row: rlm-prompt
+      - title: What rlm-prompt adds
+        text: |
+          The doctrine: the rules neither the generated SDK listing nor the transport's description can say, such as "`rlm.run` returns a handle, not an answer". The volatile facts (depth, working directory, family, workspace tier) are a `context()` snapshot placed after retained history, so a change does not re-bill the cached prefix.
+      - row: rlm-kernel-snapshot
+      - row: rlm-skills-python
+      - title: What rlm-skills-python adds
+        text: |
+          A skill directory that is also an installable package is installed into the kernel's venv, and its import name is handed to every kernel in the `boot` frame, so `await name(...)` works inside a cell. `paths` is empty as shipped, so the row costs nothing until a deployment names a directory.
+      - row: rlm-harness-invariant
+      - links:
+          - {to: "topic:dispatch", label: "Which dispatch mode carries each hook"}
+          - {to: "security", label: "Containment, the sandbox and what a child inherits"}
+
+  - id: dispatch
+    title: Which dispatch mode carries each hook
+    summary: |
+      Most of ph-rlm is not on the bus. A cell is a service call to the code
+      runtime, its bindings are frames on fd 3, and each binding call re-enters
+      ph-core's tool pipeline, which is where the waterfalls are.
+    blocks:
+      - table:
+          columns: [hop, carried by, mode]
+          rows:
+            - ["`python` call → `run_code`", "the tool pipeline: `tools/pre-execute`, `tools/execute`, `tools/body`, `tools/post-execute`", "waterfall, waterfall, serial, waterfall"]
+            - ["`run_code` → the runtime", "`ctx.code_runtime.run(CodeRunRequest)`", "service call"]
+            - ["runtime ↔ guest", "newline-delimited JSON frames on fd 3", "frame"]
+            - ["a binding call", "`DispatchBridge.call` → `ctx.tools.execute`: the same four events again, per call", "waterfall, waterfall, serial, waterfall"]
+            - ["a settled dispatch about to be logged", "`tools/code-dispatch-log`", "waterfall"]
+            - ["a family check on a send", "`ctx.tools.guard`", "registration, asked last"]
+            - ["`rlm.run` → a child", "`ctx.subagents.start`", "service call"]
+            - ["a message to a child", "`agent.steer`, read at the target's next step", "call"]
+            - ["a kernel bound to its agent", "`agent/created`", "emit"]
+            - ["auto-refine at a turn's end", "`session/event`", "emit"]
+            - ["a veto before a refinement", "`harness/before-refine`", "waterfall"]
+            - ["a global refinement's approval", "`ctx.approval.request`, then `approval/request`", "service call, then waterfall"]
+      - event: tools/code-dispatch-log
+        args:
+          - [record, CodeDispatchLog, "which dispatch this is, and whether it failed"]
+          - [content, "Sequence[ContentBlock]", "the result blocks; a listener returns the blocks to log"]
+      - event: harness/before-refine
+        args:
+          - [request, RefineRequest, "the session, the agent, the scope (`local` or `global`), the trigger (`user`, `turns`, `compaction`) and any instructions"]
+      - event: agent/created
+      - links:
+          - {to: "dispatch", label: "The four dispatch modes"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      The kernel is a process and dies with the daemon. What it held is in the
+      session log, one `kernel/snapshot` per changed variable, and the first
+      cell after a restart gets the namespace back. A child agent comes back
+      through its own log.
+    blocks:
+      - title: The namespace comes back, on the first cell
+        text: |
+          `Kernel.run` starts a kernel that is not alive and then calls `_rehydrate`: it folds the `kernel/snapshot` records of this namespace, sends one `restore` frame per variable, and appends `kernel/restored` with what came back and what did not. A new daemon has no live kernel for a resumed agent, so the first cell the agent runs takes this path.
+
+          There is no step in the resume path itself, and none is needed: the restore is lazy, at kernel start (DESIGN.md §8).
+      - title: Checked by running it
+        lang: json
+        note: |
+          Generated: a cell set `carried` and `total`, the stored logs were
+          copied as a dead process leaves them, a second mount resumed the
+          session, and the next cell read both. The result's value was
+          `[42, [1, 2, 3]]` and `reset` was false.
+        code: |
+          {"type": "kernel/snapshot", "data": {"namespace": "restart-demo", "run": 1, "record": {"kind": "snap", "var": "carried", "digest": "4a4a9c07…", "bytes": 32, "blob": "gAWVFQAAAAAAAAB9lIwEb3ZlcpRdlChLAUsCSwNlcy4=", "tag": "a90deb54…"}}}
+          {"type": "kernel/snapshot", "data": {"namespace": "restart-demo", "run": 1, "record": {"kind": "snap", "var": "total", "digest": "26fce7c6…", "bytes": 5, "blob": "gAVLKS4=", "tag": "de8a25fb…"}}}
+          {"type": "kernel/restored", "data": {"namespace": "restart-demo", "restored": ["carried", "total"], "failed": []}}
+      - title: What is read back from the log
+        tone: durable
+        list:
+          - "**The namespace**: the last `snap` of each variable that no later `clear` removed (`fold_namespace`)."
+          - "**A dispatch**: `tool/code-dispatch-start` is on record before a binding's body runs, and `tool/code-dispatch` settles it. A start a crash left open is settled by repair as outcome unknown, unless the tool can check (`reconcile`) or names its effect (`idempotency_key`)."
+          - "**A spawn a crash cut short**: `rlm_run` reconciles from the children's own logs. An admission that names the dispatch's id answers the call with the same handle; none means no child was started."
+          - "**A message a crash cut short**: `agent_message_send` reconciles against the receiver's log, which is written before the sender is told."
+          - "**The harness**: a fold over `harness/refined` records. `harness_state.json` is written for people and never read back."
+          - "**A corpus**: `context/loaded` records the recipe (sources and digest). A resumed session re-resolves it and says so only when the digest moved."
+          - "**A child**: admitted, started and ended in its own log; the resume sweep readmits one that was `queued` or `running`."
+      - title: Where a blob lives
+        tone: durable
+        list:
+          - "A snapshot payload up to `inlineBlobMax` (64 KiB) is base64 in the record. A larger one goes to the spill store under `kernel/<namespace>` and the record carries its locator."
+          - "A blob is on disk before the record that names it. A blob no record names is collected when the log is next read; a record whose blob is gone is reported as failed by `kernel/restored`."
+          - "The tag is an HMAC-SHA256 keyed by the session id. A blob from another session, or a torn one, fails verification and is not unpickled."
+      - title: Not kept
+        tone: limit
+        list:
+          - "A kernel that dies inside one daemon's life (a crash, `os._exit`, a kill past the limits) is replaced with an **empty** namespace, and the next result starts with `<runtime_reset>`. It is deliberately not restored: the model has been told the namespace is gone."
+          - "A variable `dill` cannot pickle, or one over `maxSnapshotBytes` (16 MiB), is recorded as a `clear` with the reason and does not come back."
+          - "Open files, sockets, threads and running tasks are not state the log holds."
+          - "The first cell after a restore records each restored variable again: the new guest has no memory of the digests it sent before. Seen in the run above."
+          - "The managed venv is a cache under `$PH_CACHE`. Deleting it costs a rebuild."
+      - record: kernel/restored
+      - links:
+          - {to: "durability", label: "Durability across the whole harness"}
+          - {to: "node:log", label: "The records ph-rlm writes"}
+
+  - id: caps
+    title: Output caps and the dropped total
+    summary: |
+      A cell's output is bounded where it is produced. Each stream is cut at
+      `maxLogBytes`, the cell's value at `maxValueBytes`, and each snapshot at
+      `maxSnapshotBytes`. Bytes past a cap are counted, and the count reaches
+      the model once, at the end of the logs.
+    blocks:
+      - table:
+          columns: [cap, default, bounds, past it]
+          rows:
+            - ["`maxLogBytes`", "64 KiB", "what a cell prints, and each of the process's own stdout and stderr", "the stream is cut between characters and marked; the rest is read, counted and not kept"]
+            - ["`maxValueBytes`", "64 KiB", "the cell's own value", "`truncated` is set; no output is dropped"]
+            - ["`maxSnapshotBytes`", "16 MiB", "one variable's pickled size", "a `clear` record with reason `too-large`"]
+            - ["`maxDispatchesPerRun`", "256", "binding calls in one cell", "the run ends with `CODE_RUN_BUDGET`"]
+            - ["`maxSubagentSpawnsPerRun`", "32", "`rlm.run` calls in one cell", "the run ends with `CODE_RUN_BUDGET`"]
+            - ["`maxParallelSubCalls`", "10", "binding calls in flight at once", "the next one waits"]
+      - title: A cell that printed 5 000 bytes under a 200 byte cap
+        lang: json
+        note: |
+          Generated with `maxLogBytes: 200`. The first marker says where the
+          stream was cut. The last line is the run's total, the same number as
+          `dropped`.
+        code: |
+          {"logs": "xxxxxxxx…xxxx\n[ph: output truncated — the rest is not kept, cap 200 bytes]\n\n[ph: output truncated — 4801 bytes dropped, cap 200 bytes]\n",
+           "value": 3, "dispatches": 0, "truncated": true, "dropped": 4801, "reset": false, "displays": []}
+      - title: How the total is counted
+        text: |
+          The guest counts what its own caps threw away and sends the number on `done` as `dropped`. The host adds what it dropped from the process's stdout and stderr, which carry a grandchild's output. `CodeRunResult.dropped` is the sum, and `logs` ends with one sentence that says it. A marker inside the logs carries no number, because a stream still running cannot know what will follow.
+      - frame: done
+        example: |
+          {"type": "done", "id": 2, "value": 3, "truncated": true, "dropped": 4801}
+      - struct: ph.seams.code_runtime:CodeRunResult
+      - title: Limits
+        tone: limit
+        list:
+          - "A run that was killed sends no `done`, so the guest's share of the total is not counted."
+          - "A binding's own result is not capped here. It is a tool result, and `tool-result-offload` decides about it per dispatch."
+          - "A display payload (a plot, a table) rides `displays` for a front end and never enters the model's text."
+      - links:
+          - {to: "ph-runtime-guest", label: "The frames, one by one"}
+          - {to: "ph-stabilize#node:result-offload", label: "Offloading one oversized dispatch"}
+
+  - id: subagents
+    title: What a child agent gets
+    summary: |
+      `rlm.run` admits a child and returns at once. The child is a whole agent:
+      its own session log, its own workspace and, the first time it runs a
+      cell, its own kernel. What it may call is a subset of its parent's, fixed
+      when it is admitted.
+    blocks:
+      - table:
+          columns: [thing, a child's]
+          rows:
+            - ["session log", "its own, filed in its parent's family; the header names the parent"]
+            - ["kernel", "its own process, keyed by its agent id, started on its first cell and closed with its scope"]
+            - ["namespace", "its own `kernel/snapshot` records, in its own log"]
+            - ["workspace", "its own, branched from the parent's root; `access` is `read` unless the spawn says `write`"]
+            - ["tools and skills", "its parent's, or the subset the spawn names"]
+            - ["budgets", "the same `tools-code-mode` and `limits` rows, counted per agent"]
+            - ["depth", "its parent's plus one; a spawn from depth `maxDepth` is refused"]
+      - title: What the parent reads when a child is admitted
+        lang: text
+        note: |
+          Generated: `rlm.run('summarize README.md', name='reader')` in a
+          directory that is not a git repository. The worktree tier declined,
+          so the child got the shared tree, and the handle says so.
+        code: |
+          admitted reader (child-af5f670e3f35) on fake-1
+          session: profile-child-af5f670e3f35
+          workspace access: write (requested read)
+          It will reply by agent message; keep working and check later.
+      - links:
+          - {to: "security#topic:inherits", label: "What a sub-agent inherits, and the rule that it cannot be widened"}
+          - {to: "security#topic:ladder", label: "The containment ladder"}
+          - {to: "node:subagents", label: "rlm-subagent-provider"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      Code Mode governs what a program calls, not what it computes. Raw Python
+      in a cell is bounded by the kernel's limits and the OS sandbox, never
+      gated.
+    blocks:
+      - tone: limit
+        list:
+          - "A cell's own `open()`, `subprocess` or socket fires no intent and passes no gate. The sandbox bounds it, or nothing does. See [security](security#topic:limits)."
+          - "A denial ends the whole run. `RunStopped` derives from `BaseException`, so a program cannot catch a refusal; the stop is a frame, then a signal, then a kill, and is best effort in time."
+          - "`rlm.run` returns a handle, not an answer. A program that needs the answer calls `rlm.wait`."
+          - "The namespace does not survive a dead kernel inside one daemon's life."
+          - "`patch` and `recipe` snapshot kinds are named and nothing writes them."
+          - "The snapshot tag is provenance, not secrecy. Anyone who can write the log can write the tag."
+          - "`find_models` is absent: there is no model catalog to answer it."
+          - "`python: host` puts ph-core and its dependencies on the child's `sys.path`. It reaches no live object, and it is a wider surface than the managed venv."
+          - "On macOS the address-space limit is not applied; `phern doctor` reports what each guest applied."
+          - "Skills reach every kernel through the `boot` frame, so \"importable in a cell\" is per mount, not per agent."
+          - "`rlm-context-loader` ships off, and stands down with no `sources` or below `minChars`. `rlm-stable` enables it without naming a source."
+
+nodes:
+  presentation:
+    title: rlm-presentation
+    summary: |
+      The row that names the one callable. `run_code` is ph-core's reserved
+      transport name; this row presents it to the model as `python`, with a
+      description of pH's own interpreter, and says how a settled cell reads. It
+      adds no tool.
+    blocks:
+      - row: rlm-presentation
+      - title: What it registers
+        struct: ph.tools.definition:TransportPresentation
+      - title: How a settled cell reads
+        text: |
+          The result text keeps prime-agent's order of sections: output, then the result, then the traceback. The two streams are interleaved in arrival order, not concatenated one after the other, so a cell that prints, warns and prints again reads in the order it happened. The card a front end draws (`CellDetails`) is computed from the stored result alone, so a replayed cell draws the same card as a live one.
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The transport name stays reserved: nothing may register a tool called `run_code`, and a presentation over a name that is already a visible tool is refused."
+          - "A rule that keys on `run_code` (a `hitl.interruptOn` entry, say) is honored for the presented name."
+      - title: Limits
+        tone: limit
+        list:
+          - "The row has no options. A different name or description is a different row."
+          - "It is not IPython: there are no magics, and a shell is `await tools.bash(...)`."
+      - links:
+          - {to: "edge:present", label: "The registration"}
+          - {to: "node:transport", label: "The transport it renames"}
+
+  transport:
+    title: The run_code transport (tools-code-mode)
+    summary: |
+      ph-core's `tools-code-mode` row registers the reserved transport. Its body
+      builds a `DispatchBridge` for this cell, gathers the binding namespaces
+      the calling agent may see, and asks the code runtime to run the program.
+      It declares itself irreversible, so `hitl` asks about a cell the
+      destructive classifier flags.
+    blocks:
+      - row: tools-code-mode
+      - title: In a profile
+        lang: yaml
+        note: These are the bundle's values. The budgets are per cell.
+        code: |
+          - id: tools
+            config:
+              mode: code                    # native | code | both
+          - id: tools-code-mode
+            config:
+              maxDispatchesPerRun: 256
+              maxSubagentSpawnsPerRun: 32
+              maxParallelSubCalls: 10
+      - row: tools
+      - title: What the cell returns to the model
+        struct: ph.tools.code_mode:CodeCellValue
+      - title: A real result
+        lang: json
+        note: Generated by a cell that called `tools.glob`, printed one line and ended on an expression.
+        code: |
+          {"logs": "found 2\n", "value": 2, "dispatches": 1, "truncated": false, "dropped": 0, "reset": false, "displays": []}
+      - title: What it listens to and dispatches
+        table:
+          columns: [event or call, dispatch, role]
+          rows:
+            - ["`tools/pre-execute` and the rest of the pipeline", waterfall, "the cell itself is gated like any tool call, under the name `run_code`"]
+            - ["`ctx.code_runtime.run`", "service", "runs the program"]
+            - ["`ctx.system_prompt.section`", "registration", "the SDK listing of every binding the agent may call"]
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The namespaces are built per call from the agent's own tool view, so a child narrowed to three tools is shown and can call three."
+          - "The transport itself is never removed by a restriction: a child with no way to call anything would be broken, not narrower. What a cell may do is restricted at each binding."
+          - "A call with no agent is refused: the namespace is the agent's id."
+      - title: Limits
+        tone: limit
+        list:
+          - "A program that is empty or not a string is a tool error."
+          - "The budgets bound governed calls, not computation. CPU and memory are the kernel's limits."
+      - links:
+          - {to: "edge:run-request", label: "The request to the runtime"}
+          - {to: "node:pipeline", label: "What each binding call re-enters"}
+
+  kernel:
+    title: code-runtime-python
+    summary: |
+      The runtime: one CPython child process per agent, started on the agent's
+      first cell and kept, so variables persist from one cell to the next. The
+      host talks to it on an inherited descriptor, fd 3, and rebuilds every
+      frame it reads, because the child runs model-written code and is treated
+      as hostile.
+    blocks:
+      - row: code-runtime-python
+      - title: In a profile
+        lang: yaml
+        note: |
+          `python: managed` builds `$PH_CACHE/runtime-venv` holding
+          `ph-runtime-guest`, `dill` and the Python skills, and nothing else.
+          `host` reuses pH's own interpreter. `interpreter:` or
+          `$PH_RUNTIME_PYTHON` names a third.
+        code: |
+          - id: code-runtime-python
+            config:
+              python: managed              # managed | host
+              cpuSeconds: 30               # per cell, re-armed at each run
+              idleCpuSeconds: 2            # CPU while no cell is running
+              addressSpaceBytes: 2147483648
+              maxLogBytes: 65536
+              maxValueBytes: 65536
+              maxSnapshotBytes: 16777216
+              cancelGraceSeconds: 2.0
+              probeSeconds: 1.0
+      - title: The limits, as the guest is told them
+        struct: ph_rlm.kernel.manager:KernelLimits
+      - title: What it provides
+        text: |
+          `ctx.code_runtime` gets a provider with `language: python`, `isolation: process` and `persistence: namespace`. The seam accepts `persistence: namespace` only from a provider that declares kernel snapshots; `rlm-kernel-snapshot` is the row that keeps that promise. The row also provides `ctx.python_runtime` for the snapshot and skills rows.
+      - struct: ph.seams.code_runtime:CodeRunRequest
+      - struct: ph.seams.code_runtime:CodeRunResult
+      - title: What it listens to
+        table:
+          columns: [event, dispatch, what the row does]
+          rows:
+            - ["`agent/created`", emit, "remembers the agent's scope, so its kernel is closed as an effect of that scope"]
+      - title: A kernel's life
+        text: |
+          1. The first `run` for a namespace resolves the interpreter, builds the argv, wraps it with `ctx.sandbox.confine` when a backend is mounted and the agent holds a workspace, and spawns the guest with fd 3 inherited.
+          2. `boot` carries every limit and the binding names; the guest answers `boot-ack` with what it applied.
+          3. If the log holds snapshots for this namespace, they are restored before the program runs.
+          4. Each `run` is serialized: one namespace, one program at a time.
+          5. A child that dies is replaced on the next run, and that run's logs start with `<runtime_reset>`.
+          6. Disposing the agent's scope closes the kernel.
+      - title: Durability
+        tone: durable
+        list:
+          - "Every changed variable is a `kernel/snapshot` record before the run's `done`."
+          - "A fresh kernel is handed the namespace the log remembers, after a daemon restart included."
+          - "Every spawn is journaled in the orphan ledger and fsynced; the next start sweeps a stray whose start token still matches."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "CPU per cell (`RLIMIT_CPU`, re-armed from the CPU already used), CPU while idle, and address space, applied in the child."
+          - "Exceeding the CPU limit raises from `BaseException`, so a cell cannot `except Exception` past it."
+          - "The kernel is confined by the same policy as a shell command: the agent's workspace and scratch. See [the OS sandbox](security#node:sandbox)."
+          - "The child gets a scrubbed environment and a session of its own; it never inherits the person's terminal."
+          - "An inbound frame is rebuilt field by field; junk becomes nothing and a handler never raises."
+          - "A `call` stamped with a run that is not the open one is refused, so a task a cell left behind cannot spend the next cell's budget."
+      - title: Limits
+        tone: limit
+        list:
+          - "With no sandbox backend, or an agent with no workspace, the kernel is not confined and a cell's raw `open()` is bounded by the cwd only."
+          - "The namespace of a kernel that died is lost."
+          - "`bwrap` does not forward signals, so a confined cell is canceled by a `cancel` frame."
+          - "`probeSeconds: null` gives up the loop gauge and the one repair for a run whose `done` was lost."
+      - links:
+          - {to: "edge:frames", label: "The frames on fd 3"}
+          - {to: "topic:durability", label: "What survives a restart"}
+          - {to: "security#node:effect", label: "A confined process"}
+
+  guest:
+    title: ph-runtime-guest
+    summary: |
+      The other half of the kernel: a small package that runs inside the child
+      process. It imports no harness code. It executes the program, turns each
+      binding call into a `call` frame, redirects `print` into `log` frames, and
+      snapshots changed variables before it reports `done`.
+    blocks:
+      - title: What it is given
+        list:
+          - "fd 3, named by an environment variable, as the framed channel."
+          - "A `boot` frame with every limit and each namespace's binding names and parameter order. The guest has no defaults of its own."
+          - "The import names of the Python skills to bind before any cell runs."
+      - title: The frames a guest sends
+        frames: guest
+      - frame: boot-ack
+        example: |
+          {"type": "boot-ack", "protocol": 4, "python": "3.12.3",
+           "limits": {"addressSpaceBytes": 2147483648, "cpu": "per-run", "dieWithParent": "pdeathsig"}}
+      - title: What it bounds
+        tone: secure
+        list:
+          - "It applies the limits to its own process and reports what it applied; the host believes the report, not the request."
+          - "It dies with its parent (`pdeathsig` on Linux, a kqueue exit watch on macOS)."
+          - "A program cannot catch `RunStopped`: a refused call unwinds the cell."
+      - title: Limits
+        tone: limit
+        list:
+          - "It is the hostile side. Nothing it sends is trusted: the host's codec rebuilds each frame, and a forged field is dropped."
+          - "The protocol is written twice on purpose, once here and once in ph-rlm; `test_protocol_mirror.py` compares the two field by field."
+      - links:
+          - {to: "ph-runtime-guest", label: "One cell over fd 3, frame by frame"}
+          - {to: "edge:frames", label: "A real exchange"}
+
+  pipeline:
+    title: The tool pipeline, re-entered per binding (DispatchBridge)
+    summary: |
+      Each `await tools.x(...)` in a cell arrives as a `call` frame and is
+      dispatched by a `DispatchBridge` through ph-core's complete tool pipeline:
+      gates, approval, guards, body, post-execute. Each dispatch writes two log
+      records. A denial ends the whole run.
+    blocks:
+      - title: One dispatch
+        text: |
+          1. The bridge checks the cell's budgets and gives the call an id, `<cell call id>:code:<n>`.
+          2. `ctx.tools.execute` runs it as its own execution, with the cell's scope, session and agent, and the cell's token as its parent.
+          3. `tool/code-dispatch-start` is written before the body runs.
+          4. The settled content goes through `tools/code-dispatch-log`, then `tool/code-dispatch` is written.
+          5. A failure raises `ToolCallError` in the program. A denial, a spent budget or a result that ends the turn raises `CodeRunFailure`, which the program cannot catch.
+      - title: The identity the two records share
+        struct: ph.tools.code_mode:CodeDispatchRef
+      - record: tool/code-dispatch-start
+        example: |
+          {"type": "tool/code-dispatch-start",
+           "data": {"rootCallId": "c1", "parentCallId": "c1", "subCallId": "c1:code:0", "name": "glob",
+                    "arguments": {"pattern": "*.py", "path": "/home/me/repo"}, "restoreCovered": true}}
+      - record: tool/code-dispatch
+        example: |
+          {"type": "tool/code-dispatch",
+           "data": {"rootCallId": "c1", "parentCallId": "c1", "subCallId": "c1:code:0", "name": "glob",
+                    "isError": false,
+                    "content": [{"type": "text", "text": "1 match(es):\n/home/me/repo/a.py"}]}}
+      - title: A refusal, as the model reads it
+        lang: text
+        note: |
+          Generated: a cell wrapped `agent_message.send(..., receiver_role='sibling')`
+          in `try/except Exception`. The `except` did not run. The error's code
+          is `CODE_RUN_DENIED`.
+        code: |
+          tools.agent_message_send was refused: no family member has the role "sibling" (reachable roles: child). Agent reach is limited to parent, siblings, and children.. The program was stopped; re-plan with this refusal in mind.
+      - title: The three ways a run ends early
+        table:
+          columns: [kind, code, cause]
+          rows:
+            - ["`denied`", "`CODE_RUN_DENIED`", "a gate, a guard or a person refused one call"]
+            - ["`budget`", "`CODE_RUN_BUDGET`", "`maxDispatchesPerRun` or `maxSubagentSpawnsPerRun` was reached, or a result ended the turn"]
+            - ["`aborted`", "`CODE_RUN_ABORTED`", "the cell was canceled"]
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Forty calls are forty evaluations of `hitl`, `limits`, the guards and `permissions-fs`, and forty independent offload decisions."
+          - "Both records are log-only: they never re-enter the model's context."
+          - "A sub-call runs in the cell's scope, so a child's narrowing applies inside its cells."
+      - title: Limits
+        tone: limit
+        list:
+          - "The stop after a denial is best effort in time: the program stops at its next yield point, then is signaled, then killed after `cancelGraceSeconds`."
+          - "A dispatch a crash left open is settled as outcome unknown unless its tool can reconcile it."
+      - links:
+          - {to: "edge:dispatch", label: "A call frame becomes a dispatch"}
+          - {to: "security#node:gates", label: "The gates each dispatch passes"}
+
+  bindings:
+    title: rlm-bindings
+    summary: |
+      The `rlm` namespace. A cell writes `rlm.run(...)`; the governed tool is
+      `rlm_run`. Because it is a tool, a deployment can deny or ask about
+      spawning by policy, and the cell's spawn budget counts it.
+    blocks:
+      - row: rlm-bindings
+      - title: What a cell can call
+        table:
+          columns: [in a cell, tool, does]
+          rows:
+            - ["`await rlm.run(prompt, ...)`", "`rlm_run`", "admits a child and returns a handle; counts against `maxSubagentSpawnsPerRun`"]
+            - ["`await rlm.wait(handle)`", "`rlm_wait`", "waits for one of the cell's own children; a failed child fails the call"]
+            - ["`await rlm.list_subagents()`", "`rlm_list_subagents`", "each child as its own log tells it"]
+            - ["`await rlm.delete_subagent(child_id)`", "`rlm_delete_subagent`", "revokes a child and leaves a tombstone in its log"]
+      - title: The arguments of rlm.run
+        struct: ph_rlm.bindings:RunArgs
+      - title: What comes back
+        struct: ph_rlm.bindings:SpawnHandle
+      - title: A real handle
+        lang: json
+        code: |
+          {"childId": "child-af5f670e3f35", "name": "reader", "sessionId": "profile-child-af5f670e3f35",
+           "model": "fake-1", "requestedAccess": "read", "grantedAccess": "write"}
+      - title: Durability
+        tone: durable
+        list:
+          - "A spawn cut short by a crash is answered from the children's logs: `Done` with the handle when an admission names this call, `NotDone` when none does."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The spawn states its boundary: `scope=run.scope`, so the ceiling is computed in the calling agent's scope."
+          - "`access` defaults to `read`."
+          - "A spawn error keeps its code (`SPAWN_REFUSED`) on the way back to the program."
+      - title: Limits
+        tone: limit
+        list:
+          - "`rlm.run` does not return an answer. The reply arrives later as an inbox message, or through `rlm.wait`."
+          - "A pydantic class as `output=` needs `pydantic` importable in the kernel; the managed venv does not hold it."
+      - links:
+          - {to: "edge:start-child", label: "The call into ctx.subagents"}
+          - {to: "security#topic:inherits", label: "What the child inherits"}
+
+  messaging:
+    title: rlm-messaging
+    summary: |
+      Agent-to-agent messages and a bounded read of a family member's
+      transcript. A send is a governed tool, so the family boundary is a guard
+      no later listener can re-permit, and the rate limit is a tool error the
+      program may handle.
+    blocks:
+      - row: rlm-messaging
+      - title: In a profile
+        lang: yaml
+        code: |
+          - id: rlm-messaging
+            config:
+              maxMessageChars: 16384
+              maxPending: 20
+              rateCapacity: 3
+              rateRefillSeconds: 1.0
+              observeMaxMessages: 40
+      - title: What a cell can call
+        table:
+          columns: [in a cell, tool, does]
+          rows:
+            - ["`await agent_message.send(message, receiver_role=, receiver_name=)`", "`agent_message_send`", "steers one message into a family member"]
+            - ["`await agent_message.list_agents()`", "`agent_message_list_agents`", "who this agent may address, and how each is related"]
+            - ["`await agent_observe.list()`", "`agent_observe_list`", "the same roster"]
+            - ["`await agent_observe.get(agent_id, limit=)`", "`agent_observe_get`", "the last messages of that agent's transcript, as role and text"]
+      - struct: ph_rlm.messaging:SendArgs
+      - title: The receipt
+        struct: ph_rlm.messaging:Receipt
+      - title: What it bounds
+        tone: secure
+        list:
+          - "Reach is the sender's parent, its direct children and its siblings. The guard and the roster come from one function, `reachable_family`."
+          - "The guard is deny-only and runs last, after any approval."
+          - "A body is at most `maxMessageChars`; a target holding `maxPending` unread messages refuses more."
+          - "The message is on the receiver's disk before the sender is told it was delivered."
+      - title: Limits
+        tone: limit
+        list:
+          - "The rate limit is backpressure: 3 sends per second per sender and target, then a tool error."
+          - "Delivery is at the target's next step. A busy target answers `queued`."
+          - "A settled child is woken to receive a message; one that cannot be woken fails the send and names `agent_observe.get`."
+          - "Reading is as wide as writing: a child can read its parent's recent transcript."
+      - links:
+          - {to: "edge:to-messaging", label: "A send, dispatched"}
+          - {to: "edge:steer", label: "Delivery into the target"}
+          - {to: "security#node:child", label: "How messaging is guarded"}
+
+  loader:
+    title: rlm-context-loader
+    summary: |
+      A queryable corpus: a body of text the agent consults by tool call without
+      any of it entering the prompt. It ships switched off. When armed it
+      registers three tools, reached in a cell as `tools.context_search` and
+      friends, and puts a manifest in the prompt: names, sizes and how to query.
+    blocks:
+      - row: rlm-context-loader
+      - title: Switching it on
+        lang: yaml
+        note: |
+          The row is `disabled: true` in the bundle. With no `sources` it
+          stands down at once, and below `minChars` too: no tools and no prompt
+          section. `rlm-stable` switches the row on with `minChars: 200000` and
+          names no source, so there it is still inert until a profile adds
+          `sources`.
+        code: |
+          - id: rlm-context-loader
+            disabled: false
+            config:
+              corpus: context
+              sources:
+                - {kind: path, value: "docs/**/*.md"}
+                - {kind: text, name: glossary, value: "RLM: recursive language model …"}
+              minChars: 0
+              maxMatches: 200
+      - struct: ph_rlm.context_loader:ContextSource
+      - title: The tools
+        table:
+          columns: [tool, does]
+          rows:
+            - ["`context_search`", "matches over the corpus, capped by `maxMatches`"]
+            - ["`context_chunks`", "a range of one document"]
+            - ["`context_head`", "the start of one document"]
+      - record: context/loaded
+        example: |
+          {"type": "context/loaded",
+           "data": {"corpus": "context", "loader": "rlm-context-loader",
+                    "sources": ["docs/**/*.md"], "digest": "<sha256 of the resolved corpus>", "note": ""}}
+      - title: Durability
+        tone: durable
+        list:
+          - "The record is the recipe, not the content. A later session re-resolves the sources; a matching digest is silent, a changed one tells the model the corpus was rebuilt, a missing source says so."
+      - title: Limits
+        tone: limit
+        list:
+          - "The corpus never enters the kernel, so there is no `context` variable in a cell."
+          - "The record example above is written from the writer's field list; the `sources` and `digest` values are illustrative."
+      - links:
+          - {to: "edge:to-loader", label: "A query, dispatched"}
+
+  subagents:
+    title: rlm-subagent-provider
+    summary: |
+      The provider that runs a child in this process: it registers `rlm-child`
+      on `ctx.subagents`. `start` creates the child's session and agent inside
+      the parent's scope, takes its workspace, starts its drive as a job and
+      returns. The seam, not this row, writes the admission and applies the
+      ceiling.
+    blocks:
+      - row: rlm-subagent-provider
+      - title: In a profile
+        lang: yaml
+        note: |
+          The bundle's values. A spawn from depth `maxDepth` is refused.
+          Children past `maxConcurrent` queue in admission order; the row's own
+          default is no cap.
+        code: |
+          - id: rlm-subagent-provider
+            config:
+              maxDepth: 2
+              maxConcurrent: 4
+              answerPreviewChars: 240
+      - title: What it needs and provides
+        text: |
+          It injects `ctx.subagents`, `ctx.agents`, `ctx.sessions` and `ctx.jobs`. It provides `ctx.rlm_children` for the prompt row, which reads the depth limit from it so the number the model is told and the number enforced are one value.
+      - title: The handle
+        struct: ph.seams.subagents:SubagentRun
+      - title: The records, all in the child's log
+        lang: json
+        note: From a real spawn and a real run. The seam's doors write them; the provider calls the doors.
+        code: |
+          {"type": "subagent/admitted", "data": {"runId": "child-af5f670e3f35", "name": "reader", "owner": "rlm-child", "prompt": "summarize README.md", "modelProvider": "fake", "model": "fake-1", "requestedAccess": "read", "grantedAccess": "write", "callId": "c3:code:0"}}
+          {"type": "subagent/status", "data": {"status": "running"}}
+          {"type": "subagent/status", "data": {"status": "done", "answerPreview": "ok", "notice": {"text": "[rlm child reader (child-af5f670e3f35) completed without sending a reply. Last assistant text: ok]", "summary": "reader finished without replying", "id": "48daa566-…"}}}
+      - record: subagent/admitted
+      - record: subagent/status
+      - title: Durability
+        tone: durable
+        list:
+          - "The agent is created before the admission is written, so a failed create leaves no admitted child. It does not run until the seam opens its gate, after the admission is on disk."
+          - "A restart readmits a `queued` or `running` child under its own run id, and the task is presented again saying the turn was cut short."
+          - "A mount going away suspends each unfinished child (`queued`, no tombstone); the resume sweep readmits it."
+      - title: What it bounds
+        tone: secure
+        list:
+          - "The child's scope is created with `parent=parent`, inside the parent's, and handed back so the seam can bound it."
+          - "The child is an effect of the parent's scope: a disposed parent revokes it."
+          - "A child's log is leased like a root's, so a second process cannot open it."
+      - title: Limits
+        tone: limit
+        list:
+          - "`maxConcurrent` is per parent: ten roots at four each is forty children. The host's bound is `jobs.concurrency.subagent`."
+          - "There is no `default_access` option; the request's default is `read`."
+          - "A child deleted right after it was admitted was seen, in a scratch run with the fake model, to record `running` and `done` after its tombstone. Not investigated."
+      - links:
+          - {to: "edge:admit", label: "Admitting the child"}
+          - {to: "security#node:subagents", label: "The spawn door and its checks"}
+
+  child:
+    title: A child agent
+    summary: |
+      A child is an agent like its parent, one level deeper. Its task arrives as
+      the first message in its inbox, labeled as the parent's. It works in its
+      own workspace, runs cells in its own kernel, and answers by agent message
+      or by ending.
+    blocks:
+      - title: Its first records
+        lang: json
+        note: |
+          From a real spawn in a directory that is not a git repository: the
+          worktree tier was asked, declined, and the child got the shared tree.
+        code: |
+          {"type": "workspace/acquiring", "data": {"agentId": "profile-child-af5f670e3f35", "kind": "worktree-ephemeral", "root": "…/worktrees/profile-child-af5f670e3f35/profile-child-af5f670e3f35", "ref": "ph/profile-child-af5f670e3f35/profile-child-af5f670e3f35"}}
+          {"type": "workspace/acquired", "data": {"agentId": "profile-child-af5f670e3f35", "kind": "shared", "root": "/home/me/notes", "repoWritable": true, "declined": "not-a-repository"}}
+          {"type": "agent/inbox/spliced", "data": {"target": "next-turn", "start": 0, "inserted": [{"id": "86d0eda0-…", "role": "user", "content": [{"type": "text", "text": "[task from parent]\n\nsummarize README.md"}], "source": {"kind": "plugin", "plugin": "ph_rlm.subagents", "form": "relay"}}]}}
+          {"type": "subagent/admitted", "data": {"runId": "child-af5f670e3f35", "name": "reader", "owner": "rlm-child", "…": "…"}}
+          {"type": "subagent/status", "data": {"status": "running"}}
+          {"type": "turn/start", "data": {"turn": 1}}
+      - title: How its answer reaches the parent
+        table:
+          columns: [the child, the parent gets]
+          rows:
+            - ["sends `agent_message.send(..., receiver_role='parent')`", "a steered message at its next step"]
+            - ["ends without replying", "a notice in its inbox with the child's last text"]
+            - ["returns a value it owes (`output=`)", "the value on the ending notice and in the roster row"]
+            - ["fails or is canceled", "a failure notice; an ephemeral worktree is kept as evidence"]
+      - title: What survives
+        tone: durable
+        list:
+          - "Its whole story is its own log. The parent's log holds only what the parent did, such as the dispatch that spawned it."
+          - "Its spend is counted from its own `assistant/message` records."
+          - "A settled child that is addressed again is woken on the same branch, with the access its admission recorded."
+      - title: Limits
+        tone: limit
+        list:
+          - "Its kernel is its own. Variables are not shared with the parent; data crosses by message, by file or by a returned value."
+          - "With no tier in force it works in its parent's tree, whatever `access` it asked for."
+      - links:
+          - {to: "security#node:child", label: "What a child can and cannot do"}
+          - {to: "topic:subagents", label: "What a child agent gets"}
+
+  log:
+    title: The session log
+    summary: |
+      ph-core's append-only log, one per agent. ph-rlm's state is in it: every
+      dispatch, every changed variable, every refinement. Nothing here keeps a
+      second account in memory.
+    blocks:
+      - title: What ph-rlm writes
+        table:
+          columns: [record, written by, when]
+          rows:
+            - ["`tool/code-dispatch-start`", "the dispatch bridge, through the journal", "before a binding's body runs"]
+            - ["`tool/code-dispatch`", "the dispatch bridge, through the journal", "when the binding settles"]
+            - ["`kernel/snapshot`", "`ph_rlm.snapshot`", "one per changed variable, before the run's `done`"]
+            - ["`kernel/restored`", "`ph_rlm.snapshot`", "after a fresh kernel was handed the namespace"]
+            - ["`harness/refined`", "`ph_rlm.harness.service`", "a refinement was applied, or rolled back"]
+            - ["`harness/refine-considered`", "`ph_rlm.harness`", "a pass that produced no refinement, with the reason"]
+            - ["`harness/probe`, `harness/probed`", "`ph_rlm.kinds`", "around the check that a skill entry's reference resolves"]
+            - ["`context/loaded`", "`ph_rlm.context_loader`", "the first prompt assembly that shows a corpus"]
+            - ["`subagent/*`", "`ph.seams.subagents`", "in the child's log, through the seam's doors"]
+      - record: kernel/snapshot
+        example: |
+          {"type": "kernel/snapshot",
+           "data": {"namespace": "profile", "run": 1,
+                    "record": {"kind": "snap", "var": "count",
+                               "digest": "ee6c32ed6d10895fbd523f1637c50374fe48506c821286ad83416f51e69765b2",
+                               "bytes": 5, "blob": "gAVLAi4=",
+                               "tag": "8005b195357bf665f00a70fa29845e164fad968ddedfd589c625c8d00bbfaf33"}}}
+      - title: One snapshot record
+        struct: ph_rlm.snapshot:SnapshotRecord
+      - title: What survives
+        tone: durable
+        list:
+          - "A dispatch pair is an intent: opened before the act, settled after, and repaired if a crash left it open."
+          - "`kernel/snapshot` and `kernel/restored` are ignorable: a reader without ph-rlm skips them and loses only the namespace."
+          - "`harness/refined` is required reading: skipping one would change what the model is told."
+      - links:
+          - {to: "topic:durability", label: "What survives a restart"}
+          - {to: "ph-core", label: "ph-core: the loop, the log and the seams"}
+
+  harness:
+    title: rlm-harness and /refine
+    summary: |
+      The Continual Harness: notes, procedures and skill pointers the agent
+      accumulates, shown in its prompt. Its state is a fold over
+      `harness/refined` records, so a fork inherits it and a rollback is derived
+      from the record that made the change. `/refine` is a command a person
+      types, not a tool the model calls.
+    blocks:
+      - row: rlm-harness
+      - title: In a profile
+        lang: yaml
+        note: "The defaults. `autoRefine: false` keeps the command and stops the automatic pass."
+        code: |
+          - id: rlm-harness
+            config:
+              autoRefine: true
+              turnsBetweenRefinements: 25
+              cooldownMinutes: 20
+              maxPerKind: 12
+              maxRefinements: 5
+      - row: rlm-harness-invariant
+      - title: The command
+        lang: text
+        code: |
+          /refine [--global] [--show] [--rollback <id>] [instructions]
+      - title: What it listens to and dispatches
+        table:
+          columns: [event or call, dispatch, what the row does]
+          rows:
+            - ["`session/event`", emit, "at a `turn/end`, considers an automatic pass (after 25 turns or a compaction, outside the cooldown)"]
+            - ["`harness/before-refine`", waterfall, "asks listeners for a veto before any model call is spent"]
+            - ["`ctx.jobs.start`", "service", "runs the pass as a job owned by the agent's scope"]
+            - ["`ctx.approval.request(tool_name=\"refine\")`", "service", "asks a person before a `--global` edit"]
+            - ["`ctx.code_runtime.run`", "service", "probes that a skill entry's reference imports, in the runtime the model uses"]
+      - event: harness/before-refine
+        args:
+          - [request, RefineRequest, "the session, the agent, the scope, the trigger and any instructions"]
+      - record: harness/refined
+        example: |
+          {"type": "harness/refined",
+           "data": {"refineId": "refine-98497349", "scope": "local",
+                    "summary": "prefer uv over pip in this repo", "rationale": "", "expectedOutcome": "",
+                    "appliedEdits": [{"action": "create", "kind": "note", "id": "prefer-uv",
+                      "after": {"kind": "note", "id": "prefer-uv", "title": "Use uv",
+                                "content": "Run tools with `uv run`; pip is not installed.",
+                                "version": 1, "scope": "local", "metadata": {}}}],
+                    "rejected": ["skill \"no-such\" does not resolve: ModuleNotFoundError: No module named 'nonesuch_module'"]}}
+      - title: The probe around it
+        lang: json
+        note: Generated with the refinement above, which also proposed a skill entry whose module does not exist.
+        code: |
+          {"type": "harness/probe", "data": {"refineId": "refine-98497349", "entry": "no-such", "module": "nonesuch_module", "callable": "helper"}}
+          {"type": "harness/probed", "data": {"probeSeq": 0, "unresolved": "ModuleNotFoundError: No module named 'nonesuch_module'"}}
+      - struct: ph_rlm.harness.state:RefinementRecord
+      - title: The four checks before anything is written
+        tone: secure
+        list:
+          - "A skill entry's reference must resolve, probed in the kernel. A refusal is recorded on the record as `rejected`."
+          - "The call pattern is rendered by the harness, never accepted from the model."
+          - "A `scope: global` entry goes through `ctx.approval`, and fails closed with nobody to ask."
+          - "The base doctrine is not editable."
+          - "An entry references capability that exists; it cannot create a tool or a preset (I7)."
+      - title: Durability
+        tone: durable
+        list:
+          - "State is the fold of `harness/refined`. Deleting `harness_state.json` and deriving it again gives the same bytes; `rlm-harness-invariant` checks that."
+          - "Global entries are records in `$PH_HOME/harness/events.jsonl`, appended under a file lock."
+          - "A global edit whose approval cannot be written is refused."
+      - title: Limits
+        tone: limit
+        list:
+          - "An automatic pass is local only."
+          - "`harness/refine-considered` advances the cooldown, so a declined pass costs one cheap call, not one per turn."
+          - "A rollback applies the inverse record and is not revalidated."
+      - links:
+          - {to: "edge:harness-log", label: "The record it writes"}
+          - {to: "invariants", label: "I7 and the other invariants"}
+
+edges:
+  present:
+    transport: call
+    summary: |
+      At mount, `rlm-presentation` calls `ctx.tools.present_transport` with the
+      name `python` and its description. Nothing crosses at run time: the
+      registry shows the reserved transport under that name from then on, for
+      every agent the registration reaches.
+    blocks:
+      - struct: ph.tools.definition:TransportPresentation
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A presentation whose name is already a visible tool is refused, and so is a later tool registered under the presented name."
+          - "It is a registration of the row's scope: unmounting the row restores `run_code`."
+
+  run-request:
+    transport: service
+    summary: |
+      The transport's body calls `ctx.code_runtime.run` with the program, the
+      calling agent's id as both `agent` and `namespace`, the binding namespaces
+      and a cancel token. The runtime returns one `CodeRunResult` when the
+      program settles.
+    blocks:
+      - struct: ph.seams.code_runtime:CodeRunRequest
+      - title: What comes back
+        struct: ph.seams.code_runtime:CodeRunResult
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A denied dispatch does not come back as a result: the runtime raises the `CodeRunFailure`, and the cell's tool call fails with it."
+          - "With no runtime registered, `ctx.code_runtime.require()` refuses. ph-core ships a `code-runtime-stub` row; no shipped profile mounts it."
+          - "A runtime that died since the last run sets `reset` and starts the logs with `<runtime_reset>`."
+
+  frames:
+    transport: frame
+    summary: |
+      The host and the guest exchange newline-delimited JSON on fd 3. The host
+      sends `boot` once, then `run` for each cell and a `reply` for each `call`.
+      The guest sends `call`, `log`, `display` and `snapshot` while a program
+      runs, and `done` last.
+    blocks:
+      - title: One cell, as it crossed
+        lang: json
+        note: |
+          Captured from a real kernel running a cell that called `tools.glob`,
+          printed one line and ended on an expression. The `boot` frame is
+          shortened: it lists every binding of every namespace.
+        code: |
+          host > {"type":"boot","protocol":4,"cpuSeconds":30,"idleCpuSeconds":2,"addressSpaceBytes":2147483648,"maxLogBytes":65536,"maxValueBytes":65536,"maxSnapshotBytes":16777216,"namespaces":[{"name":"tools","description":"governed capabilities; every call is recorded and may be refused","bindings":[{"name":"attach","description":"…","parameters":["path"]}, …]}, …],"skills":[]}
+          guest> {"type": "boot-ack", "protocol": 4, "python": "3.12.3", "limits": {"addressSpaceBytes": 2147483648, "cpu": "per-run", "dieWithParent": "pdeathsig"}}
+          host > {"type":"run","id":1,"program":"files = await tools.glob(pattern='*.py', path='/home/me/repo')\nprint('found', len(files['paths']))\nlen(files['paths'])"}
+          guest> {"type": "call", "id": 1, "run": 1, "global": "tools", "name": "glob", "args": {"pattern": "*.py", "path": "/home/me/repo"}}
+          host > {"type":"reply","id":1,"ok":true,"value":{"paths":["/home/me/repo/a.py"],"truncated":false}}
+          guest> {"type": "snapshot", "id": 1, "variables": [{"var": "files", "digest": "7fc17abe…", "bytes": 113, "blob": "gAWVZgAAAAAAAAB9…"}]}
+          guest> {"type": "log", "stream": "stdout", "text": "found 1\n"}
+          guest> {"type": "done", "id": 1, "value": 1}
+      - title: Every frame
+        frames: all
+      - frame: boot
+      - frame: run
+      - frame: call
+      - frame: reply
+        example: |
+          {"type":"reply","id":4,"ok":false,"message":"tools.agent_message_send was refused: …","fatal":true}
+      - frame: snapshot
+      - frame: done
+      - frame: restore
+      - frame: cancel
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Until `boot-ack`, any other frame is a fault to report. After it, a frame the codec cannot rebuild is dropped."
+          - "A `reply` with `fatal` makes the guest raise `RunStopped`, which the program cannot catch. The host also starts the stop ladder: `cancel` frame, signal, kill."
+          - "A frame is one line. A `restore` sends one variable per frame so a namespace cannot exceed the frame bound."
+          - "The two sides must agree on `protocol` (4); a guest one version behind is refused at `boot`."
+      - links:
+          - {to: "ph-runtime-guest", label: "The same exchange, as a sequence"}
+          - {to: "ph-runtime-guest#edge:call", label: "The call frame"}
+
+  dispatch:
+    transport: call
+    summary: |
+      A `call` frame names a namespace (`global`) and a binding. The kernel
+      looks the binding up among those this run was given and awaits its
+      dispatch closure, which is `DispatchBridge.call`. The value comes back as
+      a `reply` frame.
+    blocks:
+      - frame: call
+        example: |
+          {"type": "call", "id": 1, "run": 1, "global": "tools", "name": "glob", "args": {"pattern": "*.py", "path": "/home/me/repo"}}
+      - title: What the bridge builds from it
+        struct: ph.tools.definition:ToolExecutionInput
+      - title: How the answer is mapped
+        table:
+          columns: [outcome, reply, in the program]
+          rows:
+            - ["the tool returned", "`ok: true`, `value`", "the awaited value"]
+            - ["the tool failed", "`ok: false`, `message`, `name`", "`ToolFailed`, which the program may catch"]
+            - ["denied, a spent budget, or the turn ended", "`ok: false`, `message`, `fatal: true`", "`RunStopped`; the run is over"]
+            - ["the binding is not in this run's set", "`ok: false`, `<namespace>.<name> is not available`", "a failure"]
+            - ["the call belongs to a run that has settled", "`ok: false`, `the program that made this call has finished`", "a failure in a task the cell left behind"]
+      - event: tools/pre-execute
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "At most `maxParallelSubCalls` dispatches of one cell run at once."
+          - "Arguments must be JSON; the bridge freezes them once and that snapshot is what is logged and run."
+
+  to-bindings:
+    transport: call
+    summary: |
+      A dispatch named `rlm_run`, `rlm_wait`, `rlm_list_subagents` or
+      `rlm_delete_subagent` runs that tool's body in `rlm-bindings`, after the
+      gates. The body returns a typed value, which the bridge hands back to the
+      cell.
+    blocks:
+      - struct: ph_rlm.bindings:RunArgs
+      - title: The dispatch pair for a spawn
+        lang: json
+        note: From a real cell. `restoreCovered` is false, because a restore point does not undo a child.
+        code: |
+          {"type": "tool/code-dispatch-start", "data": {"rootCallId": "c3", "parentCallId": "c3", "subCallId": "c3:code:0", "name": "rlm_run", "arguments": {"prompt": "summarize README.md", "name": "reader"}, "restoreCovered": false}}
+          {"type": "tool/code-dispatch", "data": {"rootCallId": "c3", "parentCallId": "c3", "subCallId": "c3:code:0", "name": "rlm_run", "isError": false, "content": [{"type": "text", "text": "admitted reader (child-af5f670e3f35) on fake-1\nsession: profile-child-af5f670e3f35\nworkspace access: write (requested read)\nIt will reply by agent message; keep working and check later."}]}}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A refused spawn is a failed call with code `SPAWN_REFUSED`; the program may catch it and choose again."
+          - "The 33rd `rlm.run` of one cell ends the run with `CODE_RUN_BUDGET`."
+
+  to-messaging:
+    transport: call
+    summary: |
+      A dispatch named `agent_message_send` passes the family guard, then runs
+      the send. The body resolves the target by role and name, takes a token
+      from the rate bucket, steers the message in and returns a receipt.
+    blocks:
+      - struct: ph_rlm.messaging:SendArgs
+      - title: What comes back
+        struct: ph_rlm.messaging:Receipt
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "Outside the family: a denial from the guard, and the cell ends."
+          - "Too fast, too long, or a full inbox: a tool error the program may catch and retry."
+          - "A send a crash cut short is reconciled against the receiver's log by its message id."
+
+  to-loader:
+    transport: call
+    summary: |
+      When `rlm-context-loader` is armed, a dispatch named `context_search`,
+      `context_chunks` or `context_head` runs against the corpus. Each query is
+      its own dispatch pair, so one oversized result is offloaded without its
+      siblings. The arrow is dashed because the row ships off.
+    blocks:
+      - struct: ph_rlm.context_loader:SearchArgs
+      - struct: ph_rlm.context_loader:SearchValue
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "With the row off, or a corpus under `minChars`, the tools do not exist and the call fails as not available."
+          - "`limit` is capped at `maxMatches` whatever the model asks."
+
+  start-child:
+    transport: service
+    summary: |
+      The `rlm_run` body calls `ctx.subagents.start("rlm-child", SubagentRequest)`
+      with the calling agent as `parent`, its scope as `scope` and the
+      dispatch's id as `call_id`. The seam resolves and checks the request, then
+      calls the provider. A `SubagentRun` comes back at admission.
+    blocks:
+      - struct: ph.seams.subagents:SubagentRequest
+      - title: What comes back
+        struct: ph.seams.subagents:SubagentRun
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A refusal raises `SubagentSpawnError`: a tool the parent lacks, an unknown preset, a model this mount cannot run, a spent child ceiling, or the depth limit."
+          - "`RLM recursion depth limit reached (RLM_DEPTH=2, RLM_MAX_DEPTH=2)` is the depth refusal."
+      - links:
+          - {to: "security#topic:inherits", label: "Every check, in order"}
+
+  admit:
+    transport: call
+    summary: |
+      The provider creates the child's session and agent, takes its workspace,
+      queues its task and starts its drive job. The seam then writes
+      `subagent/admitted` into the child's log, applies the grant, flushes, and
+      opens the child's gate. Only then does the child take a step.
+    blocks:
+      - record: subagent/admitted
+        example: |
+          {"type": "subagent/admitted",
+           "data": {"runId": "child-af5f670e3f35", "name": "reader", "owner": "rlm-child",
+                    "prompt": "summarize README.md", "modelProvider": "fake", "model": "fake-1",
+                    "requestedAccess": "read", "grantedAccess": "write", "callId": "c3:code:0"}}
+      - struct: ph.seams.subagents:Admission
+      - title: The child's session header
+        struct: ph.session.session:SessionHeader
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An admission that cannot be written refuses the spawn; the child is released and ended in its own log."
+          - "A child past `maxConcurrent` is admitted and waits as `queued`; it is not refused."
+          - "A parent disposed during the spawn refuses it."
+
+  steer:
+    transport: call
+    summary: |
+      Delivery is `target.steer(message)`: the message joins the target's inbox
+      and is read at its next step, not its next turn. The receiver's log is
+      written before the sender gets its receipt.
+    blocks:
+      - title: What the target reads
+        lang: text
+        note: "`render_received`. The body is reproduced exactly."
+        code: |
+          [from child:reader]
+          Agent-to-agent message received.
+          Source: agent_message
+          From: profile-child-af5f670e3f35
+          To: profile
+          Message id: <message id>
+
+          The README covers install and the three shipped profiles.
+      - struct: ph.llm.types:PluginSource
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A target that is running, or already holds input, answers `queued`; otherwise `delivered`."
+          - "A settled child is woken first (`ensure_addressable`); one that cannot be woken fails the send."
+          - "The text above is written from `render_received`; the ids and the body are illustrative."
+
+  dispatch-log:
+    transport: log
+    summary: |
+      Each dispatch writes two records to the calling agent's log through the
+      journal: `tool/code-dispatch-start` before the body, `tool/code-dispatch`
+      at settle. Before the second is written, its content passes the
+      `tools/code-dispatch-log` waterfall, where a row may replace one oversized
+      result.
+    blocks:
+      - record: tool/code-dispatch-start
+      - record: tool/code-dispatch
+        example: |
+          {"type": "tool/code-dispatch",
+           "data": {"rootCallId": "c1", "parentCallId": "c1", "subCallId": "c1:code:0", "name": "glob",
+                    "isError": false,
+                    "content": [{"type": "text", "text": "1 match(es):\n/home/me/repo/a.py"}]}}
+      - event: tools/code-dispatch-log
+        args:
+          - [record, CodeDispatchLog, "which dispatch this is, and whether it failed"]
+          - [content, "Sequence[ContentBlock]", "the result blocks; a listener returns the blocks to log"]
+      - struct: ph.tools.code_mode:CodeDispatchRef
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A dispatch whose body raised past the bridge is abandoned as outcome unknown."
+          - "Readers pair the two records by `parentCallId` and `subCallId`, and by nothing else."
+
+  snapshot-log:
+    transport: log
+    summary: |
+      Before `done`, the guest sends a `snapshot` frame with each variable whose
+      digest moved. `rlm-kernel-snapshot` turns each into a `kernel/snapshot`
+      record in the agent's log: `snap` with the payload or its locator, or
+      `clear` for a variable that was deleted or could not be stored.
+    blocks:
+      - frame: snapshot
+        example: |
+          {"type": "snapshot", "id": 1, "variables": [{"var": "files", "digest": "7fc17abe…", "bytes": 113, "blob": "gAWVZgAAAAAAAAB9…"}]}
+      - record: kernel/snapshot
+        example: |
+          {"type": "kernel/snapshot",
+           "data": {"namespace": "profile", "run": 1,
+                    "record": {"kind": "snap", "var": "count", "digest": "ee6c32ed…", "bytes": 5,
+                               "blob": "gAVLAi4=", "tag": "8005b195…"}}}
+      - struct: ph_rlm.snapshot:SnapshotRecord
+      - row: rlm-kernel-snapshot
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An unchanged variable writes nothing, however large it is."
+          - "A payload over `inlineBlobMax` goes to the spill store first; one the store cannot take is recorded as a `clear`."
+          - "With the snapshot row unmounted the runtime still runs, and nothing keeps its `persistence: namespace` promise. The bundle mounts both."
+
+  harness-log:
+    transport: log
+    summary: |
+      A refinement that passed its checks is appended as one `harness/refined`
+      record: to the session's log for a local edit, to the global log for a
+      `--global` one. The prompt's harness section is the fold of those records.
+    blocks:
+      - record: harness/refined
+      - struct: ph_rlm.harness.state:RefinementRecord
+      - record: harness/refine-considered
+        example: |
+          {"type": "harness/refine-considered", "data": {"trigger": "turns", "scope": "local", "reason": "<why no refinement was made>"}}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An edit that failed a check is not applied; the reason is listed in `rejected` on the same record."
+          - "A rollback is another `harness/refined` record carrying the inverse edits."

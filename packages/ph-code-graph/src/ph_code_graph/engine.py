@@ -2,7 +2,7 @@
 
 Two tools. `code_index` walks a tree through `ctx.fs`, parses it with
 tree-sitter and records what each file defines and references. `code_graph`
-answers five questions over that index — and answers every one of them with
+answers six questions over that index — and answers every one of them with
 `path:start-end`, so a hit is a pointer the agent can hand straight to `read`.
 
 That last part is the whole point. An agent dropped into an unfamiliar
@@ -21,7 +21,7 @@ a parser Python already has, and left the intelligence behind.
 
 So: `tree-sitter-language-pack` for extraction — a 3.7 MB wheel, 371
 languages fetched once into a cache — and `sqlite3` from the
-standard library for the graph, because two of the five queries here are exactly
+standard library for the graph, because two of the six queries here are exactly
 the two `pyturso` cannot serve (`_store` has the measurements).
 
 ## Name-based, and it says so

@@ -11,6 +11,7 @@ a page naming a method that no longer exists, fails the suite.
 | [Cookbook](cookbook/) | How to extend pH: a plugin, a tool, an adapter, a seam. Start here. |
 | [Seams](seams/) | Reference for all 29 service keys — what each publishes, who may provide it, what it refuses. |
 | [Skills](skills/) | Authoring skills and playbooks (P7-18). |
+| [Visuals](visuals/) | One diagram of how the packages work together and one per package, as standalone HTML. |
 | [Dev notes](dev-notes/) | Per-phase records and design notes, including measurements and things that were tried and dropped. |
 | [Linux/macOS differences](dev-notes/linux-macos-differences.md) | What breaks when this is built on the other platform, and why every "platform gap" so far turned out to be a bug. Read before adding a `skipif`. |
 

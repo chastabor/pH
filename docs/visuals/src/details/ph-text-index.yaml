@@ -1,0 +1,1400 @@
+intro: |
+  `ph-text-index` is two tools and a command. `text_index` reads documents,
+  cuts them into passages that keep their line numbers, embeds them and saves
+  the vectors beside their text. `text_search` embeds a question and answers
+  with the nearest passages and the `path:start-end` each came from.
+
+  The tools do not run in the session's process. The
+  [text-index rows](node:rows) add a UTCP manual, [ph-utcp](node:utcp) turns it
+  into two tools, and each call starts the `ph-text-index` command under the
+  calling agent's sandbox. How a manual becomes a tool is on the
+  [ph-utcp page](ph-utcp); this page is what the command does once it runs.
+
+  The answers on this page were produced by running `ph-text-index call` with
+  the local model (already downloaded) against three scratch Markdown files,
+  unless a note says a shape is illustrative. No endpoint was contacted: the
+  endpoint request bodies are built by the real code and the two endpoint
+  failures are real, against an address nothing listens on.
+
+topics:
+  - id: embedder
+    title: Choosing an embedder
+    summary: |
+      Two rows make a session's text index: `text-index` is the seam and the
+      settings for cutting, and one embedder row says what turns a passage into
+      a vector. The bundle ships `text-index-local`, a `sentence-transformers`
+      model that runs in the command. `text-index-endpoint` sends the text to an
+      OpenAI-compatible `/v1/embeddings` server instead. One embedder a session:
+      an index is one vector space.
+    blocks:
+      - title: What the bundle mounts
+        bundle: ph_text_index/bundle.yaml
+      - title: The two embedders
+        table:
+          columns: ["", "text-index-local", "text-index-endpoint"]
+          rows:
+            - ["where the model runs", "in the `ph-text-index` command, loaded on every call", "in somebody else's process: llama.cpp, Ollama, vLLM, or a hosted API"]
+            - ["what it needs installed", "the `[local]` extra: `sentence-transformers` and torch", "nothing more; no torch"]
+            - ["what leaves the machine", "nothing, once the weights are on disk", "the text of every passage indexed and of every question asked, to `baseUrl`"]
+            - ["where its limit comes from", "the model's own `max_seq_length`; `maxTokens` can lower it", "`maxTokens`, else a llama.cpp's `/props`; else learned from a refusal"]
+            - ["how a passage is counted", "the model's tokenizer, exactly", "its UTF-8 bytes, three to a token"]
+            - ["shipped", "in the bundle, switched on", "registered, in no shipped file"]
+      - title: The local model, with a larger model named
+        lang: yaml
+        note: |
+          Checked with `phern --profile docs-local --dump-config`. Each `config`
+          replaces the row's whole config. `trustRemoteCode: true` executes
+          Python from the model's repository in the command; it is a trust
+          decision, and this model needs it. Options are camelCase here, as the
+          option tables show them; snake_case validates too.
+        code: |
+          # $PH_HOME/profiles/docs-local.yaml
+          extends: rlm-indexed
+          rows:
+            - id: text-index
+              config:
+                index:
+                  paths: [docs, README.md]
+                  include: ["**/*.md", "**/*.rst"]     # default ["**/*.md"]
+                  exclude: ["**/drafts/**"]
+                maxChars: 1200
+                overlapChars: 200
+                maxFiles: 2000
+            - id: text-index-local
+              config:
+                model: nomic-ai/nomic-embed-text-v1.5
+                queryPrefix: "search_query: "
+                documentPrefix: "search_document: "
+                trustRemoteCode: true
+                maxTokens: 2048
+                batchSize: 16
+                cache: ~/models                        # default $PH_CACHE/models
+      - title: An endpoint, in place of the local model
+        lang: yaml
+        note: |
+          Checked with `phern doctor --profile docs-endpoint`: the manual gave
+          two tools and the section read `embedder: text-embedding-3-small at
+          https://api.openai.com/v1`, `limit: 8191 tokens (configured)`.
+          `apiKeyEnv` is the **name** of a variable. A confined agent reaches
+          the host only if `sandbox-allow` lists it under `network.hosts`, and
+          that list replaces the shipped one: restate the hosts you still want.
+        code: |
+          # $PH_HOME/profiles/docs-endpoint.yaml
+          extends: rlm-indexed
+          rows:
+            - id: text-index-local
+              disabled: true
+            - insert:
+                - id: text-index-endpoint
+                  name: text-index-endpoint
+                  config:
+                    baseUrl: https://api.openai.com/v1
+                    model: text-embedding-3-small
+                    apiKeyEnv: OPENAI_API_KEY          # a name, never a value
+                    dimensions: 512
+                    maxTokens: 8191                    # a hosted API has nothing to ask
+                    timeoutS: 60
+            - id: sandbox-allow
+              config:
+                network:
+                  hosts: ["api.openai.com:443"]
+      - title: A local server
+        lang: yaml
+        note: |
+          Illustrative values, the same row. With `maxTokens` unset a llama.cpp
+          is asked for its window at `/props`. No key: `apiKeyEnv` stays empty.
+        code: |
+          - id: text-index-endpoint
+            name: text-index-endpoint
+            config:
+              baseUrl: http://127.0.0.1:8080/v1
+              model: nomic-embed-text-v1.5
+              queryPrefix: "search_query: "
+              documentPrefix: "search_document: "
+      - title: "text-index: how documents are cut"
+        row: text-index
+      - title: "index: what a bare text_index looks at"
+        struct: ph_text_index._config:Scope
+      - title: "text-index-local: every option"
+        row: text-index-local
+      - title: "text-index-endpoint: every option"
+        row: text-index-endpoint
+      - title: Switching is safe to try
+        text: |
+          The index directory is named by a digest of the embedder's `name`: the model, both prefixes, and for an endpoint an asked-for `dimensions`. A new model gets its own directory, and switching back finds the old one intact. An endpoint's address is **not** part of the name, so moving a server keeps the index.
+
+          The local default's name is `sentence-transformers:sentence-transformers/all-MiniLM-L6-v2:|` and its directory is `bdca8442acbeecd4`.
+      - title: Making the model ready
+        lang: text
+        note: |
+          Commands a person types, not tools. In a session they run
+          `ph-text-index status` or `install` outside the sandbox. `status`
+          loads nothing and asks no server. For an unattended run,
+          `preload: true` on `text-index-local` runs `install` at mount and
+          refuses the mount when it fails.
+        code: |
+          /text-index status     # loaded | downloaded, loads on first use | not downloaded
+          /text-index install    # fetch and load the model now, and say what happened
+      - title: Limits
+        tone: limit
+        list:
+          - "A profile with `text-index` and no embedder row offers no tools and no skill."
+          - "A second embedder row is refused: one index is one vector space. There is no fallback to another embedder when one cannot be reached."
+          - "`text-index-local` refuses to mount when `sentence-transformers` is not installed, and names the `[local]` extra."
+          - "A hosted model that changes under an unchanged name cannot be told apart, beyond its vector width, which is checked on every add."
+      - links:
+          - {to: "node:embed", label: "The embedder protocols"}
+          - {to: "topic:sizing", label: "How a passage is sized"}
+
+  - id: sizing
+    title: How a passage is sized
+    summary: |
+      A model reads so many tokens and no more. Past that a local model drops
+      the rest without a word, and a server refuses the request. So a passage
+      is held to two bounds at once: `maxChars`, which is how a profile says how
+      big a passage should be, and the embedder's limit, in the embedder's own
+      tokens. Each passage is as long as both allow.
+    blocks:
+      - title: The steps, for one document
+        text: |
+          1. **Ask the embedder its limit** (`TextIndexSeam.limit`). A setting, the model's own length, a server's answer, or nothing.
+          2. **Take the room**: the limit, less what an empty input costs (the prefix and the model's start and end markers), and never under 16 tokens (`MIN_PASSAGE_TOKENS`).
+          3. **Pack** the document's paragraphs to `maxChars` and to the room (`chunk_paragraphs` with a `Weight`).
+          4. **Measure what will be sent.** A packing adds up the weights of a passage's parts; an embedder counts the whole. If the longest passage measures over the limit, pack the document again with less room: `limit / longest × 0.9` of the heaviest passage.
+          5. **Embed.** If the embedder refuses a passage as too long (`CONTEXT_WINDOW_EXCEEDED`), read the refusal, pack with less room and send again.
+          6. **Give up at 16 tokens.** A document refused even then is skipped, with the embedder's words, and the run goes on.
+
+          The document is packed again, never split in place, so every passage still starts and ends on the lines it says.
+      - title: Where a limit comes from
+        struct: ph_text_index._config:Limit
+      - table:
+          columns: [source, said by, when it is asked]
+          rows:
+            - ["`configured`", "`maxTokens` on the embedder row", "read without loading anything"]
+            - ["`model`", "the loaded model's `max_seq_length`; `maxTokens` wins only when it is lower", "an index run that embeds; it means loading the model"]
+            - ["`server`", "`default_generation_settings.n_ctx` of a llama.cpp's `GET /props`", "an index run that embeds, with a 5 s timeout"]
+            - ["`refused`", "the number a refusal named", "learned when the embedder turns an input away"]
+      - title: Counting with no tokenizer
+        text: |
+          An endpoint embedder has no tokenizer to ask. `ph.llm.tokens.tokens_of` is the estimate: UTF-8 **bytes** over `BYTES_PER_TOKEN`, which is 3. Bytes, not characters, so a script that is three bytes a character counts about a token a character. `estimate_tokens` adds two for the markers a model puts around an input.
+      - lang: text
+        note: "Generated by calling `tokens_of` and `estimate_tokens`."
+        code: |
+          tokens_of("A customer may send an order back within thirty days of delivery.")   -> 21.67   (65 bytes / 3)
+          estimate_tokens(the same, 3)                                                     -> 24      (ceil, + 2 markers)
+          measured behind "search_document: "                                              -> 30
+          tokens_of("注文は三十日以内に返品できます")                                           -> 15.0    (15 characters, 45 bytes)
+      - title: What a real run says
+        lang: text
+        note: |
+          Generated. The default model reads 256 tokens, and a 1 750-character
+          line was in one of the documents: the limit, not `maxChars`, ended a
+          passage, so the result says what passages were held to.
+        code: |
+          Indexed 3 documents: 6 passages added, 0 removed.
+          Spent embedding: 3 requests, 6 texts.
+          Passages are held to 254 tokens of text, to fit the embedder's limit of 256 tokens (the model's).
+            docs/discounts.md
+            docs/returns.md
+            docs/shipping.md
+          The index now holds 6 passages from 3 documents.
+      - title: Reading a refusal
+        text: |
+          `ph.llm.adapter.input_too_long` recognizes a refusal for length by its wording, and `too_long_facts` reads two numbers out of it where it gives them: how many tokens the input was, and how many the server takes. `_refused` then:
+
+          - takes the second number as the limit for the rest of the run (`learn`, only ever downward)
+          - takes the first as this corpus's density: the refused text's bytes over the tokens the server counted (`calibrate`, only ever toward denser, never past a token a byte)
+          - packs to the named limit when that is a different packing; otherwise aims at `refused_share × 0.9` of the heaviest passage, or at half when the refusal named no number
+
+          Both learned numbers are saved in the index (`learned`, in the embedder log), so the next command does not spend a refusal to learn them again.
+      - lang: text
+        note: |
+          Generated by calling the three functions on a llama.cpp's sentence
+          and on OpenAI's. `refused_share` is the share of the refused input
+          the server reads.
+        code: |
+          "input (702 tokens) is too large to process. increase the physical batch size (current batch size: 512)"
+            input_too_long -> True    too_long_facts -> (702, 512)     refused_share -> 0.729
+          "This model's maximum context length is 8192 tokens, however you requested 9021 tokens"
+            input_too_long -> True    too_long_facts -> (9021, 8192)   refused_share -> 0.908
+      - title: A server's reported limit is not always what it takes
+        text: |
+          A llama.cpp's `/props` gives its window per slot, and it refuses an embedding longer than its batch, which `/props` does not mention. The `learn` docstring records a measured case: a window of 2 048 and a refusal past 512. The first refusal settles it and the number is kept.
+      - title: A question is held to the limit too
+        lang: json
+        note: |
+          Generated: a 2 310-character question against the 256-token model.
+          `head_of` takes as much of its start as fits, back to the end of a
+          word. `query_chars` says how much was searched; `null` when all of
+          it was.
+        code: |
+          {"query": "when does a refund reach my card after I send a parcel back to the warehouse when does ...",
+           "searched": 6, "indexing": false, "query_chars": 1140,
+           "hits": [{"path": "docs/returns.md", "start_line": 1, "end_line": 15, "score": 0.512, "text": "# Returns\n\n..."}]}
+
+          text: "1 passage for 'when does a refund reach my card after I send a parcel back to the warehouse when does a …':
+                 The question is longer than the embedder reads: only its first 1140 characters were searched. Ask something shorter to search by all of it."
+      - title: Limits
+        tone: limit
+        list:
+          - "An embedder that reports no limit and refuses with no number costs a request per halving."
+          - "A larger limit changes nothing: `maxChars` stays the ceiling, because smaller passages retrieve better."
+          - "A changed `maxChars`, `overlapChars` or `maxTokens` is part of each document's digest, so a document that is **read** is cut again. In a git or jj tree a document version control vouches for is not read, and keeps its old passages until it changes. Measured here: in a git tree, `maxChars: 400` left all 3 committed documents `unchanged`; in a tree with no version control the same change re-cut all 3 into 10 passages."
+          - "What a model or a server reports is not in the digest. A server given another window re-cuts nothing already indexed."
+      - links:
+          - {to: "node:chunk", label: "The packer"}
+          - {to: "node:embed", label: "The embedder protocols"}
+          - {to: "edge:encode", label: "The request an endpoint is sent"}
+
+  - id: where
+    title: Where it lives, and what a sub-agent sees
+    summary: |
+      An index is a directory with two files and a lock. In a session it sits in
+      the scratch of the agent whose tree it describes, one directory per
+      embedder beneath it. The source is the truth: an index is rebuilt from it
+      when absent.
+    blocks:
+      - title: The paths
+        table:
+          columns: [what, where]
+          rows:
+            - ["the index, in a session", "`$PH_HOME/scratch/<session>/<agent>/text-index/<digest of the embedder's name>/`"]
+            - ["the index, from a shell", "`--state DIR` or `$PH_TOOL_STATE`, then `/<embedder>`; with neither, `$PH_CACHE/text-index/<digest of the workspace root>/<embedder>/`"]
+            - ["in that directory", "`index.tvim` (vectors), `chunks.json` (the sidecar), `writer.lock`"]
+            - ["the local model's weights", "`$PH_CACHE/models`, or the row's `cache`"]
+            - ["the command's log", "`$PH_CACHE/logs/ph-text-index.log`"]
+            - ["settings with no profile", "`$PH_HOME/tools/ph-text-index.yaml`"]
+      - title: A real index directory
+        lang: text
+        note: "From the scratch run: 3 documents, 6 passages, 384 dimensions at 4 bits."
+        code: |
+          <state>/bdca8442acbeecd4/chunks.json     3 894 bytes
+          <state>/bdca8442acbeecd4/index.tvim    451 155 bytes
+          <state>/bdca8442acbeecd4/writer.lock         0 bytes
+      - title: Which agent's index a call uses
+        text: |
+          `UtcpSeam.owner_of` decides, per call:
+
+          - **A child in its parent's checkout**, or one **granted only to read the project** (every child of a read-only fan-out), asks its parent's index. It embeds no document and loads no model for indexing.
+          - **A child with a tree it writes for keeps** (a `worktree`, an `overlay`) builds its own index, at its first call.
+
+          When a child asks an ancestor's index the command runs in the ancestor's tree, and the result's text ends with `[Paths here are relative to <root>, the tree this was built from.]`.
+      - title: What survives a restart
+        tone: durable
+        list:
+          - "**The index.** A resumed session has the same session and agent ids, so the same directory."
+          - "**What a stopped run had saved.** A run saves every `saveEveryS` (30 s) and on its way out, shielded from cancellation. Each document carries a digest, so the next run embeds only what was not saved."
+          - "**What the embedder said, and what its refusals taught**: the embedder log is saved with the passages, under the same lock."
+          - "**The weights**, under `$PH_CACHE`, shared by every agent."
+          - "Nothing about the index is in the session log. A call leaves `tool/call` and `tool/result`; the note that a background run ended is a logged `user/message`."
+      - title: What a restart loses
+        tone: limit
+        list:
+          - "A run in progress, and up to `saveEveryS` of what it had embedded since its last save. A resumed root agent gets a new run at its first step."
+          - "The loaded model. Every command loads it again anyway."
+          - "What a refused **question** taught. A search writes nothing; the log is an index run's to write."
+          - "A new session embeds the corpus again: the scratch path has the session id in it."
+      - links:
+          - {to: "ph-utcp", label: "ph-utcp: how a manual becomes a tool"}
+          - {to: "durability", label: "Durability across the whole harness"}
+          - {to: "security", label: "Scopes, isolation and the containment ladder"}
+
+  - id: outside
+    title: Running it outside phern
+    summary: |
+      `ph-text-index` is an ordinary command. A person can index and search by
+      hand, and any UTCP harness can register the same manual a phern session
+      uses. Every call is one command: nothing stays up, and with the local
+      embedder each call loads the model.
+    blocks:
+      - title: Three ways in
+        table:
+          columns: [who, how the tools arrive, the tool names]
+          rows:
+            - ["a phern session", "an embedder row's claim registers the manual with `ctx.utcp`; under Code Mode the tools are `await tools.text_index(...)` and `await tools.text_search(...)`", "`text_index`, `text_search`"]
+            - ["a person at a shell", "`ph-text-index call <tool> --field value`", "the same"]
+            - ["another harness, over UTCP", "it registers what `ph-text-index manual --registration` prints", "`ph_text_index.text_index`, `ph_text_index.text_search`"]
+      - title: The command
+        table:
+          columns: [command, what it does]
+          rows:
+            - ["`call TOOL [--field value ...]`", "run one tool; `--args-json '{...}'` passes every field at once; `--format text` prints only the prose"]
+            - ["`tools`", "the tools and their flags"]
+            - ["`status`", "whether the model is ready, where the index is and what it holds"]
+            - ["`install`", "fetch and load the model now"]
+            - ["`manual`", "the UTCP manual; `manual --registration` is what a harness registers"]
+      - title: status
+        lang: text
+        note: "Generated after the scratch run. It loaded no model: the limit is read from the embedder log."
+        code: |
+          sentence-transformers:sentence-transformers/all-MiniLM-L6-v2:|: downloaded, loads on first use. Weights under /home/me/.cache/ph/models.
+          Text index:
+            embedder: sentence-transformers:sentence-transformers/all-MiniLM-L6-v2:|
+            model: downloaded, loads on first use
+            weights: /home/me/.cache/ph/models
+            path: <state>/bdca8442acbeecd4
+            limit: 256 tokens (the model's), as the last run to embed asked
+            documents: 3
+            chunks: 6
+            vectors: 384 dim at 4 bit
+            calibration: uncalibrated
+      - title: Settings with no profile
+        lang: yaml
+        note: |
+          Row options by row id, read from `$PH_HOME/tools/ph-text-index.yaml`,
+          then `$PH_TOOL_CONFIG`, then `--config FILE`. The command mounts the
+          local embedder unless a config names another. Naming two is refused
+          with `BAD_CONFIG` (generated): "ph-text-index mounts one of
+          text-index-local, text-index-endpoint, and the configs name
+          text-index-local, text-index-endpoint; configure one".
+        code: |
+          # ~/.ph/tools/ph-text-index.yaml
+          text-index:
+            index:
+              paths: [docs]
+          text-index-endpoint:
+            baseUrl: http://127.0.0.1:8080/v1
+            model: nomic-embed-text-v1.5
+      - title: Progress, on stderr
+        lang: json
+        note: |
+          Generated with `call text_index --paths docs --progress`. `spent` is
+          what the embedder counted so far, on every line, so a run that fails
+          or is killed still says what it cost.
+        code: |
+          {"state":"working","done":0,"total":3,"what":"documents"}
+          {"state":"working","done":1,"total":3,"what":"documents","spent":{"requests":1,"texts":4}}
+          {"state":"done","done":3,"total":3,"what":"documents","changed":true,"note":"Indexed 3 documents: 6 passages added, 0 removed.\nSpent embedding: 3 requests, 6 texts.\nPassages are held to 254 tokens of text, to fit the embedder's limit of 256 tokens (the model's).\nThe index now holds 6 passages from 3 documents.","spent":{"requests":3,"texts":6}}
+      - title: What a harness needs to know
+        list:
+          - "**The workspace is the directory the command is started in.**"
+          - "**Give the model `text`.** `value` is for code. A failure is `ok: false` with a code; exit codes are ignored by the UTCP command-line protocol."
+          - "**Nothing watches the tree.** Call `text_index` again after edits; an unchanged document is not embedded again."
+          - "**One index a tree and embedder.** Set `PH_TOOL_STATE` per agent for one index per agent."
+          - "**In a sandbox, these are written**: the index directory, `$PH_CACHE/models` (the hub keeps its locks beside the weights) and `$PH_CACHE/logs`. Nothing in the tree is."
+          - "**A downloaded model loads without the network.** Weights on disk are loaded with `local_files_only`, so a confined command can search."
+          - "**Each tool's template lists the variables it inherits**: the pH roots, `HF_ENDPOINT`, `HF_HUB_OFFLINE`, `TRANSFORMERS_OFFLINE`, `OMP_NUM_THREADS`, `CUDA_VISIBLE_DEVICES`, and the name an endpoint row's `apiKeyEnv` gives (checked: `SCRATCH_EMBED_KEY` appeared in both templates). Not `HF_TOKEN`. The discovery template in the registration does not carry the key's name."
+          - "**The model's instructions ship with the package**: `ph_text_index/skills/text-search/SKILL.md`."
+      - links:
+          - {to: "ph-utcp", label: "ph-utcp: what phern's own harness adds"}
+          - {to: "ph-code-graph#topic:outside", label: "The same command shape in ph-code-graph"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      What the package does not do, in the terms the code uses.
+    blocks:
+      - title: What is found
+        tone: limit
+        list:
+          - "**Only what was indexed.** An empty result may mean the corpus was never indexed. `searched` says how many passages the question was scored against."
+          - "**Markdown only, unless told.** `index.include` defaults to `**/*.md`."
+          - "**A score is not a confidence.** It is an inner product of normalized vectors, quantized. The top hit of an off-topic question still has a score."
+          - "**A passage can be a fragment.** A line longer than a passage is cut on characters, and its pieces all claim that one line. In the scratch run a 1 750-character line became pieces of 1 144 and 56 characters, both `docs/discounts.md:3-3`."
+          - "**A question past the limit is searched by its head**, and the answer says so."
+          - "**Machine output is left out.** `ph.indexable.triage` drops minified, encoded or generated blocks, and skips a document with nothing else in it: `holds no prose to index (minified, encoded, or generated)`."
+      - title: Freshness
+        tone: limit
+        list:
+          - "**Nothing watches the filesystem.** The index changes when `text_index` runs."
+          - "**The passage text is a copy.** A hit quotes what was indexed, not the file as it is now."
+          - "**A request made during another run is not queued.** `state: indexing` means this call did nothing."
+          - "**A search during a run** sees what the run has saved, at most `saveEveryS` behind."
+          - "**A new session embeds the corpus again.**"
+          - "**A changed cut setting does not re-cut what version control vouches for.** See [How a passage is sized](topic:sizing)."
+      - title: Size and cost
+        tone: limit
+        list:
+          - "**The sidecar is rewritten whole on every save**, while the vectors append. Fine for a corpus of documents, wrong for millions. The ceiling is the sidecar, not turbovec."
+          - "**Every call loads the local model.** The README measures a search at about 3.9 s with MiniLM on disk, 6 s under `bwrap`. A deployment that searches often serves the model from a local server and mounts `text-index-endpoint`."
+          - "**A walk stops at `maxFiles`** (5 000). A document past `maxBytes` (2 MiB) is skipped and named."
+          - "**Calibration is rare.** turbovec's TQ+ fit is committed only when the index is empty and the first document added brings at least 1 024 passages. Otherwise the index stays uncalibrated."
+          - "**What an endpoint costs is not recorded.** The request is the command's own, so no embedding spend is in a session's log or charged to a goal's budget. The run's result and its progress lines carry `spent`."
+      - title: Reach
+        tone: limit
+        list:
+          - "**`permissions-fs` does not screen these tools.** The command reads through its own `ctx.fs`. The sandbox bounds it, as it bounds `bash`."
+          - "**An endpoint that cannot be reached fails the whole call**, with `TEXT_INDEX_ENDPOINT_UNREACHABLE`. Only a refusal for length is retried smaller."
+          - "**An allowed host is allowed to every confined command.** `sandbox-allow` is the deployment's, not this tool's: an agent's `bash` reaches the same embeddings server."
+      - links:
+          - {to: "node:sidecar", label: "chunks.json"}
+          - {to: "node:model", label: "What leaves the machine"}
+
+nodes:
+  rows:
+    title: The text-index rows
+    summary: |
+      The rows a session mounts. `text-index` publishes a seam,
+      `ctx.text_index`, and holds the settings for cutting. An embedder row,
+      `text-index-local` or `text-index-endpoint`, claims that seam, and the
+      claim is what registers the package's UTCP manual. So a profile with no
+      embedder offers no tools, and unmounting the embedder takes the tools and
+      the skill with it.
+    blocks:
+      - row: text-index
+      - row: text-index-local
+      - row: text-index-endpoint
+      - title: Where they ship
+        bundle: ph_text_index/bundle.yaml
+      - title: A profile entry
+        lang: yaml
+        note: "Checked with `phern --profile docs-local --dump-config`. More entries are under [Choosing an embedder](topic:embedder)."
+        code: |
+          # $PH_HOME/profiles/docs-local.yaml
+          extends: rlm-indexed
+          rows:
+            - id: text-index
+              config:
+                index:
+                  paths: [docs, README.md]
+                  exclude: ["**/drafts/**"]
+            - id: text-index-local
+              config:
+                model: nomic-ai/nomic-embed-text-v1.5
+                queryPrefix: "search_query: "
+                documentPrefix: "search_document: "
+                trustRemoteCode: true
+      - title: The seam, and what an embedder row hands it
+        struct: ph_text_index.row:TextIndexRow
+        methods: true
+      - struct: ph_text_index.row:Provider
+      - title: The manual, for the local embedder
+        lang: json
+        note: |
+          Generated by calling `ph_text_index.row.manual`; the template and
+          tool views are left out. `env` names **both** rows, each with only
+          what differs from its defaults. Being named there is how the command
+          learns which embedder row to mount.
+        code: |
+          {"names": "bare", "envelope": true, "state": "text-index",
+           "writable": ["/home/me/.cache/ph/models", "/home/me/.cache/ph/logs"],
+           "env": {"PH_TOOL_CONFIG": "{\"text-index\":{\"index\":{\"paths\":[\"docs\"]}},\"text-index-local\":{}}"},
+           "passEnv": [],
+           "background": {"command": ["/home/me/pH/.venv/bin/python3", "-P", "-m", "ph_text_index", "call"],
+                          "label": "text index", "tools": ["text_index"], "eager": true, "waitS": 5.0},
+           "tools": {"text_index":  {"timeoutMs": 1800000, "concurrencySafe": false, "argumentsDisposable": true},
+                     "text_search": {"timeoutMs": 300000,  "concurrencySafe": true,  "argumentsDisposable": false}}}
+      - title: The same, for an endpoint with a key
+        lang: json
+        note: |
+          Generated. No weights folder is granted. The key's **name** is in
+          `passEnv`; ph-utcp reads that one variable from the harness's own
+          environment each time it starts the command, and holds it nowhere.
+        code: |
+          {"state": "text-index",
+           "writable": ["/home/me/.cache/ph/logs"],
+           "env": {"PH_TOOL_CONFIG": "{\"text-index\":{\"index\":{\"paths\":[\"docs\"]}},\"text-index-endpoint\":{\"baseUrl\":\"https://api.openai.com/v1\",\"model\":\"text-embedding-3-small\",\"apiKeyEnv\":\"OPENAI_API_KEY\",\"maxTokens\":8191}}"},
+           "passEnv": ["OPENAI_API_KEY"]}
+      - title: Events and services
+        table:
+          columns: [what, how, mode]
+          rows:
+            - ["`text-index` publishes the seam", "`ctx.provide(TEXT_INDEX, seam)`", "a service"]
+            - ["an embedder claims it", "`ctx.text_index.register(provider, scope=ctx)`: a slot claim, then `ctx.utcp.add(manual)`", "a service call"]
+            - ["the skill", "`offer_skills`, from the claim, only when the manual gave tools", "a registration"]
+            - ["`/text-index`", "`contribute_item(ctx, COMMANDS, ...)`", "a registration"]
+            - ["the doctor section", "`Diagnostic(id=\"text-index\", title=\"Text index\")`", "a registration"]
+            - ["the run before the first step", "ph-utcp's listener on `agent/pre-step`, because `background.eager` is true", "waterfall"]
+      - title: What phern doctor shows
+        lang: text
+        note: |
+          Generated with `phern doctor --profile docs-endpoint`. The session
+          knows a limit only when a profile set one; a model's own length is
+          the command's to say.
+        code: |
+          Text index
+            tools     text_index, text_search (through UTCP)
+            command   /home/me/pH/.venv/bin/python3 -P -m ph_text_index
+            embedder  text-embedding-3-small at https://api.openai.com/v1
+            limit     8191 tokens (configured)
+            index     each agent's own, in its scratch (text-index/)
+            details   /text-index status
+          Topology
+            text-index           active · injects utcp, fs, shell
+            text-index-local     disabled · by profiles/docs-endpoint.yaml
+            text-index-endpoint  active · injects text_index, utcp, fs, shell
+      - title: "/text-index install and /text-index status"
+        text: |
+          A command, not a tool: a person asks, and it costs no model turn. The row runs `ph-text-index install` or `status` through `ctx.utcp.run_command` for the agent that typed it and shows what the command said. It runs **outside the sandbox**, because `install` needs the network, and may run for 30 minutes. With no embedder registered it answers that there is nothing to install.
+
+          `install` **loads** the model and does not only fetch it: a model can download and still fail at import for a missing package, and only a load says so. The upstream sentence is passed through as it is.
+      - title: The skill it offers
+        text: |
+          `skills/text-search/SKILL.md`, offered with `source="ph-text-index"`, `allowed-tools: [text_index, text_search, read, grep, glob]`. It says: index the corpus once; ask in your own words; narrow with `paths`; read the `skipped` list; a score is not a confidence. It follows the tools: offered from the embedder's claim, on the embedder's scope.
+      - title: Durable
+        tone: durable
+        list:
+          - "The rows hold no state of their own. Their configs are in the session's recorded profile."
+          - "The index is files in the agent's scratch. See [where it lives](topic:where)."
+      - title: Secure
+        tone: secure
+        list:
+          - "**The harness process never loads the model.** `sentence-transformers`, torch and turbovec run in the command."
+          - "**The command runs under the calling agent's sandbox**, in that agent's tree or the tree it shares."
+          - "**Read-only bars the tree, not the index.** The index is in the agent's scratch, writable under every sandbox mode."
+          - "**No credential is stored.** `apiKeyEnv` is a name. Nothing in a profile, the session log or `$PH_TOOL_CONFIG` is a key."
+          - "**The key is the tool's alone.** Its value is set only on this manual's commands. An agent's `bash` starts from the scrubbed environment and does not have it."
+          - "**ph-utcp warns** at mount, and in `phern doctor`, when a manual passes a variable whose name the deployment's scrub would not drop: such a variable is in every command's environment already."
+      - title: Limits
+        tone: limit
+        list:
+          - "The rows inject `ctx.utcp`. Without the `utcp` row they stay waiting and never activate."
+          - "With no sandbox backend nothing holds the key back: `bash` runs as the same user and can read the harness's environment. A key kept in a file the agent can read is readable too."
+          - "Discovery and `/text-index install|status` run with no sandbox."
+          - "No row here declares a narrower, so a child cannot be given another embedder or other cut settings than its parent's."
+      - links:
+          - {to: "ph-utcp#edge:add-manual", label: "ph-utcp: ctx.utcp.add(manual)"}
+          - {to: "topic:embedder", label: "Choosing an embedder"}
+
+  utcp:
+    title: ph-utcp
+    summary: |
+      The `utcp` row turns the manual into two pH tools and runs each call as a
+      command through `ctx.shell`. This box is that row seen from this package.
+      The full path is on the [ph-utcp page](ph-utcp).
+    blocks:
+      - row: utcp
+      - title: What it does with this manual
+        text: |
+          1. Runs the discovery command (`python -P -m ph_text_index manual`) once.
+          2. Registers `text_index` and `text_search` under their own names, with the manual's traits: `text_index` is not concurrency-safe and has 30 minutes; `text_search` has 5.
+          3. For each call, finds the agent whose tree the call is about, sets `$PH_TOOL_STATE` to `<that agent's scratch>/text-index` and `$PH_TOOL_CONFIG` to both rows' configs, hands over any variable `passEnv` names, and starts the command in that tree under the calling agent's sandbox.
+          4. Reads the envelope: `value` is the tool's value, `text` what the model reads, `ok: false` a failure with the command's own code.
+      - title: The run before the first step
+        event: agent/pre-step
+      - text: |
+          For a root agent, once, `UtcpSeam.eager` starts `text_index` with no arguments as a background job and calls on. `index.onMount: false` switches this off. The job runs `ph-text-index call text_index --progress --args-json {}` with no time limit, and its progress lines feed the footer.
+
+          A `text_index` call joins the run going for its tree, or starts one, and waits `waitS` (5 s by default). A run that ended in time is the answer. Otherwise the command is asked with `--wait 0` and answers `state: indexing`, and the result's text ends with how far the run has got, for example `[The text index is still working: 120/539 documents.]`.
+      - title: The note an agent is given when a run ends
+        lang: text
+        note: |
+          Built from the format strings in `UtcpSeam._ended` and the real
+          `done` line of the scratch run; illustrative, not captured from a
+          session. It is an injected `user/message` from `ph_utcp` with
+          `form: notice`: it waits for the agent's next step and starts no
+          turn. A run nobody asked for that changed nothing says nothing.
+        code: |
+          The text index is finished: 3 documents. Searches now cover all of it.
+          Indexed 3 documents: 6 passages added, 0 removed.
+          Spent embedding: 3 requests, 6 texts.
+          Passages are held to 254 tokens of text, to fit the embedder's limit of 256 tokens (the model's).
+          The index now holds 6 passages from 3 documents.
+      - title: Secure
+        tone: secure
+        list:
+          - "A `cli` manual's commands go through `ctx.shell`, which confines a command for an agent that holds a workspace."
+          - "A named variable is read from the harness's environment when a command is started, set on that one command, and kept nowhere."
+          - "A child that shares its parent's index is granted that one state directory as writable."
+      - links:
+          - {to: "ph-utcp", label: "ph-utcp: a manual becomes a tool"}
+          - {to: "ph-utcp#edge:call-run", label: "ph-utcp: run_argv for the agent"}
+          - {to: "ph-utcp#edge:envelope", label: "ph-utcp: the envelope"}
+
+  tindex:
+    title: text_index
+    summary: |
+      The indexing tool, registered by the `text-index-engine` row inside the
+      `ph-text-index` command. One call is one run: it takes the writer lock,
+      walks the scope, skips every document it can prove unchanged, cuts and
+      embeds the rest, and saves as it goes.
+    blocks:
+      - title: The row the command mounts
+        row: text-index-engine
+      - text: |
+          `ph.toolcli` mounts `tools`, `subprocess-local`, `fs-local`, `commands` and `diagnostics`, then `text-index-engine` **under the id `text-index`**, then exactly one embedder row: the one a config names, or `text-index-local-engine`. There is no session and no agent in that process, and `ctx.fs` is the command's own, rooted at the working directory.
+      - title: Arguments
+        struct: ph_text_index.engine:IndexArgs
+      - title: Result
+        struct: ph_text_index.engine:IndexValue
+      - title: A first run
+        lang: json
+        note: Generated with the local model.
+        code: |
+          $ ph-text-index call text_index --paths docs
+          {"ok":true,"value":{"state":"done","documents":["docs/discounts.md","docs/returns.md","docs/shipping.md"],"chunks_added":6,"chunks_removed":0,"unchanged":0,"limit":"256 tokens (the model's)","embedder_changed":null,"spent":{"requests":3,"texts":6},"passage_tokens":254,"cut_smaller":[],"skipped":[],"total_documents":3,"total_chunks":6},"text":"Indexed 3 documents: 6 passages added, 0 removed.\nSpent embedding: 3 requests, 6 texts.\nPassages are held to 254 tokens of text, to fit the embedder's limit of 256 tokens (the model's).\n  docs/discounts.md\n  docs/returns.md\n  docs/shipping.md\nThe index now holds 6 passages from 3 documents."}
+      - title: A second run
+        lang: json
+        note: "Generated. Nothing was embedded and no model question was asked: every digest matched."
+        code: |
+          {"ok":true,"value":{"state":"done","documents":[],"chunks_added":0,"chunks_removed":0,"unchanged":3,"limit":"","embedder_changed":null,"spent":null,"passage_tokens":null,"cut_smaller":[],"skipped":[],"total_documents":3,"total_chunks":6},"text":"Indexed 0 documents: 0 passages added, 0 removed; 3 unchanged and not re-embedded.\nThe index now holds 6 passages from 3 documents."}
+      - title: When another run holds the index
+        lang: json
+        note: "Generated by holding `writer.lock` from another process and calling with `--wait 0`."
+        code: |
+          {"ok":true,"value":{"state":"indexing","documents":[],"chunks_added":0,"chunks_removed":0,"unchanged":0,"limit":"","embedder_changed":null,"spent":null,"passage_tokens":null,"cut_smaller":[],"skipped":[],"total_documents":3,"total_chunks":6},"text":"An indexing run is already building this index, so this call started none. `text_search` answers now, from what is indexed already, and says while the index is still being built. Call `text_index` again once that run has finished.\nThe index holds 6 passages from 3 documents so far."}
+      - title: One run, step by step
+        text: |
+          1. **Take the writer lock**, `flock` on `writer.lock`, waited for `waitS`. Not held in time: answer `state: indexing`.
+          2. **Load what is on disk** again if another writer changed it, and reconcile the two files.
+          3. **Walk** the narrowed scope through `ctx.fs.collect`, up to `maxFiles`.
+          4. **Ask version control** what changed since the stored token (`ph.seams.changes.tree_state`).
+          5. **For each document**: count it `unchanged` without reading it when version control vouches for it; otherwise read it and compare its digest; otherwise [triage, cut](edge:document-text) and [embed](edge:passages) it, then replace its passages.
+          6. **Save** every `saveEveryS` seconds while there is something unsaved.
+          7. **Forget what is gone**: every indexed document that no longer exists on disk.
+          8. **Store the version-control token** last, and save, shielded from cancellation.
+      - title: The digest of a document
+        text: |
+          SHA-256 of `"<maxChars>:<overlapChars>:<configured maxTokens>\n"` followed by the text. So the digest covers the cut as well as the text: a profile that changes one of those three gets a document that is read cut again. Only the *setting* is in it; what a model or a server reports is learned by asking, and a run that would embed nothing must not load a model to compare digests.
+      - title: Durable
+        tone: durable
+        list:
+          - "A run that is stopped keeps what it saved, and loses at most `saveEveryS` of embedding."
+          - "Each document's passages and vectors go in together, so what is saved is whole."
+          - "A stopped run saves without the token; the next run finds its documents by their digests."
+      - title: Secure
+        tone: secure
+        list:
+          - "Every byte indexed arrives through the **command's** `ctx.fs.read`. No `permissions-fs` row is mounted there; the sandbox is the bound."
+          - "It writes the index directory, the weights folder (the hub's locks) and the log. It writes no file of the tree."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A document past `maxBytes`, not text, empty, or with no prose is skipped and named in `skipped`. Its old passages are dropped."
+          - "A model that is not downloaded and cannot be fetched fails the call with `TEXT_INDEX_MODEL_MISSING` and names `/text-index install`."
+          - "An endpoint that is down or not allowed fails the call. Generated: `{\"ok\":false,\"error\":{\"code\":\"TEXT_INDEX_ENDPOINT_UNREACHABLE\",\"message\":\"the embeddings endpoint http://127.0.0.1:1/v1/embeddings could not be reached: [Errno 111] Connection refused. For a confined agent its host has to be among the hosts the deployment allows (`sandbox-allow`).\"}}`"
+          - "An index built by another embedder, or a sidecar of another format, raises `IndexMismatch`: delete the directory and re-index."
+      - links:
+          - {to: "topic:sizing", label: "How a passage is sized"}
+          - {to: "topic:where", label: "Where the index lives"}
+
+  tsearch:
+    title: text_search
+    summary: |
+      The search tool. It opens the index as a reader, embeds the question,
+      takes the nearest `k` vectors and answers with the passages they stand
+      for. It takes no lock and writes no file, so a search never waits for an
+      indexing run.
+    blocks:
+      - title: Arguments
+        struct: ph_text_index.engine:SearchArgs
+      - title: Result
+        struct: ph_text_index.engine:SearchValue
+      - struct: ph_text_index.engine:HitValue
+      - title: A real search
+        lang: json
+        note: "Generated with the local model; the second hit's text is shortened here."
+        code: |
+          $ ph-text-index call text_search --query "how long until I get my money back" --k 2
+          {"ok":true,"value":{"query":"how long until I get my money back","searched":6,"indexing":false,"query_chars":null,
+            "hits":[{"path":"docs/returns.md","start_line":1,"end_line":15,"score":0.5456381440162659,
+                     "text":"# Returns\n\nA customer may send an order back within thirty days of delivery. The item has\nto be unused and in the box it came in.\n\n## Refunds\n\nMoney goes back to the card that paid for the order. It takes up to five\nworking days after the parcel reaches the warehouse. Shipping is not refunded\nunless the item arrived broken.\n\n## Exchanges\n\nTo swap a mug for another color, start a return and place a new order. We do\nnot hold stock for an exchange."},
+                    {"path":"docs/discounts.md","start_line":3,"end_line":3,"score":0.2784707546234131,"text":"Discount codes are checked at the till and at no other moment. ..."}]},
+           "text":"2 passages for 'how long until I get my money back':\n\ndocs/returns.md:1-15  (score 0.546)\n# Returns\n\nA customer may send an order back ...\n\ndocs/discounts.md:3-3  (score 0.278)\nDiscount codes are checked at the till ..."}
+      - title: Narrowed to a path
+        lang: json
+        note: "Generated; the text is shortened. `searched` is 1: the one passage under `docs/shipping.md`."
+        code: |
+          $ ph-text-index call text_search --query "what happens to a cracked mug" --k 1 --paths docs/shipping.md
+          {"ok":true,"value":{"query":"what happens to a cracked mug","searched":1,"indexing":false,"query_chars":null,
+            "hits":[{"path":"docs/shipping.md","start_line":1,"end_line":14,"score":0.36115559935569763,"text":"# Shipping\n\nOrders placed before noon ..."}]},
+           "text":"1 passage for 'what happens to a cracked mug':\n\ndocs/shipping.md:1-14  (score 0.361)\n# Shipping\n..."}
+      - title: With nothing indexed
+        lang: json
+        note: "Generated. Answered at once: no model is loaded to embed a question there is nothing to score against."
+        code: |
+          {"ok":true,"value":{"query":"anything","searched":0,"indexing":false,"query_chars":null,"hits":[]},"text":"Nothing matched 'anything' among 0 indexed passages. Index the documents first if this corpus is empty."}
+      - title: While a run is still indexing
+        text: |
+          `indexing` is `true` while a run holds the writer lock, and the text carries: `Not finished indexing. These results cover what is indexed so far; search again once it finishes.` (generated by holding the lock from another process).
+      - title: How paths are matched
+        text: |
+          `paths` are put in the spelling documents are stored under (workspace-relative), and `.` or an empty string means the whole workspace, which is no filter. A path matches a document at it or under it.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "`k` is 1 to 50, 5 by default. There is no paging."
+          - "A filter does not make a search faster; it removes near-misses from elsewhere."
+          - "A search asks the embedder nothing about its limit: it reads the newest entry of the index's embedder log."
+          - "A refused question is cut smaller and asked again, down to 16 tokens; then the refusal is the answer. What it taught is not saved."
+          - "With the local embedder each search loads the model first."
+      - links:
+          - {to: "edge:question", label: "How the question is embedded"}
+          - {to: "node:hits", label: "Search hits"}
+
+  chunk:
+    title: "_chunk.py: the packer"
+    summary: |
+      Cuts a document into passages that keep their place in it. Cuts land
+      between paragraphs, never mid-sentence where it can be helped, and every
+      passage carries the 1-based line span it came from, so a hit is a pointer
+      an agent can hand to `read`.
+    blocks:
+      - struct: ph_text_index._chunk:Chunk
+      - title: The second bound
+        struct: ph_text_index._chunk:Weight
+      - title: The rules, in order
+        text: |
+          1. **A paragraph is a run of non-blank lines** (`ph.indexable.paragraphs`, which uses `splitlines()` so a CRLF file reads the same).
+          2. **Paragraphs are packed greedily**, joined by a blank line, until the next one would pass `maxChars` or the weight bound. Then the passage is emitted.
+          3. **The next passage is seeded with the tail of the last** (`_tail`): whole trailing paragraphs, up to `overlapChars`, and never more than a quarter of the weight bound. The carry-over is a budget: it gives way to the bound, so a passage is never over because of its overlap.
+          4. **A paragraph longer than a passage is cut on line boundaries**, so each span stays exact.
+          5. **A line longer than a passage is cut on characters**: first to `maxChars` (`ph.characters.pieces`), then each piece that is still too heavy is cut again in proportion and re-weighed (`_fitting`, `_lightened`). The pieces all claim that one line, and none is joined to another piece of it.
+      - title: A real cut, by characters alone
+        lang: text
+        note: |
+          Generated: `chunk_text(docs/returns.md, max_chars=200, overlap_chars=60)`.
+          Three passages, each a heading with its paragraph, each with its
+          lines. No tail was carried: the paragraph before each was past the
+          overlap budget.
+        code: |
+          lines 1-4    141 chars   '# Returns\n\nA customer may send an order back within thirty d…'
+          lines 6-10   194 chars   '## Refunds\n\nMoney goes back to the card that paid for the or…'
+          lines 12-15  122 chars   '## Exchanges\n\nTo swap a mug for another color, start a retur…'
+      - title: A real cut, in the stored index
+        lang: text
+        note: |
+          The six passages of the scratch run, as `chunks.json` holds them.
+          Passages 2 and 3 are pieces of one 1 750-character line, held to 254
+          tokens by the model's own tokenizer.
+        code: |
+          id 1  docs/discounts.md  1-1      11 chars
+          id 2  docs/discounts.md  3-3    1144 chars
+          id 3  docs/discounts.md  3-3      56 chars
+          id 4  docs/discounts.md  3-7     613 chars
+          id 5  docs/returns.md    1-15    449 chars
+          id 6  docs/shipping.md   1-14    451 chars
+      - title: Cuts fall between characters
+        text: |
+          Every cut inside a line goes through `ph.characters.cut_before` and `cut_after`, which stop only between characters as a reader sees them (Unicode extended grapheme clusters). An accent is not left on one side of a cut and its letter on the other; an emoji sequence or a flag is not split across two passages. The module is written with the standard library and errs one way: it may refuse a cut the standard allows, never allow one it refuses.
+      - title: Weight is asked in batches
+        text: |
+          `Weight.of` is called with a document's paragraphs, or a paragraph's lines, at once, because the one that counts is a tokenizer and a call costs more than the counting. A passage's weight is the sum of its parts plus a `joint` for each separator, never under one token. That is exact where weight is bytes and on the careful side where it is a tokenizer's count, which is why what is sent is measured again.
+      - title: Limits
+        tone: limit
+        list:
+          - "Pieces of a line cut on characters share one line number. For a minified bundle or a base64 blob the span was notional already."
+          - "A piece cut on characters can end inside a sentence, and inside a word."
+          - "Passages built from several pieces are joined with a blank line, including lines of one paragraph that was split. The stored text can show a blank line where the document has a newline."
+          - "The packer applies no policy about what is worth indexing. `ph.indexable.triage` does, before it."
+      - links:
+          - {to: "topic:sizing", label: "How a passage is sized"}
+
+  embed:
+    title: "Embedder: _embed.py"
+    summary: |
+      What turns a passage into a vector. `Embedder` is the one required
+      protocol: a `name` and `encode`. Four optional capabilities are protocols
+      of their own, checked with `isinstance`, never probed with `getattr`. The
+      package ships two embedders: a local `sentence-transformers` model and an
+      OpenAI-compatible endpoint.
+    blocks:
+      - title: The required protocol
+        struct: ph_text_index._embed:Embedder
+      - title: "TokenBounded: how long an input it reads"
+        struct: ph_text_index._embed:TokenBounded
+        methods: true
+      - title: "Served: an embedder behind a server"
+        struct: ph_text_index._embed:Served
+      - title: "LocalWeights: weights to fetch and load"
+        struct: ph_text_index._embed:LocalWeights
+        methods: true
+      - title: "Metered: what it spends"
+        struct: ph_text_index._embed:Metered
+      - title: Which embedder is which
+        table:
+          columns: [capability, SentenceTransformerEmbedder, EndpointEmbedder]
+          rows:
+            - ["`TokenBounded`", "yes: the model's tokenizer counts", "yes: bytes at the corpus's density"]
+            - ["`Served`", "no", "yes: `asked_of` is the address without `/v1`"]
+            - ["`LocalWeights`", "yes", "no: nothing to load, so `status` says `nothing to load`"]
+            - ["`Metered`", "requests and texts", "requests, texts, and the `tokens` a server's `usage` reported"]
+      - title: The identity an index is keyed by
+        lang: text
+        note: "Generated from the two classes. The address and `trustRemoteCode` are not part of it."
+        code: |
+          sentence-transformers:sentence-transformers/all-MiniLM-L6-v2:|
+          endpoint:nomic-embed-text-v1.5:search_query: |search_document:
+          endpoint:text-embedding-3-small:512:|
+      - title: The rows the command mounts
+        row: text-index-local-engine
+      - row: text-index-endpoint-engine
+      - title: The local model
+        text: |
+          Loaded on first use in the command, never at mount. Weights already on disk are loaded with `local_files_only`, so a load cannot quietly become a download and a confined command needs no network to search. An `OSError` there (an interrupted download) is tried once more with the network. `cached()` reads the hub cache's own layout, `models--<owner>--<name>` under the weights folder.
+
+          `encode` puts the prefix in front of each text and asks for normalized vectors. Normalized because turbovec scores an inner product, and over normalized vectors that is cosine similarity.
+      - title: The endpoint
+        text: |
+          One POST per batch to `<baseUrl>/embeddings` with `urllib`, which honors the proxy variables a sandbox sets for a confined command. Vectors are placed by their `index`, normalized here, and an answer with another count than inputs is refused. Nothing is asked of the endpoint at mount: a server that is down, or a key that is not set, is a sentence on the call that needed a vector.
+      - title: What is known of the embedder, kept in the index
+        struct: ph_text_index._config:EmbedderRecord
+      - struct: ph_text_index._config:Learned
+      - title: Secure
+        tone: secure
+        list:
+          - "`trustRemoteCode` is off by default. `true` runs Python downloaded from the model's repository in the command's process. Nothing infers it from a load failure."
+          - "The key is read from the variable `apiKeyEnv` names, where the command runs, when a request is built. It is sent as `Authorization: Bearer`."
+          - "The weights folder is set through the constructor, not by changing `HF_HOME`, so no child process inherits it."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "An empty key variable fails before anything is sent. Generated: `{\"ok\":false,\"error\":{\"code\":\"MISSING_CREDENTIAL\",\"message\":\"the embeddings endpoint's key is missing: $SCRATCH_EMBED_KEY is not set where the command runs. Set it in the environment pH, or the harness that runs this command, is started from; the command is handed it by name.\"}}`"
+          - "A server's error is `TEXT_INDEX_ENDPOINT_FAILED` with its own words, or `CONTEXT_WINDOW_EXCEEDED` when the words say an input was too long."
+          - "A local model past its length truncates without a word. That is why passages are packed to it."
+          - "An embedder that is not `TokenBounded` is packed by bytes only when it refuses."
+      - links:
+          - {to: "topic:embedder", label: "Choosing an embedder"}
+          - {to: "edge:encode", label: "What an endpoint is sent"}
+
+  model:
+    title: The embedding model
+    summary: |
+      The model itself: weights on this machine, loaded by the command, or a
+      server reached over HTTP. Which one is the deployment's choice, made by
+      mounting one embedder row. It decides what leaves the machine.
+    blocks:
+      - title: Local weights
+        text: |
+          `sentence-transformers/all-MiniLM-L6-v2` by default: 384 dimensions, about 90 MB, symmetric, so it needs no prefixes. It reads 256 tokens. The weights live in `$PH_CACHE/models`, shared by every agent, and the session row grants that folder to the confined command. They are fetched by `/text-index install`, or by the first call that can reach the hub.
+      - title: An endpoint
+        text: |
+          Any server that answers the OpenAI `/v1/embeddings` request: a local llama.cpp, Ollama or vLLM, or a hosted API. A local server holds the model between calls, so a search loads nothing in the command.
+      - title: What leaves the machine
+        tone: secure
+        list:
+          - "**Local model: nothing**, once the weights are on disk."
+          - "**Endpoint: the text of every passage indexed and of every question asked**, behind its prefix, to the `baseUrl` the row names. Writing the row is how a deployment says it means that."
+          - "**Endpoint: the model name**, and `dimensions` when set."
+          - "**Endpoint: the key**, as a bearer header, when `apiKeyEnv` names one. Also on the `GET /props` that asks a server its window, which is sent only when `maxTokens` is unset."
+          - "**No paths and no line numbers** are sent. They stay in the sidecar."
+      - title: Reaching it from a sandbox
+        tone: secure
+        list:
+          - "A confined command has the network its deployment allows. The endpoint's host and port go in `sandbox-allow` under `network.hosts`."
+          - "A host that is not allowed, or is down, fails with `TEXT_INDEX_ENDPOINT_UNREACHABLE`."
+      - title: Limits
+        tone: limit
+        list:
+          - "An allowed host is allowed to every confined command, an agent's `bash` included. A hosted API refuses it for want of the key; a server that needs no key answers it."
+          - "The allowlist is `network.hosts` on `sandbox-allow`; a top-level `hosts` is refused at mount, and the list a profile writes replaces the shipped one."
+          - "Vectors do not transfer between models. Another model is another index."
+      - links:
+          - {to: "edge:encode", label: "The request"}
+          - {to: "security", label: "Sandbox and egress"}
+
+  sidecar:
+    title: chunks.json
+    summary: |
+      The sidecar: what each vector means. For every passage its id, path, line
+      span and **text**; for every document its digest and its version-control
+      id; and the embedder log. It holds the text on purpose, so one call
+      answers and what it answers with is what was indexed.
+    blocks:
+      - title: The file, from the scratch run
+        lang: json
+        note: "Read from the real `chunks.json`; four records and the long text are left out."
+        code: |
+          {"format": 1,
+           "vcs": "",
+           "vcs_ids": {"docs/discounts.md": "", "docs/returns.md": "", "docs/shipping.md": ""},
+           "digests": {"docs/discounts.md": "388bde9ac8e0…f39c6aa1",
+                       "docs/returns.md":   "ba665e4d2b17…7dd5a052",
+                       "docs/shipping.md":  "3167ce3f24e8…d95d0581"},
+           "embedder": [{"askedAtMs": 1794884017864, "reported": {}, "limit": {"tokens": 256, "source": "model"}, "learned": {}}],
+           "model": "sentence-transformers:sentence-transformers/all-MiniLM-L6-v2:|",
+           "dim": 384,
+           "bit_width": 4,
+           "next_id": 7,
+           "records": [
+             {"id": 1, "path": "docs/discounts.md", "start_line": 1, "end_line": 1, "text": "# Discounts"},
+             {"id": 5, "path": "docs/returns.md", "start_line": 1, "end_line": 15, "text": "# Returns\n\nA customer may send an order back ..."}
+           ]}
+      - title: One passage
+        struct: ph_text_index._store:Record
+      - title: The embedder log
+        struct: ph_text_index._config:EmbedderRecord
+      - lang: json
+        note: |
+          Generated by building the record and calling `to_wire()`; the values
+          are the README's example of a llama.cpp that reports 2 048 and
+          refuses past 512. `effective()` answers `512 tokens (what its
+          refusal said)`.
+        code: |
+          {"askedOf": "http://127.0.0.1:8080", "askedAtMs": 1762905600000,
+           "reported": {"n_ctx": 2048, "total_slots": 4},
+           "limit": {"tokens": 2048, "source": "server"},
+           "learned": {"tokens": 512, "density": 2.7}}
+      - title: How the log is used
+        list:
+          - "The newest entry is the one used. The ones before it say what changed, and when."
+          - "An index run that embeds asks the embedder. An answer that differs from the newest entry is added as a new entry, `learned` starts over, and the run's result says so in `embedder_changed`."
+          - "An entry asked of another address is not used: the run asks again."
+          - "A search reads the newest entry and asks nothing."
+      - title: What makes an index, or a document, stale
+        table:
+          columns: [what changed, what happens]
+          rows:
+            - ["the model, a prefix, an endpoint's `dimensions`", "the embedder's `name` changes, so the index is **another directory**. The old one is left intact."]
+            - ["`maxChars`, `overlapChars`, a configured `maxTokens`", "each document's digest changes; a document that is read is cut and embedded again. One that version control vouches for is not read."]
+            - ["a document's text", "its digest, or its version-control id, changes; its passages are replaced."]
+            - ["a document is deleted", "its passages are dropped at the end of the next run."]
+            - ["what the model or server reports as its limit", "a new embedder-log entry. Nothing already indexed is cut again."]
+            - ["a sidecar whose `model` or `format` this build does not expect", "`IndexMismatch`: delete the directory and re-index."]
+            - ["another writer saved since this copy was loaded", "`stale()` sees the file stamps differ, and the copy is loaded again."]
+      - title: Durable
+        tone: durable
+        list:
+          - "Written with `write_atomic`: replaced whole, never truncated in place. It is the only copy of what the vectors mean."
+          - "Written **after** the vectors. A crash between the two leaves vectors no record names; the next writer's `open` removes them."
+          - "`open` also drops any record whose vector the index does not hold."
+          - "One writer at a time, across processes: `writer.lock` in the directory."
+      - title: Limits
+        tone: limit
+        list:
+          - "Rewritten whole on every save. The README measures 7.1 MB and 16 ms at 6 000 passages."
+          - "It holds a copy of the corpus's text, readable by whoever can read the agent's scratch."
+          - "`format` is 1 and there is no migration."
+
+  tvim:
+    title: index.tvim
+    summary: |
+      The vectors, in turbovec's own file format, keyed by passage id. The
+      index is built at turbovec's quantization width `bitWidth`, 4 or 2. turbovec holds no
+      text and no paths: an id means something only through the sidecar.
+    blocks:
+      - title: How it is used
+        table:
+          columns: [call, when]
+          rows:
+            - ["`IdMapIndex(dim, bit_width)`", "the first passages of an empty index; the width is the embedder's"]
+            - ["`add_with_ids(rows, ids)`", "each document's passages, with ids counted up from the sidecar's `next_id`"]
+            - ["`remove(id)`", "a document re-indexed, forgotten or gone"]
+            - ["`sync(path)`", "each save, before the sidecar is written"]
+            - ["`IdMapIndex.load(path)`", "each open"]
+            - ["`search(query, k, allowlist=)`", "each search"]
+            - ["`calibrate(sample)`", "once at most, before the first add, when that add brings 1 024 rows or more"]
+      - title: Options that shape it
+        table:
+          columns: [option, on, effect]
+          rows:
+            - ["`bitWidth`", "`text-index`", "4, or 2 for half the memory and less recall. A third value is refused by the profile."]
+            - ["`calibrate`", "`text-index`", "whether the one calibration is attempted at all"]
+            - ["`dimensions`", "`text-index-endpoint`", "ask the endpoint for shorter vectors; another width is another index"]
+      - title: Durable
+        tone: durable
+        list:
+          - "`sync` appends and commits before it returns. The module docstring calls it crash-safe at any byte."
+          - "A vector the sidecar does not name is removed by the next writer (`_remove_strays`), because its id is one the next add would allocate again."
+          - "A reader leaves such vectors where they are: a writer may be part-way through a save."
+      - title: Limits
+        tone: limit
+        list:
+          - "A vector of another width than the index holds raises `IndexMismatch`."
+          - "turbovec lists no ids, so strays are found by one full scan, and only when the counts differ."
+          - "A real file: 451 155 bytes for 6 passages at 384 dimensions."
+
+  hits:
+    title: Search hits
+    summary: |
+      What `text_search` answers with: for each of the best `k` passages its
+      path, its line span, its score and its text. A hit is both an answer and
+      a pointer: the model can answer from the passage, or `read` the file
+      around it.
+    blocks:
+      - struct: ph_text_index.engine:HitValue
+      - title: As the model reads it
+        lang: text
+        note: "Generated: the `text` of a real search for \"how long until I get my money back\", first hit."
+        code: |
+          2 passages for 'how long until I get my money back':
+
+          docs/returns.md:1-15  (score 0.546)
+          # Returns
+
+          A customer may send an order back within thirty days of delivery. The item has
+          to be unused and in the box it came in.
+
+          ## Refunds
+
+          Money goes back to the card that paid for the order. It takes up to five
+          working days after the parcel reaches the warehouse. Shipping is not refunded
+          unless the item arrived broken.
+          ...
+      - title: Reading a hit
+        list:
+          - "`path` is as the workspace names it, so it can be handed to `read`. `start_line` is 1-based; `read`'s `offset` is one less."
+          - "`score` is the inner product of the question's vector and the passage's, both normalized: higher is nearer. It is not a probability."
+          - "`text` is the passage as it was indexed."
+          - "The question is repeated on one line, cut at 200 characters."
+      - title: Limits
+        tone: limit
+        list:
+          - "A passage can state a position the document goes on to reject. The skill tells the model so."
+          - "When a child asked its parent's index, paths are relative to the parent's tree, and the text says which."
+          - "The text is a copy from the last index run."
+
+edges:
+  manual:
+    transport: service
+    summary: |
+      At mount an embedder row calls `ctx.text_index.register(provider)`, which
+      claims the embedder slot and then calls `ctx.utcp.add(manual, scope=...)`
+      on the embedder's own scope. ph-utcp runs the discovery command, registers
+      the two tools and returns a `ManualState`.
+    blocks:
+      - title: What is handed over
+        struct: ph_utcp:Manual
+      - title: What an embedder row gives the seam first
+        struct: ph_text_index.row:Provider
+      - title: What comes back
+        struct: ph_utcp:ManualState
+      - title: The registration another harness uses
+        lang: json
+        note: |
+          Generated with `ph-text-index manual --registration`; the default
+          list is shortened. With an endpoint row that names a key, the name is
+          added to each **tool's** template in the manual, not to this one.
+        code: |
+          {"name": "ph_text_index", "call_template_type": "cli",
+           "commands": [{"command": "/home/me/pH/.venv/bin/python3 -P -m ph_text_index manual"}],
+           "inherit_env_vars": ["PATH", "HOME", "...", "PH_HOME", "PH_CACHE", "PH_RUNTIME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+             "PH_TOOL_CONFIG", "PH_TOOL_STATE",
+             "HF_ENDPOINT", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "OMP_NUM_THREADS", "CUDA_VISIBLE_DEVICES"]}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A second embedder's claim is refused."
+          - "If discovery fails the rows stand down: no tools, no skill, a `phern doctor` line with the reason."
+          - "The manual belongs to the embedder's scope. Unmounting the embedder row removes the tools, the skill and the claim."
+          - "With `preload: true`, `text-index-local` runs the command's `install` before it registers, outside the sandbox, and refuses the mount when it exits failing."
+      - links:
+          - {to: "ph-utcp#edge:add-manual", label: "ph-utcp: add(manual)"}
+          - {to: "ph-utcp#edge:register-tool", label: "ph-utcp: register(definition)"}
+
+  call-index:
+    transport: process
+    summary: |
+      A `text_index` call reaches ph-utcp's `execute`, which starts
+      `ph-text-index call text_index` through `ctx.shell` in the owning agent's
+      tree, under the calling agent's sandbox. One JSON envelope comes back on
+      stdout.
+    blocks:
+      - title: The command line
+        lang: bash
+        note: |
+          The manual's template, the background run, and the ask that will not
+          wait. `$PH_TOOL_STATE` and `$PH_TOOL_CONFIG` are set on each.
+        code: |
+          python -P -m ph_text_index call text_index --format json --paths=... --glob=... --exclude=... --forget=...
+          python -P -m ph_text_index call text_index --progress --args-json '{"paths": ["docs"]}'
+          python -P -m ph_text_index call text_index --wait 0 --args-json '{"paths": ["docs"]}'
+      - title: What the command is given
+        table:
+          columns: [what, value]
+          rows:
+            - ["working directory", "the root of the agent that owns the tree"]
+            - ["`PH_TOOL_STATE`", "`<owner's scratch>/text-index`"]
+            - ["`PH_TOOL_CONFIG`", "`{\"text-index\": {...}, \"text-index-local\": {...}}`: both rows, by id"]
+            - ["a key", "the one variable `apiKeyEnv` names, read from the harness's environment now"]
+            - ["writable outside the workspace", "the weights folder (local embedder), the log's folder, and the owner's state directory when it is not the caller's own"]
+      - title: Arguments
+        struct: ph_text_index.engine:IndexArgs
+      - title: What comes back
+        struct: ph_text_index.engine:IndexValue
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The call may run 30 minutes (`INDEX_TIMEOUT_MS`). In a session it answers within `waitS` and the run goes on in the background."
+          - "A background run has no time limit; its job ends it."
+          - "A UTCP client passes arguments as strings; `ph.toolcli.decode_argument` reads each by the tool's schema."
+          - "The command's stderr is closed for the length of a call. Only `--progress` writes there."
+      - links:
+          - {to: "ph-utcp#edge:call-run", label: "ph-utcp: run_argv for the agent"}
+          - {to: "ph-utcp#edge:sandboxed-command", label: "ph-utcp: the sandboxed command"}
+          - {to: "node:tindex", label: "text_index"}
+
+  call-search:
+    transport: process
+    summary: |
+      A `text_search` call is the same hop for the other tool. It is never run
+      in the background and never waits on a run: the command opens the index
+      as a reader and answers from what is saved.
+    blocks:
+      - title: The command line
+        lang: bash
+        code: |
+          python -P -m ph_text_index call text_search --format json --query=... --k=... --paths=...
+      - title: Arguments
+        struct: ph_text_index.engine:SearchArgs
+      - title: What comes back
+        struct: ph_text_index.engine:SearchValue
+      - title: In the session log
+        text: |
+          An ordinary tool call: `tool/call` and `tool/result` in the calling agent's log, with the envelope's `text` as the content. The passages quoted in that text are therefore in the log. The command writes nothing to the session log; its tracebacks go to `$PH_CACHE/logs/ph-text-index.log`.
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The call may run 5 minutes (`SEARCH_TIMEOUT_MS`): with a local model each search loads it."
+          - "The tool is concurrency-safe: several searches of one batch run together, each its own command, each loading the model."
+          - "While a background run is going, ph-utcp adds how far it has got to the text."
+      - links:
+          - {to: "node:tsearch", label: "text_search"}
+
+  document-text:
+    transport: call
+    summary: |
+      For each document that is not proved unchanged, `text_index` reads the
+      whole file through `ctx.fs.read`, computes its digest, and passes the
+      text through `ph.indexable.triage`. What survives is a list of paragraphs
+      with their line spans, handed to the packer.
+    blocks:
+      - title: What is handed to the packer
+        struct: ph.indexable:Paragraph
+      - title: The gates before it
+        table:
+          columns: [gate, asked of, a refusal reads]
+          rows:
+            - ["`fs.skip_reason`", "the path and its size, without reading", "`cannot be read (...)`, or `<n> bytes, past the <m>-byte limit`"]
+            - ["the digest", "the text, with the cut settings in front", "not a skip: the document is `unchanged`"]
+            - ["`triage`: not text", "the share of replacement characters", "`is not text`"]
+            - ["`triage`: no prose", "what is left after machine blocks are taken out", "`holds no prose to index (minified, encoded, or generated)`"]
+            - ["nothing left", "the paragraphs", "`is empty`"]
+      - title: Why the whole file
+        text: |
+          `limit=None` and `max_bytes=None` on the read: a passage index over a truncated document would answer confidently about the first two thousand lines and silently about the rest. `skip_reason` is the walk's size bound, and it is a skip that reports, where `read`'s own default would raise.
+      - title: Limits
+        tone: limit
+        list:
+          - "A README with an embedded image still indexes every paragraph around it: machine blocks are dropped one by one."
+          - "A short note is never refused for being short. Only a document something was taken out of can fall below the prose floor."
+      - links:
+          - {to: "node:chunk", label: "The packer"}
+
+  passages:
+    transport: call
+    summary: |
+      `_embedded` packs one document's paragraphs into passages, checks them
+      against the embedder's limit, and hands their texts to
+      `TextIndexSeam.embed`, which calls the embedder's `encode` in a worker
+      thread. One row of floats comes back per passage.
+    blocks:
+      - title: The call
+        lang: python
+        note: "From `engine._embedded` and `TextIndexSeam.embed`, shortened."
+        code: |
+          room = await seam.room(await seam.limit(store, ask=True))
+          chunks, held = await _packed(seam, paragraphs, room)       # chunk_paragraphs(..., weight=Weight(of=seam.weigh, most=room))
+          texts = [chunk.text for chunk in chunks]
+          longest = max(await seam.measure(texts))                   # as sent: prefix and markers included
+          vectors = await seam.embed(texts, query=False)             # embedder.encode(texts, query=False)
+      - title: What crosses
+        table:
+          columns: [direction, what]
+          rows:
+            - ["to the embedder", "a list of passage texts, without prefix; `query=False`"]
+            - ["back", "`Vectors`: a float32 array of shape `(len(texts), dim)`, each row L2-normalized"]
+      - title: What a passage is
+        struct: ph_text_index._chunk:Chunk
+      - title: Failure
+        tone: limit
+        list:
+          - "A refusal for length is not the end of the run: the document is packed with less room and sent again."
+          - "Any other failure of the embedder ends the call."
+          - "The embedding runs outside the guard a search shares, so a search in the same process does not wait for a model."
+      - links:
+          - {to: "topic:sizing", label: "How a passage is sized"}
+
+  passage-records:
+    transport: file
+    summary: |
+      After a document's vectors come back, `TextIndex.add` records each
+      passage in memory with a new id, and the next `save` writes them all to
+      `chunks.json`. The document's old passages are forgotten first, in the
+      same guarded step.
+    blocks:
+      - title: One record, as saved
+        lang: json
+        note: From the real sidecar.
+        code: |
+          {"id": 6, "path": "docs/shipping.md", "start_line": 1, "end_line": 14,
+           "text": "# Shipping\n\nOrders placed before noon leave the warehouse the same day. Tea is packed in\ntins so it survives a week in transit.\n\n## Carriers\n\n..."}
+      - struct: ph_text_index._store:Record
+      - title: Beside the records
+        list:
+          - "`digests[path]`: the digest the document was indexed under."
+          - "`vcs_ids[path]`: what version control called the document's content, or empty."
+          - "`next_id`: where the next add allocates. Ids are never reused within an index."
+      - title: Durable
+        tone: durable
+        list:
+          - "A save every `saveEveryS`, and one on the way out of the run, shielded from cancellation."
+          - "`write_atomic`: the sidecar is replaced whole."
+      - links:
+          - {to: "node:sidecar", label: "chunks.json"}
+
+  question:
+    transport: call
+    summary: |
+      `_asked` hands the question to the embedder with `query=True`, so an
+      asymmetric model gets its question prefix. A question that measures over
+      the limit is first cut to its head. One vector comes back.
+    blocks:
+      - title: The steps
+        text: |
+          1. Read the limit from the newest entry of the index's embedder log. Nothing is asked of a server.
+          2. Measure the question as it would be sent, prefix included.
+          3. Over the limit: take its head with `head_of`, as much of its start as fits the room, back to the end of a word.
+          4. Embed. A refusal for length cuts it smaller and asks again, down to 16 tokens; past that the refusal is the answer.
+      - title: What comes back to the tool
+        table:
+          columns: [value, meaning]
+          rows:
+            - ["the vector", "one normalized row"]
+            - ["`query_chars`", "how many characters were embedded, when that is not all of them; else `null`"]
+      - lang: text
+        note: "Generated: `head_of` with a byte weight and room for 10 tokens."
+        code: |
+          head_of("when does a refund reach my card after I send a parcel back", most=10)  ->  'when does a refund reach my'
+      - title: Limits
+        tone: limit
+        list:
+          - "The head, not an average of the parts: what a model that truncates would have searched by, now said."
+          - "With an empty index the question is never embedded."
+
+  encode:
+    transport: http
+    summary: |
+      Where the embedder meets the model. For the local embedder it is a call
+      into `sentence-transformers` in the same process. For an endpoint it is
+      one HTTPS or HTTP request per batch: the passages' text goes out, vectors
+      come back.
+    blocks:
+      - title: The request an endpoint is sent
+        lang: json
+        note: |
+          The bodies are generated by `_embed._embeddings_body`. `model` is
+          left out when empty; `dimensions` when unset. Each input is behind
+          its prefix. `batchSize` texts go in one request (32 by default).
+        code: |
+          POST <baseUrl>/embeddings
+          Content-Type: application/json
+          Authorization: Bearer <the value of the variable apiKeyEnv names>
+
+          {"input": ["search_document: # Returns\n\nA customer may send an order back within thirty days of delivery.",
+                     "search_document: ## Refunds\n\nMoney goes back to the card that paid for the order."],
+           "model": "nomic-embed-text-v1.5"}
+
+          {"input": ["search_query: how long until I get my money back"], "model": "text-embedding-3-small", "dimensions": 512}
+      - title: The answer it reads
+        lang: json
+        note: |
+          Illustrative, written from the reader (`_vectors_of`, and the `usage`
+          lines of `_ask`). Embeddings are placed by `index`, so they may come
+          back in any order. `usage.total_tokens`, else `prompt_tokens`, is
+          added to what the run spent.
+        code: |
+          {"data": [{"index": 1, "embedding": [0.0, 1.0]},
+                    {"index": 0, "embedding": [1.0, 0.0]}],
+           "usage": {"total_tokens": 41}}
+      - title: Asking a server its window
+        lang: json
+        note: |
+          Illustrative, written from the reader (`_reported`). Sent only when
+          `maxTokens` is unset, to the address without `/v1`, with a 5 s
+          timeout. A server that does not answer it simply reports no limit.
+        code: |
+          GET http://127.0.0.1:8080/props
+
+          {"default_generation_settings": {"n_ctx": 2048},
+           "total_slots": 4, "model_path": "/models/nomic-embed-text-v1.5.Q8_0.gguf", "model_alias": "nomic"}
+      - title: The local call
+        lang: python
+        note: "From `SentenceTransformerEmbedder.encode`."
+        code: |
+          rows = model.encode(
+              [f"{prefix}{text}" for text in texts],
+              batch_size=self.batch_size,
+              convert_to_numpy=True,
+              normalize_embeddings=True,
+              show_progress_bar=False,
+          )
+      - title: How a refusal is told apart
+        table:
+          columns: [what happened, code, what the run does]
+          rows:
+            - ["the key's variable is empty", "`MISSING_CREDENTIAL`", "fails; nothing is sent"]
+            - ["an HTTP error whose body says an input was too long", "`CONTEXT_WINDOW_EXCEEDED`", "reads the numbers, packs smaller, sends again"]
+            - ["any other HTTP error", "`TEXT_INDEX_ENDPOINT_FAILED`, with up to 600 bytes of the server's words", "fails"]
+            - ["no connection, a timeout", "`TEXT_INDEX_ENDPOINT_UNREACHABLE`", "fails"]
+            - ["not JSON, another count of embeddings, a value that is not a number", "`TEXT_INDEX_ENDPOINT_FAILED`", "fails"]
+      - title: Secure
+        tone: secure
+        list:
+          - "The request carries passage text and, when configured, the key. It carries no path, no line number and nothing of the session."
+          - "`urllib` honors the proxy variables a sandbox sets, which is the only way a confined command reaches an allowed host."
+          - "One request may take `timeoutS` (60 s)."
+      - title: Limits
+        tone: limit
+        list:
+          - "There is no retry for a failure that is not about length, and no second endpoint."
+          - "Nothing an embedding costs is in the session log."
+      - links:
+          - {to: "node:model", label: "What leaves the machine"}
+          - {to: "topic:sizing", label: "Reading a refusal"}
+
+  vectors:
+    transport: file
+    summary: |
+      `TextIndex.add` gives each passage's vector an id and adds it to the
+      turbovec index in memory; `save` then calls `sync`, which commits the
+      vectors to `index.tvim` before the sidecar is written.
+    blocks:
+      - title: The order of a save
+        text: |
+          1. `self._index.sync("index.tvim")`: the vectors, durably.
+          2. `write_atomic("chunks.json", ...)`: every record, the digests, the embedder log.
+
+          Vectors first, so a crash never leaves named passages with no vector. A crash after step 1 leaves vectors no record names; the next writer removes them.
+      - title: What is checked on the way in
+        list:
+          - "As many vectors as passages, or `ValueError`."
+          - "The same width as the index holds, or `IndexMismatch`."
+          - "Rows are made contiguous float32; ids are `uint64`, counted up from `next_id`."
+      - links:
+          - {to: "node:tvim", label: "index.tvim"}
+
+  nearest:
+    transport: call
+    summary: |
+      `TextIndex.search` asks turbovec for the best `k` ids for the question's
+      vector, optionally within an allowlist of ids, and gets scores and ids
+      back, best first.
+    blocks:
+      - title: The call
+        lang: python
+        note: "From `_store.TextIndex.search`."
+        code: |
+          query = np.ascontiguousarray(np.atleast_2d(vector), dtype=np.float32)
+          allowlist = None if allowed is None else np.array(sorted(set(allowed)), dtype=np.uint64)
+          scores, ids = self._index.search(query, k, allowlist=allowlist)
+      - title: The filter
+        text: |
+          When the call names `paths`, `ids_under` collects the ids of every document at or under one of them, once, and that list is both the allowlist and the `searched` count. `None` means no filter. An empty list means nothing is allowed, and the store answers that itself, because turbovec raises on an empty allowlist.
+      - title: Limits
+        tone: limit
+        list:
+          - "A selective filter costs more than an unfiltered search: building the allowlist dominates. The reason to filter is precision."
+          - "An id turbovec returns that the sidecar does not name is left out of the answer."
+      - links:
+          - {to: "node:hits", label: "Search hits"}
+
+  passage-text:
+    transport: file
+    summary: |
+      Each id turbovec returned is looked up in the records loaded from
+      `chunks.json`, which gives the hit its path, its line span and its text.
+      No file of the workspace is read to answer a search.
+    blocks:
+      - title: What the lookup yields
+        struct: ph_text_index._store:Record
+      - title: A reader's open
+        text: |
+          A search opens the index with `readonly=True`, without the writer lock. It changes no file. Every file a writer saves is replaced whole, so a search during a run reads what the run last saved. The copy is loaded again when either file's stamp has changed since it was read.
+      - title: Limits
+        tone: limit
+        list:
+          - "The text is what was indexed. If the file has changed since, the hit quotes the old text with the old lines."
+          - "A reader may see vectors a writer has synced and not yet named. `search` answers only for a vector the sidecar names."
+      - links:
+          - {to: "node:sidecar", label: "chunks.json"}

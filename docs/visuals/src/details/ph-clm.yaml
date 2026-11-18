@@ -1,0 +1,1215 @@
+intro: |
+  ph-clm lets the model edit its own context. The middle row of the diagram is
+  the path of one edit: the model calls a `context_*` tool, the tool hands the
+  edit to the editor, and the editor appends one surface `replace` and one
+  `clm/revised` record to the session log in a single batch. The next request
+  is derived from the log, so it reads the edit. The log keeps every original.
+
+  The bottom row is the second front end, the context file. The top row is the
+  section map every edit names, and the size readouts that tell the model when
+  to edit. Click a box or an arrow. The records, receipts, refusals and the
+  file shown on this page were produced by running the tools against a scratch
+  session.
+
+topics:
+  - id: configuring
+    title: Configuring it
+    summary: |
+      Two rows, in the `clm` bundle. `clm-context` holds the section map, the
+      editor, the seven tools and the readouts. `clm-mirror` keeps the context
+      file and takes no options. Of the shipped profiles only `rlm-clm` layers
+      the bundle: `rlm` plus these two rows, with compaction still mounted as
+      the backstop.
+    blocks:
+      - title: The bundle
+        bundle: ph_clm/bundle.yaml
+      - title: Starting with it
+        lang: bash
+        code: |
+          phern --profile rlm-clm
+          phern --profile rlm-clm --patch '{id: clm-mirror, disabled: true}'   # tools only, no context file
+      - title: A profile that changes it
+        lang: yaml
+        note: |
+          This entry composes (`phern --profile editing --dump-config`). A patch
+          replaces a row's whole config, so restate what you want to keep. With
+          compaction at its default 0.85 and `lastMargin: 0.25`, the reminders
+          come at 40% and 60%: any `remindAt` share at or past 60% gives way to
+          the last one.
+        code: |
+          # $PH_HOME/profiles/editing.yaml
+          extends: rlm-clm
+          rows:
+            - id: clm-context
+              config:
+                protectTask: true      # the first message the person typed cannot be edited
+                gate: fit              # refuse an edit that grows the context past the window
+                mapLimit: 40           # sections context_sections lists by default
+                remindAt: [0.4, 0.6]   # shares of the window that earn a readout
+                lastMargin: 0.25       # the last reminder comes this far below compaction's trigger
+      - row: clm-context
+      - row: clm-mirror
+      - title: The gate
+        table:
+          columns: [gate, an edit that grows the context]
+          rows:
+            - ["`none` (default)", "lands; the receipt says `This GREW the context`"]
+            - ["`fit`", "refused when the context would pass the window, and whenever the window is unknown"]
+            - ["`shrink`", "always refused. The model reads: this edit grows the context (~6 → ~13 tokens), and the clm-context row's gate is shrink: replace stale text with something shorter"]
+      - title: What mounting needs
+        list:
+          - "`clm-context` injects `ctx.tools`, `ctx.token_meter` and `ctx.compaction`. The compaction seam ships in ph-core with no engine; with none registered there is no trigger to warn ahead of and the `remindAt` shares stand as written."
+          - "`clm-mirror` injects `ctx.clm` (so it needs `clm-context`), `ctx.tools` and `ctx.system_prompt`. It adds a prompt section, `clm:mirror`, that tells the model where its file is and how it reads."
+          - "Readouts need a known context window. With no window there is no share to report, and none is given."
+      - links:
+          - {to: "node:tools", label: "The tools and their arguments"}
+          - {to: "node:readouts", label: "Readouts"}
+          - {to: "node:file", label: "The context file"}
+
+  - id: cost
+    title: What an edit costs
+    summary: |
+      An edit changes text in the middle of the request, and a provider's prefix
+      cache cannot serve anything after the first change. So every section after
+      an edit is read again once, on the next request. The map shows that number
+      for each section as `after`, and every receipt states it.
+    blocks:
+      - title: Where the number comes from
+        list:
+          - "`Section.after` is the tokens in every section after this one."
+          - "A substitution (tombstone, replace, restore of one) re-reads the `after` of the last section in its run."
+          - "An in-place rewrite re-reads its section's `after`, plus the nodes of the same section that follow the one it changed."
+          - "A batch of edits from one context-file write reports the largest of its `reread` figures, once."
+      - title: Three receipts from one session (generated)
+        lang: text
+        note: |
+          The first is a rewrite that cut a long tool output: 384 tokens saved
+          for 20 re-read. The second is a tombstone of a 6-token step, whose
+          marker is 13 tokens: it grew the context. The third replaces a run
+          with a summary.
+        code: |
+          Rewrote a passage in S1. Context ~422 → ~38 tokens.
+          The ~20 tokens after it are read once more on the next request: a prefix cache cannot serve past an edit.
+
+          Removed S5, now S10. Context ~38 → ~45 tokens.
+          The ~2 tokens after it are read once more on the next request: a prefix cache cannot serve past an edit.
+          This GREW the context. If you meant to condense, you may have kept the old text as well as the new.
+
+          Replaced S1..S3, now S12. Context ~45 → ~40 tokens.
+          The ~19 tokens after it are read once more on the next request: a prefix cache cannot serve past an edit.
+      - title: What follows from it
+        list:
+          - "Edit late sections, or many at once, rather than a small early one. The tool descriptions say this to the model."
+          - "A detailed summary costs little: everything after the edit is re-read once whatever the summary's length."
+          - "`context_sections`, `context_recall` and `context_diff` change nothing on the surface. Each costs its own result, which is then part of the context."
+          - "`context_restore` grows the context by design; its receipt does not warn."
+          - "A readout is one line appended to a tool result that was being logged anyway."
+      - title: How the context is counted
+        text: |
+          Receipts and readouts use `TokenMeter.baseline(session)`: the provider's own count of the last request, system prompt and tool schemas included, moved by what the surface did since. Section sizes are the meter's per-node measure. So `Context ~422 → ~38` is the same number compaction and the `fit` gate judge.
+      - title: Limits
+        tone: limit
+        list:
+          - "The row does not know whether the provider has a prefix cache or what it charges. `reread` is the size of what can no longer be served from one, in tokens, not a price."
+      - links:
+          - {to: "edge:editor-to-log", label: "How an edit lands"}
+          - {to: "node:map", label: "The section map"}
+
+  - id: dispatch
+    title: The events it listens to
+    summary: |
+      Neither row dispatches an event of its own. Both hook events the loop, the
+      tool pipeline and the session store already fire. The model's edits arrive
+      as ordinary tool calls.
+    blocks:
+      - table:
+          columns: [row, event, mode, what the listener does]
+          rows:
+            - ["clm-mirror", "`agent/request`", waterfall, "calls on first, then catches a change no call made and writes the file afresh; returns the call config unchanged"]
+            - ["clm-mirror", "`tools/post-execute`", waterfall, "calls on, then reads the file back and lands its changes; appends the receipt to the result"]
+            - ["clm-context", "`tools/post-execute`", waterfall, "registered with `prepend=True`, so it is outermost: measures the result as it will be logged and appends a readout when a share is crossed"]
+            - ["clm-context", "`session/disposed`", emit, "forgets the session's section facts and readout level"]
+            - ["clm-mirror", "`session/disposed`", emit, "deletes the session's context files and forgets them"]
+      - event: agent/request
+      - event: tools/post-execute
+        args:
+          - [execution, ToolExecution, "the call: its name, arguments, call id, agent, session and `parent` (set for a dispatch inside a code cell)"]
+          - [result, ToolExecutionResult, "the outcome so far; a listener returns `Accept` or `Block`"]
+      - event: session/disposed
+        args:
+          - [session, Session, "the session that left the store"]
+      - title: Not bus events
+        list:
+          - "The tools reach the editor through the service `ctx.clm`. So does the context file."
+          - "The editor reaches the log through ph-core's revision door, `ph.session.revise`, inside `Session.batch()`."
+          - "The readouts ask `ctx.compaction.trigger_fraction()`, a service call."
+          - "The file itself is plain file I/O, written directly and not through `ctx.fs`."
+      - title: Order on tools/post-execute
+        text: |
+          Both listeners call `next_` first and act on the way back. `clm-context` is prepended, so it is the outermost whatever order the rows mounted in. One call's result therefore gets, in this order: the inner rows' changes (an offload may replace the content), the context file's receipt, then the readout, measured on what will be logged.
+
+          Both skip a call whose `execution.parent` is set. A tool dispatched from inside a Code Mode cell does not trigger a read-back or a readout; the cell's own call does, after every write the cell made.
+      - links:
+          - {to: "dispatch", label: "The four dispatch modes"}
+
+  - id: durability
+    title: What survives a restart
+    summary: |
+      Every edit is two log records in one batch, so a restarted daemon derives
+      the same context the model had. Nothing an edit means lives outside the
+      log. What is kept in memory is a cache of the log or a convenience, and
+      each one is rebuilt or reset safely.
+    blocks:
+      - title: In the log
+        tone: durable
+        list:
+          - "**The edit.** A surface `replace`: a `user/message` standing for a run, or a near-copy of the rewritten `tool/result` or `assistant/message`. A resumed session folds it like any other event."
+          - "**Its account.** `clm/revised`, in the same batch, stamped with the replacement's seq (`revises`) and its size."
+          - "**The originals.** Never removed. `context_recall`, `context_diff` and `context_restore` read them back after a restart as before."
+          - "**A refused file edit.** `clm/declined`, with the reason."
+          - "**A call a crash interrupted.** Each editing tool declares `reconcile`: on resume it looks for a `clm/revised` with the call's id. Found, the call is done and the model is shown the receipt. Absent, nothing changed."
+      - title: Rebuilt from the log
+        list:
+          - "**The section map.** A `SessionFoldCache` of per-event facts; a fresh process folds the log once. Ids are seqs, so `S412` means the same section after a restart."
+          - "**The context file.** Written afresh before the next request. A file found on disk that this process did not write is rewritten, never applied: it may be an edit a crashed call left half done."
+      - title: Not kept
+        tone: limit
+        list:
+          - "**Which readouts were given.** The level each session reached is in memory. After a restart the first reading sets it without a readout, so a resumed session is not told again what it was told before; it is told at the next share it crosses."
+          - "**An edit made in the file but not yet read back.** If the daemon dies while the call that wrote the file is running, the edit never landed. The log shows the call interrupted and the file is rewritten."
+          - "**The file's write is not synced to disk.** It is a cache of the log."
+      - links:
+          - {to: "durability", label: "Durability across the whole harness"}
+          - {to: "edge:editor-to-log", label: "The batch an edit lands in"}
+
+  - id: subagents
+    title: What a sub-agent gets
+    summary: |
+      The bundle is mounted once for the mount, not once an agent. A child runs
+      on its parent's mount, so the rows' listeners hear a child's requests and
+      tool calls as they hear the root's, with the same config. What each agent
+      edits is its own session.
+    blocks:
+      - tone: secure
+        list:
+          - "**Each agent edits only its own context.** Every tool takes the session of the call that made it (`run.session`). No argument names another session, so a child cannot edit its parent's context and a parent cannot edit a child's."
+          - "**The tools are granted, not inherited.** A child holds the `context_*` tools only if the spawn gave it them."
+          - "**Each agent has its own file**: `<its scratch>/clm/context.md`, where the scratch is `<scratch root>/<session id>/<agent id>`. The prompt section names that agent's path."
+          - "**The same config.** `protectTask`, `gate` and `remindAt` cannot differ for one agent of a mount. The protected task is judged per session: the first message with a user source in that agent's own log."
+          - "**The file is private.** Directory 0700, file 0600, deleted when the session leaves the store."
+      - title: Limits
+        tone: limit
+        list:
+          - "The context file is rendered for every agent of the mount before every request, whether or not that agent holds any tool that could edit it."
+          - "The read-back cannot tell who wrote the file. Whatever changed between the last render and the end of one of the agent's own calls is credited to that call. A child confined to its own scratch cannot reach its parent's file; an unconfined process could."
+      - links:
+          - {to: "security", label: "What a sub-agent inherits, across the harness"}
+
+  - id: invariants
+    title: The invariants it leans on
+    summary: |
+      The package exists because of two invariants. The model may rewrite what
+      it sees because the log never changes (I4), and an edit is safe to make
+      because everything the model is shown afterwards is logged (I3).
+    blocks:
+      - table:
+          columns: [invariant, here]
+          rows:
+            - ["I1 Everything is a plugin", "Two rows on events that already exist. A build without the package folds the same log: the edit is a core surface `replace`, and the two record types are ignorable."]
+            - ["I2 Registrations unwind", "The tools, the listeners, the prompt section and the two fold-cache checks belong to their row's scope."]
+            - ["[I3 Model-visible means logged](invariants#node:i3)", "A receipt and a readout are appended to a tool result in `tools/post-execute`, before the result is logged. Nothing is slipped into a request. An edit is in the log before the call that made it returns."]
+            - ["[I4 The log is append-only](invariants#node:i4)", "An edit appends a replacement and shadows the nodes it stands for. The originals stay; recall, diff and restore are reads of them. The person's transcript still shows the conversation they had."]
+            - ["I5 Seams have three roles", "`clm-context` provides `ctx.clm`; the tools and `clm-mirror` consume it. The readouts consume `ctx.compaction` without knowing which engine answers."]
+      - title: Checked at runtime
+        list:
+          - "The section map and the file's per-node text are fold caches. Each registers a drift check with `contribute_fold_cache` (`clm-section-map`, `clm-mirror-text`), which compares the cache with a fresh fold of the log."
+      - title: What ph-core holds for it
+        tone: secure
+        list:
+          - "Every write goes through the revision door (`ph.session.revise`). It keeps a rewrite's message id and leaves an assistant reply's usage and step with the original."
+          - "The surface refuses a replacement of a node that is no longer current, and a `tool/result` rewrite that changes more than content."
+      - links:
+          - {to: "invariants", label: "The five invariants"}
+          - {to: "invariants#topic:at-runtime", label: "How invariants are checked at runtime"}
+
+  - id: limits
+    title: Limits and known gaps
+    summary: |
+      What the package does not do, in the terms the code uses.
+    blocks:
+      - title: What cannot be edited
+        tone: limit
+        list:
+          - "**The step in flight.** An edit lands inside the step that asked for it, and that step's section is protected: `it holds the step in flight`."
+          - "**The task**, while `protectTask` is on: the first message the person typed."
+          - "**The context snapshot**: it is re-added whenever it is missing."
+          - "**The system prompt and the tool schemas.** They are not on the surface, so they are not sections."
+          - "**Part of a run.** Tombstone and replace take whole sections in one unbroken run. A run with a gap is refused and names the section between."
+          - "**Calls, reasoning and media.** `context_rewrite` changes text in a tool output or a reply. `old` must occur exactly once in the section."
+      - title: Restore
+        tone: limit
+        list:
+          - "One level: the latest edit of one section."
+          - "A rewrite goes back exactly. A removed or replaced run comes back as its text in one user-role message under a label, not as the original messages. Restoring that message undoes the restore."
+          - "A section the harness revised (a compaction summary, a paste moved to a file) cannot be restored; `context_recall` reads what it stands for."
+      - title: The context file
+        tone: limit
+        list:
+          - "Only an edit a tool call makes is applied. A change made outside any call is declined and overwritten before the next request."
+          - "A file written before the context was last revised is refused: its first line carries the surface's generation."
+          - "Sections cannot be reordered, and a damaged header refuses the whole write."
+          - "A refusal applies nothing from that write, even its valid changes."
+      - title: Readouts
+        tone: limit
+        list:
+          - "Only on a tool result. A turn with no tool call gets none."
+          - "Not on a call made from inside a code cell, only on the cell's own call."
+          - "No window, no readout."
+      - title: With compaction
+        tone: limit
+        list:
+          - "Compaction is still the backstop. It summarizes the surface, the model's revisions included, and it declines when everything above its cut is already a stand-in."
+          - "A summary written before the model acted replaces the sections it meant to edit. `lastMargin` exists to leave room for that."
+      - links:
+          - {to: "topic:cost", label: "What an edit costs"}
+          - {to: "ph-stabilize#node:compaction", label: "compaction-summarize"}
+
+nodes:
+  model:
+    title: The model
+    summary: |
+      The outside party. It sees its context as sections, reads their sizes, and
+      decides what to remove, summarize or shorten. It has two ways to do it:
+      call a `context_*` tool, or edit the context file with a tool it already
+      uses. Under Code Mode the tools are `tools.context_*` in a cell, so a cell
+      can compute an edit and make it.
+    blocks:
+      - title: What it is told
+        table:
+          columns: [what, where]
+          rows:
+            - ["the seven tools and their schemas", "the request's tool list (or Code Mode's listing)"]
+            - ["where its context file is and how it reads", "the prompt section `clm:mirror`"]
+            - ["how large its context is", "a readout line on a tool result"]
+            - ["what an edit did and cost", "the receipt, as that call's result"]
+      - title: In a code cell
+        lang: python
+        note: "The readout spells the call out with keywords, because a live model passed the sections positionally and lost its edit to the error."
+        code: |
+          await tools.context_tombstone(sections=['S12'], reason='superseded by the second run')
+          await tools.context_replace(sections=['S12..S20'], text='Tried three fixes; only the regex change passed.')
+      - title: Limits
+        tone: limit
+        list:
+          - "The model's word is all there is: nothing checks that a summary is faithful. The originals stay in the log for `context_recall`."
+      - links:
+          - {to: "node:tools", label: "The tools"}
+          - {to: "node:file", label: "The context file"}
+
+  tools:
+    title: The context_* tools (clm-context row)
+    summary: |
+      The `clm-context` row registers seven tools. Four edit: tombstone, replace,
+      rewrite and restore. Three only read: the map, recall and diff. An edit
+      lands in the session log before the call returns, so the call's own result
+      is the receipt and no notice is added to the context.
+    blocks:
+      - row: clm-context
+      - title: In a profile
+        lang: yaml
+        code: |
+          - id: clm-context
+            config:
+              gate: fit
+              remindAt: [0.4, 0.6]
+              lastMargin: 0.25
+      - title: The seven tools
+        table:
+          columns: [tool, arguments, does, returns]
+          rows:
+            - ["`context_sections`", "`start`, `limit`", "lists sections: id, kind, size, tokens after", "`MapValue`"]
+            - ["`context_tombstone`", "`sections`, `reason`", "replaces a run with a one-line marker", "`EditValue`"]
+            - ["`context_replace`", "`sections`, `text`", "replaces a run with text the model wrote", "`EditValue`"]
+            - ["`context_rewrite`", "`section`, `old`, `new`", "changes one passage in a tool output or reply, in place", "`EditValue`"]
+            - ["`context_restore`", "`section`", "undoes a section's latest edit, one level", "`EditValue`"]
+            - ["`context_recall`", "`section`, `max_tokens`", "reads back the originals a revised section stands for", "`RecallValue`"]
+            - ["`context_diff`", "`section`", "unified diff against the originals, after the list of edits", "`DiffValue`"]
+      - title: context_sections
+        struct: ph_clm.tools:SectionsArgs
+      - title: What the map returns
+        struct: ph_clm.tools:MapValue
+      - title: One row of the map
+        struct: ph_clm.tools:SectionValue
+      - title: The map as the model reads it (generated)
+        lang: text
+        code: |
+          5 sections, ~40 tokens. `after` is what an edit there makes the provider re-read.
+          S0  task  ~3  after ~37  [protected]  — fix the parser
+          S12  revised (stands for S1..S8)  ~18  after ~19  — [revised context, standing for S1..S3]
+          S4  user  ~4  after ~15  — now run the tests
+          S10  revised (stands for S5..S6)  ~13  after ~2  — [removed from context: S5 (the grep found nothing new)]
+          S7  assistant  ~2  after ~0  — all green
+      - title: context_tombstone
+        struct: ph_clm.tools:TombstoneArgs
+      - title: context_replace
+        struct: ph_clm.tools:ReplaceArgs
+      - title: context_rewrite
+        struct: ph_clm.tools:RewriteArgs
+      - title: context_restore
+        struct: ph_clm.tools:RestoreArgs
+      - title: What every editing tool returns
+        struct: ph_clm.tools:EditValue
+      - title: An edit's value and its cost line (generated)
+        lang: json
+        note: "The model reads `receipt`. The second line of it is the cost."
+        code: |
+          {"verb": "replace", "sections": "S1..S3", "replacement": "S12",
+           "tokens_before": 23, "tokens_after": 18, "reread": 19,
+           "context_before": 45, "context_after": 40,
+           "receipt": "Replaced S1..S3, now S12. Context ~45 → ~40 tokens.\nThe ~19 tokens after it are read once more on the next request: a prefix cache cannot serve past an edit."}
+      - title: context_recall
+        struct: ph_clm.tools:RecallArgs
+      - struct: ph_clm.tools:RecallValue
+      - title: A recall (generated, cut)
+        lang: text
+        code: |
+          [S12 as first written, ~200 tokens]
+          [assistant]
+          [call read {"path": "parser.py"}]
+
+          [user]
+          [result c1]
+          parser.py line 1
+          noise from a long listing
+          ...
+          [recall cut at the token bound; the session log holds the rest]
+      - title: context_diff
+        struct: ph_clm.tools:DiffArgs
+      - struct: ph_clm.tools:DiffValue
+      - title: A diff (generated, cut)
+        lang: diff
+        note: "The edits are listed with the seq each landed at, what it did, and the records its producer wrote."
+        code: |
+          Edits, oldest first:
+          - seq 8: rewrite (clm/revised)
+          - seq 12: stand-in (clm/revised)
+
+          --- S12 as first written
+          +++ S12 now
+          @@ -1,70 +1,3 @@
+          -[assistant]
+          -[call read {"path": "parser.py"}]
+          -
+           [user]
+          -[result c1]
+          -parser.py line 1
+          -noise from a long listing
+          ...
+      - title: Refusals (generated)
+        note: "Every refusal is an `EditRefused` with the code `CONTEXT_EDIT_REFUSED`, and reaches the model as the call's failed result."
+        table:
+          columns: [the call, the model reads]
+          rows:
+            - ["tombstone the task", "`S0 cannot be edited: it is the task (the clm-context row's protectTask)`"]
+            - ["name a section that was replaced", "`S1 has been revised; S14 stands for it now`"]
+            - ["name an id that never was", "`S999 is not a section of this context`"]
+            - ["rewrite text that is not there", "`that text does not occur in the tool output or replies of S7`"]
+            - ["recall a section nobody revised", "`S7 has not been revised; it is in your context as it was written`"]
+      - title: What the scheduler is told
+        list:
+          - "The three reading tools are `effect_free` and safe to overlap."
+          - "The four editing tools are not safe to overlap: two edits in one message run one after the other."
+          - "Each editing tool declares `reconcile`, which answers for a call a crash left open."
+      - title: What it listens to
+        table:
+          columns: [event, mode, why]
+          rows:
+            - ["`tools/post-execute`", waterfall, "readouts, outermost; only when `remindAt` is not empty"]
+            - ["`session/disposed`", emit, "forget the session's cached facts"]
+      - title: Durability
+        tone: durable
+        list:
+          - "An edit and its `clm/revised` record are one batch. The record is in the log exactly when the edit is, which is what `reconcile` reads."
+      - title: Limits
+        tone: limit
+        list:
+          - "The tools need a session. A call with none is refused."
+          - "`context_diff` carries at most 20 000 characters of diff and says when it was cut."
+          - "`context_recall` returns at most `max_tokens` (128 to 8000, 2000 by default)."
+      - links:
+          - {to: "topic:configuring", label: "Configuring it"}
+          - {to: "topic:cost", label: "What an edit costs"}
+
+  editor:
+    title: The editor (ctx.clm, edits.py)
+    summary: |
+      The one door every context edit goes through. It has four verbs. Each is
+      a draft that validates and measures without writing, and `land`, which
+      applies the gate and writes every draft with its record in one batch. The
+      tools land one draft a call; the context file compiles one write into
+      several drafts and lands them together.
+    blocks:
+      - title: The service
+        struct: ph_clm.edits:Editor
+      - title: Its verbs
+        table:
+          columns: [method, what lands]
+          rows:
+            - ["`tombstone(session, names, reason, *, call_id) -> Revision`", "a run of whole sections becomes `[removed from context: S5 (reason)]`. A tombstone beside an earlier one takes it in, so a run of deletions reads as one marker"]
+            - ["`replace(session, names, text, *, call_id) -> Revision`", "a run becomes two text blocks: the harness's label `[revised context, standing for S1..S3]`, then the model's text"]
+            - ["`rewrite(session, name, old, new, *, call_id) -> Revision`", "one passage in one tool result or reply changes in place; the message id and the call ids stay"]
+            - ["`restore(session, name, *, call_id) -> Revision`", "the latest edit of one section, undone one level"]
+            - ["`land(session, drafts, *, call_id, via=\"tool\") -> list[Revision]`", "gates the drafts as one change, then writes them all in one `Session.batch()`"]
+      - title: What one edit did
+        struct: ph_clm.edits:Revision
+      - title: A draft
+        struct: ph_clm.edits:Pending
+      - title: What a substitution is
+        text: |
+          A tombstone or a replace is a `user/message` whose source is `PluginSource(plugin="clm", form="compaction")`. That form is the claim "this stands in for conversation that has left the surface": the TUI draws it as a revision, the map lists it as `revised`, and compaction treats it as already condensed. It has the user role, never the assistant's: text standing for several turns is no one turn's speaker.
+
+          A restore of a removed or replaced run uses `form="recall"` instead. It is the conversation back, not a summary of it, so compaction may summarize it again.
+      - title: Security
+        tone: secure
+        list:
+          - "Whole sections, one unbroken run, nothing protected: `sections.resolve_run` holds those. A run that split a call from its result would hand the provider an orphan."
+          - "The gate is judged on the batch as one change. Two drafts that each fit can together not."
+      - title: Limits
+        tone: limit
+        list:
+          - "A replacement needs text. Empty text is refused and points at tombstone."
+          - "The gate is off unless the row's `gate` asks."
+      - links:
+          - {to: "edge:editor-to-log", label: "The batch it writes"}
+          - {to: "node:map", label: "The section map it resolves names against"}
+
+  map:
+    title: The section map (sections.py)
+    summary: |
+      The model's view of its own context, cut where it may be edited. A section
+      is the run of surface nodes between two points where no tool call is
+      outstanding: a user message, an assistant reply, or an assistant message
+      with every result it asked for. It is the smallest unit that can leave the
+      surface without orphaning a call or a result.
+    blocks:
+      - title: One section
+        struct: ph_clm.sections:Section
+      - title: How a section is named
+        list:
+          - "By the seq its first node was appended at: `S412`. A seq never moves, so an id read on one call is good on the next."
+          - "An in-place rewrite keeps the id: the node it lands is a near-copy, so it is the same section."
+          - "A substitution retires the ids it replaced and has an id of its own, the seq it landed at. A later use of an old id is refused and names what stands for it."
+          - "A span is `S412..S431`. `S412`, `s412` and `412` all name the same section."
+      - title: Kinds
+        table:
+          columns: [kind, what it is]
+          rows:
+            - ["`task`", "the first message the person typed"]
+            - ["`user`", "any later one"]
+            - ["`assistant`", "a reply with no calls"]
+            - ["`step`", "an assistant message that made calls, with their results"]
+            - ["`context`", "plugin-authored text: the context snapshot, a relayed message, a restored run"]
+            - ["`revised`", "text standing in for conversation that left the surface: a ph-clm edit or a compaction summary"]
+      - title: What is protected
+        table:
+          columns: [section, the reason the model reads]
+          rows:
+            - ["one with a call still awaiting its result", "`it holds the step in flight`"]
+            - ["the task, with `protectTask` on", "`it is the task (the clm-context row's protectTask)`"]
+            - ["the context snapshot", "`it is the context snapshot, which is re-added whenever it is missing`"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The map is a fold of the log. What a node contributes (its size, its calls, its preview, its origin) depends only on its event and the log before it, so those facts are cached and only the cut into sections is redone."
+          - "The cache is dropped when its session leaves the store, and it has a drift check (`clm-section-map`)."
+      - links:
+          - {to: "edge:log-to-map", label: "How it is folded"}
+          - {to: "topic:limits", label: "What cannot be edited"}
+
+  log:
+    title: The session log (ph-core)
+    summary: |
+      The append-only log of the agent's session. An edit adds to it and removes
+      nothing. The replacement carries a surface `replace` naming the nodes it
+      stands for; the surface lands it where the earliest of them was and takes
+      the rest out. The originals stay in the log, where recall, diff, restore
+      and the person's transcript read them.
+    blocks:
+      - title: The door an edit is written through
+        struct: ph.session.revise:RevisionRecord
+        note: |
+          `substitute(batch, shadowed, message, record)` appends a message in
+          place of several nodes; `rewrite(batch, event, message, record)`
+          appends a near-copy of one. Each then writes the producer's record and
+          stamps it with `revises` and `size`.
+      - struct: ph.session.revise:RevisionSize
+      - record: clm/revised
+        example: |
+          {"type": "clm/revised", "seq": 13, "time": 1794883875529,
+           "data": {"verb": "replace", "via": "tool", "callId": "call-1",
+                    "first": 1, "last": 3, "shadowed": [1, 8, 3],
+                    "reread": 19, "contextBefore": 45, "removed": [],
+                    "size": {"unit": "tokens", "before": 23, "after": 18},
+                    "revises": [12]},
+           "ignorable": true, "batch": {"first": 12, "count": 2}}
+      - record: clm/declined
+        example: |
+          {"type": "clm/declined", "seq": 18, "time": 1794883875541,
+           "data": {"via": "mirror", "callId": "call-1",
+                    "reason": "S0 cannot be edited: it is the task (the clm-context row's protectTask)"},
+           "ignorable": true}
+      - title: Two views of one log (generated)
+        table:
+          columns: [reader, after a rewrite, a tombstone, a replace and a restore]
+          rows:
+            - ["the model (`derive_messages()`)", "the task, one restored run, `now run the tests`, one marker"]
+            - ["the person (`transcript()`)", "the whole conversation as it happened: the read with all 60 lines of its output, the reply, the grep, `all green`"]
+      - title: Durability
+        tone: durable
+        list:
+          - "Both record types are ignorable and audit-only: a build without ph-clm folds the same surface and skips the account."
+          - "`clm/declined` ships its `reason` to telemetry."
+      - links:
+          - {to: "ph-core#node:session", label: "ph-core: the session and its surface"}
+          - {to: "invariants#node:i4", label: "I4: the log is append-only"}
+
+  next:
+    title: The next request
+    summary: |
+      What the model is sent. The loop derives it from the log's surface before
+      every request, so an edit that landed during one step is what the next
+      step reads. The row keeps no second copy of the context.
+    blocks:
+      - title: What the model reads after the edits on this page (generated)
+        lang: text
+        code: |
+          [user]
+          fix the parser
+
+          [user]
+          [restored context, standing for S1..S3]
+          [assistant]
+          [call read {"path": "parser.py"}]
+
+          [user]
+          [result c1]
+          parser.py line 1
+          noise from a long listing
+
+          [assistant]
+          the bug is on line 1 of parser.py
+
+          [user]
+          now run the tests
+
+          [user]
+          [removed from context: S5 (the grep found nothing new); S7 (removed in the context file)]
+      - title: The cost
+        list:
+          - "The request is unchanged up to the first edited node and different after it. Everything after is read again once."
+      - title: Limits
+        tone: limit
+        list:
+          - "A substitution has the user role, so two user-role messages can follow each other in the derived messages, as they do above."
+      - links:
+          - {to: "topic:cost", label: "What an edit costs"}
+          - {to: "ph-core#node:loop", label: "ph-core: the loop"}
+
+  file:
+    title: The context file (clm-mirror row)
+    summary: |
+      The model's context as a file it edits with its ordinary tools: `edit`,
+      `sed`, Python in a cell. The row writes the surface to the file before
+      each request, and when the tool call that touched it finishes, compiles
+      the changes into the editor's verbs and lands them in one batch. The file
+      is a cache of the log, never a source.
+    blocks:
+      - row: clm-mirror
+      - title: In a profile
+        lang: yaml
+        note: "The row takes no options. Switch it off to leave only the tools."
+        code: |
+          - id: clm-mirror
+            disabled: true
+      - title: Where it is
+        text: |
+          `<the agent's scratch>/clm/context.md`, where the scratch is `<scratch root>/<session id>/<agent id>`. The scratch is writable under every sandbox mode and outside the tree a repository tracks.
+      - title: The file (generated)
+        lang: text
+        note: |
+          The first line names the session, the surface's `replace_generation`
+          and the last section the file holds. A section's header gives its
+          kind, its size and the tokens after it. A revision's label is on its
+          header line; the body under a header is only text the model may edit.
+          A line starting `\[[` stands for one starting `[[` inside a body.
+        code: |
+          [[LIVE_CONTEXT session=clm-0 generation=4 through=S7]]
+
+          [[SECTION S0 task ~3 after=~67 protected]]
+          fix the parser
+
+          [[SECTION S14 context ~48 after=~19 — restored context, standing for S1..S3]]
+          [assistant]
+          [call read {"path": "parser.py"}]
+          ...
+
+          [[SECTION S4 user ~4 after=~15]]
+          now run the tests
+
+          [[SECTION S10 revised ~13 after=~2 — removed from context: S5 (the grep found nothing new)]]
+
+          [[SECTION S7 assistant ~2 after=~0]]
+          all green
+      - title: A step, before any edit (generated)
+        lang: text
+        code: |
+          [[SECTION S5 step grep ~6 after=~2]]
+          [[RESULT S6 grep]]
+          3 matches
+      - title: What a change becomes
+        table:
+          columns: [in the file, becomes]
+          rows:
+            - ["a section's block is gone, or its body emptied", "a tombstone; consecutive ones are one marker"]
+            - ["a `RESULT` body changed, headers unchanged", "that result rewritten in place"]
+            - ["the reply text above the results changed", "the reply rewritten in place, its calls kept"]
+            - ["a step's `RESULT` lines removed", "the whole step replaced by the text left"]
+            - ["a user message's or a revision's text changed", "a replacement standing for it"]
+            - ["no `SECTION` lines left at all", "one replacement for everything editable"]
+      - title: The service, `ctx.clm_mirror`
+        struct: ph_clm.mirror:MirrorService
+      - title: Its methods
+        table:
+          columns: [method, what it does]
+          rows:
+            - ["`path(session, agent) -> Path`", "where this agent's context file lives"]
+            - ["`await refresh(session, agent) -> Path`", "before a request: decline a change no call made, then write the file afresh"]
+            - ["`await render(session, agent) -> Path`", "write the file for the surface as it stands"]
+            - ["`await read_back(session, agent, *, call_id) -> str | None`", "land whatever the model changed and say what happened; `None` when nothing changed"]
+            - ["`blocks(session) -> list[Block]`", "every section as the file shows it now"]
+            - ["`forget(session_id)`", "delete the session's files and everything kept about them"]
+      - title: What it listens to
+        table:
+          columns: [event, mode, what it does]
+          rows:
+            - ["`agent/request`", waterfall, "after the rest of the chain: declines a change no call made, then writes the file"]
+            - ["`tools/post-execute`", waterfall, "reads the file back when the model's own call ends"]
+            - ["`session/disposed`", emit, "deletes the file and its directory"]
+      - title: Security
+        tone: secure
+        list:
+          - "The `clm/` directory is 0700 and the file 0600: the file is a whole conversation."
+          - "A link at either path is replaced, never followed. The file is opened with `O_NOFOLLOW`; a link, a pipe or anything that is not UTF-8 text is a refusal that quotes nothing from the file."
+          - "It is written directly, not through `ctx.fs`. That seam gates what the model may touch, and the harness's own render is not the model's write."
+          - "The model's edit to the file is an ordinary tool call, so `permissions-fs` and the sandbox apply to it as to any write. The scratch is one of the agent's writable roots, so the shipped rule does not ask about it."
+      - title: Durability
+        tone: durable
+        list:
+          - "The file holds nothing the log does not. Read-back rebuilds its base from the log, which is what makes it right after a restart."
+          - "An edit lands before the result that reports it."
+      - title: Limits
+        tone: limit
+        list:
+          - "A file this process did not write is rewritten, never applied."
+          - "The file is deleted when the session leaves the store. A directory something else wrote into stays."
+          - "Sections appended since the file was written are left alone: the file's `through=` names the last one it held."
+      - links:
+          - {to: "edge:file-read-back", label: "The read-back"}
+          - {to: "edge:next-to-file", label: "The render"}
+
+  readouts:
+    title: Readouts (budget.py)
+    summary: |
+      When a tool result takes the context past a share of its window, that
+      result ends with one line giving the context's size and how to free space.
+      It tells the model to edit before the provider's limit, or compaction,
+      decides for it. Each share is reported once, and again only after an edit
+      brings the context back below it.
+    blocks:
+      - title: The options
+        struct: ph_clm.tools:Config
+        fields: [remindAt, lastMargin]
+      - title: In a profile
+        lang: yaml
+        note: "`remindAt: []` turns readouts off; the listener is then not registered at all."
+        code: |
+          - id: clm-context
+            config:
+              remindAt: [0.5, 0.75]   # the defaults
+              lastMargin: 0.2
+      - title: The thresholds
+        struct: ph_clm.budget:Shares
+      - title: Two readouts (generated, 16 384-token window, compaction at 0.85)
+        lang: text
+        note: |
+          With compaction mounted the thresholds are 50% and 65%: the 75% share
+          gives way to the last reminder, 0.2 below the trigger. The second
+          line names the context file because `clm-mirror` is mounted.
+        code: |
+          [context: ~8.4k of 16.4k tokens (51%). Free space when it suits you — use context_tombstone, context_replace or context_rewrite. The next reminder comes at 65%.]
+
+          [context: ~13.1k of 16.4k tokens (79%). This is the last reminder: free space now — edit /home/me/.ph/scratch/<session>/<agent>/clm/context.md, or use context_tombstone, context_replace or context_rewrite. At 85% older context is summarized for you.]
+      - title: When a line is appended
+        text: |
+          1. A tool call the model made ends and its result is accepted. A dispatch inside a code cell is skipped.
+          2. The context is measured as compaction measures it: `TokenMeter.baseline(session)`, plus the result about to be logged.
+          3. The result's UTF-8 length bounds its token count, so it is tokenized only when that bound could cross a threshold.
+          4. If the result raised the number of thresholds this session has reached, the line is appended to the result's content.
+          5. Every reading sets the level, so an edit that frees space lowers it and the next crossing is reported again.
+      - title: The level each session reached
+        struct: ph_clm.budget:Readouts
+      - title: Durability
+        tone: durable
+        list:
+          - "A readout is part of a `tool/result` record: the model was shown it, so it is logged."
+      - title: Limits
+        tone: limit
+        list:
+          - "The level is in memory. After a restart the first reading sets it without a readout."
+          - "No window, no readouts."
+          - "A context that passes two thresholds in one result gets one line, for the higher."
+      - links:
+          - {to: "edge:compaction-to-readouts", label: "Where the last threshold comes from"}
+
+  compaction:
+    title: ctx.compaction (ph-stabilize's engine)
+    summary: |
+      ph-core's compaction seam, with the `compaction-summarize` engine behind
+      it in every shipped profile. ph-clm does not replace it. It asks it one
+      thing, the share of the window at which it summarizes by itself, so the
+      last readout comes ahead of the summary. Compaction stays the backstop
+      when a session outgrows its window anyway.
+    blocks:
+      - title: What ph-clm asks
+        lang: python
+        note: |
+          The seam answers `None` with no engine registered. The
+          `compaction-summarize` engine answers its `triggerFraction` (0.85 by
+          default) while `auto` is on, and `None` when it is off.
+        code: |
+          compacts_at = ctx.require(COMPACTION).trigger_fraction()   # float | None
+      - title: The engine row
+        row: compaction-summarize
+      - title: How the two share the surface
+        list:
+          - "Both write surface replacements through the same door, with the same `form: compaction` claim."
+          - "Compaction summarizes the surface as it stands, the model's revisions included."
+          - "It declines when everything above its cut is already a stand-in: summarizing a summary shortens nothing."
+          - "A run the model restored is marked `form: recall`, so compaction may summarize it again."
+      - title: Limits
+        tone: limit
+        list:
+          - "ph-clm does not hold compaction off. If the model does not free space before the trigger, the summary is written."
+      - links:
+          - {to: "ph-stabilize#node:compaction", label: "compaction-summarize in full"}
+
+edges:
+  model-calls-tools:
+    transport: call
+    summary: |
+      The model calls a `context_*` tool like any other tool: the call crosses
+      the tool pipeline, the tool runs, and the result goes back. For an edit
+      the result is the receipt. Under Code Mode the call is made from a cell
+      as `tools.context_*`.
+    blocks:
+      - title: A call and its result in the log (shape)
+        lang: json
+        note: "Illustrative of the order; the `tool/call` and `tool/result` records are ph-core's. The two records between them are the edit, generated."
+        code: |
+          {"type": "tool/call",   "data": {"callId": "call-1", "name": "context_tombstone",
+                                           "arguments": "{\"sections\": [\"S5\"], \"reason\": \"the grep found nothing new\"}"}}
+          {"type": "user/message", "surfaceOp": {"op": "replace", "replaces": [5, 6]}, "...": "the marker"}
+          {"type": "clm/revised", "data": {"verb": "tombstone", "callId": "call-1", "...": "..."}}
+          {"type": "tool/result", "...": "Removed S5, now S10. Context ~38 → ~45 tokens. ..."}
+      - title: The waterfalls the call crosses
+        events: tools
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A refusal is a failed result with the code `CONTEXT_EDIT_REFUSED`; nothing was written."
+          - "Editing tools are not safe to overlap, so two in one message run in order."
+          - "The step that makes the call is itself protected from the edit."
+      - links:
+          - {to: "node:tools", label: "Each tool's arguments"}
+
+  tools-to-editor:
+    transport: service
+    summary: |
+      Each editing tool resolves the session of its call and calls one verb of
+      `ctx.clm` with the call's id. The editor answers with a `Revision`, which
+      the tool turns into its `EditValue` and receipt.
+    blocks:
+      - title: The calls
+        lang: python
+        code: |
+          editor.tombstone(session, args.sections, args.reason, call_id=call)
+          editor.replace(session, args.sections, args.text, call_id=call)
+          editor.rewrite(session, args.section, args.old, args.new, call_id=call)
+          editor.restore(session, args.section, call_id=call)
+      - title: What comes back
+        struct: ph_clm.edits:Revision
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The editor raises `EditRefused` before anything is written: a bad name, a gap, a protected section, text that occurs zero or several times, an edit the gate stops."
+
+  editor-to-log:
+    transport: log
+    summary: |
+      `Editor.land` opens one `Session.batch()` and, for each draft, writes the
+      replacement and then its `clm/revised` record through ph-core's revision
+      door. The batch commits as one, so the record never lands without the
+      edit it describes, and the edit never without its record.
+    blocks:
+      - title: A tombstone (generated)
+        record: user/message
+        example: |
+          {"type": "user/message", "seq": 10, "time": 1794883875527,
+           "data": {"id": "1504ae4c-...", "role": "user",
+                    "content": [{"type": "text", "text": "[removed from context: S5 (the grep found nothing new)]"}],
+                    "source": {"kind": "plugin", "plugin": "clm", "form": "compaction",
+                               "summary": "removed from context: S5 (the grep found nothing new)"}},
+           "sourceEventSeqs": [5, 6],
+           "surfaceOp": {"op": "replace", "replaces": [5, 6]},
+           "batch": {"first": 10, "count": 2}}
+      - record: clm/revised
+        example: |
+          {"type": "clm/revised", "seq": 11, "time": 1794883875527,
+           "data": {"verb": "tombstone", "via": "tool", "callId": "call-1",
+                    "first": 5, "last": 5, "shadowed": [5, 6],
+                    "reread": 2, "contextBefore": 38,
+                    "removed": [{"first": 5, "last": 5, "reason": "the grep found nothing new"}],
+                    "size": {"unit": "tokens", "before": 6, "after": 13},
+                    "revises": [10]},
+           "ignorable": true, "batch": {"first": 10, "count": 2}}
+      - title: A rewrite in place (generated)
+        lang: json
+        note: |
+          The replacement is a near-copy of the `tool/result` at seq 2: the
+          same message id and call id, new text. The section keeps its id, S1.
+        code: |
+          {"type": "tool/result", "seq": 8,
+           "data": {"turn": 1, "step": 1,
+                    "message": {"id": "m3", "role": "user",
+                                "content": [{"type": "tool-result", "toolCallId": "c1", "isError": false,
+                                             "content": [{"type": "text", "text": "parser.py line 1\nnoise from a long listing\n"}]}],
+                                "source": {"kind": "tool", "callId": "c1"}}},
+           "sourceEventSeqs": [2],
+           "surfaceOp": {"op": "replace", "replaces": [2]},
+           "batch": {"first": 8, "count": 2}}
+          {"type": "clm/revised", "seq": 9,
+           "data": {"verb": "rewrite", "via": "tool", "callId": "call-1", "first": 1, "last": 1,
+                    "shadowed": [2], "reread": 20, "contextBefore": 422, "removed": [],
+                    "size": {"unit": "tokens", "before": 394, "after": 10}, "revises": [8]},
+           "ignorable": true, "batch": {"first": 8, "count": 2}}
+      - title: A replace and a restore of it (generated)
+        lang: json
+        note: |
+          A replacement is two text blocks: the harness's label, then the
+          model's text. The restore stands for the replacement (seq 12) and
+          holds the text of what that replaced, under `form: recall`.
+        code: |
+          {"type": "user/message", "seq": 12,
+           "data": {"role": "user",
+                    "content": [{"type": "text", "text": "[revised context, standing for S1..S3]"},
+                                {"type": "text", "text": "Read parser.py: the bug is on line 1."}],
+                    "source": {"kind": "plugin", "plugin": "clm", "form": "compaction", "summary": "revised S1..S3"}},
+           "sourceEventSeqs": [1, 8, 3], "surfaceOp": {"op": "replace", "replaces": [1, 8, 3]}}
+
+          {"type": "user/message", "seq": 14,
+           "data": {"role": "user",
+                    "content": [{"type": "text", "text": "[restored context, standing for S1..S3]"},
+                                {"type": "text", "text": "[assistant]\n[call read {\"path\": \"parser.py\"}]\n\n[user]\n[result c1]\nparser.py line 1\n..."}],
+                    "source": {"kind": "plugin", "plugin": "clm", "form": "recall", "summary": "restored S1..S3"}},
+           "sourceEventSeqs": [12], "surfaceOp": {"op": "replace", "replaces": [12]}}
+          {"type": "clm/revised", "seq": 15,
+           "data": {"verb": "restore", "via": "tool", "callId": "call-1", "first": 12, "last": 12,
+                    "shadowed": [12], "reread": 19, "contextBefore": 40, "removed": [],
+                    "size": {"unit": "tokens", "before": 18, "after": 48}, "revises": [14]}}
+      - title: The fields of clm/revised
+        table:
+          columns: [field, meaning]
+          rows:
+            - ["`verb`", "`tombstone`, `replace`, `rewrite` or `restore`"]
+            - ["`via`", "`tool`, or `mirror` for an edit made in the context file"]
+            - ["`callId`", "the tool call the edit landed in; what `reconcile` matches"]
+            - ["`first`, `last`", "the ids of the first and last section the edit named"]
+            - ["`shadowed`", "the surface nodes it took out"]
+            - ["`reread`", "tokens after the edit that a provider reads again"]
+            - ["`contextBefore`", "the context before the batch, as the meter's baseline counts it"]
+            - ["`removed`", "for a tombstone: every span the marker stands for, with its reason"]
+            - ["`size`, `revises`", "stamped by the revision door: tokens before and after, and the seq of the replacement"]
+      - title: Durability
+        tone: durable
+        list:
+          - "One batch: `batch.first` and `batch.count` on both records name the pair."
+          - "A crash before the commit leaves neither. A crash after it leaves both, and the editing tool's `reconcile` finds the record by `callId` and answers that the call is done."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The gate is applied before the batch opens. A refused batch writes nothing."
+          - "ph-core's surface refuses a replacement of a node that is no longer current."
+      - links:
+          - {to: "invariants#node:i4", label: "I4: the log is append-only"}
+          - {to: "topic:durability", label: "What survives a restart"}
+
+  log-to-next:
+    transport: call
+    summary: |
+      Before each request the loop derives the messages to send from the log's
+      surface (`session.derive_messages()`). A replacement sits where the
+      earliest node it stands for was; the nodes it shadowed are not on the
+      surface. Nothing in ph-clm is on this path: it is ph-core's own
+      derivation.
+    blocks:
+      - title: What moves on the surface
+        table:
+          columns: [edit, the surface after]
+          rows:
+            - ["tombstone or replace of `S1..S3`", "one user-role node where S1 was; the nodes of S1 to S3 are shadowed"]
+            - ["rewrite inside `S1`", "the same node position, new text, same message id; the section is still S1"]
+            - ["restore of a rewrite", "the text before it, exactly"]
+            - ["restore of a substitution", "one user-role node holding the text of what it stood for"]
+      - title: Limits
+        tone: limit
+        list:
+          - "The person's transcript is a different derivation of the same log and still shows the originals."
+      - links:
+          - {to: "node:next", label: "What the model then reads"}
+
+  next-to-file:
+    transport: bus
+    mode: waterfall
+    summary: |
+      `clm-mirror` listens on `agent/request`. It lets the rest of the chain run
+      first, so a listener that revises the surface on the way to the request
+      (a paste offloaded) is in the file. Then it checks for a change no call
+      made, writes the file for the surface as it stands, and returns the call
+      config unchanged.
+    blocks:
+      - event: agent/request
+      - title: The payload
+        struct: ph.agent.types:RequestProposal
+      - title: What refresh does
+        text: |
+          1. Takes the file's lock.
+          2. If this process wrote the file before and its `(mtime_ns, size)` is no longer what was written, records `clm/declined` with `via: outside`. A file that was deleted is only rewritten.
+          3. Renders every section and writes the file atomically, directory 0700, file 0600.
+          4. Remembers the `(mtime_ns, size)` it wrote.
+      - title: The record for a change no call made (generated)
+        record: clm/declined
+        example: |
+          {"type": "clm/declined", "seq": 19, "time": 1794883875542,
+           "data": {"via": "outside", "callId": null,
+                    "reason": "the context file changed outside any tool call — in an editor, or by another process — and only an edit a tool call makes is applied"},
+           "ignorable": true}
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The write is not synced. The file is rebuilt from the log before the next request."
+          - "The file is written before every request of every agent on the mount."
+
+  model-edits-file:
+    transport: file
+    summary: |
+      The model changes the file with a tool it already has: `edit`, a `sed`
+      through `bash`, or Python in a code cell. That call is an ordinary tool
+      call with its own gates. ph-clm does nothing until the call ends.
+    blocks:
+      - title: What the model is told (the prompt section, cut)
+        lang: markdown
+        code: |
+          ## Your context, as a file
+
+          Before each request, the conversation you can see is written to `<path>`. Edit that
+          file with your ordinary tools to change your own context: the edit is applied when
+          the tool call that made it finishes, and that call's result says what changed.
+
+          - Keep the first line, `[[LIVE_CONTEXT …]]`, exactly as it is.
+          - Delete a section (its line and its text) to remove it; a one-line marker stays.
+          - Change the text under a line to rewrite it. ...
+          - Sections marked `protected` cannot change, and sections cannot be reordered.
+          - Only an edit one of your tool calls makes is applied; the file is rewritten before
+            every request.
+      - title: Security
+        tone: secure
+        list:
+          - "The write is the model's, so `permissions-fs`, `hitl` and the sandbox apply to it. The file is in the agent's scratch, which every sandbox mode lets the agent write and which is among the roots an agent may write without being asked (`writable_roots`), so the shipped `outside-workspace` rule does not prompt for it."
+      - title: Limits
+        tone: limit
+        list:
+          - "Several writes in one call are one edit: only the file as the call left it is read."
+
+  file-read-back:
+    transport: bus
+    mode: waterfall
+    summary: |
+      `clm-mirror` listens on `tools/post-execute`. When a call the model made
+      ends, it compares the file with what it last wrote. If the file moved, it
+      parses it, compiles the changes into the editor's drafts and lands them in
+      one batch, before the call's result is logged. The receipt is appended to
+      that result.
+    blocks:
+      - event: tools/post-execute
+        args:
+          - [execution, ToolExecution, "the call that just ran; skipped when `parent` is set"]
+          - [result, ToolExecutionResult, "the outcome; the receipt is appended to its content"]
+      - title: The steps
+        text: |
+          1. `lstat` the file. Nothing there, or the same `(mtime_ns, size)` as written: nothing happened.
+          2. A file this process never wrote: rewritten from the log, never applied.
+          3. Read it without following a link, and parse the header and the blocks.
+          4. Check it against the log: same session, same surface generation, no reorder, no unknown section, no change to a protected section.
+          5. Compile each changed section into a draft and call `editor.land(session, drafts, call_id=..., via="mirror")`.
+          6. Write the file afresh and append the receipt.
+      - title: A receipt on the writing call's result (generated)
+        lang: text
+        note: "The model deleted S7's block. The marker beside it took the deletion in, so one marker stands for both."
+        code: |
+          written
+          [context file applied. Removed S10..S7, now S16. Context ~70 → ~77 tokens.
+          The ~0 tokens after it are read once more on the next request: a prefix cache cannot serve past an edit.
+          This GREW the context. If you meant to condense, you may have kept the old text as well as the new.]
+      - title: Its record (generated)
+        record: clm/revised
+        example: |
+          {"type": "clm/revised", "seq": 17, "time": 1794883875538,
+           "data": {"verb": "tombstone", "via": "mirror", "callId": "call-1",
+                    "first": 10, "last": 7, "shadowed": [10, 7], "reread": 0, "contextBefore": 70,
+                    "removed": [{"first": 5, "last": 5, "reason": "the grep found nothing new"},
+                                {"first": 7, "last": 7, "reason": "removed in the context file"}],
+                    "size": {"unit": "tokens", "before": 15, "after": 22}, "revises": [16]},
+           "ignorable": true, "batch": {"first": 16, "count": 2}}
+      - title: A refused write (generated)
+        lang: text
+        note: "The model changed the task's text. Nothing was applied, `clm/declined` was recorded with `via: mirror`, and the file was rewritten."
+        code: |
+          written
+          [context file not applied: S0 cannot be edited: it is the task (the clm-context row's protectTask). It has been rewritten from your context as it stands; edit it again.]
+      - title: What is declined
+        table:
+          columns: [the file, the reason]
+          rows:
+            - ["names another session", "`this context file belongs to another session`"]
+            - ["was written before the last revision", "`the context was revised after this file was written, so its sections may not be the ones you see now`"]
+            - ["has sections in another order", "`sections cannot be reordered; a revision lands where it stood`"]
+            - ["names a section it did not hold", "`S412 is not a section of the context this file holds`"]
+            - ["changes a protected section", "`S0 cannot be edited: ...`"]
+            - ["has text before the first section", "`text before the first [[SECTION]] line belongs to no section`"]
+            - ["has a damaged or repeated header", "`the context file has a damaged header: ...`"]
+            - ["is a link, a pipe or not UTF-8", "a refusal that quotes nothing from the file"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The edit lands before the result that reports it. A crash between the two leaves an edit that landed beside a call that did not finish, which is what happened."
+          - "One write lands all its edits in one batch, or none."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A dispatch inside a Code Mode cell does not read back. The cell's own call does."
+          - "Whatever changed in the file while the call ran is credited to that call."
+      - links:
+          - {to: "node:file", label: "The file's format"}
+          - {to: "node:editor", label: "The editor it lands through"}
+
+  log-to-map:
+    transport: call
+    summary: |
+      The section map is folded from the log. What one surface event contributes
+      is worked out once and cached per session; a call to the map pays only for
+      what was appended since the last one, then cuts the current surface into
+      sections again.
+    blocks:
+      - title: What is cached and what is redone
+        table:
+          columns: [part, when]
+          rows:
+            - ["a node's size, calls, preview, origin and what it replaced", "once per event, in a `SessionFoldCache`"]
+            - ["the cut into sections, each section's `after`, and protection", "every call, because the surface moves"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The cache is a pure function of the log. It registers a drift check (`clm-section-map`) and is dropped on `session/disposed`."
+      - links:
+          - {to: "invariants#topic:at-runtime", label: "How fold caches are checked"}
+
+  map-to-editor:
+    transport: call
+    summary: |
+      Every edit names whole sections from the map. The editor asks the map for
+      the session's sections, resolves the names the model gave, and refuses
+      before drafting anything if they do not name one unbroken, editable run.
+    blocks:
+      - title: What a section carries
+        struct: ph_clm.sections:Section
+        fields: [nodes, origins, kind, tokens, after, protected, stands_for]
+      - title: The rules
+        tone: secure
+        list:
+          - "`resolve_run` (tombstone, replace): at least one section, one unbroken run, none protected. A gap names the section between: `the sections must be one unbroken run, and S4 sits between them`."
+          - "`resolve_one` (rewrite, restore, recall, diff): one section, not a span. For an edit it must not be protected."
+          - "An id inside a section is refused and told to name the section. An id that was replaced is told what stands for it now."
+      - links:
+          - {to: "node:map", label: "The section map"}
+
+  compaction-to-readouts:
+    transport: service
+    summary: |
+      At each tool result the readouts ask the compaction seam for the share at
+      which the engine summarizes by itself. The answer moves the last reminder
+      to `lastMargin` below that share, so the model always has room to act
+      before a summary is written for it.
+    blocks:
+      - title: How the thresholds are built (`Shares.of`)
+        table:
+          columns: [remindAt, lastMargin, engine's trigger, thresholds]
+          rows:
+            - ["`[0.5, 0.75]`", "0.2", "0.85", "50%, 65%"]
+            - ["`[0.5, 0.75]`", "0.2", "none (no engine, or `auto: false`)", "50%, 75%"]
+            - ["`[0.4, 0.6]`", "0.25", "0.85", "40%, 60%"]
+            - ["`[]`", "any", "any", "none: readouts off"]
+      - struct: ph_clm.budget:Shares
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "The trigger is asked of the seam at every result; it is not copied into this row's config."
+          - "A margin that would put the last reminder at or below zero leaves `remindAt` unchanged."
+      - links:
+          - {to: "node:compaction", label: "ctx.compaction"}
+
+  readouts-to-model:
+    transport: bus
+    mode: waterfall
+    summary: |
+      The readout reaches the model as the last line of a tool result. The
+      `clm-context` listener on `tools/post-execute` is the outermost, so it
+      measures the result after every other row has had its say, and returns an
+      `Accept` whose content is the result's content plus one text block.
+    blocks:
+      - event: tools/post-execute
+        args:
+          - [execution, ToolExecution, "the call; a dispatch inside a code cell is skipped"]
+          - [result, ToolExecutionResult, "the outcome; the line is appended to the content the model reads"]
+      - title: The line (generated)
+        lang: text
+        code: |
+          [context: ~8.4k of 16.4k tokens (51%). Free space when it suits you — use context_tombstone, context_replace or context_rewrite. The next reminder comes at 65%.]
+      - title: How it says to free space
+        table:
+          columns: [session, the line says]
+          rows:
+            - ["native tool calls", "`use context_tombstone, context_replace or context_rewrite`"]
+            - ["Code Mode", "`in a cell, await tools.context_tombstone(sections=['S12'], reason='...') or tools.context_replace(sections=['S12..S20'], text='...')`"]
+            - ["with `clm-mirror` mounted", "`edit <the context file's path>, or ` and then one of the above"]
+      - title: Durability
+        tone: durable
+        list:
+          - "The line is in the `tool/result` record, so a resumed session shows the model the same result."
+      - title: Failure and limits
+        tone: limit
+        list:
+          - "A blocked result gets no readout."
+          - "It is on the result, not beside it: a notice message per threshold would be one more surface node to edit away."
+      - links:
+          - {to: "node:readouts", label: "Readouts"}
+          - {to: "invariants#node:i3", label: "I3: model-visible means logged"}

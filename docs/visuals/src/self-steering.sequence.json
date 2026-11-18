@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "self-steering: how a skill runs",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [
+      1080,
+      640
+    ],
+    "views": [
+      {
+        "id": "reading",
+        "label": "Reading",
+        "focus": [
+          "person",
+          "loop",
+          "model",
+          "skill",
+          "steps",
+          "todo"
+        ],
+        "note": "The skill tool returns the body and emits skills/read; skill-steps appends the steps to the todo list."
+      },
+      {
+        "id": "working",
+        "label": "Working",
+        "focus": [
+          "model",
+          "todo"
+        ],
+        "note": "The model marks steps done with write_todos. A write that drops or reorders a seeded step is refused."
+      },
+      {
+        "id": "asking",
+        "label": "Asking",
+        "focus": [
+          "loop",
+          "steps",
+          "todo",
+          "decider"
+        ],
+        "note": "At turn end the row folds the log, then asks a decision model whether the assistant is waiting for the person."
+      },
+      {
+        "id": "hold-or-nudge",
+        "label": "Outcome",
+        "focus": [
+          "person",
+          "loop",
+          "model",
+          "steps"
+        ],
+        "note": "Waiting: the turn ends and the person answers. Not waiting: a plugin user/message starts another step."
+      }
+    ],
+    "legend": {
+      "entries": {
+        "dashed": {
+          "label": "Bus event"
+        },
+        "security": {
+          "label": "Nudge"
+        }
+      }
+    }
+  },
+  "participants": [
+    {
+      "id": "person",
+      "type": "external",
+      "label": "Person",
+      "sublabel": "asks, answers"
+    },
+    {
+      "id": "loop",
+      "type": "frontend",
+      "label": "Agent loop",
+      "sublabel": "ph-core"
+    },
+    {
+      "id": "model",
+      "type": "cloud",
+      "label": "Model",
+      "sublabel": "chat route"
+    },
+    {
+      "id": "skill",
+      "type": "backend",
+      "label": "skill tool",
+      "sublabel": "skills-progressive"
+    },
+    {
+      "id": "steps",
+      "type": "security",
+      "label": "skill-steps",
+      "sublabel": "row, ships off"
+    },
+    {
+      "id": "todo",
+      "type": "database",
+      "label": "Todo list",
+      "sublabel": "tool-todo, the log"
+    },
+    {
+      "id": "decider",
+      "type": "external",
+      "label": "Decider",
+      "sublabel": "decision model"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 272,
+      "label": "The skill is read"
+    },
+    {
+      "from": 280,
+      "to": 334,
+      "label": "The model works"
+    },
+    {
+      "from": 344,
+      "to": 562,
+      "label": "A turn tries to end"
+    }
+  ],
+  "messages": [
+    {
+      "id": "ask",
+      "from": "person",
+      "to": "loop",
+      "y": 160,
+      "label": "prompt",
+      "variant": "emphasis"
+    },
+    {
+      "id": "call-skill",
+      "from": "model",
+      "to": "skill",
+      "y": 184,
+      "label": "skill(name, arguments)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "skills-read",
+      "from": "skill",
+      "to": "steps",
+      "y": 208,
+      "label": "skills/read",
+      "variant": "dashed"
+    },
+    {
+      "id": "seed",
+      "from": "steps",
+      "to": "todo",
+      "y": 232,
+      "label": "todo/write, seeded",
+      "variant": "default"
+    },
+    {
+      "id": "instructions",
+      "from": "skill",
+      "to": "model",
+      "y": 260,
+      "label": "instructions",
+      "variant": "return"
+    },
+    {
+      "id": "mark",
+      "from": "model",
+      "to": "todo",
+      "y": 292,
+      "label": "write_todos",
+      "variant": "emphasis"
+    },
+    {
+      "id": "written",
+      "from": "todo",
+      "to": "model",
+      "y": 320,
+      "label": "list, or PlanError",
+      "variant": "return"
+    },
+    {
+      "id": "stopping",
+      "from": "loop",
+      "to": "steps",
+      "y": 356,
+      "label": "agent/turn-stopping",
+      "variant": "dashed"
+    },
+    {
+      "id": "fold",
+      "from": "steps",
+      "to": "todo",
+      "y": 380,
+      "label": "folds the log",
+      "variant": "default"
+    },
+    {
+      "id": "decide",
+      "from": "steps",
+      "to": "decider",
+      "y": 410,
+      "label": "ctx.llm.decide",
+      "variant": "default"
+    },
+    {
+      "id": "answer",
+      "from": "decider",
+      "to": "steps",
+      "y": 438,
+      "label": "waiting: 0.97",
+      "variant": "return"
+    },
+    {
+      "id": "hold",
+      "from": "steps",
+      "to": "loop",
+      "y": 466,
+      "label": "held: no steer",
+      "variant": "return"
+    },
+    {
+      "id": "wait",
+      "from": "loop",
+      "to": "person",
+      "y": 490,
+      "label": "turn ends",
+      "variant": "return"
+    },
+    {
+      "id": "nudge",
+      "from": "steps",
+      "to": "loop",
+      "y": 522,
+      "label": "else agent.steer(notice)",
+      "variant": "security"
+    },
+    {
+      "id": "next-step",
+      "from": "loop",
+      "to": "model",
+      "y": 550,
+      "label": "user/message",
+      "variant": "security"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "skill",
+      "from": 184,
+      "to": 265,
+      "type": "backend"
+    },
+    {
+      "participant": "todo",
+      "from": 292,
+      "to": 325,
+      "type": "database"
+    },
+    {
+      "participant": "steps",
+      "from": 356,
+      "to": 527,
+      "type": "security"
+    },
+    {
+      "participant": "decider",
+      "from": 410,
+      "to": 443,
+      "type": "external"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Three rows switch it on",
+      "items": [
+        "Rows: skills-progressive, tool-todo, skill-steps",
+        "A profile or a --patch arms them",
+        "Reading a skill arms nothing"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Steps the model cannot drop",
+      "items": [
+        "Seeded as todos tagged source: skill",
+        "The model may mark one done",
+        "Dropping or rewording one is refused"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "A nudge with a budget",
+      "items": [
+        "Sent at turn end if a step can start",
+        "Held when waiting reads 0.8 or more",
+        "Stops after 3 unanswered nudges"
+      ]
+    }
+  ]
+}

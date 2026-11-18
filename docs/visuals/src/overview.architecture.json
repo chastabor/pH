@@ -1,0 +1,325 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "pH: how the packages work together",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "a-turn",
+        "label": "One turn",
+        "focus": [
+          "person",
+          "phern",
+          "core",
+          "providers"
+        ],
+        "note": "A prompt enters through phern, the loop in ph-core builds a request from the log, and an adapter sends it."
+      },
+      {
+        "id": "code-mode",
+        "label": "Code Mode",
+        "focus": [
+          "core",
+          "rlm",
+          "guest"
+        ],
+        "note": "The model writes Python; ph-rlm runs it in a guest process and bindings re-enter the tool pipeline."
+      },
+      {
+        "id": "context-upkeep",
+        "label": "Context upkeep",
+        "focus": [
+          "core",
+          "stabilize",
+          "clm"
+        ],
+        "note": "Rows that keep a long session inside its window without rewriting the log."
+      },
+      {
+        "id": "retrieval",
+        "label": "Published tools",
+        "focus": [
+          "core",
+          "utcp",
+          "text",
+          "graph"
+        ],
+        "note": "Index tools publish UTCP manuals; ph-utcp turns each into a governed pH tool."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "person",
+      "type": "external",
+      "label": "Person",
+      "sublabel": "terminal or rpc client",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "phern",
+      "type": "frontend",
+      "label": "phern",
+      "sublabel": "CLI, TUI, daemon, adapters",
+      "pos": [
+        250,
+        300
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "providers",
+      "type": "external",
+      "label": "Model servers",
+      "sublabel": "chat and decision models",
+      "pos": [
+        250,
+        480
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "ph-core",
+      "sublabel": "cordis, session log, agent loop, seams",
+      "pos": [
+        480,
+        300
+      ],
+      "size": [
+        220,
+        64
+      ]
+    },
+    {
+      "id": "stabilize",
+      "type": "backend",
+      "label": "ph-stabilize",
+      "sublabel": "todo, offload, compaction",
+      "pos": [
+        390,
+        110
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "clm",
+      "type": "backend",
+      "label": "ph-clm",
+      "sublabel": "model edits its context",
+      "pos": [
+        610,
+        110
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "rlm",
+      "type": "backend",
+      "label": "ph-rlm",
+      "sublabel": "Code Mode, subagents",
+      "pos": [
+        790,
+        300
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "guest",
+      "type": "security",
+      "label": "ph-runtime-guest",
+      "sublabel": "runs the model's Python",
+      "pos": [
+        1040,
+        300
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "tag": "own venv"
+    },
+    {
+      "id": "utcp",
+      "type": "messagebus",
+      "label": "ph-utcp",
+      "sublabel": "UTCP manuals as tools",
+      "pos": [
+        505,
+        480
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "text",
+      "type": "database",
+      "label": "ph-text-index",
+      "sublabel": "text_index, text_search",
+      "pos": [
+        790,
+        430
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "graph",
+      "type": "database",
+      "label": "ph-code-graph",
+      "sublabel": "code_index, code_graph",
+      "pos": [
+        790,
+        550
+      ],
+      "size": [
+        170,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "guest process: imports no harness code",
+      "wraps": [
+        "guest"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "person-to-phern",
+      "from": "person",
+      "to": "phern",
+      "label": "prompts",
+      "variant": "emphasis"
+    },
+    {
+      "id": "phern-mounts-core",
+      "from": "phern",
+      "to": "core",
+      "label": "mounts rows",
+      "variant": "emphasis"
+    },
+    {
+      "id": "phern-to-providers",
+      "from": "phern",
+      "to": "providers",
+      "label": "HTTP",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 70
+    },
+    {
+      "id": "stabilize-rows",
+      "from": "stabilize",
+      "to": "core",
+      "label": "rows",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "clm-rows",
+      "from": "clm",
+      "to": "core",
+      "label": "rows",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "core-to-rlm",
+      "from": "core",
+      "to": "rlm",
+      "label": "code cells",
+      "variant": "emphasis"
+    },
+    {
+      "id": "rlm-to-guest",
+      "from": "rlm",
+      "to": "guest",
+      "label": "fd 3 frames",
+      "variant": "security"
+    },
+    {
+      "id": "utcp-tools",
+      "from": "utcp",
+      "to": "core",
+      "label": "tools",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "text-manual",
+      "from": "text",
+      "to": "utcp",
+      "label": "manual"
+    },
+    {
+      "id": "graph-manual",
+      "from": "graph",
+      "to": "utcp",
+      "label": "manual"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "No privileged core",
+      "items": [
+        "Every part is a row in a YAML profile",
+        "phern names the bundles but never imports them",
+        "Bundles arrive through ph.bundles entry points"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "ph-core holds the two axes",
+      "items": [
+        "Space: the cordis Context tree and its seams",
+        "Time: the append-only session log",
+        "The loop reads the log and acts through seams"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Boundaries",
+      "items": [
+        "Model code runs in a guest process over fd 3",
+        "The guest keeps copies, pinned by a mirror test",
+        "A UTCP tool runs under the agent's sandbox"
+      ]
+    }
+  ]
+}

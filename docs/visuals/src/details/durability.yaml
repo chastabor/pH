@@ -1,0 +1,1252 @@
+intro: |
+  A pH session is its log. Nothing a restart needs is kept anywhere else, so the
+  question "what survives" is the question "what was in the log, and was the log on
+  disk". The top half of the picture is the write path: who may append, when the
+  log is forced to disk, and what the store promises once a flush returns. The
+  bottom half is the next process: it reads each log back, closes what the crash
+  left open, mounts the root in the rows the log records, and puts each sub-agent
+  back to work from the sub-agent's own log.
+
+  Click a box for its structures and options, or an arrow for what crosses it.
+
+topics:
+  - id: replay
+    title: What a restart replays
+    summary: |
+      Nothing is replayed in the sense of running it again. A restart reads the
+      log, adds the records that close what was open, and derives every piece of
+      state from the result. The steps below are what one root goes through, in
+      order, in `Supervisor.start` and `ph.persistence.open_session`.
+    blocks:
+      - title: One root, start to first step
+        table:
+          columns: [step, what happens, where]
+          rows:
+            - ["1", "The root's `profile/base` and `profile/override` records are read off disk, before anything mounts, and the root is mounted from them.", "`ph_app.profiles.session_profile`"]
+            - ["2", "The store takes the session's lease. A second process is refused with `session_already_active`.", "`ph.persistence.lease`"]
+            - ["3", "The log is read and its lineage followed. A torn last line, or a batch a write cut short, is dropped.", "`read_session`, `materialize`"]
+            - ["4", "Tools are asked about calls and dispatches the crash cut off (`ToolDefinition.reconcile`).", "`resume._reconciled`"]
+            - ["5", "Repair builds the closers: a settle for each open intent, a `tool/result` for each unanswered call, `step/end`, `turn/end` with `interrupted`.", "`interrupted_turn_closers`"]
+            - ["6", "The session is seeded with the stored events plus the closers and published. `session/resumed` is appended.", "`resume_session`"]
+            - ["7", "`session/loaded` runs and is awaited: leaked workspace trees are reclaimed and unnamed spill blobs are swept.", "`SessionStore.loaded`"]
+            - ["8", "The children's state is folded from their own logs.", "`SubagentService.load_children`"]
+            - ["9", "`opened()` records a base if there is none, logs this start's `--patch` options, and brings the mount to what the log says.", "`ph.session_profile`"]
+            - ["10", "The supervisor folds its retry ladder from the log, continues a cut-short turn nobody will send again, and flushes the repair.", "`Supervisor._start`"]
+            - ["11", "A missing credential holds the root. Otherwise each unfinished child is readmitted, held or ended, in its own log.", "`resume_children`"]
+            - ["12", "A prompt still in the inbox rings the root and the next turn takes it.", "`agent/woken`"]
+      - title: What is derived, not stored
+        note: Each of these is a fold over the log, so a restart gets it by reading.
+        list:
+          - "The model's surface: `derive_messages()` over `user/message`, `assistant/message` and `tool/result` and their replaces."
+          - "The inbox: `agent/inbox/spliced` records, so a prompt typed before the crash is still pending."
+          - "The todo list, an open goal, schedules, approval mode, sandbox mode, the request header."
+          - "The retry ladder (`supervisor/retry`, `supervisor/failed`, `supervisor/recovered`) and how many times a turn was cut short (`session/resumed` with a `turn`)."
+          - "A child's status, spend and restart count, from `subagent/*` records in the child's log."
+          - "The kernel namespace, from `kernel/snapshot` records, when the first cell after the restart starts a kernel."
+      - title: How often a restart is retried
+        table:
+          columns: [what, bound, when it is spent]
+          rows:
+            - ["a root's task crashing around a turn", "3 retries at 0.25 s, 1 s, 5 s", "`supervisor/failed`; the root stays mounted and takes wakes"]
+            - ["a root's turn cut short by restarts", "`ROOT_RESUME_LIMIT` = 3 in a row with no answer between", "`supervisor/failed`; a resume pass skips it unless `--force`"]
+            - ["a child interrupted mid-turn", "`CHILD_RETRY_LIMIT` = 3 since its last answer", "the child is ended in its own log and its parent is told"]
+      - links:
+          - {to: "node:repair", label: "open_session and repair"}
+          - {to: "node:supervisor", label: "How the daemon decides which roots to bring back"}
+          - {to: "node:children", label: "How a sub-agent comes back"}
+
+  - id: lost
+    title: What is lost
+    summary: |
+      The rule is short: what no flush had written is gone, and what was in flight
+      is closed as unknown rather than guessed at. Everything else on this list is
+      state that was never in the log, by decision.
+    blocks:
+      - title: Lost by a kill
+        tone: limit
+        list:
+          - "**Events since the last barrier.** Appends are in memory first. A flush runs before each model request, before a tool body and at the points listed under [the barriers](edge:barriers), so the window is one model response or one tool body."
+          - "**A model stream in flight.** Its `assistant/chunk` events were never flushed. The turn is closed `interrupted`. The request is not sent again; if the turn is continued, a new turn begins from what the transcript holds."
+          - "**The outcome of a running tool call.** The `tool/call` is on disk, its result is not. Repair writes `TOOL_OUTCOME_UNKNOWN` unless the tool can answer for itself. The call is not re-run by the harness."
+          - "**A shell command, upload or restore in flight.** Its opening record is on disk; it is settled `outcome-unknown`. A child process may still be running until the next start's sweep."
+          - "**A question or approval that was on screen.** It is settled as `interrupted` and not put again. The model reads `TOOL_NOT_STARTED` and asks again, to whoever is attached then."
+          - "**The kernel process.** Variables that could be pickled come back from `kernel/snapshot`. Open files, sockets, threads and anything recorded as `clear` (unpicklable, too large) do not."
+      - title: Never in the log
+        tone: limit
+        list:
+          - "**Who was attached.** Subscriptions are per connection; a client attaches again."
+          - "**A staged attachment.** The tray is composer state. The blob stays in the store; the chip is gone (DESIGN.md §8)."
+          - "**Credential values.** Never stored. A resumed root or child whose route names a credential the deployment cannot supply is held with `credential/needed` until the name arrives."
+          - "**The orphan journal across a reboot.** It lives in `$PH_RUNTIME`, which a reboot wipes, and so do the pids it names."
+          - "**In-memory caches.** Fold caches, the tool registry, the mounted rows. All are rebuilt by mounting and reading."
+      - title: Not guaranteed
+        tone: limit
+        note: From `NON_GUARANTEES` in `ph_app/daemon/supervisor.py`, which `phern doctor` prints.
+        list:
+          - "The daemon does not restart itself. An init system or `phern service` starts the next one."
+          - "A fresh daemon mounts no root on its own. It resumes owed roots when asked (`phern daemon --resume-owed`, `phern agents resume --all`, `phern service start`), mounts one when a client asks for it, and mounts one whose schedule comes due."
+          - "While the daemon is down nothing fires. On start a schedule catches up with one run per missed window."
+          - "All roots share one process. A `SIGKILL`, an OOM kill or a segfault ends every root at once and runs no teardown."
+          - "There is no global turn or request timeout and no per-root memory cap."
+      - title: Other gaps
+        tone: limit
+        list:
+          - "A log type a package declares is known to a reader only once the package is imported. A stored log carrying a required plugin type is refused by a build without the plugin."
+          - "A resume whose log holds an open intent of a kind the process never declared is refused by name (`UndeclaredIntentError`), not left open."
+          - "A workspace tree is not an intent kind. Its owner settles it: `workspace-reconcile` looks at the disk when the session is loaded."
+          - "A missing ancestor in a fork chain is a `LineageError`. The session is not opened on a partial history."
+
+  - id: settings
+    title: Settings that change durability
+    summary: |
+      The rows below are the ones a person sets. The first five are `deployment`
+      rows, so they belong in `$PH_HOME/daemon.yaml`. The last three
+      (`rlm-kernel-snapshot`, `subprocess-local`, `workspace-reconcile`) are
+      `environment` rows and go in a session profile. The lease has no setting:
+      every session opened through `open_session` is claimed, and a backend that
+      cannot claim says so in a warning.
+    blocks:
+      - title: Where the log is kept
+        row: session-persistence-jsonl
+      - title: The other backend
+        note: |
+          Swapping is a removal and an insertion. An entry with both `id:` and
+          `name:` is a row, not a patch, so renaming in place adds a second row
+          and the mount refuses it.
+        code: |
+          # $PH_HOME/daemon.yaml
+          rows:
+            - id: session-persistence
+              remove: true
+            - insert:
+                - id: session-persistence
+                  name: session-persistence-turso
+                  config:
+                    root: /var/lib/ph/sessions
+      - row: session-persistence-turso
+      - title: When the log reaches disk
+        note: |
+          No options. Removing the row removes the barriers before a model request
+          and a tool body; the mount warns when a storage row has no checkpoint row.
+          Intent barriers and the mount's last write still run.
+        row: session-checkpoint-policy
+      - title: Export
+        note: |
+          Telemetry is an export of the log, not a second copy of it. A record
+          ships only once `session/durable` says the log holds its event. It ships
+          disabled in `base.yaml`.
+        row: session-telemetry
+      - title: Blobs the log names
+        row: spill-local
+      - title: Kernel variables
+        note: Variables above `inlineBlobMax` bytes go to the spill store; smaller ones ride in the record.
+        row: rlm-kernel-snapshot
+      - title: Strays from a hard kill
+        note: "`sweepOrphans: false` is for a deployment that shares `$PH_RUNTIME` with something pH does not own."
+        row: subprocess-local
+      - title: Leaked workspace trees
+        row: workspace-reconcile
+      - title: Daemon options
+        lang: bash
+        code: |
+          phern daemon --resume-owed            # mount every root that owes work, once the socket is open
+          phern daemon --continue-interrupted   # also continue a person's cut-short turn
+          phern daemon --passivate-after 30     # minutes of quiet before a root is released; "off" disables
+          phern agents resume --all [--force]   # the same pass, from a client; --force includes spent ladders
+          phern service start | watch           # start the daemon, run the pass, report ready / degraded / down
+      - title: Fixed, not configurable
+        table:
+          columns: [value, where, what it bounds]
+          rows:
+            - ["`PASSIVATE_AFTER` = 90 min", "`ph_app.daemon.recovery`", "default idle time before a root is released"]
+            - ["`RETRY_DELAYS` = 0.25, 1, 5 s", "`ph_app.daemon.recovery`", "the root task's retry ladder"]
+            - ["`ROOT_RESUME_LIMIT` = 3", "`ph_app.daemon.recovery`", "cut-short turns continued in a row"]
+            - ["`CHILD_RETRY_LIMIT` = 3", "`ph_app.daemon.recovery`", "restarts of an interrupted child since its last answer"]
+            - ["`GRACE_SECONDS` = 10", "`ph.cordis.context`", "the unwind's budget"]
+            - ["`SHUTDOWN_SECONDS` = 15", "`ph.resources`", "first signal to hard stop"]
+            - ["`MAX_DEPTH` = 64", "`ph.persistence.lineage`", "ancestors one read may walk"]
+            - ["`SESSION_FORMAT_VERSION` = 4", "`ph.session.events`", "a log of another version is refused, not migrated"]
+
+  - id: endings
+    title: Each way a process ends
+    summary: |
+      How much reaches disk depends on how the process stopped. Only a `SIGKILL`
+      (or a power cut) skips the unwind, and the log is built so that case reads
+      back as a crash that repair can close.
+    blocks:
+      - table:
+          columns: [how it ends, what runs, what the log says afterwards]
+          rows:
+            - ["mode completes, or wire `shutdown`", "the full unwind; the checkpoint policy's last barrier writes what the agents appended as they let go; the mount's last write runs before the lease is given back", "a balanced log. No closers on the next open."]
+            - ["`SIGTERM` or `SIGINT`", "the same unwind, with a hard stop armed 15 s later. Sub-agents are suspended, not revoked. A second signal leaves at once.", "an aborted turn (`turn/end` `aborted`); children `queued` with the reason."]
+            - ["hard stop (unwind overran)", "what the process still has in the orphan journal is killed; `os._exit(128 + signum)`", "whatever the last barrier wrote. Repair closes the rest."]
+            - ["`SIGKILL`, OOM, power cut", "nothing", "whatever the last barrier wrote, possibly a torn last line. Child processes may outlive it until the next sweep."]
+            - ["passivation (idle root)", "`supervisor/passivated` is appended and flushed, then the root's mount unwinds", "a balanced log; the next `start` resumes it like any other."]
+            - ["the root's task raises", "the retry ladder: the workspace is restored to its last checkpoint where one exists, then the task runs again", "`supervisor/retry` per attempt, `supervisor/recovered` or `supervisor/failed`."]
+            - ["the daemon's socket is removed or replaced", "nothing stops; `supervisor/unreachable` is appended to every root and flushed", "the note, in each root's transcript."]
+      - title: Records the supervisor writes about a root
+        table:
+          columns: [record, when]
+          rows:
+            - ["`supervisor/passivated`", "an idle root is released: `{idleMs}`"]
+            - ["`supervisor/retry`", "before each retry of a crashed task"]
+            - ["`supervisor/failed`", "a ladder is spent: `{attempts, reason}`"]
+            - ["`supervisor/recovered`", "a retry succeeded: `{afterAttempts}`"]
+            - ["`supervisor/unreachable`", "the daemon lost its socket"]
+            - ["`supervisor/violated`", "a polled invariant did not hold"]
+      - record: supervisor/passivated
+        example: |
+          {"type": "supervisor/passivated", "seq": 913, "time": 1794836412000,
+           "data": {"idleMs": 5400000}, "ignorable": true}
+
+nodes:
+  rows:
+    title: Rows that write the log
+    summary: |
+      Every module that appends to a session log does it through its own writer,
+      minted once at import with `log_writer(__name__)`. `Session` has no public
+      `append`. A writer refuses a record type its module is not the writer of
+      record for, at the write, so a row handed a session cannot put another
+      row's record into it.
+    blocks:
+      - title: The door
+        lang: python
+        code: |
+          from ph.session.writers import log_writer
+
+          _LOG = log_writer(__name__)          # refused for any owner but the calling module
+
+          _LOG.append(session, "sandbox/mode", {"mode": mode})
+      - title: The right to write
+        struct: ph.session.writers:LogWriter
+      - title: Where the right comes from
+        table:
+          columns: [source, covers, example]
+          rows:
+            - ["`known_event_types._WRITTEN_BY`, read as `WRITERS`", "every ph-core record type and the modules that append it", "`turn/end` is written by `ph.agent_loop.driver` alone"]
+            - ["`declare_log_type(name, owner=, ignorable=, audit_only=)`", "a type a package outside ph-core adds, declared in its `kinds` leaf", "`clm/revised`, owned by ph-clm"]
+            - ["`IntentKind.writer`", "the two types of an intent pair, written by the journal through the declaring leaf's writer", "`shell/command` and `shell/result`, owner `ph.session.kinds`"]
+      - title: What a writer refuses
+        list:
+          - "A type its owner does not own: `LogWriteError`."
+          - "A payload carrying `revises`. Only the revision door (`ph.session.revise`) stamps it."
+          - "Behind it, `Session._append` refuses a type this build could not read back, so no build writes a log it cannot open."
+      - title: Durability
+        tone: durable
+        list:
+          - "An append is synchronous and does no I/O. It lands in memory and is owed to the store until the next flush."
+          - "A record that must be on disk before an effect is an intent, opened through [ctx.intents](node:journal), not a hand-written flush."
+          - "Model-visible state is only ever these records, so a restart needs nothing a row held in memory."
+      - title: Limits
+        tone: limit
+        list:
+          - "A writer can be forged on purpose: importing another module's writer, constructing a `LogWriter`, or calling `Session._append`. `test_log_writers.py` fails on all three; the runtime does not stop them."
+          - "A replica, a seed and a fork do not write. They `admit` records somebody else wrote."
+      - links:
+          - {to: "edge:append", label: "The record envelope"}
+          - {to: "invariants#node:i3", label: "I3: model-visible means logged"}
+          - {to: "invariants#node:i4", label: "I4: the log is append-only"}
+
+  journal:
+    title: ctx.intents, the intent journal
+    summary: |
+      An intent is an act the log records before it happens and settles after:
+      a record that opens, and one that settles. `ctx.intents` is the one place
+      that appends the opening record, flushes it when the kind says so, hands
+      out a claim, and writes the settle. A kind left open by a dead process is
+      settled by repair on the next open.
+    blocks:
+      - title: Using it
+        lang: python
+        code: |
+          opened = {"command": cmd, "surface": False}
+          async with ctx.intents.claim(session, SHELL_COMMAND, opened) as held:
+              # the opening record is on disk before this line
+              result = await run(cmd)
+              ctx.intents.settle(session, held, settled(held.opened.seq, result))
+          # a body that raises or is canceled is settled outcome-unknown
+      - title: A kind
+        struct: ph.session.intents:IntentKind
+      - title: What a caller holds
+        struct: ph.session.journal:Claim
+      - title: A key the log already opened
+        note: Handed back by `open_once` and `claim_once` in place of a claim, so a retried act is answered from the log.
+        struct: ph.session.journal:Prior
+      - title: The three barriers
+        table:
+          columns: [barrier, when the opening record is on disk, if it cannot be written]
+          rows:
+            - ["`durable`", "before the claim is handed out; the journal awaits `ctx.sessions.written`", "`IntentNotDurable`; the act does not happen and the pair is settled `not-started`"]
+            - ["`tools-body`", "at the checkpoint policy's barrier on `tools/body`, after every pre-execute gate", "the tool body is not invoked"]
+            - ["`buffered`", "at the next flush, with the records around it", "a line of history is lost, never an act"]
+      - title: Every declared kind
+        note: |
+          ph-core's are in `ph/session/kinds.py`. A package brings its own leaf:
+          `ph_app.kinds` and `ph_rlm.kinds`. `tool/call` and `tool/result` are not
+          a kind; the turn repair closes that pair because its closer is
+          model-visible.
+        table:
+          columns: [opens, settles, barrier, a crash leaves it]
+          rows:
+            - ["`shell/command`", "`shell/result`", "durable", "`outcome-unknown`: `{commandSeq, ok: false}`"]
+            - ["`command/run`", "`command/done`", "durable", "`outcome-unknown`"]
+            - ["`approval/asked`", "`approval/decided`", "durable", "`outcome: interrupted`, `automatic: true`"]
+            - ["`question/asked`", "`question/answered`", "durable", "`{askId, askSeq}` with no `declined`"]
+            - ["`attachment/uploading`", "`attachment/uploaded`", "durable", "`outcome-unknown`: the file may have left"]
+            - ["`workspace/restoring`", "`workspace/restored`", "durable", "`ok: false`: the tree may be part-way"]
+            - ["`tool/code-dispatch-start`", "`tool/code-dispatch`", "tools-body", "`outcome-unknown`, or what the tool says on resume"]
+            - ["`tool/effect`", "`tool/effect-settled`", "tools-body", "`outcome-unknown`; a failed or not-started one may be opened again"]
+            - ["`credential/needed`", "`credential/supplied`", "buffered", "left open: its owner asks again at each open"]
+            - ["`client/command` (phern)", "`client/command-settled`", "buffered", "`outcome-unknown`: the client is told to ask, not that it finished"]
+            - ["`harness/probe` (ph-rlm)", "`harness/probed`", "durable", "`outcome-unknown`"]
+      - title: The marker on a settle the act did not write
+        note: |
+          One field for every kind. `why` is `outcome-unknown` (it may have
+          happened) or `not-started` (it cannot have). `by` is `repair` (on
+          resume) or `process` (the live process, for a body that raised or a
+          barrier that failed).
+        lang: json
+        code: |
+          {"type": "shell/result", "seq": 418, "time": 1794836401220,
+           "data": {"commandSeq": 417, "ok": false,
+                    "unsettled": {"why": "outcome-unknown", "by": "repair"}},
+           "ignorable": true}
+      - record: shell/command
+        example: |
+          {"type": "shell/command", "seq": 417, "time": 1794836401220,
+           "data": {"command": "make test", "surface": false}, "ignorable": true}
+      - title: Durability
+        tone: durable
+        list:
+          - "The journal stores nothing. An intent is its opening record, its outcome is its settle, and what is open is a fold of the log (`fold_intents`)."
+          - "`Prior.here` tells a retried caller whether this process opened the intent or an earlier one did."
+          - "A kind must be declared before the journal will open one, because repair settles only the kinds it knows."
+      - title: Limits
+        tone: limit
+        list:
+          - "Repair says `outcome-unknown`; it does not find out. Only a tool that declares `reconcile` is asked what happened."
+          - "A log holding an open intent of a kind this process never declared is refused by name on resume (`UndeclaredIntentError`)."
+          - "Kinds are declared by import. A reader that never imported the package cannot pair that package's records; it counts openings against settles instead."
+      - links:
+          - {to: "edge:intent-pair", label: "The pair on the wire"}
+          - {to: "node:repair", label: "What repair writes for an open intent"}
+
+  log:
+    title: The session log
+    summary: |
+      One append-only list of events per session, held in memory by the
+      `session` row and published as `ctx.sessions`. `seq` is the list index.
+      Events are never rewritten; what the model sees is a projection of the log,
+      and a compaction or an offload is a new event that replaces surface nodes.
+    blocks:
+      - row: session
+      - title: One event
+        struct: ph.session.events:SessionEvent
+      - title: The header, beside the log
+        note: Storage metadata, not conversation. Written once, as the file's first line.
+        struct: ph.session.session:SessionHeader
+      - title: Events the store dispatches
+        table:
+          columns: [event, dispatch, what it is for]
+          rows:
+            - ["`session/created`", emit, "a session was published; a backend starts tracking it"]
+            - ["`session/event`", emit, "post-commit feed, once per appended event"]
+            - ["`session/flush`", parallel, "the awaited checkpoint: every backend writes, the caller waits for all"]
+            - ["`session/durable`", emit, "a flush every backend finished, with how much the log now holds"]
+            - ["`session/unwritten`", emit, "a flush raised, and why"]
+            - ["`session/loaded`", parallel, "a stored log was read in; awaited before the session is handed out"]
+            - ["`session/disposed`", emit, "a session left the store"]
+      - title: What a seed must pass
+        note: One gate for a resume, a fork, a replay and an import (`_readmit`).
+        list:
+          - "`seq == index`, contiguous from 0."
+          - "No unknown type that is not marked `ignorable`."
+          - "A batch (`Session.batch()`) is whole or absent: each member carries `batch: {first, count}`."
+          - "A header of another `SESSION_FORMAT_VERSION` is refused, not migrated."
+      - title: Durability
+        tone: durable
+        list:
+          - "`Session.durable_length` states how much a store already holds: a resume's stored length or a fork's inherited prefix. A backend writes from there."
+          - "`flush` writes ancestors before a child, so a reference fork is never on disk ahead of the prefix it depends on."
+          - "`written(session)` answers whether a flush worked instead of raising, for a caller that must decide (ask a person or not, report a child done or not)."
+          - "A sub-agent's log is another session through the same store: its own file, its own lease, its own flushes."
+      - title: Limits
+        tone: limit
+        list:
+          - "Memory first. The window between two barriers is not on disk."
+          - "A log of another format version is refused. Versions so far: lineage directories (1), batch membership (2), each session owns its log (3), sampling as one value (4)."
+      - links:
+          - {to: "ph-core#node:session", label: "ph.session on the ph-core page"}
+          - {to: "edge:flush", label: "session/flush"}
+
+  policy:
+    title: session-checkpoint-policy
+    summary: |
+      Persistence decides how to store; this row decides when to force it. It
+      listens on three serial events and flushes the session before the thing
+      each one announces, so the record of an effect is on disk before the
+      effect. It takes no options: a different durability and latency trade is a
+      different row in its place.
+    blocks:
+      - row: session-checkpoint-policy
+      - title: The four barriers
+        table:
+          columns: [barrier, hooks, dispatch, what it guarantees]
+          rows:
+            - ["before a model request", "`llm/send`", serial, "the events that motivated the request are on disk before it is in flight"]
+            - ["before a tool body", "`tools/body`", serial, "`tool/call` is on disk before the side effect, so a crashed call reads `TOOL_OUTCOME_UNKNOWN` and not as nothing"]
+            - ["after a rejected step", "`agent/step-rejected`", serial, "no request follows to carry the previous step's results"]
+            - ["once the agents let go", "the row's own disposer", "unwind", "what teardown appended (`workspace/disposed`, tombstones, a canceled `turn/end`) is written before persistence goes"]
+      - event: llm/send
+      - event: tools/body
+      - title: What is not flushed
+        note: |
+          A nested Code Mode dispatch is skipped when it has nothing to recover.
+          Under the `rlm` profile every tool call is nested, so this is what keeps
+          a cell of reads from paying one `fsync` per call.
+        list:
+          - "A dispatch whose tool is effect-free (`ToolRuntime.effect_free`)."
+          - "A dispatch in a run that took a restore point, when every effect of the call is a file in the workspace (`ToolExecution.restore_covered`)."
+          - "Anything else is flushed: an unknown tool, a write whose path leaves the tree."
+      - title: Fail closed
+        tone: secure
+        list:
+          - "Barriers 1 and 2 await the flush. If it raises, the adapter and the tool body are not invoked."
+          - "The last barrier is not fail-closed: nothing waits on it, and the mount's last write tries again."
+      - title: Limits
+        tone: limit
+        list:
+          - "A step end is not its own barrier on the request path. The next request's flush covers it."
+          - "Without this row the mount warns (`a storage row with no checkpoint row`). Intents still flush their own opening records."
+      - links:
+          - {to: "edge:barriers", label: "The barriers, as events"}
+          - {to: "dispatch#node:serial", label: "Why these are serial events"}
+
+  store:
+    title: session-persistence
+    summary: |
+      The backend behind `ctx.session_persistence`. It writes only on
+      `session/flush`, and what it writes is read off the log past a cursor, not
+      drained from a queue, so a write that did not happen owes exactly what it
+      owed before. Two backends satisfy one `SessionPersistence` protocol: JSONL
+      (the default) and Turso.
+    blocks:
+      - row: session-persistence-jsonl
+      - row: session-persistence-turso
+      - title: Configuring it
+        note: Both are `deployment` rows. `root` defaults to `$PH_HOME/sessions`.
+        code: |
+          # $PH_HOME/daemon.yaml
+          rows:
+            - id: session-persistence
+              config:
+                root: /var/lib/ph/sessions
+      - title: The two backends
+        table:
+          columns: ["", JSONL, Turso]
+          rows:
+            - ["one session is", "`<root>/<family>/<id>.jsonl`", "`<root>/<family>/<id>.db`, one database per session"]
+            - ["a flush is", "whole lines appended with `O_APPEND`, then `fsync`; the directory synced on the first write", "one transaction; `journal_mode=WAL`, `synchronous=FULL`"]
+            - ["a failed write", "the file is cut back to its length before the write, then the error is reported", "rolled back"]
+            - ["a write twice", "cannot happen: the first flush measures the file's last `seq` and starts after it", "a row already held as it was is skipped; a different event at a held `seq` is refused"]
+            - ["a death mid-write", "a torn last line; the reader drops it and the writer's first flush trims it", "the transaction did not commit"]
+            - ["ships in", "`base.yaml`", "no shipped profile; `pyturso` is pre-1.0 and has no Windows wheels"]
+      - title: What a backend owes
+        list:
+          - "`track(session)`: start persisting, owing what the log holds past `durable_length`."
+          - "`flush(session)`: write what the log holds that the backend does not. Callable after the row has unwound."
+          - "`claim(session_id, scope=)`: hold the session against every other writer, and write every live log before letting go."
+          - "`read`, `read_own`, `stored`, `holding`, `descendants_of`, `exists`, `locate`, `directory`: the read side, with no filename in the contract."
+      - title: A listing row
+        struct: ph.persistence.protocol:StoredSession
+      - title: Durability
+        tone: durable
+        list:
+          - "A flush that returned is on disk: `fsync` for JSONL, a synced commit for Turso."
+          - "The cursor advances only after the write returns. A canceled or failed flush leaves it where it was."
+          - "Flushes of one log are serialized, so the checkpoint policy and the supervisor cannot interleave."
+          - "`write_on_unwind` makes writing every live log the last act of the mount's own scope, before the lease is released. A log it could not write is kept for the host (`unwritten_at_unwind`)."
+      - title: Limits
+        tone: limit
+        list:
+          - "A malformed line anywhere before the last is refused, not skipped. `phern doctor sessions --repair` truncates a damaged log under its lease."
+          - "A backend with no per-session file cannot claim. The host warns that I-5 is not enforced; nothing locks a path that protects nothing."
+          - "No full-text search in either backend."
+      - links:
+          - {to: "edge:sync", label: "What is on the disk after a flush"}
+          - {to: "topic:settings", label: "Every setting that changes durability"}
+
+  disk:
+    title: What is on disk
+    summary: |
+      Everything a restart reads. The session logs are authoritative; the two
+      indexes are caches rebuilt from the logs when they cannot vouch for
+      themselves. `$PH_RUNTIME` is a different tier: the OS wipes it at reboot,
+      which is why the socket and the orphan journal live there and no log does.
+    blocks:
+      - title: Under $PH_HOME
+        lang: text
+        code: |
+          $PH_HOME/
+            sessions/
+              <cwd-tag>-<root id>/          one family: a root and everything it spawned
+                <root id>.jsonl             header line, then one event per line
+                <root id>-<run id>.jsonl    a sub-agent's own log
+                <fork id>.jsonl             a fork: only its own events, the rest by reference
+              .leases/<session id>.lock     the I-5 lease, an flock held by the open descriptor
+            spill/                          offloaded tool results, kernel variable blobs
+            attachments/                    media the log points at
+            live.json                       which roots still owe work, and why (a cache)
+            schedules.json                  which roots have an appointment due (a cache)
+            profiles/, daemon.yaml          what a person configures
+          $PH_RUNTIME/
+            processes.jsonl                 the orphan journal: pid, start token, argv digest
+      - title: A JSONL log
+        lang: json
+        code: |
+          {"type": "session/header", "header": {"version": 4, "id": "20261116T142301-3fa9c1", "createdAt": 1794836581000, "cwd": "/home/me/proj", "family": "a41c07-20261116T142301-3fa9c1"}}
+          {"type": "profile/base", "seq": 0, "time": 1794836581400, "data": {"name": "rlm", "rows": ["..."], "sources": [], "phVersion": "0.11.0"}}
+          {"type": "turn/start", "seq": 2, "time": 1794836581412, "data": {"turn": 1}}
+          {"type": "step/start", "seq": 4, "time": 1794836581413, "data": {"turn": 1, "step": 1}, "batch": {"first": 3, "count": 3}}
+          {"type": "user/message", "seq": 5, "time": 1794836581413, "data": {"id": "...", "role": "user", "source": {"kind": "user"}, "content": [{"type": "text", "text": "..."}]}, "surfaceOp": "append", "batch": {"first": 3, "count": 3}}
+        note: |
+          Abridged: some lines are left out and the seq numbers are illustrative.
+          A `user/message` payload is the message itself; `assistant/message` and
+          `tool/result` carry theirs under `message`. The claim that takes a prompt
+          out of the inbox and the `user/message` that puts it in the conversation
+          are one batch. Header fields are `SessionHeader`'s; a root's family is
+          `<cwd-tag>-<id>`.
+      - title: The header
+        struct: ph.session.session:SessionHeader
+      - title: The lease
+        tone: secure
+        list:
+          - "Keyed by the session id, not the log's path, so a store may move its files."
+          - "`timeout=0`: a second process is refused at once with `session_already_active`, never queued."
+          - "Held for the life of the mount (`ctx.root`) through `scope.effect`. A passivated root gives it back by unwinding; a killed process gives it back by dying."
+          - "Covers every writer: a daemon's roots, `phern -p --session`, rpc mode, and every sub-agent's log."
+      - title: Forks store a reference
+        note: |
+          A file is complete exactly when its first event has `seq == 0`. A
+          reference fork starts at `seedLength`; `materialize` walks
+          `parentSession` to assemble the rest, up to 64 ancestors.
+        list:
+          - "The prefix a child depends on cannot change, because the log is append-only."
+          - "A missing or looping ancestor is a `LineageError` with a code (`MISSING_ANCESTOR`, `CYCLE`, `GAP`). `phern doctor` lists them under Session lineage."
+      - title: The indexes are caches
+        tone: durable
+        list:
+          - "`live.json` records, per root, which holds stand: `turn`, `inbox`, `goal`, `children`, plus `failed` and `damaged`. Each is derived from records a log still holds."
+          - "A missing, stale or corrupt index is rebuilt from the logs (`rebuild_live_index`, `rebuild_index`). It costs a root left for the next pass, never a wrong one."
+      - title: Limits
+        tone: limit
+        list:
+          - "Nothing here is encrypted or signed. The kernel blob tag is provenance (an HMAC keyed by the session id), not secrecy."
+          - "A sessions root on a network file system relies on that file system's `flock` and `fsync`."
+      - links:
+          - {to: "edge:read-back", label: "How it is read at a restart"}
+
+  kernel:
+    title: The code kernel and the spill store
+    summary: |
+      The kernel is a child process holding the model's Python namespace
+      (ph-rlm). The process does not survive its host. What survives is the
+      namespace: after each cell the `rlm-kernel-snapshot` row appends one
+      `kernel/snapshot` per changed variable, and a kernel started later is
+      handed those payloads before its first cell.
+    blocks:
+      - row: rlm-kernel-snapshot
+      - title: In a profile
+        code: |
+          # $PH_HOME/profiles/<name>.yaml
+          extends: rlm
+          rows:
+            - id: rlm-kernel-snapshot
+              config:
+                inlineBlobMax: 16384     # bytes; above this a variable goes to the spill store
+      - title: One record
+        struct: ph_rlm.snapshot:SnapshotRecord
+      - record: kernel/snapshot
+        example: |
+          {"type": "kernel/snapshot", "seq": 231, "time": 1794836590022,
+           "data": {"namespace": "<agent id>", "run": 4,
+                    "record": {"kind": "snap", "var": "df", "digest": "9c1e...", "bytes": 1048576,
+                               "locator": "<spill root>/.../df.dill", "tag": "5b07..."}},
+           "ignorable": true, "batch": {"first": 230, "count": 2}}
+      - record: kernel/restored
+      - title: How a variable is kept
+        table:
+          columns: [case, record]
+          rows:
+            - ["changed, at most `inlineBlobMax` bytes", "`snap` with the payload inline as base64 `blob`"]
+            - ["changed, larger", "`snap` with a `locator` into the spill store; the blob is written and synced before the record is appended"]
+            - ["unchanged (same digest)", "nothing"]
+            - ["deleted, unpicklable, too large, or the blob could not be stored", "`clear` with a `reason`"]
+      - title: The spill store
+        row: spill-local
+      - title: A spill reference
+        struct: ph.seams.spill:SpillRef
+      - title: Durability
+        tone: durable
+        list:
+          - "Written, then recorded: a blob is durable at its locator before the event naming it is appended. A death between the two leaves a blob nothing names, and the sweep on `session/loaded` collects it."
+          - "The records for one cell are one batch, and the next request's barrier puts them on disk before the model reads the cell's result."
+          - "A fresh kernel is rehydrated on its first run (`KernelManager._rehydrate`): `fold_namespace` over the log, then a `restore` frame, then `kernel/restored` saying what came back and what failed."
+          - "An offloaded tool result is relocated, not deleted. The model gets a preview and a locator that still resolves after a restart."
+      - title: Limits
+        tone: limit
+        list:
+          - "Not after the kernel itself crashed in a live process: the model is told the namespace is gone and nothing is reconstituted."
+          - "A blob that is missing, torn or tagged for another session is not unpickled. `kernel/restored` lists the variable as failed."
+          - "Open files, sockets, threads and imports with process state are not in a pickle."
+          - "`patch` and `recipe` are in the vocabulary and nothing writes them."
+      - links:
+          - {to: "ph-rlm", label: "How a code cell runs"}
+          - {to: "ph-runtime-guest", label: "The snapshot and restore frames"}
+
+  processes:
+    title: Child processes
+    summary: |
+      Cleanup in pH is structural: an effect's disposer, a scope unwinding. None
+      of it runs under `SIGKILL`, and POSIX hands a dead process's children to
+      PID 1 instead of killing them. So every spawn is journaled, and every pH
+      start sweeps the journal and kills the strays it can prove are its own.
+    blocks:
+      - row: subprocess-local
+      - title: Turning the sweep off
+        note: For a deployment that shares `$PH_RUNTIME` with something pH does not own. `code-runtime-python` carries the same switch.
+        code: |
+          # $PH_HOME/profiles/<name>.yaml
+          extends: tui
+          rows:
+            - id: subprocess
+              config:
+                sweepOrphans: false
+      - title: What a sweep reports
+        struct: ph.orphans:SweepReport
+      - title: What dies when
+        table:
+          columns: [process, clean stop or signal, "`SIGKILL` of pH"]
+          rows:
+            - ["kernel guest", "stopped by its disposer", "dies with its host (`pdeathsig` on Linux, `kqueue-exit` on macOS)"]
+            - ["confined shell command, Linux", "stopped by its disposer", "dies with its host (`bwrap --die-with-parent --unshare-pid`)"]
+            - ["unconfined `!!` or shell-tool child", "stopped by its disposer; past the bound, the hard stop kills what the journal still lists", "left running until the next start's sweep"]
+            - ["any shell child on macOS", "the same", "left running until the next start's sweep (Seatbelt has no equivalent)"]
+      - title: How a stray is proven
+        tone: secure
+        list:
+          - "Each record carries a start token: the kernel's own record of when that pid started (`/proc` on Linux, `sysctl` on macOS)."
+          - "A stray is killed only when the token still matches. A reused pid does not match."
+          - "Where the token cannot be read, the record is reported as `unverifiable` and not killed."
+      - title: The socket and the login session
+        note: |
+          `ph.lingering` is about the daemon outliving the login that started it.
+          `$PH_RUNTIME` is `$XDG_RUNTIME_DIR/ph` on Linux, and logind removes it
+          when a user's last session ends unless the user is lingering.
+        list:
+          - "`phern doctor` and `phern daemon` check beforehand and name `loginctl enable-linger`."
+          - "A daemon whose socket was removed or replaced keeps its roots working and writes `supervisor/unreachable` into each root's log, flushed."
+      - title: Limits
+        tone: limit
+        list:
+          - "The journal is not `fsync`ed and lives in `$PH_RUNTIME`. A reboot wipes it, and the pids with it."
+          - "An `unverifiable` stray reaches a person only as a count in an INFO log line. `SweepReport` is not read by `phern doctor`."
+          - "The macOS token rests on a fixed `kinfo_proc` layout. A layout a later kernel moves reads as no token, so the stray is spared."
+      - links:
+          - {to: "security.html", label: "Containment and the sandbox"}
+
+  repair:
+    title: open_session, resume and repair
+    summary: |
+      `ph.persistence.open_session` is the one door every session is opened
+      through: a daemon's roots, the one-shot modes, rpc mode and every
+      sub-agent's log. It claims the session, then resumes it if a log is stored
+      or creates it. A resume repairs the log before anything reads it, so the
+      first thing a provider sees is already valid.
+    blocks:
+      - title: The door
+        lang: python
+        code: |
+          session = await open_session(ctx, session_id, family=family, meta={"cwd": cwd})
+          # 1. claim     the store's lease, held for the life of the mount
+          # 2. read      read_if_stored(store, id): the log, lineage followed, or None
+          # 3. repair    interrupted_turn_closers(events, calls, intents=...)
+          # 4. seed      Session(id, seed=[*events, *closers], durable=len(events))
+          # 5. record    session/resumed, then session/loaded is awaited
+          # 6. children  ctx.subagents.load_children(id, family)
+          # 7. profile   opened(ctx, session)
+      - title: What repair appends, in order
+        table:
+          columns: [closer, for, says]
+          rows:
+            - ["a settle per open intent", "every declared kind that is not `owner-settles`", "the kind's closer plus `unsettled: {why, by: repair}`"]
+            - ["`tool/result`", "each assistant tool call with no result", "`TOOL_NOT_STARTED` if no `tool/call` was recorded, else `TOOL_OUTCOME_UNKNOWN`; or the tool's own answer"]
+            - ["`step/end`", "an open step", "`{turn, step}`"]
+            - ["`turn/end`", "the open turn", "`reason: {kind: interrupted}`"]
+      - title: A synthesized tool result
+        note: |
+          Timestamps are the last real event's, never `now()`. `sourceEventSeqs`
+          cites the `tool/call` when there was one.
+        lang: json
+        code: |
+          {"type": "tool/result", "seq": 412, "time": 1794836401220,
+           "data": {"turn": 7, "step": 2,
+                    "message": {"id": "interrupted-tool-result-toolu_01-412", "role": "user",
+                                "source": {"kind": "tool", "callId": "toolu_01"},
+                                "content": [{"type": "tool-result", "toolCallId": "toolu_01", "isError": true,
+                                             "content": [{"type": "text", "text": "The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. ..."}]}]},
+                    "error": {"name": "ToolOutcomeUnknownError", "code": "TOOL_OUTCOME_UNKNOWN"}},
+           "surfaceOp": "append", "sourceEventSeqs": [409]}
+      - record: turn/end
+        example: |
+          {"type": "turn/end", "seq": 414, "time": 1794836401220,
+           "data": {"turn": 7, "reason": {"kind": "interrupted"}}}
+      - record: session/resumed
+        example: |
+          {"type": "session/resumed", "seq": 415, "time": 1794839911034,
+           "data": {"events": 412, "interrupted": true, "closed": 3, "turn": 7}}
+      - title: What a reader gets from session/resumed
+        struct: ph.persistence.resume:Resumption
+      - title: What a tool may say about its own call
+        note: |
+          Asked at deployment scope, mounted, before repair runs. A tool that
+          declares `reconcile` answers done (with the result it vouches for) or
+          not done. The answer is marked `meta: {reconciled: true}`.
+        struct: ph.persistence.repair:CallOutcome
+      - title: Durability
+        tone: durable
+        list:
+          - "Repair is a pure fold. The same log repairs the same way in every process, and a balanced log gets no closers, so reopening does not grow it."
+          - "`durable=len(events)` tells the store that only the stored events are held. The closers are owed and written at the next flush, so a log stops reading as crashed after its first reopen."
+          - "`session/resumed` is a record, so a front end that did not perform the resume learns of it the same way (`resumption_of`)."
+          - "`stored_session` opens a log under its lease without resuming it, to add a record while nothing runs (`phern profiles adopt`)."
+      - title: Limits
+        tone: limit
+        list:
+          - "A turn parked on a person is closed `interrupted` and its ask is not put again. The model reads `TOOL_NOT_STARTED` and asks again."
+          - "Tools scoped to an agent are not seen at deployment scope. Their calls keep `TOOL_OUTCOME_UNKNOWN`."
+          - "`TurnEndReason(kind=\"interrupted\")` is never constructed as a dataclass; it exists only as this wire payload."
+          - "A log whose ancestor is missing, or that holds an open intent of an undeclared kind, is refused and not opened."
+      - links:
+          - {to: "topic:replay", label: "The whole restart, step by step"}
+          - {to: "node:journal", label: "Intent kinds and their closers"}
+
+  environment:
+    title: The session's environment, in its log
+    summary: |
+      A session records the environment it runs in. `profile/base` holds every
+      environment row of the profile it started on, each through its plugin's
+      config model so the defaults are in it too. Each later change is a
+      `profile/override`. A restart mounts the root from those records, not from
+      whatever the named profile file says today.
+    blocks:
+      - title: The base
+        struct: ph.session_profile:ProfileBase
+      - record: profile/base
+        example: |
+          {"type": "profile/base", "seq": 0, "time": 1794836581400,
+           "data": {"name": "rlm",
+                    "rows": [{"id": "tools", "name": "tools", "config": {"mode": "native"}, "disabled": false},
+                             {"id": "tool-todo", "name": "tool-todo", "config": null, "disabled": true}],
+                    "sources": [{"layer": "<the person's profile layer>", "entries": [{"id": "tool-todo", "disabled": true}]}],
+                    "phVersion": "0.11.0"}}
+      - title: One override
+        struct: ph.session_profile:Override
+      - record: profile/override
+        example: |
+          {"type": "profile/override", "seq": 58, "time": 1794836701115,
+           "data": {"row": "tool-todo", "entry": {"id": "tool-todo", "disabled": false},
+                    "source": "cli", "command": "--patch {id: tool-todo, disabled: false}"}}
+      - title: The records beside them
+        table:
+          columns: [record, means]
+          rows:
+            - ["`profile/adopted`", "a version of the named profile was accepted; the next start makes it the base"]
+            - ["`profile/declined`", "a version a person said no to; it is not offered again"]
+            - ["`profile/withdrawn`", "an adopted version a start could not mount, taken back, with the reason"]
+            - ["`profile/override-cleared`", "an override that stops applying"]
+            - ["`profile/refused`", "records that could not be written, named by seq, so the fold passes over them"]
+            - ["`profile/saved`", "the environment was saved as a named profile"]
+      - title: Written before it takes effect
+        tone: durable
+        list:
+          - "`record_base` appends the base and awaits the write before the agent's first step. If it cannot be written the start is refused (`OverrideNotRecorded`)."
+          - "`override(ctx, session, row_id, config, source=, command=)` is the one door for a live change: append, write, and only then `Mount.reconfigure`. `/sandbox`, `/model` and start options go through it."
+          - "A value the session already runs with records nothing."
+          - "Each root is mounted from `rebuilt(base, host, overrides, then=start options)`: the log's environment over the host's own deployment and presentation rows."
+      - title: What a sub-agent gets
+        tone: secure
+        list:
+          - "A sub-agent's log has no base. A child runs on its root's mount, so the root's base answers for it."
+          - "A fork or a segment is a session of its own and inherits the base in its prefix."
+      - title: Limits
+        tone: limit
+        list:
+          - "Only environment rows. Deployment and presentation rows are the host's and are composed as they are now."
+          - "On a live mount only a config can be changed. An override that adds, removes or switches a row waits for the next start that can read the log."
+          - "A named profile that moved is found only at a start, and taken only on purpose (`/profile use`, `phern profiles adopt`, or a yes to the ask)."
+          - "A setting is recorded as the value it runs with, `${env:...}` interpolated. A row's config names a credential and never holds one."
+      - links:
+          - {to: "ph-core#node:profile", label: "Profiles and rows in ph-core"}
+          - {to: "edge:opened", label: "What opened() does at each start"}
+
+  supervisor:
+    title: The daemon supervisor
+    summary: |
+      One task per root, in one process (`ph_app/daemon/supervisor.py`). A root
+      is a mounted profile, a session, an agent and a queue. The supervisor does
+      not keep roots alive across a restart; it keeps a small index of which
+      roots still owe work, and a resume pass mounts those through the ordinary
+      `start`, which is the whole of a resume.
+    blocks:
+      - title: Bringing roots back
+        lang: bash
+        code: |
+          phern service start                    # spawn `phern daemon --resume-owed`, wait for ready, run the pass
+          phern daemon --resume-owed             # the pass, run by the daemon once its socket is open
+          phern agents resume --all              # the pass, from a client
+          phern agents resume <id> --force       # one root, even with a spent ladder
+          phern service status                   # exit 0 ready, 1 down, 2 degraded
+      - title: Why a root is on the index
+        struct: ph.seams.live_index:LiveEntry
+      - title: The holds
+        table:
+          columns: [hold, means]
+          rows:
+            - ["`turn`", "the agent is mid-turn, or the log ends inside one"]
+            - ["`inbox`", "a prompt is pending that no turn has claimed"]
+            - ["`goal`", "an `/autonomous` goal is open"]
+            - ["`children`", "a sub-agent of this root is still live in its own log"]
+            - ["`failed` (beside the holds)", "the ladder is spent; a pass skips it unless forced"]
+            - ["`damaged` (beside the holds)", "a log beneath the root will not read"]
+      - title: What a start does with a cut-short turn
+        table:
+          columns: [the turn was owed to, what happens]
+          rows:
+            - ["nobody at a keyboard: a schedule, a child's notice, an earlier continuation", "continued: a notice is delivered for the next turn"]
+            - ["a person, and a goal is open", "continued"]
+            - ["a person", "left closed `interrupted`, unless `--continue-interrupted`"]
+            - ["a turn cut before it claimed a prompt", "nothing sent; the prompt is still in the inbox and the ring runs it"]
+      - title: The continuation notice
+        note: |
+          The message handed to `agent.followup` (a generated `id` is added). It is
+          logged as a `user/message` whose source is the plugin, so a transcript
+          draws it as a notice and not as the person's words.
+        lang: json
+        code: |
+          {"role": "user",
+           "source": {"kind": "plugin", "plugin": "ph_app.daemon.supervisor", "form": "notice",
+                      "summary": "the turn was cut short by a restart; continuing it"},
+           "content": [{"type": "text", "text": "[the harness stopped while you were working, so the turn above was cut short; this is attempt 1 of 3. Anything you finished is in your transcript — continue from there rather than starting over, and check a tool call whose outcome reads as unknown before repeating it.]"}]}
+      - title: The ladder's state
+        struct: ph_app.daemon.recovery:Recovery
+      - title: Durability
+        tone: durable
+        list:
+          - "Every part of the ladder is folded from the log at root start (`recovery_of`), so a daemon that died mid-ladder does not start the count over."
+          - "Passivation measures idleness from the log's own last event, so the clock survives a restart."
+          - "A verb that changes a root is flushed before the daemon replies, with its `client/command` key, so a retried verb is answered from the log."
+          - "The repair is flushed before any work, so a second kill does not find the same open turn again."
+      - title: Roots are self-contained
+        tone: secure
+        list:
+          - "Each root has its own `Context`, session store and lease. One root's crash is caught and retried in its own log."
+          - "A sub-agent's id is refused as a root (`not_a_root`): only its root's mount writes that log."
+      - title: Limits
+        tone: limit
+        list:
+          - "The ladder retries the root's task, not a failed turn. A `turn/end` with `error` is final for that turn."
+          - "A passivated root is resumable but answers `no_such_session` to status calls until something starts it."
+          - "A new daemon does not mount every stored root on its own. It mounts a root whose schedule is due, and the owed roots when asked (`phern agents resume --all`, `phern daemon --resume-owed`); any other waits for a client (DESIGN.md §5.4, `NON_GUARANTEES`)."
+      - links:
+          - {to: "phern#node:supervisor", label: "The supervisor on the phern page"}
+          - {to: "topic:endings", label: "Each way a process ends"}
+
+  children:
+    title: Sub-agents
+    summary: |
+      Each session owns its log. A child records what it was asked, each start,
+      its ending and its deletion in its own log, and nothing about it is written
+      to its parent's. A parent, the resume sweep, budgets and front ends derive
+      a child's state by reading the child's log, so there is no second account
+      to keep in step across a crash.
+    blocks:
+      - title: The records, in the child's log
+        table:
+          columns: [record, when]
+          rows:
+            - ["`subagent/admitted`", "the delegation: prompt, model, access granted. Flushed before the child's gate opens."]
+            - ["`subagent/status`", "`queued`, `running`, `done`, `error`, `canceled`. A restart's `running` carries `cause: resumed` and is on disk before the attempt."]
+            - ["`subagent/returned`", "the value of a child with an `output`"]
+            - ["`subagent/deleted`", "a tombstone. The log is kept; the child is never rehydrated."]
+            - ["`credential/needed`, `credential/supplied`", "the child is held for a credential, then released"]
+      - record: subagent/status
+        example: |
+          {"type": "subagent/status", "seq": 96, "time": 1794839911200,
+           "data": {"status": "running", "cause": "resumed"}}
+      - title: What the sweep decides, child by child
+        table:
+          columns: [the child's log says, what happens]
+          rows:
+            - ["`queued`: admitted, never ran", "readmitted and driven; nothing was claimed or spent"]
+            - ["`running`: interrupted mid-turn", "its turn is closed, its task is presented again with the cut-short note, and the restart is counted"]
+            - ["interrupted 3 times since its last answer", "ended in its own log, saying how many times; the parent is told"]
+            - ["no provider mounted can start it", "ended; its transcript is on disk"]
+            - ["its route names a credential the deployment lacks", "held with `credential/needed`; no start is counted"]
+            - ["ended, and the parent's inbox lacks its notice", "the notice is delivered now"]
+            - ["ended, with unfinished descendants", "each descendant is tombstoned in its own log"]
+      - title: On a clean stop
+        tone: durable
+        list:
+          - "A mount going away suspends its children (`rlm-subagent-provider`'s own disposer). A suspended child keeps a live row, `queued` with the reason, its inbox, and no tombstone."
+          - "The next start's sweep readmits it. No rung of its ladder is spent, because it did not crash."
+          - "A child's ending is written to its own disk before the result is handed to the parent (`record_ended`)."
+      - title: What a child comes back with
+        tone: secure
+        list:
+          - "The ceiling is re-derived from `subagent/admitted` (`check_grant`, `grant_for`, `_enforce`). A child comes back no wider than it was admitted."
+          - "The spawn guards do not run again: they gate new work, and a cap would count the child against itself."
+          - "Every sub-agent log is opened through `open_session`, so it is leased like a root's."
+      - title: Limits
+        tone: limit
+        list:
+          - "A deleted child is never rehydrated. The tombstone is the record."
+          - "A child is live only in a log that reached disk. A child's header is written at its first flush; the admission flush is what makes it visible to the next process."
+          - "A child log that will not read is isolated and listed as `damaged` on the root's index entry; the root is not held hostage by it."
+          - "`subagents` ships with no provider in `base.yaml`. Without `rlm-subagent-provider` (or another), an unfinished child is ended at the sweep."
+      - links:
+          - {to: "edge:readmit", label: "The sweep, as a service call"}
+          - {to: "edge:own-log", label: "Why the parent's log holds nothing about a child"}
+          - {to: "security.html", label: "What a sub-agent may and may not do"}
+
+edges:
+  append:
+    transport: call
+    summary: |
+      A module calls its own writer: `_LOG.append(session, type, data, surface)`.
+      The writer checks the type against what its owner may write, then the
+      session validates and freezes the payload, stamps `seq` and `time`, and
+      appends. It returns the event. No I/O happens.
+    blocks:
+      - title: The envelope
+        struct: ph.session.events:SessionEvent
+      - title: On disk
+        note: camelCase, absent optional fields omitted. `ignorable` is stamped from the type's declaration.
+        lang: json
+        code: |
+          {"type": "tool/call", "seq": 409, "time": 1794836399871,
+           "data": {"turn": 7, "step": 2, "callId": "toolu_01", "name": "bash", "arguments": "{\"command\": \"make test\"}"}}
+      - title: Surface placement
+        note: Required on `user/message`, `assistant/message` and `tool/result`, and forbidden on every other type.
+        struct: ph.session.events:SurfaceIntent
+      - title: Batches
+        note: Events appended together by `Session.batch()` are kept or dropped together by a reader.
+        struct: ph.session.events:BatchRef
+      - title: Refusals
+        tone: limit
+        list:
+          - "`LogWriteError`: the type is not this writer's, or the payload carries `revises`."
+          - "`UnknownEventTypeError`: this build could not read the type back."
+          - "A payload that is not an object, or not lossless JSON, is refused by the session."
+
+  intent-pair:
+    transport: log
+    summary: |
+      The journal appends the opening record through the declaring leaf's writer
+      and, for a `durable` kind, awaits a flush before returning the claim. The
+      settle is a second record that carries the key back. Nothing else is
+      stored: what is open is a fold over those two types.
+    blocks:
+      - title: A pair
+        lang: json
+        code: |
+          {"type": "approval/asked",   "seq": 77, "time": 1794836390000, "data": {"toolName": "bash", "callId": "toolu_01", "...": "..."}}
+          {"type": "approval/decided", "seq": 78, "time": 1794836393500, "data": {"toolName": "bash", "outcome": "allowed-once", "askSeq": 77, "callId": "toolu_01"}}
+        note: |
+          `askSeq` names the ask it decides. `outcome` is the answer's one word;
+          the full payloads carry more than is shown.
+      - title: The same pair, settled by repair
+        lang: json
+        code: |
+          {"type": "approval/decided", "seq": 78, "time": 1794836390000,
+           "data": {"toolName": "bash", "outcome": "interrupted", "askSeq": 77, "callId": "toolu_01",
+                    "automatic": true, "unsettled": {"why": "outcome-unknown", "by": "repair"}}}
+      - title: How a key is read
+        table:
+          columns: [kind, opening key, the settle carries it as]
+          rows:
+            - ["asks, shell, upload, restore, slash command", "the opening record's own `seq`", "`askSeq`, `commandSeq`, `uploadSeq`, `restoringSeq`, `runSeq`"]
+            - ["Code Mode dispatch", "`subCallId`", "`subCallId`"]
+            - ["tool effect", "`key` (tool name and effect key)", "`key`"]
+            - ["daemon verb", "`command`", "`command`"]
+            - ["credential hold", "`key`, which is `<holder>:<name>`", "`key`"]
+      - title: Failure
+        tone: limit
+        list:
+          - "`IntentNotDurable`: the opening record could not be written, so no claim is handed out and the act does not happen."
+          - "`IntentError`: the kind is undeclared, the payload carries no key, or a closer does not settle its own key."
+
+  flush:
+    transport: bus
+    mode: parallel
+    summary: |
+      `ctx.sessions.flush(session)` dispatches `session/flush` once per session
+      in the lineage, ancestors first, and awaits every backend. Then it emits
+      `session/durable` with how much of the log is now held. A flush that raises
+      emits `session/unwritten` for that session and every one after it.
+    blocks:
+      - event: session/flush
+      - event: session/durable
+      - event: session/unwritten
+      - title: Who calls it
+        table:
+          columns: [caller, when]
+          rows:
+            - ["`session-checkpoint-policy`", "before a model request, before a tool body, after a rejected step, as it unwinds"]
+            - ["`ctx.intents`", "before handing out a `durable` claim"]
+            - ["`ph.session_profile`", "before a base or an override takes effect"]
+            - ["`ph.seams.subagents`", "a child's admission before its gate opens; its ending before the parent is told"]
+            - ["the supervisor", "before a verb replies; after a repair; around each ladder record; on passivation"]
+            - ["an upload", "before its handle is cached"]
+      - title: Failure
+        tone: limit
+        list:
+          - "`flush` raises; `written` answers `False` and logs. Cancellation propagates either way and is not a failed write."
+          - "A failed flush owes the same events again. Nothing is dropped from a queue, because there is no queue."
+          - "The daemon marks a root unwritten on `session/unwritten` and readiness answers no until a later flush succeeds."
+      - links:
+          - {to: "dispatch#node:parallel", label: "The parallel dispatch mode"}
+
+  barriers:
+    transport: bus
+    mode: serial
+    summary: |
+      The checkpoint policy does not write. It listens on three serial events
+      and, inside each, awaits `ctx.sessions.flush(session)`. Because the
+      dispatch is serial and awaited, the dispatcher (the model call, the tool
+      pipeline, the loop) cannot go on until the flush has returned.
+    blocks:
+      - event: llm/send
+      - event: tools/body
+      - event: agent/step-rejected
+      - title: Why these events and not the waterfalls beside them
+        text: |
+          `llm/send` fires once every `llm/stream` listener has had its say, and
+          `tools/body` once every `tools/execute` listener has. A barrier on the
+          waterfall itself would run before a listener registered after it, and
+          what that listener appended would reach the model or the tool body
+          unflushed.
+      - title: Failure
+        tone: limit
+        list:
+          - "A flush that raises inside `llm/send` or `tools/body` propagates: the adapter or the tool body is not invoked."
+          - "A session-less request or execution is passed through."
+
+  sync:
+    transport: file
+    summary: |
+      The backend writes what the log holds past its cursor, in a worker thread
+      so the event loop is not held. For JSONL that is the header line when owed
+      and one line per event, appended to an `O_APPEND` descriptor and
+      `fsync`ed; the directory is synced on the write that creates the file.
+    blocks:
+      - title: One flush of a JSONL log
+        lang: python
+        code: |
+          tail = _settle_tail(path)                       # first flush only: finish or remove a torn tail
+          cursor = tail.last_seq + 1                      # what the file holds decides, not the caller
+          owed = session.events_from(cursor)
+          _append_and_sync(path, records, fresh=header_owed)   # write_all, fsync
+          cursor = owed[-1].seq + 1                       # only after the write returned
+      - title: All or nothing
+        tone: durable
+        list:
+          - "A write that fails part-way is cut back to the file's earlier length before the failure is reported, so the retry appends to a clean end."
+          - "A process that dies mid-write leaves a torn last line. A fragment that is a whole record gets its newline; anything else is removed. The reader applies the same two rules."
+          - "A batch cut short at the tail is removed whole, by the reader and by the writer."
+          - "Turso: one transaction per flush, WAL with `synchronous=FULL`, rolled back on failure."
+      - title: Limits
+        tone: limit
+        list:
+          - "A malformed line that is not the last is damage, and the log is refused until it is repaired."
+          - "The promise is the file system's `fsync`."
+
+  kernel-blobs:
+    transport: file
+    summary: |
+      A variable too large for its record goes to the spill store. The blob is
+      written and synced first, then the `kernel/snapshot` naming it is appended
+      to the log, so no record on disk names a blob that is not there.
+    blocks:
+      - title: The frame the guest sends
+        frame: snapshot
+      - title: The frame that puts variables back
+        frame: restore
+      - record: kernel/snapshot
+      - title: Failure
+        tone: limit
+        list:
+          - "A blob the store could not take is recorded as a `clear` saying so."
+          - "A blob written and never named (a death between the two) is collected by the spill sweep on `session/loaded`."
+          - "A record naming a blob that is gone is reported by the sweep, and `kernel/restored` lists the variable as failed."
+
+  spawn-journal:
+    transport: file
+    summary: |
+      Every spawn through `ctx.subprocess` and every kernel start is appended to
+      `$PH_RUNTIME/processes.jsonl` with the pid and its start token, and
+      forgotten when the child is reaped. The next pH start reads the journal
+      and kills the entries that are still alive and still match.
+    blocks:
+      - title: One journal line
+        note: |
+          Written and closed before the child can do anything. `startToken` is the
+          kernel's record of when that pid started; `argv` is a digest, not the
+          command line. The owner is recorded too, so a sweep leaves alone a child
+          whose owning pH process is still running.
+        lang: json
+        code: |
+          {"op": "spawn", "pid": 48213, "startToken": "...", "argv": "<digest>",
+           "label": "git", "owner": 47990, "ownerToken": "..."}
+      - title: What a sweep reports
+        struct: ph.orphans:SweepReport
+      - title: Rules
+        tone: secure
+        list:
+          - "Killed only when the start token still matches the pid."
+          - "Unreadable token: reported `unverifiable`, not killed."
+          - "The hard stop kills what this process still owns in the journal (`kill_owned`) before it exits."
+      - title: Limits
+        tone: limit
+        list:
+          - "Not `fsync`ed. A journal the host cannot read or lock is warned about and left; a mount is not refused over it."
+
+  read-back:
+    transport: file
+    summary: |
+      `read_if_stored(store, id)` returns the header and the events, dense from
+      `seq` 0 with the fork chain followed, or `None` when nothing is stored
+      under that id. It runs off the event loop. Reading goes through the
+      protocol, not a filename, so a database backend resumes the same way.
+    blocks:
+      - title: What the reader tolerates
+        table:
+          columns: [damage, what the reader does]
+          rows:
+            - ["an unterminated last line", "dropped: no flush ever reported it written"]
+            - ["a batch cut short at the tail", "dropped whole"]
+            - ["a malformed line before the last", "`LogDamaged`; the log is not opened"]
+            - ["an ancestor missing, looping or with a gap", "`LineageError`, naming the ancestor"]
+            - ["an unknown required type", "the seed is refused; an ignorable one is skipped"]
+            - ["a header of another format version", "refused, not migrated"]
+      - title: A listing row
+        struct: ph.persistence.protocol:StoredSession
+      - title: Other readers of the same files
+        list:
+          - "`ph_app.stored.load_session` reads a log with nothing mounted, repaired in memory, for the trajectory viewer and exports."
+          - "`SessionArchive.holding(types, gate=)` reads a few record types out of every log, for rebuilding the schedule index."
+          - "`descendants_of(parent_id, family)` lists every stored session beneath a parent in one directory read."
+
+  opened:
+    transport: call
+    summary: |
+      `open_session` calls `opened(ctx, session)` for every root, new or
+      resumed, before anything runs in it. It turns the mount the host built
+      into records in the log, and brings the mount to what the log says.
+    blocks:
+      - title: In order
+        table:
+          columns: [step, what, record]
+          rows:
+            - ["0", "a version adopted since the session last ran becomes its base", "`profile/base` and a `profile/override-cleared` per cleared override, one batch"]
+            - ["1", "a session with no base gets one", "`profile/base`"]
+            - ["2", "each `--patch` of this start that differs from what the log already says is logged", "`profile/override` with `source: cli`"]
+            - ["3", "each row an override names is set to the value the log's composition gives it", "none"]
+      - record: profile/override
+      - title: Failure
+        tone: limit
+        list:
+          - "`OverrideNotRecorded`: a base or a start option could not be written. The start is refused and the session is let go."
+          - "A sub-agent's log is skipped: it runs on its root's mount."
+          - "Step 3 is a no-op for a root mounted from its own log. It is the fallback for a store the host could not read before mounting."
+
+  resumed-root:
+    transport: call
+    summary: |
+      `Supervisor.start(root_id)` mounts the root's profile and calls
+      `open_session`, which hands back a live `Session` seeded with the stored
+      log and its closers. The supervisor then reads what it needs from that
+      session: the resume record, the ladder, the inbox.
+    blocks:
+      - title: What the supervisor reads off the session
+        table:
+          columns: [call, answers]
+          rows:
+            - ["`resumption_of(session)`", "was this a crash (`interrupted`), and which turn was cut"]
+            - ["`cut_turn_owner(session)`", "`person`, `unattended`, or `None` when the cut turn owed nobody"]
+            - ["`interrupted_resumes(session)`", "how many restarts in a row cut a turn short since the last answer"]
+            - ["`recovery_of(session)`", "attempts and `failed`, folded from `supervisor/*` records"]
+            - ["`logged_environment(session)`", "the base and the overrides in force"]
+      - title: The resume record
+        struct: ph.persistence.resume:Resumption
+      - title: Refusals
+        tone: limit
+        list:
+          - "`session_already_active`: another process holds the lease."
+          - "`not_a_root`: the id names a sub-agent's log."
+          - "`root_start_abandoned`: the daemon stopped before the mount finished; the build unwinds itself."
+          - "A root held for a credential or a profile decision is mounted and not driven."
+
+  readmit:
+    transport: service
+    summary: |
+      Every host calls `ctx.subagents.resume_children(agent, retry_limit=3)`
+      once a root has an agent: the daemon, rpc mode and the one-shot modes. It
+      loads each child's state from the child's log and decides, child by child,
+      whether it runs again, is held, or is ended. It returns the run ids it
+      revived.
+    blocks:
+      - title: The call
+        lang: python
+        code: |
+          revived = await ctx.subagents.resume_children(
+              agent, retry_limit=CHILD_RETRY_LIMIT)
+          # retry_limit has no default: the number of attempts is the host's policy
+      - title: What a revived child is told
+        note: The same wording a continued root gets (`cut_short_note`).
+        code: |
+          [the harness stopped while you were working, so the turn above was cut short;
+          this is attempt 2 of 3. Anything you finished is in your transcript — continue
+          from there rather than starting over, and check a tool call whose outcome reads
+          as unknown before repeating it.]
+        lang: text
+      - record: subagent/status
+      - record: subagent/admitted
+      - title: Failure
+        tone: limit
+        list:
+          - "One child that cannot be rebuilt is ended and logged; the sweep goes on."
+          - "A provider that declines is an ending too."
+          - "A crash mid-sweep leaves each child decided or undecided, and the next start decides the undecided the same way."
+
+  own-log:
+    transport: log
+    summary: |
+      Not a write into the parent's log. A child is a session of its own: its
+      records go through the same writers, barriers and store, into its own
+      file in the root's family directory, under its own lease.
+    blocks:
+      - title: Where a child's log is
+        lang: text
+        code: |
+          $PH_HOME/sessions/<family>/<parent id>-<run id>.jsonl
+          header: {"parentSession": "<parent id>", "origin": "subagent", "family": "<the root's family>", "delegationDepth": 1}
+        note: Field names are `SessionHeader`'s; the file name is built by `child_session_id(parent_id, run_id)`.
+      - title: Why
+        tone: durable
+        list:
+          - "A parent's copy of a child's state was a second account that four separate flush rules existed to keep in step. With one account there is nothing to reconcile after a crash."
+          - "A parent reads a child's state with `read_own(..., types=CHILD_EVENT_TYPES)`, which parses only the records the fold needs."
+          - "Since format version 3 a parent's log holds no `subagent/*` record."
+      - links:
+          - {to: "node:children", label: "How a child comes back"}

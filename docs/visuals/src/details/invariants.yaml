@@ -1,0 +1,399 @@
+intro: |
+  Five properties pH carries from the harness it was ported from. Read each column
+  top to bottom: the invariant, the mechanism in ph-core that makes it hard to
+  violate, and what holds the mechanism to it. Click any box for the detail,
+  including where the invariant is imperfect.
+
+topics:
+  - id: at-runtime
+    title: Which invariants are checked while it runs
+    summary: |
+      An invariant row registers what it promises with `ctx.invariants`. Some are
+      enforced inline, on the path they govern; the rest are polled. `phern doctor`
+      prints the list for a profile, so a deployment that mounts fewer rows shows
+      fewer promises.
+    blocks:
+      - title: What phern doctor prints (rlm profile)
+        lang: text
+        code: |
+          model-visible-logged  enforced inline · every loop request's messages are the session's own derivation
+          session-log           holds · every projection a session keeps of its log equals the fold of that log
+          goal-fold-cache       holds · every cached goal table equals the fold of the log it projects
+          harness-fold-cache    holds · every cached harness state equals the fold of the log it projects
+          intent-fold-cache     holds · every cached intent index equals the fold of the log it projects
+          limits-fold-cache     holds · every cached limit count equals the fold of the log it projects
+          sandbox-fold-cache    holds · every cached sandbox refusal count equals the fold of the log it projects
+          schedule-fold-cache   holds · every cached schedule table equals the fold of the log it projects
+          subagent-fold-cache   holds · every cached subagent state equals the fold of the log it projects
+          tool-view-cache       holds · a memoized tool view equals the view the registry would build now
+          skill-reach-cache     holds · a memoized skill reach equals the set the registry would build now
+          scope-unwind          holds · no disposed scope is still held by a live one
+          scope-teardown        holds · every effect a scope registered was disposed when it unwound
+          harness-projection    holds · harness_state.json equals the harness/refined fold
+      - title: One registered invariant
+        struct: ph.seams.invariants:Invariant
+      - title: The registry row
+        row: invariants
+      - title: Limits
+        tone: limit
+        list:
+          - "Every invariant row is optional. \"pH enforces I3\" is true of a profile that mounts `agent-loop-invariant`, not of pH."
+          - "An inline invariant is reported as *enforced inline*, never as *holds*: there is no state between requests to poll."
+          - "`phern doctor` mounts a fresh profile, so *holds* there says the checks run. The daemon is where they have live state to look at: it checks each root once the root settles after a write."
+          - "A check that raises counts as a violation, not as a dropped line."
+  - id: numbering
+    title: I1 to I5, and the other numbers
+    summary: |
+      Three numbering series exist in `plans/`, and they collide. This page is the
+      first five of the second series.
+    blocks:
+      - table:
+          columns: [series, where, what]
+          rows:
+            - ["1 to 5", "`Python_Harness_Port_Plan.md` §2", "the five on this page"]
+            - ["I1 to I8", "`Implementation_Plan.md`", "those five, plus three pH added"]
+            - ["I-1 to I-9", "`Implementation_Plan.md`", "a separate hardening register: runtime directory, credentials, session leases, wire casing"]
+      - title: The three pH added
+        table:
+          columns: [id, statement, where it shows]
+          rows:
+            - ["I6", "every projection equals its fold", "`session-invariant`, `tools-invariant`, `skills-invariant`, the `*-fold-cache` lines above"]
+            - ["I7", "the knowledge layer may only refer to capability that exists", "a skill cannot install itself or arm a row; see [self-steering](self-steering)"]
+            - ["I8", "containment is not interception", "the sandbox bounds what a process can reach; rules on `ctx.fs` bound only calls through the seam; see [security](security)"]
+
+nodes:
+  i1:
+    summary: |
+      There is no core with plugins bolted on. The agent loop, the model adapters,
+      the tool registry, the session store and the persistence backend are all rows
+      in a profile, mounted by the same loader. Any of them can be replaced without
+      forking anything else.
+    blocks:
+      - title: Where it shows
+        list:
+          - "A profile is an ordered list of rows; a patch addresses one by id to reconfigure, remove or replace it."
+          - "Two session backends, JSONL and Turso, satisfy one `SessionPersistence` protocol. Swapping is removing one row and inserting another."
+          - "A bundle another distribution ships reaches a profile through the `ph.bundles` entry-point group, the same way the shipped ones do."
+      - title: Swapping a row that ships
+        note: An entry with both `id:` and `name:` is a row, not a patch, so a swap is a removal and an insertion.
+        code: |
+          # $PH_HOME/daemon.yaml
+          rows:
+            - id: session-persistence
+              remove: true
+            - insert:
+                - id: session-persistence
+                  name: session-persistence-turso
+      - title: Where it is imperfect
+        tone: limit
+        list:
+          - "`phern` is not a plugin. The CLI, the TUI and the daemon are a host; the invariant is about the harness, not the shell around it."
+      - links:
+          - {to: "ph-core#node:profile", label: "Profiles and rows in ph-core"}
+  i2:
+    summary: |
+      Whatever a scope registers or acquires is an effect of that scope. Disposing
+      the scope releases all of it, children first, with no cleanup list to keep.
+    blocks:
+      - title: Where it shows
+        list:
+          - "A child agent's worktree, its kernel subprocess, its jobs and its session lease are all effects of scopes. Disposing a scope anywhere in the tree releases everything beneath it."
+          - "A row that is unmounted takes its tools, commands, listeners and services with it."
+          - "A lint refuses `subprocess.Popen` and `tempfile.mkdtemp` outside the seams, so a resource cannot be acquired where nothing would release it."
+      - title: Where it is imperfect
+        tone: limit
+        list:
+          - "State outside the harness cannot be unwound. An email sent or a row written to another database stays, and a resumed session may ask for the action again."
+          - "What a tool can do about that: name its effect (`ToolDefinition.idempotency_key`) so a repeat is answered from the log, or say whether it happened (`ToolDefinition.reconcile`) so a resumed call reads done or not done."
+          - "A tool with neither still leaves the model an unknown after a crash. Every MCP tool is in that position today."
+          - "A fact that spans two logs is eventual, not atomic. Only the order holds: a message is on its receiver's disk before its sender is told."
+      - links:
+          - {to: "durability", label: "What survives a restart"}
+  i3:
+    summary: |
+      Anything that reaches a model request must be exactly the projection of the
+      session log. That equality is what makes the log a complete trace: what the
+      model saw can be audited, replayed and offloaded only if the log is the one
+      source it came from.
+    blocks:
+      - title: Where it shows
+        list:
+          - "Compaction, offloading and context injection cannot take a shortcut through the request builder. They append events, or the check fires on the next step."
+          - "A request that is not a conversation turn declares a `purpose`. The set of purposes is closed, so opting out is something the type can enumerate."
+      - links:
+          - {to: "ph-stabilize", label: "Rows that change what the model sees, by appending"}
+          - {to: "ph-clm", label: "The model editing its own context, as surface replaces"}
+  i4:
+    summary: |
+      The log keeps every event and is never rewritten. What changes is the
+      surface: the ordered list of log entries the model's history is built from.
+      An entry either appends to the surface or replaces a range of it.
+    blocks:
+      - title: Two readers, one log
+        text: |
+          `derive_messages()` is what the model reads: the surface, in order.
+          `transcript()` is what the person reads, and it keeps what a
+          replacement shadowed, because someone scrolling back should still see
+          what they said.
+      - title: One log entry
+        struct: ph.session.events:SessionEvent
+      - title: A replacement
+        struct: ph.session.events:SurfaceReplace
+      - title: Where it shows
+        list:
+          - "Compaction replaces older history with a summary as one surface `replace`; the originals stay in the log."
+          - "A pasted blob is replaced by a preview the same way; the transcript still shows the paste."
+          - "An event's `data` is frozen when it enters the log, and `seq` is its index in the log."
+  i5:
+    summary: |
+      A seam is three separable parts: the definition (a service key and its
+      protocol), a provider, and the consumers. A consumer asks for the key and
+      never learns which provider answered.
+    blocks:
+      - title: Where it shows
+        list:
+          - "Containment tiers, code runtimes, compaction engines and persistence backends are provider swaps."
+          - "`ph-base` mounts several seams with no provider at all (`code_runtime`, `subagents`, `compaction`, `uploads`), because the answer differs per deployment."
+          - "Removing the worktree tier degrades every agent to a shared workspace with a recorded reason, rather than breaking a consumer."
+          - "A provider swap does not change the bytes the model has already seen, so the provider's prompt cache stays warm."
+      - title: Decline is not failure
+        text: |
+          A seam can answer "I could not serve this, and here is the code for
+          why" without that being an error. Otherwise every optional tier would
+          be a startup failure.
+      - links:
+          - {to: "ph-core#node:seams", label: "The seams in ph-core"}
+  m1:
+    title: The profile loader
+    summary: |
+      `ph.cordis.loader` composes YAML documents into rows, resolves each row's
+      plugin by name from the `ph.plugins` entry-point group, and mounts it on the
+      context tree. Activation waits for the services a row injects; file order
+      carries no load semantics.
+    blocks:
+      - title: One row
+        struct: ph.cordis.loader:Row
+      - title: What a plugin declares
+        struct: ph.cordis.plugin:PluginSpec
+      - title: One layer of a profile
+        struct: ph.cordis.loader:ProfileDocument
+      - title: The entry grammar
+        code: |
+          - id: fs                 # a patch: reconfigure the row with this id
+            config: {root: /tmp/scratch}
+          - id: tool-todo          # a patch: arm a row that ships off
+            disabled: false
+          - id: hitl               # a patch: drop a row
+            remove: true
+          - insert:                # add rows
+              - id: session-persistence
+                name: session-persistence-turso
+      - title: Notes
+        tone: limit
+        list:
+          - "A patch replaces a row's whole config; it does not merge. A list in config is replaced, not appended to."
+          - "Each row names what it `affects` (environment, deployment or presentation), and a layer a person writes may set one kind."
+  m2:
+    title: Context scopes and effects
+    summary: |
+      `ph.cordis.Context` is a tree. Each scope keeps the effects registered on it;
+      disposing a scope disposes its children first, then its own effects in
+      reverse. `owner_for(scope)` decides whose lifetime a registration made now
+      belongs to.
+    blocks:
+      - title: Who owns a registration
+        table:
+          columns: [case, owner]
+          rows:
+            - ["an explicit `scope=` is passed", "that scope"]
+            - ["a row's `apply` is running", "the row's activation scope"]
+            - ["neither", "this context, with a warning: it is the one branch that fails open"]
+      - title: The claiming helpers
+        text: |
+          Seams register through three helpers in `ph.seams._registry`:
+          `claim_key` (one entry under a name), `claim_entry` (one entry in a
+          list) and `claim_slot` (the single provider of a seam). Each returns a
+          disposer and records it on the owner, so a seam never hand-writes an
+          unregistration.
+  m3:
+    summary: |
+      `Session.derive_messages()` projects the ordered surface into the message
+      history a model request carries. It is the only place that history comes
+      from.
+    blocks:
+      - title: What is on the surface
+        text: |
+          Three record types are surface-eligible: `user/message`,
+          `assistant/message` and `tool/result`. Each must say how it enters,
+          with a `surface_op` of `append` or `replace`. Every other record is in
+          the log and never in a request.
+      - links:
+          - {to: "ph-core#node:session", label: "The session log in ph-core"}
+  m4:
+    summary: |
+      `SurfaceManager` keeps the ordered list of surface node seqs. It plans a
+      transition before committing it, so a refused append leaves the surface
+      untouched.
+    blocks:
+      - title: The four rules it enforces
+        table:
+          columns: [rule, what it means]
+          rows:
+            - ["contiguity", "an event's `seq` equals the next log index"]
+            - ["eligibility", "only a surface-eligible type carries a `surface_op`, and such a type must carry one"]
+            - ["provenance", "a replacement cites every node it shadows in `source_event_seqs`, each earlier than itself, no duplicates"]
+            - ["tool-result narrowing", "a `tool/result` replacement rewrites one node and may change only content, never the call id or whether it was an error"]
+      - title: Reproducible offline
+        text: |
+          `fold_surface(events)` replays a stored log through the same rules, so
+          a reader outside the process reaches the same surface.
+  m5:
+    summary: |
+      A service is published under a typed key (`ServiceKey`). A row lists the
+      keys it injects and is activated when they exist; a provider publishes with
+      `ctx.provide` or claims a seam's slot.
+    blocks:
+      - title: In a row
+        note: From `ph/seams/invariants.py`. A consumer row lists the key in `inject=[...]` and reads it with `ctx.require(INVARIANTS)`.
+        code: |
+          @plugin("invariants", affects="deployment")
+          async def apply(ctx: Context, config: None) -> None:
+              registry = InvariantRegistry(ctx=ctx)
+              ctx.provide(INVARIANTS, registry)   # published; unwinds with the row
+        lang: python
+      - title: Seams with and without a provider
+        text: |
+          Not every key has a provider slot. Some seams are contribution tables
+          (commands, diagnostics, invariants), some are answered by a waterfall
+          (approval, user questions), and some are plain services. `test_keys.py`
+          holds every `ctx.provide` in ph-core to a typed key in `ph.keys`, and
+          every key to a provider, in both directions.
+  c1:
+    summary: |
+      I1 has no runtime row. It is held by tests that walk the code.
+    blocks:
+      - table:
+          columns: [test, what it refuses]
+          rows:
+            - ["`ph-core/tests/test_layering.py`", "ph-core importing a front end: Textual, Rich, Typer, `ph_app`"]
+            - ["`phern/tests/test_app_layering.py`", "the app importing a bundle: it may name `ph-rlm` as a dependency, and may not `import ph_rlm`"]
+            - ["`ph-core/tests/test_keys.py`", "a `ctx.provide` without a typed key, or a key without a provider"]
+            - ["`ph-core/tests/test_registration_ownership.py`", "a seam whose scoped methods and provider slots are not classified"]
+      - title: Limits
+        tone: limit
+        list:
+          - "These run in CI, not in a session. Nothing at runtime reports I1."
+  c2:
+    summary: |
+      Declares the structural half of I2 and lets it be polled: it walks the scope
+      tree from the deployment root.
+    blocks:
+      - row: scope-invariant
+      - title: What it registers
+        table:
+          columns: [id, statement]
+          rows:
+            - ["`scope-unwind`", "no disposed scope is still held by a live one"]
+            - ["`scope-teardown`", "every effect a scope registered was disposed when it unwound"]
+  c3:
+    summary: |
+      Compares every loop request's messages with `session.derive_messages()` and
+      refuses the request when they differ. Identical, not equivalent and not a
+      superset.
+    blocks:
+      - row: agent-loop-invariant
+      - title: How it sees the request
+        text: |
+          It is a listener on `llm/stream`, prepended, so it sees what the loop
+          built before any other middleware can rewrite it. On a mismatch it
+          raises `ModelVisibleNotLoggedError`, naming both counts.
+      - event: llm/stream
+  c4:
+    summary: |
+      Declares that every projection a session keeps of its log equals the fold of
+      that log: the events snapshot, the surface order and the derived messages.
+    blocks:
+      - row: session-invariant
+      - title: Its siblings, for other caches
+        table:
+          columns: [row, statement]
+          rows:
+            - ["`tools-invariant`", "a memoized tool view equals the view the registry would build now"]
+            - ["`skills-invariant`", "a memoized skill reach equals the set the registry would build now"]
+            - ["`rlm-harness-invariant`", "`harness_state.json` equals the `harness/refined` fold"]
+      - title: Limits
+        tone: limit
+        list:
+          - "Polled, not checked on every append: the fold is one pass over the whole log, and running it per append would make the log's cost quadratic."
+          - "The latest-of-type folds behind `request_header()` and `request_context()` have a replay that is compared nowhere. That is the known exception."
+  c5:
+    summary: |
+      A provider is verified in four layers before and when it is mounted.
+    blocks:
+      - table:
+          columns: [layer, what it catches]
+          rows:
+            - ["static typing", "five provider protocols checked by mypy: workspace, sandbox, compaction engine, code runtime, subagent"]
+            - ["capability probes", "two `isinstance` checks that ask whether a provider can also do something: release a tree it did not create, re-attach a runtime to a settled child"]
+            - ["refusal at registration", "a code runtime that declares it persists a namespace must also declare kernel snapshots, or it is refused"]
+            - ["gate tests", "`test_registration_ownership.py` walks every module and refuses an unclassified seam"]
+
+edges:
+  i1-by:
+    transport: call
+    summary: The invariant is carried by the profile format itself, which has no way to spell a part that is not a row.
+    blocks:
+      - links: [{to: "node:m1", label: "The profile loader"}]
+  i2-by:
+    transport: call
+    summary: Every registration returns a disposer, and the disposer is recorded on the scope that owns it.
+    blocks:
+      - links: [{to: "node:m2", label: "Context scopes and effects"}]
+  i3-by:
+    transport: call
+    summary: The agent loop builds each request's messages by calling `derive_messages()`, and from nothing else.
+    blocks:
+      - links: [{to: "node:m3", label: "derive_messages"}]
+  i4-by:
+    transport: log
+    summary: A surface-eligible record must carry a `surface_op`. The append is validated before it lands.
+    blocks:
+      - struct: ph.session.events:SurfaceReplace
+  i5-by:
+    transport: service
+    summary: A consumer reaches a capability through `ctx.require(KEY)` and its signature, never through the provider's module.
+    blocks:
+      - links: [{to: "node:m5", label: "Service keys"}]
+  m1-held:
+    transport: call
+    summary: Held in CI by tests that import the entry points in a fresh interpreter and walk the import graph.
+    blocks:
+      - links: [{to: "node:c1", label: "The layering gates"}]
+  m2-held:
+    transport: service
+    summary: |
+      `scope-invariant` registers two checks with `ctx.invariants`; `phern doctor`
+      and the daemon's verifier call them.
+    blocks:
+      - links: [{to: "topic:at-runtime", label: "What is checked while it runs"}]
+  m3-held:
+    transport: bus
+    mode: waterfall
+    summary: |
+      Every model call crosses the `llm/stream` waterfall. The invariant row sits
+      first in it, compares the request with the log, and refuses by raising
+      instead of calling the next listener.
+    blocks:
+      - event: llm/stream
+  m4-held:
+    transport: service
+    summary: |
+      `session-invariant` registers `session-log` with `ctx.invariants`; its check
+      asks every live session for `stale()`.
+    blocks:
+      - links: [{to: "topic:at-runtime", label: "What is checked while it runs"}]
+  m5-held:
+    transport: call
+    summary: Checked when a provider registers, and before that by the type checker and the gate tests.
+    blocks:
+      - links: [{to: "node:c5", label: "The four layers"}]

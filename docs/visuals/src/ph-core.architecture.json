@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ph-core: the loop, the log and the seams",
+    "quality_profile": "showcase",
+    "legend": { "entries": { "external": { "label": "Outside ph-core" } } },
+    "views": [
+      { "id": "mounting", "label": "Mounting", "focus": ["profile", "cordis", "loop", "bundles", "seams"], "note": "The loader turns profile rows into plugins on one Context; bundles add providers for seams." },
+      { "id": "model-turn", "label": "A model turn", "focus": ["session", "loop", "llm", "adapters"], "note": "The loop derives the model's surface from the log and sends it through ctx.llm." },
+      { "id": "tool-call", "label": "A tool call", "focus": ["loop", "tools", "seams", "workspace"], "note": "A call passes the governed pipeline, then acts through a seam under the sandbox." },
+      { "id": "durability", "label": "Durability", "focus": ["loop", "session", "persistence"], "note": "Every state change is an appended event, written through one persistence row." }
+    ]
+  },
+  "components": [
+    { "id": "profile", "type": "frontend", "label": "Profile", "sublabel": "base.yaml, layers, patches", "pos": [270, 110], "size": [170, 64] },
+    { "id": "cordis", "type": "messagebus", "label": "ph.cordis", "sublabel": "Context, services, events", "pos": [520, 110], "size": [170, 64] },
+    { "id": "bundles", "type": "external", "label": "Bundle rows", "sublabel": "ph-rlm, ph-stabilize, others", "pos": [1020, 110], "size": [170, 64] },
+    { "id": "adapters", "type": "external", "label": "Adapter rows", "sublabel": "model wires, in phern", "pos": [40, 290], "size": [160, 64] },
+    { "id": "llm", "type": "backend", "label": "ph.llm", "sublabel": "ctx.llm: stream, decide", "pos": [270, 290], "size": [170, 64] },
+    { "id": "loop", "type": "backend", "label": "agent-loop", "sublabel": "the ReAct driver, a row", "pos": [520, 290], "size": [170, 64] },
+    { "id": "tools", "type": "backend", "label": "ph.tools", "sublabel": "registry, governed pipeline", "pos": [770, 290], "size": [170, 64] },
+    { "id": "seams", "type": "security", "label": "ph.seams", "sublabel": "fs, shell, sandbox, and more", "pos": [1020, 290], "size": [170, 64] },
+    { "id": "persistence", "type": "database", "label": "ph.persistence", "sublabel": "JSONL or Turso, leases", "pos": [270, 470], "size": [170, 64] },
+    { "id": "session", "type": "database", "label": "ph.session", "sublabel": "append-only event log", "pos": [520, 470], "size": [170, 64] },
+    { "id": "workspace", "type": "external", "label": "Workspace", "sublabel": "files and processes", "pos": [1020, 470], "size": [170, 64] }
+  ],
+  "connections": [
+    { "id": "profile-rows", "from": "profile", "to": "cordis", "label": "rows" },
+    { "id": "cordis-mounts", "from": "cordis", "to": "loop", "label": "mounts", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "loop-request", "from": "loop", "to": "llm", "label": "request", "variant": "emphasis" },
+    { "id": "llm-wire", "from": "llm", "to": "adapters", "label": "stream" },
+    { "id": "loop-tool-calls", "from": "loop", "to": "tools", "label": "tool calls", "variant": "emphasis" },
+    { "id": "tools-through-seams", "from": "tools", "to": "seams", "label": "ctx.fs", "variant": "emphasis" },
+    { "id": "loop-events", "from": "loop", "to": "session", "label": "events", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "session-durable", "from": "session", "to": "persistence", "label": "writes" },
+    { "id": "bundle-providers", "from": "bundles", "to": "seams", "label": "providers", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 70 },
+    { "id": "seam-effects", "from": "seams", "to": "workspace", "label": "confined", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 70 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Rows, not a core", "items": ["The loop, the log and the tool registry are rows in base.yaml", "A row activates when the services it injects exist", "Disposing a scope unwinds all it registered"] },
+    { "dot": "emerald", "title": "The log is the state", "items": ["Events are appended and never rewritten", "derive_messages projects what the model sees", "A restart resumes each session from its log"] },
+    { "dot": "rose", "title": "Governed effects", "items": ["Each call passes tools/pre-execute and post-execute", "A seam is a key, a provider and its consumers", "code_runtime and subagents ship with no provider"] }
+  ]
+}

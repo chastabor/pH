@@ -1,7 +1,7 @@
 # `ctx.permission_presets` — one name for a sandbox mode *and* an approval policy
 
 **Module:** `ph/seams/permission_presets.py` · **Row:** `permission-presets` ·
-**Consumers:** the TUI's posture picker, `hitl` (`ph-stabilize`)
+**Consumers:** the TUI's posture picker
 
 A user thinks in **postures** — "read-only", "let it work in here", "I know what
 I'm doing" — not in two independent knobs.
@@ -12,7 +12,16 @@ I'm doing" — not in two independent knobs.
 |---|---|---|---|
 | `read-only` | `read-only` | `ask` | Reads freely; every write or command asks first. |
 | `workspace-write` | `workspace-write` | `ask` | Writes inside the workspace without asking; anything outside asks. |
-| `danger-full-access` | `danger-full-access` | `never` | No confinement and no prompts. **The name is the warning.** |
+| `danger-full-access` | `danger-full-access` | `never` | No confinement and no prompts: a call that would have asked is refused instead. **The name is the warning.** |
+
+**`never` does not mean "approve everything".** Under it `ctx.approval` answers
+each ask at once as `rejected`, and records the pair (`approval/asked`,
+`approval/decided` with `automatic: true`) so the log says why. So in
+`danger-full-access` nothing is confined and nobody is prompted, and whatever a
+row still sends to an ask does not run: a `hitl` rule that matches, a
+`permissions-fs` rule set to `interrupt`. The model is told the call was
+rejected. A deployment that wants those calls to run takes the rule away, or
+sets `hitl`'s `mode` to `yolo`, rather than relying on the preset.
 
 Two knobs, one name. Setting them independently is still possible and is what a
 deployment does in a profile; a *person* switching posture mid-session picks a
@@ -27,9 +36,13 @@ ran under** — which is the question anyone reviewing a session asks first.
 
 That also makes it survive a resume: the posture is read from the log rather than
 held in memory, so a session reopened tomorrow is in the posture the person chose
-rather than the profile's default. `hitl` reads it for the same reason, and an
-earlier bug is why it is stated here — a preset that changed only the in-memory
-value silently reverted `interrupt_on` on the next mount.
+rather than the profile's default.
+
+`hitl` (`ph-stabilize`) does not read the preset. Its posture is its own record,
+`approval/mode` (`manual`, `auto`, `yolo`), kept apart on purpose: a preset
+writes `approval/policy`, and a posture riding that record would be reset by
+every switch of preset. The two meet only at `ctx.approval`, where `hitl`'s ask
+is answered under whatever policy the preset set.
 
 ## The surface
 
