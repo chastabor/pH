@@ -48,8 +48,8 @@ That process is the daemon, which polls itself; `phern doctor` will print this r
 as holding, truthfully, about a deployment it has just built.
 
 **Outstanding, not abandoned.** The ledger keeps the effects rather than their
-names, so a disposer released afterwards through the closure `add_disposer`
-handed out stops being reported. The invariant is about resources still held, not
+names, so a teardown released or dropped afterwards through the `Releaser`
+`add_disposer` handed out stops being reported. The invariant is about resources still held, not
 about the history of unwinds that went badly — a deployment that recovered should
 read as holding.
 
@@ -90,7 +90,7 @@ def abandoned(root: Context) -> list[str]:
     put right" is history the log already carries.
 
     **Two kinds, because they need different things from a reader.**
-    `outstanding` means somebody still holds the closure — the resource can be
+    `outstanding` means somebody still holds the releaser — the resource can be
     released, and naming it is actionable. `unreclaimable` means the last holder
     is gone, so nothing can ever call that disposer again; the resource is
     stranded until the process ends, and no amount of attention will change it.

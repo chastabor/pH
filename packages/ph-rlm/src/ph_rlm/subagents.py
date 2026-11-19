@@ -51,7 +51,7 @@ from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.characters import head
-from ph.cordis import Context, Disposer, InactiveScopeError, maybe_await, plugin
+from ph.cordis import Context, InactiveScopeError, Releaser, plugin
 from ph.json import JsonObject, JsonValue, dumps
 from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.types import PluginSource, create_user_message
@@ -175,6 +175,10 @@ class _Child:
     scope is disposed *by* the drive job's own last act, and a job that abandoned
     itself would report `canceled` for work that finished."""
     result: SubagentResult | None = None
+    teardown: Releaser | None = None
+    """The revocation registered on the parent's scope (`start`), which a parent going
+    away runs. Registered exactly while this provider holds the child: dropped unrun
+    when it is taken off (`_take`, `suspend`), since it would find nothing here."""
 
 
 @dataclass(slots=True)
@@ -331,6 +335,7 @@ class RlmChildProvider:
             # is the provider's to create and the ceiling is not the provider's
             # to remember — `rehydrate` below makes a second one, and forgot.
             scope=child_agent.ctx,
+            dispose=partial(self._dispose, run_id),
         )
         child = _Child(
             run=run,
@@ -363,11 +368,10 @@ class RlmChildProvider:
             # to answer — and `delete()` becomes "release it early" rather than a
             # second cleanup path that has to remember everything. That release is a
             # revocation; the seam's own (`run.dispose`) is not.
-            teardown = await parent.ctx.effect(
+            child.teardown = await parent.ctx.effect(
                 lambda: partial(self._release, run_id, PARENT_TEARDOWN),
                 label=f"subagent:{run_id}",
             )
-            run.dispose = partial(self._dispose, run_id, teardown)
             # `resumed` is what makes a restart countable: without it the log holds
             # a `running` record per start and no way to tell a first one from a
             # fourth, which is the fold the ladder needs. A parent torn down under the
@@ -375,8 +379,7 @@ class RlmChildProvider:
             await self._attach(child, parent, cause="resumed" if restarts else None)
         except InactiveScopeError:
             # Ended rather than left live: the release a disposed parent runs, run now.
-            # Idempotent, so the parent's own teardown reaching it as well does
-            # nothing twice.
+            # If the parent's own teardown got here first, this finds nothing.
             await self._release(run_id, PARENT_TEARDOWN)
             raise
         return run
@@ -820,19 +823,14 @@ class RlmChildProvider:
         """
         return await self._release(run_id, reason)
 
-    async def _dispose(self, run_id: str, teardown: Disposer) -> None:
+    async def _dispose(self, run_id: str) -> None:
         """`SubagentRun.dispose`: let go of a child the seam would not admit, without
         revoking it. The seam ended it already, saying why (`_abandon`), and a refusal
-        is not a deletion.
-
-        Then the parent's teardown effect is released, which runs `_release` and finds
-        the child gone: an effect cannot be dropped without being run. **In that
-        order**: the other way round, the teardown revokes the child.
+        is not a deletion: `_release` without the tombstone.
         """
         child = self._take(run_id)
         if child is not None:
             await self._drop(child)
-        await maybe_await(teardown())
 
     async def _release(self, run_id: str, reason: str) -> bool:
         """The one revocation path, whether the model asked or the parent unwound.
@@ -871,23 +869,31 @@ class RlmChildProvider:
         return True
 
     def _take(self, run_id: str) -> _Child | None:
-        """Take `run_id`'s child off this provider and stop it — its queued job and its
-        agent — before anything about it is written. `None` for a child it does not
-        hold, or holds no longer."""
+        """Take `run_id`'s child off this provider and stop it (`_stop`). `None` for a
+        child it does not hold, or holds no longer."""
         child = self._children.pop(run_id, None)
-        if child is None:
-            return None
-        if child.job_id is not None:
+        if child is not None:
+            self._stop(child)
+        return child
+
+    def _stop(self, child: _Child, *, keep_inbox: bool = False) -> None:
+        """Stop a child this provider is letting go of — its revocation on the parent's
+        scope, its queued job and its agent — before anything about it is written.
+        `keep_inbox` for a child suspended rather than released (`suspend`)."""
+        if child.teardown is not None:
+            child.teardown.drop()
+        # `get`, for `_drop`'s reason: on a mount's unwind the row may be gone.
+        jobs = self.ctx.get(JOBS)
+        if child.job_id is not None and jobs is not None:
             # Queued, never ran: `Job.cancel` stops the wait for a slot it will
             # now never take. A body parked on a limiter reads no token, so
             # without this a revoked child stays queued behind children that may
             # never settle, holding its place and `JobService.settled()` until a
             # slot frees. Harmless for a child already running: its agent
             # is what stops that one, one line down.
-            self.ctx.require(JOBS).cancel(child.job_id)
+            jobs.cancel(child.job_id)
         if child.agent is not None:
-            child.agent.cancel(AgentCancelCause(kind="parent"))
-        return child
+            child.agent.cancel(AgentCancelCause(kind="parent"), keep_inbox=keep_inbox)
 
     async def _drop(self, child: _Child) -> None:
         """Let go of a child `_take` stopped: its waiters woken, its scope released, and
@@ -908,7 +914,7 @@ class RlmChildProvider:
         after them and unwinds before them — before `jobs`, `subagents`, and the `agent`
         row whose scopes hold every parent. A mount going away (a daemon stopping, a root
         remounted on a new profile) reaches here with all of that still up, and each
-        parent's own effect then finds nothing left for `_release`. Before this, a mount's
+        child's revocation is dropped from its parent's scope with it. Before this, a mount's
         unwind reached its children only through those effects, after `jobs` had gone: a
         working child's release raised before it wrote anything, so the next start read
         it as a crash and spent a rung of its ladder, and a settled child was tombstoned.
@@ -924,16 +930,13 @@ class RlmChildProvider:
         `get` rather than `require` for the one case this does not cover: the row
         deactivating while the mount lives on, because a row it injects went away.
         """
-        jobs, registry = self.ctx.get(JOBS), self.ctx.get(SUBAGENTS)
+        registry = self.ctx.get(SUBAGENTS)
         for child in self._children.values():
+            self._stop(child, keep_inbox=True)
+            child.agent = None
             if child.result is None:
                 self._waiting(child, detail=SUSPENDED_DETAIL)
                 child.result = SubagentResult(status="queued", error=SUSPENDED_DETAIL)
-            if child.job_id is not None and jobs is not None:
-                jobs.cancel(child.job_id)
-            if child.agent is not None:
-                child.agent.cancel(AgentCancelCause(kind="parent"), keep_inbox=True)
-                child.agent = None
             self._let_go(child)
             if registry is not None:
                 registry.forget(child.run.id)

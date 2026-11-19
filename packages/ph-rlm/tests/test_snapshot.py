@@ -139,7 +139,11 @@ async def test_a_deleted_variable_is_cleared_not_forgotten(mounted_runtime: Moun
 
 
 async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: MountedRuntime) -> None:
-    """The resume path: a fresh child, the same namespace."""
+    """The resume path: a fresh child, the same namespace.
+
+    The closed kernel's close leaves the agent's scope with it, so the scope holds one
+    for the kernel it has. Sabotage: skip the drop in `close_namespace`, and it holds
+    two, the first of which finds nothing when the agent goes."""
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "carried = {'over': [1, 2, 3]}", agent=agent, session=session, call_id="c1")
 
@@ -153,6 +157,8 @@ async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: MountedRunt
     restored = [event for event in session.events if event.type == "kernel/restored"]
     assert restored
     assert "carried" in as_seq(restored[-1].data["restored"])
+    closes = [one for one in agent.ctx._effects if one.label == f"code-runtime:{agent.id}"]
+    assert len(closes) == 1
 
 
 async def test_a_crash_does_not_silently_reconstitute_the_namespace(

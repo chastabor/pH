@@ -55,7 +55,7 @@ from pydantic import PositiveFloat
 from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, first_of, is_canceled
 from ph.characters import capped_text, head_bytes, stream_decoder, utf8_size
-from ph.cordis import Context, Disposer, plugin
+from ph.cordis import Context, Disposer, Releaser, plugin
 from ph.json import as_int, as_str, thaw_json
 from ph.keys import CODE_RUNTIME
 from ph.orphans import OrphanJournal, host_journal, signal_child
@@ -1436,6 +1436,9 @@ class PythonCodeRuntime:
     `persistence: "namespace"` would then be a promise nothing keeps, which is
     why the bundle mounts both rows together."""
     _kernels: dict[str, Kernel] = field(default_factory=dict)
+    _closers: dict[str, Releaser] = field(default_factory=dict)
+    """Each kernel's close, registered on its agent's scope; dropped unrun when the
+    kernel is closed another way (`close_namespace`)."""
     _acquire_lock: anyio.Lock = field(default_factory=anyio.Lock)
     """Held across the whole of `_acquire`, so one namespace gets one kernel.
 
@@ -1729,11 +1732,15 @@ class PythonCodeRuntime:
             async def enter() -> Disposer:
                 return partial(self.close_namespace, namespace)
 
-            await scope.effect(enter, label=f"code-runtime:{namespace}")
+            self._closers[namespace] = await scope.effect(enter, label=f"code-runtime:{namespace}")
         return kernel
 
     async def close_namespace(self, namespace: str) -> None:
-        """Shut one agent's kernel down when the agent goes."""
+        """Shut one agent's kernel down: when the agent goes, or before it does, which
+        takes the close off the agent's scope."""
+        closer = self._closers.pop(namespace, None)
+        if closer is not None:
+            closer.drop()
         kernel = self._kernels.pop(namespace, None)
         if kernel is not None:
             await kernel.aclose()

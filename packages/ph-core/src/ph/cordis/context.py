@@ -59,6 +59,7 @@ __all__ = [
     "Hook",
     "Listener",
     "Next",
+    "Releaser",
     "is_bailed",
     "maybe_await",
     "settled",
@@ -254,12 +255,78 @@ class _Effect:
     became the whole story: at the moment the budget expires the loop marks each
     remaining effect claimed and never runs it, so a single flag reported a tree
     that had torn down nothing as a tree that owed nothing.
+
+    `homes` is every scope's effect list it sits on: one, or two for a teardown that
+    goes when either of a pair of scopes does (`Running.add_disposer`). Settled, it
+    leaves all of them and keeps none.
     """
 
     dispose: Disposer
     label: str
+    homes: tuple[list[_Effect], ...] = field(compare=False, repr=False)
+    """Out of `==` and `repr`: each home holds the other effects, so comparing or
+    printing one would walk them all."""
     done: bool = False
     ran: bool = False
+
+    def settle(self) -> bool:
+        """Claim it as owing nothing, outside an unwind, and take it off its scopes;
+        `False` if somebody claimed it already. Marked before removed, so an unwind
+        that gets here first finds it claimed."""
+        if self.done:
+            return False
+        self.done = self.ran = True
+        self.leave()
+        return True
+
+    def leave(self) -> None:
+        """Off every scope it sits on. By identity: two registrations of one bound
+        method with one label produce equal `_Effect`s (A8)."""
+        for home in self.homes:
+            remove_identical(home, self)
+        self.homes = ()
+
+
+def _register(dispose: Disposer, label: str, homes: tuple[list[_Effect], ...]) -> _Effect:
+    """One teardown, now the newest effect of every scope whose list is in `homes`.
+
+    A tuple the caller already has, rather than varargs: a scope keeps its own
+    one-list tuple (`Context._homes`), so a registration builds none."""
+    effect = _Effect(dispose, label, homes)
+    for home in homes:
+        home.append(effect)
+    return effect
+
+
+class Releaser:
+    """What `add_disposer` and `effect` hand back: one registered teardown, held.
+
+    **Called, it runs the teardown now** and takes it off the scope. Once: a second
+    call does nothing, and neither does a call after the scope's unwind claimed the
+    teardown. So it is a `Disposer`, and may be registered as one.
+
+    **`drop()` takes it off the scope without running it**, for the holder that has
+    already let the artifact go another way and so owes nothing. Without it the only
+    way to remove a teardown was to run it once it could find nothing to do, which
+    made the order of two steps the thing correctness hung on. A dropped teardown is
+    settled like one that ran: `Abandoned` reports it as neither outstanding nor
+    unreclaimable. A drop after a run, a run after a drop, and a drop the unwind got
+    ahead of all do nothing; in the last the teardown is running, or about to.
+
+    A teardown registered on two scopes (`Running.add_disposer`) is dropped from both.
+    """
+
+    __slots__ = ("_effect",)
+
+    def __init__(self, effect: _Effect) -> None:
+        self._effect = effect
+
+    def __call__(self) -> object:
+        effect = self._effect
+        return effect.dispose() if effect.settle() else None
+
+    def drop(self) -> None:
+        self._effect.settle()
 
 
 GRACE_SECONDS = 10.0
@@ -375,11 +442,11 @@ class Abandoned:
     """One scope whose unwind was cut short, and the teardown it left holding.
 
     **`outstanding` is derived, not recorded.** The entry watches the live
-    effects rather than snapshotting their names, so one released afterwards
-    through the closure `add_disposer` handed out drops off the report by
-    itself. A name-snapshot would keep accusing a deployment of a lease somebody
+    effects rather than snapshotting their names, so one released or dropped
+    afterwards through the `Releaser` `add_disposer` handed out leaves the report
+    by itself. A name-snapshot would keep accusing a deployment of a lease somebody
     had already returned — and `dispose()` cannot be that somebody, since its
-    early return makes a second call a no-op, so those closures are the only way
+    early return makes a second call a no-op, so those releasers are the only way
     back and the ledger has to notice them being used.
 
     **Weakly, because the alternative is a leak about a leak.** A strong
@@ -393,7 +460,7 @@ class Abandoned:
 
     The label is cached beside the reference because it outlives it, and the two
     cases are different answers rather than one: a live reference not yet done is
-    **outstanding** — somebody still holds the closure and can release it — while
+    **outstanding** — somebody still holds the releaser and can call it — while
     a dead one is `unreclaimable`, since nothing can ever call it again.
     """
 
@@ -406,7 +473,7 @@ class Abandoned:
     def outstanding(self) -> tuple[str, ...]:
         """Effects nobody has claimed, that a holder could still run.
 
-        Unclaimed *and* still referenced. `release` refuses an effect the unwind
+        Unclaimed *and* still referenced. A `Releaser` refuses an effect the unwind
         already claimed — that guard is what stops a disposer running twice — so
         a claimed one is not something anybody can act on, however incomplete.
         """
@@ -418,8 +485,8 @@ class Abandoned:
     def unreclaimable(self) -> tuple[str, ...]:
         """Effects nothing will ever run, for either of the two reasons.
 
-        The last holder is gone, so no closure survives to call — or the unwind
-        claimed it and never finished it, which `release` then refuses on the
+        The last holder is gone, so no releaser survives to call — or the unwind
+        claimed it and never finished it, which a `Releaser` then refuses on the
         `done` guard. The second is the case a deadline creates: the disposer cut
         off mid-unmount is the one most likely to have left something half-done,
         and it is also the one nobody can retry.
@@ -845,7 +912,7 @@ class Running:
     layer: Context
     """Which scope it is visible to — `Context.layer_for`."""
 
-    def add_disposer(self, dispose: Disposer, *, label: str = "") -> Disposer:
+    def add_disposer(self, dispose: Disposer, *, label: str = "") -> Releaser:
         """Release when **either** scope ends — the pair's lifetime, not a half's.
 
         Once a body a registry invokes registers as its row *for* an agent, the two are
@@ -860,21 +927,15 @@ class Running:
         not on `Context` because `Context.add_disposer(..., also=)` would ask one scope
         to know about a pair it does not hold.
 
-        The once-guard is `Context.add_disposer`'s: the releaser flips `_Effect.done` and
-        drops the effect before calling through, so `finish` re-enters exactly one level
-        and stops. Whichever scope ends first removes the sibling effect from the other.
+        **One effect on both scopes' lists**, so whichever unwinds first runs it and
+        takes it off the other, and the releaser runs or drops it on both. It was two
+        effects, the layer's running the owner's, kept in step by a closure and a link.
         """
-        drop_layer: Disposer | None = None
-
-        def finish() -> None:
-            if drop_layer is not None:
-                drop_layer()
-            dispose()
-
-        drop = self.owner.add_disposer(finish, label=label)
-        if self.layer is not self.owner:
-            drop_layer = self.layer.add_disposer(drop, label=f"{label}@visible")
-        return drop
+        if self.layer is self.owner:
+            return self.owner.add_disposer(dispose, label=label)
+        self.owner._assert_active()
+        self.layer._assert_active()
+        return Releaser(_register(dispose, label, (self.owner._effects, self.layer._effects)))
 
 
 _ACTIVATING: ContextVar[Running | None] = ContextVar("ph.cordis.activating", default=None)
@@ -971,6 +1032,7 @@ class Context:
         "_active",
         "_children",
         "_effects",
+        "_homes",
         "_isolation",
         "_label",
         "_module",
@@ -991,6 +1053,8 @@ class Context:
     _row: str
     _children: list[Context]
     _effects: list[_Effect]
+    _homes: tuple[list[_Effect]]
+    """`(_effects,)`, built once: what an effect registered here sits on."""
     _services: dict[str, _Provision]
     _active: bool
     _isolation: Context | None
@@ -1016,6 +1080,7 @@ class Context:
         self._row = parent._row if parent is not None else ""
         self._children = []
         self._effects = []
+        self._homes = (self._effects,)
         self._services = {}
         self._active = True
         self._running_self = None
@@ -1412,8 +1477,10 @@ class Context:
 
     # -------------------------------------------------------------- effects --
 
-    def add_disposer(self, dispose: Disposer, *, label: str = "") -> Disposer:
+    def add_disposer(self, dispose: Disposer, *, label: str = "") -> Releaser:
         """Register an already-acquired teardown as an effect of this scope.
+
+        The `Releaser` handed back runs it early, or drops it unrun.
 
         **Refused once the scope is down, though its unwind may still be running**,
         and callers count on that: a subagent spawned under a parent that went away
@@ -1424,24 +1491,11 @@ class Context:
         docstring says why.
         """
         self._assert_active()
-        effect = _Effect(dispose=dispose, label=label)
-        self._effects.append(effect)
-
-        def release() -> object:
-            if effect.done:
-                return None
-            # Marked before removed, so the unwind finds it claimed if it gets
-            # here first. By identity: two `add_disposer` calls with one bound
-            # method and one label produce equal `_Effect`s (A8).
-            effect.done = effect.ran = True
-            remove_identical(self._effects, effect)
-            return effect.dispose()
-
-        return release
+        return Releaser(_register(dispose, label, self._homes))
 
     async def effect(
         self, enter: Callable[[], MaybeAwaitable[Disposer]], *, label: str = ""
-    ) -> Disposer:
+    ) -> Releaser:
         """Acquire an artifact and register its release as an effect.
 
         Every external artifact an agent takes — a child process, a worktree, a
@@ -1729,10 +1783,11 @@ class Context:
                 # own business, and the traceback is the account of it.
                 log.exception("ph.cordis: effect %r failed to dispose", effect.label)
             effect.ran = True
-            # **That effect, not the last one.** A `detach` during the await above
-            # appends its stop here even though this scope is down (`_hold`), and
-            # a bare `pop()` took that newcomer unrun in place of this one.
-            remove_identical(self._effects, effect)
+            # **That effect, not the last one**, and off every scope it sits on. A
+            # `detach` during the await above appends its stop here even though this
+            # scope is down (`_hold`), and a bare `pop()` took that newcomer unrun in
+            # place of this one.
+            effect.leave()
 
     def _leave_tree(self) -> None:
         """Unlink from the parent and drop what this scope served. Cannot fail.
@@ -1751,7 +1806,7 @@ class Context:
         unreachable through `dispose` before this method existed — the early
         return above makes a second call a no-op — so nothing that would otherwise
         have run is lost by arriving here. They stay callable through the
-        `release` closure `add_disposer` handed out, which is why this reports
+        `Releaser` `add_disposer` handed out, which is why this reports
         them and leaves them alone.
 
         **Recorded as well as logged**, on the runtime rather than here, because
@@ -2096,11 +2151,10 @@ class Context:
 
         def done(finished: asyncio.Future[Any]) -> None:
             pool.discard(finished)
-            if held is not None and not held.done:
-                # Over, so nothing is owed. Dropped rather than released, which
+            if held is not None:
+                # Over, so nothing is owed. Settled rather than released, which
                 # would call the stop: for `finish`, a coroutine nobody awaits.
-                held.done = held.ran = True
-                remove_identical(self._effects, held)
+                held.settle()
             if not finished.cancelled() and finished.exception() is not None:
                 log.error("ph.cordis: detached %s failed", label, exc_info=finished.exception())
 
@@ -2118,16 +2172,16 @@ class Context:
         in the unwind already under way. Past an unwind cut short by its deadline
         nothing runs it, and the task goes on as it always did.
         """
+        stop: Disposer
         if at_dispose == "cancel":
-            effect = _Effect(dispose=task.cancel, label=label)
+            stop = task.cancel
         else:
 
             async def finished() -> None:
                 await asyncio.wait({task})
 
-            effect = _Effect(dispose=finished, label=label)
-        self._effects.append(effect)
-        return effect
+            stop = finished
+        return _register(stop, label, self._homes)
 
     async def drain(self) -> None:
         """Await the detached work this tree stops itself: async `emit` listeners,

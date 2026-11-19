@@ -101,6 +101,10 @@ in one step — so a failure between acquiring and registering cannot leak. Scop
 dispose LIFO, children first. A disposer that raises is logged and the unwind
 continues: one bad teardown must not strand every artifact registered before it.
 
+What `ctx.effect` and `ctx.add_disposer` hand back is a `Releaser`. Call it to
+release the artifact early. If the artifact is already gone another way, call
+`releaser.drop()` instead: the teardown leaves the scope without running.
+
 ## Who is running matters
 
 Registrations record *who* made them (P6-12, P6-29). A body the seam invokes

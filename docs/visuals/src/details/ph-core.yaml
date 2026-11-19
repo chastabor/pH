@@ -219,6 +219,7 @@ nodes:
             - ["`ctx.on(event, listener)`", "registers a listener for a declared event", "with the registering scope"]
             - ["`await ctx.effect(enter, label=)`", "acquires an external artifact and registers its release in one step", "LIFO, after the scope's children"]
             - ["`ctx.add_disposer(fn, label=)`", "registers a teardown", "LIFO"]
+            - ["`releaser()` / `releaser.drop()`", "what `effect` and `add_disposer` hand back (`Releaser`): run the teardown now, or take it off the scope without running it", "once; after that a call or a drop does nothing"]
             - ["`ctx.scope(label)`", "a child that is an isolation boundary and its own realm (what an agent gets)", "with its parent"]
             - ["`await ctx.reconcile()`", "activates every row whose injected keys resolve, to a fixpoint (64 rounds, then an error naming the cycle)", ""]
             - ["`await ctx.dispose()`", "children first in reverse order, then own effects LIFO, under `GRACE_SECONDS` (10 s)", ""]

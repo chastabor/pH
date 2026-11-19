@@ -62,6 +62,7 @@ from rlm_fixtures import (
     reply_to_parent,
 )
 
+from ph.agent.types import AgentHandle
 from ph.agent_loop.driver import ReactLoopAgent
 from ph.cordis import Context
 from ph.json import as_obj, as_seq
@@ -201,6 +202,16 @@ def _statuses(ctx: Context, run: SubagentRun, field: str = "status") -> list[str
     """Every status this child reached, in order — or another `field` of the same
     records. Its own log's, which is the only place a status is written."""
     return [str(event.data.get(field)) for event in _log_of(ctx, run) if event.type == STATUS]
+
+
+def _teardowns(parent: AgentHandle) -> list[str]:
+    """The children whose revocation is still registered on `parent`'s scope."""
+    prefix = "subagent:"
+    return [
+        effect.label.removeprefix(prefix)
+        for effect in parent.ctx._effects
+        if effect.label.startswith(prefix)
+    ]
 
 
 def _about_children(session: Session) -> list[str]:
@@ -763,9 +774,13 @@ async def test_deleting_a_child_leaves_a_tombstone(
     run = await _spawn(ctx, parent, "doomed")
     await settled(lambda: gate.arrived == 1, "the child to reach the model")
     subagents = ctx.require(SUBAGENTS)
+    assert _teardowns(parent) == [run.id]
 
     assert await subagents.delete(session, run.id, reason="user") is True
     assert subagents.get(run.id) is None
+    # Its revocation went with it, rather than staying on the parent's scope until
+    # the parent ends: one per deleted child, for as long as a root lives.
+    assert _teardowns(parent) == []
     # Deleting twice is not an error, and does not double-tombstone.
     assert await subagents.delete(session, run.id, reason="again") is False
 
@@ -2087,8 +2102,12 @@ async def test_a_readmission_the_seam_refuses_is_ended_and_not_revoked(
     child's notice, so a crash before the parent's next write lost it for good. Not
     deleted, the child is one that sweep delivers again (`test_child_logs`).
 
+    Its revocation is dropped from the parent's scope unrun (`Releaser.drop`), so
+    nothing is left there to revoke it later.
+
     Sabotage: point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`, and the
-    child is deleted, `parent-teardown`.
+    child is deleted, `parent-teardown`. Skip the drop in `_take`, and the parent's
+    scope still holds the revocation.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "refused next time")
@@ -2100,12 +2119,13 @@ async def test_a_readmission_the_seam_refuses_is_ended_and_not_revoked(
         "_enforce",
         raising(SubagentSpawnError("its ceiling cannot be applied now")),
     )
-    revived_ctx, revived, _parent = await _restart(mount, session.id)
+    revived_ctx, revived, revived_parent = await _restart(mount, session.id)
 
     state = _state(revived_ctx, run)
     assert (state.status, state.deleted) == ("error", False)
     assert "its ceiling cannot be applied now" in not_none(state.detail)
     assert delivered_ids(revived) == [not_none(state.notice).id]
+    assert _teardowns(revived_parent) == []
 
 
 # ------------------------------------------------- a child asked a second thing --

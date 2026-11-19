@@ -25,9 +25,11 @@ from ph.cordis import (
     Disposer,
     InactiveScopeError,
     Listener,
+    Running,
     ServiceConflictError,
     ServiceNotFoundError,
     events,
+    maybe_await,
     plugin,
     releasing,
 )
@@ -475,14 +477,17 @@ async def test_a_cut_short_unwind_is_recorded_where_something_can_read_it() -> N
     assert child not in root.children, "the scope itself is still gone from the tree"
 
 
-async def test_an_effect_released_afterwards_stops_being_reported() -> None:
+@pytest.mark.parametrize("settle", ["call", "drop"])
+async def test_an_effect_released_afterwards_stops_being_reported(settle: str) -> None:
     """`outstanding` is derived from the effects, never a snapshot of their names.
 
-    The closure `add_disposer` hands out stays callable after the unwind is
+    The `Releaser` `add_disposer` hands out stays callable after the unwind is
     abandoned — `dispose()` cannot be the one to call it, since its early return
-    makes a second call a no-op, so those closures are the only way back. A
+    makes a second call a no-op, so those releasers are the only way back. A
     ledger holding names would keep accusing a deployment of a lease somebody had
-    already returned.
+    already returned. Dropped rather than run, it is owed by nobody either: neither
+    outstanding nor stranded. Sabotage: leave a dropped effect's `ran` unset, and the
+    ledger calls it unreclaimable.
     """
     root = Context()
     child = root.scope("child")
@@ -496,10 +501,11 @@ async def test_an_effect_released_afterwards_stops_being_reported() -> None:
     (entry,) = root.abandoned
     assert "stranded-lease" in entry.outstanding
 
-    release()
+    release() if settle == "call" else release.drop()
 
-    assert ran == ["late"], "the disposer really did run"
+    assert ran == (["late"] if settle == "call" else []), "it ran only if it was called"
     assert "stranded-lease" not in entry.outstanding, "so the ledger stops reporting it"
+    assert "stranded-lease" not in entry.unreclaimable
     assert root.abandoned, "the entry stays; what changed is what it says is owed"
 
 
@@ -534,7 +540,7 @@ async def test_the_ledger_does_not_pin_what_it_reports_on() -> None:
 async def test_an_effect_nothing_can_release_is_reported_as_such() -> None:
     """Two kinds of owed teardown, because a reader needs different things.
 
-    `outstanding` means somebody still holds the closure `add_disposer` returned,
+    `outstanding` means somebody still holds the `Releaser` `add_disposer` returned,
     so the resource can be released and naming it is actionable. Once that holder
     is gone nothing can ever call the disposer again — the resource is stranded
     until the process ends, and telling an operator to go and act on it would be
@@ -551,7 +557,7 @@ async def test_an_effect_nothing_can_release_is_reported_as_such() -> None:
     (entry,) = root.abandoned
     assert "a-worktree" in entry.outstanding
 
-    # The scope goes; the closure a row kept is what still makes it actionable.
+    # The scope goes; the releaser a row kept is what still makes it actionable.
     del child
     gc.collect()
     assert "a-worktree" in entry.outstanding, "the holder can still release it"
@@ -561,6 +567,78 @@ async def test_an_effect_nothing_can_release_is_reported_as_such() -> None:
 
     assert "a-worktree" not in entry.outstanding, "nobody can release it any more"
     assert "a-worktree" in entry.unreclaimable, "reported as stranded, not actionable"
+
+
+async def test_a_dropped_effect_is_never_run() -> None:
+    """`Releaser.drop` takes a teardown off its scope without running it, for a holder
+    that let the artifact go another way. Sabotage: have `drop` call through, as
+    calling the releaser does, and the dropped teardown runs."""
+    root = Context()
+    ran: list[str] = []
+    kept = root.add_disposer(partial(ran.append, "kept"), label="kept")
+    dropped = root.add_disposer(partial(ran.append, "dropped"), label="dropped")
+
+    dropped.drop()
+    dropped()
+    assert ran == [], "a call after the drop found nothing to run"
+
+    kept()
+    kept.drop()
+    assert ran == ["kept"], "and a drop after the call undid nothing"
+
+    await root.dispose()
+    assert ran == ["kept"], "the unwind runs neither again"
+
+
+async def test_an_unwind_skips_what_was_dropped_under_it() -> None:
+    """A drop mid-unwind settles a teardown the unwind has not reached, and does
+    nothing to the one it is running. Sabotage: make `drop` do nothing, and the unwind
+    runs the earlier teardown."""
+    root = Context()
+    ran: list[str] = []
+    earlier = root.add_disposer(partial(ran.append, "earlier"), label="earlier")
+
+    def drops_both() -> None:
+        earlier.drop()
+        running.drop()
+        ran.append("running")
+
+    running = root.add_disposer(drops_both, label="running")
+    await root.dispose()
+
+    assert ran == ["running"]
+    assert not root.abandoned
+
+
+@pytest.mark.parametrize("first", ["row", "agent", "call", "drop"])
+async def test_a_teardown_on_two_scopes_goes_once_from_both(first: str) -> None:
+    """`Running.add_disposer` puts one teardown on a row and on the scope it is
+    visible to. Either scope ending, or the holder calling the releaser, runs it once
+    and awaits it; dropping it runs nothing. Each way it leaves both scopes. Sabotage:
+    have `_Effect.leave` take it off only its first scope, and the other still holds
+    it."""
+    root = Context()
+    row, agent = root.scope("row"), root.scope("agent")
+    ran: list[str] = []
+
+    async def teardown() -> None:
+        await anyio.sleep(0)
+        ran.append("ran")
+
+    held = Running(row, agent).add_disposer(teardown, label="pair")
+    assert len(row._effects) == len(agent._effects) == 1
+    if first == "call":
+        await maybe_await(held())
+    elif first == "drop":
+        held.drop()
+    else:
+        await {"row": row, "agent": agent}[first].dispose()
+
+    assert ran == ([] if first == "drop" else ["ran"])
+    assert not row._effects and not agent._effects, "a scope still holds the teardown"
+    await agent.dispose()
+    await row.dispose()
+    assert ran == ([] if first == "drop" else ["ran"])
 
 
 async def test_the_ledger_is_bounded_and_says_what_it_dropped() -> None:

@@ -64,7 +64,7 @@ of it.
 |---|---|
 | Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~126 000 lines |
-| Tests | 4 613 collected |
+| Tests | 4 621 collected |
 | Registered plugins | 110 across the `ph.plugins` entry-point group |
 | Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
 | Base profile | 61 rows (`ph/bundles/base.yaml`) |
@@ -356,6 +356,13 @@ through here, so cleanup is structural rather than remembered."*
 `Context.dispose()` unwinds **children first (reverse order), then own effects
 LIFO** (`context.py`). Each disposer's exception is caught and logged
 so one bad teardown cannot strand the rest.
+
+`effect` and `add_disposer` hand back a `Releaser`. Called, it runs the teardown
+early and takes it off the scope, once. `releaser.drop()` takes it off the scope
+**without running it**, for a holder that let the artifact go another way and so
+owes nothing: a sub-agent that was deleted or refused has no revocation left to
+run on its parent's scope. A dropped teardown is settled like one that ran, and a
+drop the unwind got ahead of does nothing.
 
 > **That ordering is load-bearing and is a real constraint on plugin authors.**
 > An effect registered *about* a child runs **after** that child's scope is
@@ -1594,7 +1601,8 @@ daemon are a host. The invariant is about the *harness*, not the shell around it
 **Mechanism.** `Context.add_disposer` / `Context.effect` (§2.5), the three
 claiming helpers (§3.2), and `Running.add_disposer` for the intersection case (a
 registration whose lifetime is *both* the registering row's and the agent
-layer's).
+layer's). Each hands back a `Releaser`, which runs the teardown early or drops it
+unrun, from both scopes in the intersection case.
 
 **How ownership is decided.** `owner_for(scope)` answers "whose lifetime does a
 registration made *now* belong to", in three cases: an explicit `scope=` wins; the

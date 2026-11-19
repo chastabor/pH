@@ -359,13 +359,17 @@ async def test_re_acquiring_does_not_let_the_old_handle_evict_the_new_one(
     put there, not whatever currently occupies the key.
 
     An unconditional removal would leave `of()` answering `None` for a live
-    workspace, which the prompt line and `phern doctor` would then repeat.
+    workspace, which the prompt line and `phern doctor` would then repeat. The old
+    handle's release is dropped from its scope unrun when the agent acquires again.
+    Sabotage: skip the drop in `_track`, and the first scope's unwind evicts the new
+    workspace.
     """
     seam = workspace_seam(tmp_path / "scratch")
     first_scope = seam.ctx.scope("first")
 
     await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path, scope=first_scope)
     second = await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path)
+    assert not first_scope._effects, "the replaced release is still on its scope"
     await first_scope.dispose()
 
     assert seam.of("a1") is second

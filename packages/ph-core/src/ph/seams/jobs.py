@@ -52,7 +52,7 @@ from anyio.abc import TaskGroup
 from pydantic import Field
 
 from ..cancel import CancelToken
-from ..cordis import Context, Disposer, events, maybe_await, plugin
+from ..cordis import Context, Disposer, Releaser, events, maybe_await, plugin
 from ..keys import JOBS
 from ..wire import WireModel
 
@@ -122,10 +122,11 @@ class Job:
     state: JobState = "running"
     result: object = None
     error: BaseException | None = None
-    release: Disposer | None = None
-    """Deregisters this job's effect from its owning scope. Set by `start`, and
-    called by `JobService.forget` — not by a caller directly, because dropping the
-    entry and deregistering the effect have to happen together."""
+    release: Releaser | None = None
+    """This job's stop on its owning scope, which cancels it if the scope goes first.
+    Set by `start`, and dropped unrun by `JobService.forget` — not by a caller
+    directly, because dropping the entry and deregistering the stop have to happen
+    together."""
 
     waiting: anyio.CancelScope | None = None
     """The wait for a slot, while there is one. Internal to `JobService`.
@@ -259,11 +260,8 @@ class JobService:
 
         def enter() -> Disposer:
             def abandon() -> None:
-                # The entry's presence *is* the "still owned" flag: `forget` pops
-                # it before deregistering, so an owner that released a finished
-                # job cannot have it reported as canceled here.
-                if self._jobs.pop(job.id, None) is None:
-                    return
+                # Never a job its owner released: `forget` drops this unrun.
+                del self._jobs[job.id]
                 # **`queued` counts as owed, not just `running`.** A job still
                 # waiting for a slot has a parked body and, once it is out of
                 # this table, no owner left to stop it: it would take a slot
@@ -344,7 +342,7 @@ class JobService:
             # returns to zero is one this table keeps for the life of the
             # process, keyed by whatever the producer chose. Usually a session id.
             self._leave(waits)
-            self._jobs.pop(job.id, None)
+            self.forget(job.id)
             raise
         return job
 
@@ -431,14 +429,14 @@ class JobService:
 
         For an owner that knows the work is done — a delegation whose child has
         settled — so the table does not hold one entry per unit of past work for
-        the life of the scope. Deregisters the effect too, so the scope stops
-        holding a teardown for something already over.
+        the life of the scope. Drops its stop from the scope too, unrun, so the scope
+        holds no teardown for something already over.
         """
         job = self._jobs.pop(job_id, None)
         if job is None:
             return False
         if job.release is not None:
-            job.release()
+            job.release.drop()
         return True
 
 

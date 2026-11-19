@@ -1396,6 +1396,28 @@ async def test_releasing_a_finished_job_does_not_report_it_canceled() -> None:
     assert not job.token.canceled
 
 
+async def test_a_job_its_own_body_releases_is_not_canceled() -> None:
+    """A subagent's drive forgets its own job as its last act, while the job is still
+    running. Its stop is dropped from the owner's scope unrun, so nothing cancels the
+    work it is finishing and the owner holds nothing for it. Sabotage: run the stop in
+    `forget` instead of dropping it, and the job is canceled."""
+    root = Context()
+    service = JobService(ctx=root)
+    owner = root.scope("owner")
+
+    def body(job: Job) -> int:
+        assert service.forget(job.id) is True
+        return 7
+
+    job = await service.start(kind="test", label="self-releasing", run=body, scope=owner)
+    await service.settled()
+
+    assert (job.state, job.token.canceled) == ("done", False)
+    assert not owner._effects
+    await owner.dispose()
+    assert (job.state, job.token.canceled) == ("done", False)
+
+
 # ------------------------------------------------------------------- slots --
 #
 # `slot=` is the harness's answer to "more work arrived than should run at once",

@@ -653,7 +653,10 @@ readmission, is ended `error` saying why, and then released through
 release, the effect a parent's teardown runs, is the revocation. A refused child
 released through it was tombstoned `parent-teardown` for a parent that was still
 there, and the notice its ending carried rode a deleted child, which the resume
-sweep does not deliver again after a crash.
+sweep does not deliver again after a crash. A child let go any way but its
+parent's teardown (refused, deleted, suspended) drops that effect from the
+parent's scope unrun (`Releaser.drop`), so a long-lived parent holds none for
+children it no longer has.
 
 A mount going away is not a revocation. The provider suspends each unfinished
 child instead: `queued` with `SUSPENDED_DETAIL` in its own log, no tombstone, and

@@ -45,7 +45,17 @@ import anyio
 from pydantic import Field, ValidationError
 
 from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
-from ..cordis import Context, Disposer, Next, Running, maybe_await, plugin, running, safe_yaml_load
+from ..cordis import (
+    Context,
+    Disposer,
+    Next,
+    Releaser,
+    Running,
+    maybe_await,
+    plugin,
+    running,
+    safe_yaml_load,
+)
 from ..json import JsonValue, as_seq, as_str
 from ..keys import AGENTS, CONTAINMENT, FS, SESSION_PERSISTENCE, SESSIONS, TOOLS, WORKSPACE
 from ..paths import canonical, default_home_path
@@ -914,7 +924,7 @@ class _Held:
     """
 
     workspace: Workspace
-    dispose: Disposer | None = None
+    dispose: Releaser | None = None
     session: Session | None = None
     """Where this workspace's closing event goes, set once the acquisition is logged.
     The release closure reads it here rather than capturing it, so the two halves of
@@ -1412,14 +1422,15 @@ class WorkspaceSeam:
         agent's work.
         """
         held = _Held(workspace=workspace)
+        replaced = self._held.get(agent_id)
+        if replaced is not None and replaced.dispose is not None:
+            # An agent that acquired again: the previous release is dropped unrun, so
+            # it cannot evict the live workspace from `_held` when its scope goes.
+            replaced.dispose.drop()
         self._held[agent_id] = held
 
         def enter() -> Disposer:
             async def release() -> None:
-                # Identity, not presence: an agent that re-acquired must not have
-                # its live workspace evicted by the previous handle's disposal.
-                if self._held.get(agent_id) is not held:
-                    return
                 del self._held[agent_id]
                 current = held.workspace
                 kept = True if current.release is None else await current.release(current)

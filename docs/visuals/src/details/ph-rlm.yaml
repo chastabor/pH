@@ -713,7 +713,7 @@ nodes:
         tone: secure
         list:
           - "The child's scope is created with `parent=parent`, inside the parent's, and handed back so the seam can bound it."
-          - "The child is an effect of the parent's scope: a disposed parent revokes it."
+          - "The child is an effect of the parent's scope: a disposed parent revokes it. A child let go any other way (deleted, refused, suspended) takes that effect off the parent's scope unrun."
           - "A child's log is leased like a root's, so a second process cannot open it."
       - title: Limits
         tone: limit
