@@ -64,7 +64,7 @@ of it.
 |---|---|
 | Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~126 000 lines |
-| Tests | 4 621 collected |
+| Tests | 4 639 collected |
 | Registered plugins | 110 across the `ph.plugins` entry-point group |
 | Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
 | Base profile | 61 rows (`ph/bundles/base.yaml`) |
@@ -363,6 +363,55 @@ early and takes it off the scope, once. `releaser.drop()` takes it off the scope
 owes nothing: a sub-agent that was deleted or refused has no revocation left to
 run on its parent's scope. A dropped teardown is settled like one that ran, and a
 drop the unwind got ahead of does nothing.
+
+#### Holdings: an entry and the teardown that takes it back
+
+Most of what a seam keeps is a pair: an **entry** in a table (a job, a held
+workspace, a kernel, a manual's state, a child) and the **teardown** on a scope
+that takes it back. The pair is one *holding*, and it has had one bug several
+times over: the two come apart. The entry goes another way, by being deleted,
+replaced under its key or ended early, and the teardown stays on its scope and
+later runs against whatever holds the key by then. Or a start fails after it wrote
+or registered something, and that is left for a thing that never existed. Or
+something ends, and a teardown still on a scope writes about it afterwards.
+
+Four rules make a holding end once:
+
+1. **Made in one step.** Register the teardown, then write the entry, with nothing
+   that suspends between them and nothing after them that can fail. A scope that
+   is down refuses before anything is held, and no second caller can come between
+   an entry and its teardown. Where the acquiring has to suspend, it goes inside
+   `effect`'s `enter`, which is the one place a failure between the two is handled.
+2. **One door out.** One function removes the entry (`JobService.forget`,
+   `WorkspaceSeam.dispose`, `PythonCodeRuntime.close_namespace`,
+   `RlmChildProvider._stop`). Every path that ends the holding goes through it,
+   the failure path of the start included, and the door settles the releaser: it
+   **runs** it (`releaser()`) when the teardown's work is still owed, or **drops**
+   it (`releaser.drop()`) when the door has done that work itself. Calling the
+   teardown's own function instead leaves it registered for something already gone.
+3. **A replacement ends what it replaces first.** Through the door when the old
+   holding still has something to release; by dropping its releaser when it has
+   nothing left (a manual whose add gave no tools, a workspace its agent acquired
+   again). Either way a key has one teardown: its holder's.
+4. **A teardown takes back only what its own registration put there.** With rules
+   2 and 3 kept it can never meet a successor, so it removes its entry outright
+   and needs no check. A teardown that checks "is this still mine" for part of
+   its work and then acts by key or name for the rest is the bug: `UtcpSeam.add`
+   checked the state by identity and then deregistered the manual by name.
+
+So a registration whose `Releaser` is thrown away is a claim that nothing but the
+scope's unwind ends what it tears down. That is true of most of them — a row's own
+mount, an agent's own scope — and `tests/test_holdings.py` makes each one say so:
+it reads every package for direct `add_disposer` and `effect` calls, and a new one
+fails until it is either declared scope-only with a reason or kept in a `Releaser`
+field with the door that settles it named and checked against the code. The
+claiming helpers (§3.2) are outside it, because they release by identity and do
+nothing else.
+
+The same rules cover a record of an ending. What says a thing is over is written
+at its one ending door, and the door drops whatever teardown would have said so
+later: a deleted sub-agent has no revocation left on its parent's scope, and a job
+its owner released is not canceled when the service unwinds.
 
 > **That ordering is load-bearing and is a real constraint on plugin authors.**
 > An effect registered *about* a child runs **after** that child's scope is
@@ -664,7 +713,9 @@ so a holder that omits the field fails loudly at registration (`slots=True` plus
 `setattr` on an undeclared name) — `_registry.py`.
 
 Unwinding is *not* these helpers' job; they delegate to `Context.add_disposer`.
-Ownership is decided by the caller through `owner_for`/`running_for`.
+Ownership is decided by the caller through `owner_for`/`running_for`. Each
+registers the teardown **before** it writes the entry, as `ScopedTable.claim` does
+below, so an owner that is down refuses with nothing claimed (§2.5, "Holdings").
 
 A registry that answers **per agent** — narrowing or shadowing for one scope — keys
 what it holds by the registration's layer instead, and `ph.cordis.ScopedTable` (with
@@ -1622,7 +1673,10 @@ retain-by-default-and-withdraw rather than retain-on-failure.
 **How it is enforced, not just intended.** `tests/test_registration_ownership.py`
 walks every module and requires every scoped method and provider slot to be
 classified; the behavioral gate mounts a row, registers through it, unmounts,
-and asserts **the seam's own context did not grow an effect**. A lint additionally
+and asserts **the seam's own context did not grow an effect**.
+`tests/test_holdings.py` asks the other question of every registration made by
+hand, in every package: whether anything but its scope can end it, and if so
+which door settles its `Releaser` (§2.5, "Holdings"). A lint additionally
 refuses `subprocess.Popen` and `tempfile.mkdtemp` outside the seams, "because the
 fiftieth plugin author will not have read §4.9" (`resources.py`).
 

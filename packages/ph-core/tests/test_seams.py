@@ -23,6 +23,7 @@ import os
 import sys
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, Literal, cast
 
 import anyio
@@ -31,6 +32,7 @@ import pytest
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
 from ph.json import JsonValue, as_str
 from ph.seams._names import SLUG_CHARACTERS
+from ph.seams._registry import claim_entry, claim_key, claim_slot
 from ph.seams.approval import ApprovalAnswer, ApprovalRequest, ApprovalService, Edited
 from ph.seams.code_runtime import (
     CodeBindingNamespace,
@@ -1969,3 +1971,31 @@ def test_settled_statuses_are_drawn_from_the_declared_vocabulary() -> None:
     )
     # And the live side is non-empty, or the predicate would call everything settled.
     assert declared - SETTLED_STATUSES
+
+
+async def test_a_claim_its_owner_refuses_leaves_nothing_claimed() -> None:
+    """Each claiming helper registers the teardown before it writes the entry, so
+    an owner that is down refuses with nothing held. Written first, the entry
+    stayed with nothing to remove it: a key no later claim could take, a provider
+    slot that read as filled.
+
+    Sabotage: write before `add_disposer` in any of the three, and its half fails.
+    """
+    root = Context()
+    gone = root.scope("gone")
+    by = root.running_for(gone)
+    await gone.dispose()
+    table: dict[str, object] = {}
+    entries: list[object] = []
+    holder = SimpleNamespace(provider=None, provider_by=None)
+
+    with pytest.raises(InactiveScopeError):
+        claim_key(gone, table, "key", object(), label="t")
+    with pytest.raises(InactiveScopeError):
+        claim_entry(gone, entries, object(), label="t")
+    with pytest.raises(InactiveScopeError):
+        claim_slot(by, holder, "provider", object(), label="t")
+
+    assert table == {}
+    assert entries == []
+    assert holder.provider is None and holder.provider_by is None

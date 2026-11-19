@@ -147,10 +147,23 @@ class AgentRegistry:
         # `Context.dispose` cascading into a nested child never calls (S12). A
         # mount's own unwind is `write_on_unwind`'s (F2); by then this finds
         # nothing owed.
-        scope.add_disposer(
+        written = scope.add_disposer(
             lambda: session_written(self.ctx, session), label=f"agents.written({session.id})"
         )
-        agent = self.driver_factory(scope, session, options or AgentOptions())
+        try:
+            agent = self.driver_factory(scope, session, options or AgentOptions())
+        except BaseException:
+            # **No agent, so nothing of one is left.** A driver refuses a log it
+            # cannot replay — an inbox record a newer build wrote. The scope stayed
+            # under `base` with the write above still on it, and when `base` went
+            # that wrote a session its opener had long since let go: after the
+            # ending the seam had written into the same log from a second copy of
+            # it. The write is dropped, the session being its opener's again, and
+            # the scope is unwound for whatever the driver registered before it
+            # raised.
+            written.drop()
+            base.detach(scope.dispose(), label=f"agents.unmade({session.id})", at_dispose="finish")
+            raise
         scope.provide(AGENT, agent)
         self._agents[agent.id] = agent
         # **The roster entry is an effect of the scope it describes**, which it
@@ -176,6 +189,17 @@ class AgentRegistry:
         of shadowing the registry with its own `agent/created` side table.
         """
         return self._agents.get(agent_id)
+
+    def scope_of(self, agent_id: str) -> Context | None:
+        """The live agent's own scope, or `None` when nobody knows the id or its
+        scope is down.
+
+        For whoever acquires something *for* an agent it has only the id of — a
+        workspace, a kernel — and makes it that agent's effect. A scope that is
+        down is declined: a registration on a dead lifetime is one nothing unwinds.
+        """
+        agent = self._agents.get(agent_id)
+        return agent.ctx if agent is not None and agent.ctx.active else None
 
     def list(self) -> list[AgentDriver]:
         """Every live agent, for a sweep that must visit all of them."""

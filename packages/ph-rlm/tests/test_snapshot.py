@@ -43,7 +43,7 @@ import pytest
 from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, InactiveScopeError
 from ph.json import as_seq, as_str
 from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
 from ph.llm.types import text_of
@@ -159,6 +159,28 @@ async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: MountedRunt
     assert "carried" in as_seq(restored[-1].data["restored"])
     closes = [one for one in agent.ctx._effects if one.label == f"code-runtime:{agent.id}"]
     assert len(closes) == 1
+
+
+async def test_no_kernel_is_built_for_an_agent_that_is_gone(
+    mounted_runtime: MountedRuntime,
+) -> None:
+    """A kernel's close is an effect of its agent's scope, so an agent that went
+    while the kernel was being built has nowhere to put one. The build is refused
+    and the table is left as it was. Built anyway, the kernel had no owner: its
+    guest ran until the row unmounted, and an agent brought back under the same id
+    ran its cells in it.
+
+    Sabotage: answer `None` for an agent that is gone, and the kernel is in the table.
+    """
+    ctx, _session, agent = await mounted_runtime(session_id="kernel-state")
+    runtime = ctx.require(PYTHON_RUNTIME)
+    await ctx.require(AGENTS).dispose(agent.id)
+
+    with pytest.raises(InactiveScopeError):
+        await runtime._acquire(agent.id, agent.id)
+
+    assert agent.id not in runtime._kernels
+    assert agent.id not in runtime._closers
 
 
 async def test_a_crash_does_not_silently_reconstitute_the_namespace(

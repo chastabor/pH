@@ -916,7 +916,8 @@ edges:
           3. Makes each `writable` path a directory, and refuses one that overlaps the session's root.
           4. Runs discovery and registers the tools.
           5. Adds a problem for each `passEnv` name the deployment's scrub does not drop.
-          6. Registers an effect on the scope: unwinding it forgets the state, cancels the manual's runs and deregisters the manual from the client.
+          6. Registers a teardown on the scope and keeps its releaser: unwinding the scope forgets the state, cancels the manual's runs and deregisters the manual from the client.
+          7. A name that was held with no tools is now this add's: the earlier add's teardown is dropped from its scope without running, so that scope's unmount cannot take this add's manual from the client.
       - title: Failure and limits
         tone: limit
         list:

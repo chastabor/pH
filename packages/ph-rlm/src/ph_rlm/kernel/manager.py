@@ -52,12 +52,11 @@ import anyio
 import anyio.abc
 from pydantic import PositiveFloat
 
-from ph.agent.types import AgentHandle
 from ph.cancel import CancelToken, first_of, is_canceled
 from ph.characters import capped_text, head_bytes, stream_decoder, utf8_size
-from ph.cordis import Context, Disposer, Releaser, plugin
+from ph.cordis import Context, Disposer, InactiveScopeError, Releaser, plugin
 from ph.json import as_int, as_str, thaw_json
-from ph.keys import CODE_RUNTIME
+from ph.keys import AGENTS, CODE_RUNTIME
 from ph.orphans import OrphanJournal, host_journal, signal_child
 from ph.paths import resolve_roots
 from ph.seams.code_runtime import (
@@ -1446,14 +1445,20 @@ class PythonCodeRuntime:
     it covers is `environment()`, and that already serializes on its own
     `_resolve_lock` — there is no concurrency here to preserve.
     """
-    _scopes: dict[str, Context] = field(default_factory=dict)
-    """Agent id → its scope, so a kernel is released *structurally* (F1).
+    scopes: Callable[[str], Context | None] | None = None
+    """Agent id → its live scope, so a kernel is released *structurally* (F1).
 
     The alternative was closing on the `agent/disposed` event, but `emit`
     schedules an async listener without awaiting it — so release would happen
     eventually rather than as part of unwinding. Registering the disposer on the
     agent's own scope makes the child process an artifact of that scope, which
-    is what every other acquired resource in pH already is."""
+    is what every other acquired resource in pH already is.
+
+    Asked of the agent registry when a kernel is built (`AgentRegistry.scope_of`),
+    and the answer for an agent that is gone is a refusal (`apply`). `None`, for a
+    runtime no registry is wired to, builds a kernel only this row's unmount closes.
+    This was a table of its own, filled on `agent/created` and never emptied: it
+    held the scope of every agent the runtime had ever heard of."""
     _environment: RuntimeEnvironment | None = None
     _resolve_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
@@ -1603,10 +1608,6 @@ class PythonCodeRuntime:
             log.warning("ph_rlm.kernel: workspace lookup failed for %s", agent_id, exc_info=True)
             return None
 
-    def remember_scope(self, agent: AgentHandle) -> None:
-        """Note an agent's scope, so its kernel can be owned by it."""
-        self._scopes[agent.id] = agent.ctx
-
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
         """Run one program in its namespace — the agent's own unless it names another —
         within the agent's boundary either way (`CodeRunRequest.agent`, S21)."""
@@ -1725,14 +1726,14 @@ class PythonCodeRuntime:
             cancel_grace=self.cancel_grace,
             probe_seconds=self.probe_seconds,
         )
-        self._kernels[namespace] = kernel
-        scope = self._scopes.get(agent_id)
+        scope = None if self.scopes is None else self.scopes(agent_id)
         if scope is not None:
-
-            async def enter() -> Disposer:
-                return partial(self.close_namespace, namespace)
-
-            self._closers[namespace] = await scope.effect(enter, label=f"code-runtime:{namespace}")
+            # The close before the entry, and nothing that suspends between them:
+            # a kernel in the table always has the close that takes it out.
+            self._closers[namespace] = scope.add_disposer(
+                partial(self.close_namespace, namespace), label=f"code-runtime:{namespace}"
+            )
+        self._kernels[namespace] = kernel
         return kernel
 
     async def close_namespace(self, namespace: str) -> None:
@@ -1852,7 +1853,23 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # The namespace *is* the agent id, so a kernel is scoped exactly like the
     # agent's tools, its inbox and its log — and released by the same unwinding.
-    ctx.on("agent/created", runtime.remember_scope)
+    # Asked when a kernel is built: the registry is what knows who is live.
+    def scope_of(agent_id: str) -> Context | None:
+        agents = ctx.get(AGENTS)
+        if agents is None:
+            return None
+        scope = agents.scope_of(agent_id)
+        if scope is None:
+            # Its agent went while the interpreter was being resolved, which on a
+            # cold cache is seconds. Built anyway, the kernel had no owner: its
+            # guest ran until this row unmounted, and an agent brought back under
+            # the same id ran its cells in it.
+            raise InactiveScopeError(
+                f"agent {agent_id} is gone; no kernel is built for an agent that cannot own it"
+            )
+        return scope
+
+    runtime.scopes = scope_of
 
     # Asked at kernel start rather than captured here, because a workspace is
     # acquired after the agent exists (P4-08) and a value read at mount would be

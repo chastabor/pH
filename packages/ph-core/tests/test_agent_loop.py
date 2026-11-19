@@ -22,6 +22,7 @@ import pytest
 from ph.agent.inbox import InboxSplice
 from ph.agent.types import (
     AgentCancelCause,
+    AgentDriver,
     AgentOptions,
     PreStepDecision,
     PreStepRequest,
@@ -51,7 +52,7 @@ from ph.llm.types import (
     ToolCallBlock,
     create_user_message,
 )
-from ph.session import SessionEvent, SurfaceIntent, SurfaceReplace
+from ph.session import Session, SessionEvent, SurfaceIntent, SurfaceReplace
 from ph.system_prompt.assembly import PromptContext, PromptSection
 from ph.testing import FAKE_OPTIONS as FAKE
 from ph.testing import (
@@ -1372,3 +1373,67 @@ async def test_a_disposed_agent_is_announced_once_and_already_off_the_roster(
     await agents.dispose(agent.id)
 
     assert heard == [None]
+
+
+async def test_an_agents_scope_is_answered_only_while_it_can_take_an_effect(
+    mount: MountProfile,
+) -> None:
+    """`scope_of` is for whoever acquires something for an agent it has only the id
+    of, and registers the release on that agent's scope: a workspace, a kernel.
+    A scope that is unwinding is not offered, since it would refuse the effect; an
+    id nobody knows has none. So no caller keeps a table of scopes of its own,
+    which is what the kernel runtime had, and never emptied.
+
+    Sabotage: answer `agent.ctx` whatever its state, and `during` holds the scope.
+    """
+    ctx = await mount()
+    agents = ctx.require(AGENTS)
+    agent = agents.create(ctx.require(SESSIONS).create("s"), FAKE)
+    during: list[object] = []
+    # Registered after the roster entry, so it runs before `_forget` pops it: the
+    # agent is still listed, and its scope is already down.
+    agent.ctx.add_disposer(lambda: during.append(agents.scope_of(agent.id)), label="asks")
+
+    assert agents.scope_of(agent.id) is agent.ctx
+    assert agents.scope_of("nobody") is None
+
+    # Through the scope, as a parent's unwind reaches a child: `dispose(agent_id)`
+    # pops the roster first, and would answer `None` for that reason instead.
+    await agent.ctx.dispose()
+
+    assert during == [None]
+    assert agents.scope_of(agent.id) is None
+
+
+async def test_an_agent_whose_driver_could_not_be_built_leaves_no_scope(
+    mount: MountProfile,
+) -> None:
+    """A driver refuses a log it cannot replay. The scope made for it is unwound and
+    the write registered on it is dropped. Left there, the scope stayed under its
+    parent, and its write flushed the session when the parent went: by then the
+    session had been let go by its opener and ended from a second copy of its log.
+
+    Sabotage: skip the drop, and the scope still holds its write as `create` raises;
+    skip the unwind, and it is still a live child.
+    """
+    ctx = await mount()
+    agents = ctx.require(AGENTS)
+    made: list[Context] = []
+
+    def refuses(scope: Context, session: Session, options: AgentOptions) -> AgentDriver:
+        made.append(scope)
+        raise ValueError("this log cannot be replayed")
+
+    agents.driver_factory = refuses
+
+    with pytest.raises(ValueError, match="cannot be replayed"):
+        agents.create(ctx.require(SESSIONS).create("s"), FAKE)
+    # Dropped as `create` raises, ahead of the unwind: run there instead, it is
+    # the write this test is about.
+    assert not made[0]._effects
+    await ctx.drain()
+
+    assert not made[0].active
+    assert not made[0]._effects
+    assert made[0] not in ctx._children
+    assert agents.get("s") is None

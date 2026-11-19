@@ -99,7 +99,7 @@ from pydantic import Field
 from ph.agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ph.cancel import Canceled, Cancellation
 from ph.characters import head
-from ph.cordis import Context, Disposer, Next, ServiceKey, plugin
+from ph.cordis import Context, Disposer, Next, Releaser, ServiceKey, plugin
 from ph.json import JsonObject, as_obj, as_str, dumps, loads
 from ph.keys import AGENTS, FS, JOBS, SHELL, SUBPROCESS, SYSTEM_PROMPT, TOOLS, TUI_STATUS
 from ph.llm.types import PluginSource, create_user_message
@@ -363,6 +363,9 @@ class UtcpSeam:
     client: Any
     """The UTCP client. `Any` because the library ships no types."""
     states: dict[str, ManualState] = field(default_factory=dict)
+    _forgets: dict[str, Releaser] = field(default_factory=dict)
+    """Each held state's `forget`, on the scope that added it. Dropped unrun when
+    another add replaces the state, so a name has one teardown: its holder's."""
     manuals: dict[str, Manual] = field(default_factory=dict)
     """The manuals that gave tools, by name — what a run is started from."""
     runs: dict[tuple[str, str], _Run] = field(default_factory=dict)
@@ -382,6 +385,11 @@ class UtcpSeam:
         name that is already held and gave tools changes nothing and answers with
         the state there is — the tools are registered, and a second discovery
         would only find the registry refusing each of them by name.
+
+        A name held with no tools is discovered again, and the name is then this
+        add's: the earlier add's teardown is dropped from its scope unrun. Left
+        there, it took the client's record of the manual when that scope went,
+        and every call of the tools this add registered failed from then on.
         """
         name = _NOT_A_WORD.sub("_", as_str(manual.template.get("name")))
         if not name:
@@ -399,29 +407,37 @@ class UtcpSeam:
         said = (*unmade, *_unscrubbed(manual.pass_env, self.ctx.get(SUBPROCESS)))
         if said:
             state = ManualState(tools=state.tools, problems=(*state.problems, *said))
-        self.states[name] = state
-        if state.available:
-            self.manuals[name] = manual
-        for problem in state.problems:
-            log.warning("ph_utcp: %s: %s", name, problem)
 
         async def forget() -> None:
             """What the owning scope's unwinding takes back: the state, so the name
-            can be added again, the runs it started, and the client's own record
-            of the manual."""
-            if self.states.get(name) is state:
-                del self.states[name]
-                self.manuals.pop(name, None)
-                for key in [key for key in self.runs if key[0] == name]:
-                    job = self.runs.pop(key).job
-                    if job is not None:
-                        job.cancel()
+            can be added again, the runs it started and that they were started,
+            and the client's own record of the manual. Only ever the holder's: an
+            add that replaces the state drops this."""
+            del self.states[name]
+            del self._forgets[name]
+            self.manuals.pop(name, None)
+            self.warmed = {key for key in self.warmed if key[0] != name}
+            for key in [key for key in self.runs if key[0] == name]:
+                job = self.runs.pop(key).job
+                if job is not None:
+                    job.cancel()
             try:
                 await self.client.deregister_manual(name)
             except Exception:
                 log.debug("ph_utcp: %s was not deregistered", name, exc_info=True)
 
-        await (scope or self.ctx).effect(lambda: forget, label=f"utcp-manual({name})")
+        # The teardown first, and nothing that suspends from here to the return:
+        # a scope that is down refuses before the name is held, and no other add
+        # can come between the state and the teardown that takes it back.
+        holding = (scope or self.ctx).add_disposer(forget, label=f"utcp-manual({name})")
+        replaced = self._forgets.pop(name, None)
+        if replaced is not None:
+            replaced.drop()
+        self.states[name], self._forgets[name] = state, holding
+        if state.available:
+            self.manuals[name] = manual
+        for problem in state.problems:
+            log.warning("ph_utcp: %s: %s", name, problem)
         return state
 
     async def _discovered(self, name: str, manual: Manual, scope: Context | None) -> ManualState:

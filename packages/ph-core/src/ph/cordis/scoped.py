@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 from .context import remove_identical
 
 if TYPE_CHECKING:
-    from .context import Context, Disposer, Running
+    from .context import Context, Disposer, Releaser, Running
 
 __all__ = ["ScopedEntries", "ScopedTable"]
 
@@ -64,13 +64,6 @@ class ScopedTable[B]:
         bucket = self._buckets.get(key)
         if bucket is None:
             bucket = self._buckets[key] = self._new()
-        try:
-            mutate(bucket)
-        except BaseException:
-            # A registration refused — a duplicate name — leaves no empty bucket.
-            if self._empty(bucket) and self._buckets.get(key) is bucket:
-                del self._buckets[key]
-            raise
 
         def release() -> None:
             undo(bucket)
@@ -79,7 +72,22 @@ class ScopedTable[B]:
             if then is not None:
                 then()
 
-        return by.add_disposer(release, label=label)
+        releaser: Releaser | None = None
+        try:
+            # The teardown before the change it undoes: a pair that is down
+            # refuses here, and applied first the change stayed in a bucket
+            # nothing would ever empty.
+            releaser = by.add_disposer(release, label=label)
+            mutate(bucket)
+        except BaseException:
+            if releaser is not None:
+                releaser.drop()
+            # A registration refused — a duplicate name, an owner that is down —
+            # leaves no empty bucket.
+            if self._empty(bucket) and self._buckets.get(key) is bucket:
+                del self._buckets[key]
+            raise
+        return releaser
 
     def get(self, key: Context | None) -> B | None:
         """The bucket of one scope — `None` for the global layer's."""

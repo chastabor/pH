@@ -75,7 +75,7 @@ from urllib.parse import quote
 
 import anyio
 
-from ..cordis import Context, plugin, releasing
+from ..cordis import Context, maybe_await, plugin, releasing
 from ..keys import SANDBOX, SUBPROCESS
 from ..paths import default_home_path, resolve_roots
 from ..resources import temporary_directory
@@ -856,16 +856,19 @@ class _Egress:
         proxy = EgressProxy(
             path=path, permits=ctx.require(SANDBOX).permits, loopback=backend.needs_loopback
         )
+        # The close before the start: a start that fails or is canceled part-way,
+        # the unix listener up and the loopback one refused, has its close already.
+        closing = ctx.add_disposer(proxy.aclose, label="sandbox-local(egress proxy)")
         try:
             await proxy.start()
         except OSError as error:
             # A host that will not let this process listen — a sandbox of its own
             # refusing unix sockets, a runtime dir it cannot write — is a host
             # with no bridge, not a row that fails to mount.
+            await maybe_await(closing())
             self.verdict = SandboxProbe(False, f"could not listen on {path}: {error}")
             log.info("ph.seams.sandbox_local: no egress bridge — %s", self.verdict.because)
             return
-        ctx.add_disposer(proxy.aclose, label="sandbox-local(egress proxy)")
         global _BRIDGE_VERDICT
         # Where the command dials: the proxy's own loopback port where it opened
         # one, else the shim's fixed number inside the namespace. Read from the
@@ -876,7 +879,9 @@ class _Egress:
         self.verdict = _BRIDGE_VERDICT
         if not self.verdict.confines:
             log.info("ph.seams.sandbox_local: no egress bridge — %s", self.verdict.because)
-            await proxy.aclose()
+            # Through the releaser, so the close leaves the row's scope as it runs:
+            # called bare, it stayed registered for a proxy already closed.
+            await maybe_await(closing())
             return
 
         def denied(host: str, port: int, agent: str | None) -> None:

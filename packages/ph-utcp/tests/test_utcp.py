@@ -442,6 +442,48 @@ async def test_another_row_can_add_a_manual_and_takes_it_back_when_it_unmounts(
     assert again.available
 
 
+async def test_a_failed_add_takes_nothing_from_the_add_that_replaced_it(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """A name whose add gave no tools can be added again, from anywhere, and is
+    then the second add's alone. The first add's teardown stayed on its scope
+    and, when that scope went, took the client's record of the manual: the tools
+    stayed listed and every call of one failed."""
+    ctx = await mount(_row())
+    seam = ctx.require(UTCP)
+    row = ctx.scope("a-row-whose-manual-fails")
+    refused = _manual(tmp_path)
+    refused["template"]["call_template_type"] = "http"
+
+    first = await seam.add(Manual.model_validate(refused), scope=row)
+    assert not first.available
+    second = await seam.add(Manual.model_validate(_manual(tmp_path)))
+    assert second.available
+    assert not [one.label for one in row._effects if one.label == "utcp-manual(fx)"]
+
+    await row.dispose()
+
+    assert seam.states["fx"] is second
+    result = await run_tool(ctx, "fx_echo", {"text": "hi", "times": 1}, agent=new_agent(ctx))
+    assert not result.is_error, text_of(result.content)
+
+
+async def test_a_forgotten_manual_is_warmed_again_when_it_comes_back(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """Forgetting a manual cancels the runs it started, so that they were started
+    goes with them: the manual added again starts its eager run again."""
+    ctx = await mount(_row())
+    seam = ctx.require(UTCP)
+    row = ctx.scope("a-row-with-a-manual")
+    await seam.add(Manual.model_validate(_manual(tmp_path)), scope=row)
+    seam.warmed.update({("fx", "an-agent"), ("another", "an-agent")})
+
+    await row.dispose()
+
+    assert seam.warmed == {("another", "an-agent")}
+
+
 # ----------------------------------------------------------------- confined --
 
 

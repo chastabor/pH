@@ -48,11 +48,13 @@ from ..agent.types import AgentHandle, PreStepDecision, PreStepRequest
 from ..cordis import (
     Context,
     Disposer,
+    InactiveScopeError,
     Next,
     Releaser,
     Running,
     maybe_await,
     plugin,
+    releasing,
     running,
     safe_yaml_load,
 )
@@ -1253,7 +1255,16 @@ class WorkspaceSeam:
         # it — against I2, in the module that argues I2.
         if scope is None:
             scope = self._agent_scope(agent_id)
-        held = await self._track(workspace, agent_id, scope)
+        try:
+            held = await self._track(workspace, agent_id, scope)
+        except InactiveScopeError:
+            # Whoever was to own it went away while the tier made it. Given back
+            # now, as `effect` gives back an artifact whose scope died mid-acquire:
+            # nothing holds it, so nothing else ever would.
+            if workspace.release is not None:
+                with releasing():
+                    await workspace.release(workspace)
+            raise
         fresh = fresh_root(workspace.kind)
         materials = self._provisioning if fresh else []
         self._log(workspace, agent_id, session, declined, materials)
@@ -1406,12 +1417,10 @@ class WorkspaceSeam:
         which outside a row's `apply` is the seam itself — a worktree taken for a real
         agent then outlived that agent by the whole process, and the containment-ladder
         tests had to remember `scope=agent.ctx` by hand (P4-16). The registry already
-        knows the answer, so the seam asks it. A disposed scope is declined for
-        `owner_for`'s reason: a registration on a dead lifetime is one nothing unwinds.
+        knows the answer, so the seam asks it (`AgentRegistry.scope_of`).
         """
         agents = self.ctx.get(AGENTS)
-        agent = agents.get(agent_id) if agents is not None else None
-        return agent.ctx if agent is not None and agent.ctx.active else None
+        return None if agents is None else agents.scope_of(agent_id)
 
     async def _track(self, workspace: Workspace, agent_id: str, scope: Context | None) -> _Held:
         """Register the teardown as an effect, so the workspace has an owner.
@@ -1422,14 +1431,20 @@ class WorkspaceSeam:
         agent's work.
         """
         held = _Held(workspace=workspace)
-        replaced = self._held.get(agent_id)
-        if replaced is not None and replaced.dispose is not None:
-            # An agent that acquired again: the previous release is dropped unrun, so
-            # it cannot evict the live workspace from `_held` when its scope goes.
-            replaced.dispose.drop()
-        self._held[agent_id] = held
 
         def enter() -> Disposer:
+            # Written here, which `effect` reaches only past its check that the
+            # owner is up, and with nothing that suspends before the release is
+            # registered. Written ahead of the call, a refusal left the entry for
+            # good and had already dropped the release of the one it replaced.
+            replaced = self._held.get(agent_id)
+            if replaced is not None and replaced.dispose is not None:
+                # An agent that acquired again: the previous release is dropped
+                # unrun, so it cannot evict the live workspace from `_held` when
+                # its scope goes.
+                replaced.dispose.drop()
+            self._held[agent_id] = held
+
             async def release() -> None:
                 del self._held[agent_id]
                 current = held.workspace

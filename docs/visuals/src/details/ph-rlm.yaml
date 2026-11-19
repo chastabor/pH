@@ -107,7 +107,7 @@ topics:
             - ["a family check on a send", "`ctx.tools.guard`", "registration, asked last"]
             - ["`rlm.run` → a child", "`ctx.subagents.start`", "service call"]
             - ["a message to a child", "`agent.steer`, read at the target's next step", "call"]
-            - ["a kernel bound to its agent", "`agent/created`", "emit"]
+            - ["a kernel bound to its agent", "`ctx.agents.scope_of(agent_id)`, asked when the kernel is built", "service call"]
             - ["auto-refine at a turn's end", "`session/event`", "emit"]
             - ["a veto before a refinement", "`harness/before-refine`", "waterfall"]
             - ["a global refinement's approval", "`ctx.approval.request`, then `approval/request`", "service call, then waterfall"]
@@ -118,7 +118,6 @@ topics:
       - event: harness/before-refine
         args:
           - [request, RefineRequest, "the session, the agent, the scope (`local` or `global`), the trigger (`user`, `turns`, `compaction`) and any instructions"]
-      - event: agent/created
       - links:
           - {to: "dispatch", label: "The four dispatch modes"}
 
@@ -390,11 +389,9 @@ nodes:
           `ctx.code_runtime` gets a provider with `language: python`, `isolation: process` and `persistence: namespace`. The seam accepts `persistence: namespace` only from a provider that declares kernel snapshots; `rlm-kernel-snapshot` is the row that keeps that promise. The row also provides `ctx.python_runtime` for the snapshot and skills rows.
       - struct: ph.seams.code_runtime:CodeRunRequest
       - struct: ph.seams.code_runtime:CodeRunResult
-      - title: What it listens to
-        table:
-          columns: [event, dispatch, what the row does]
-          rows:
-            - ["`agent/created`", emit, "remembers the agent's scope, so its kernel is closed as an effect of that scope"]
+      - title: Whose kernel it is
+        text: |
+          The row listens to no event. When it builds a kernel it asks `ctx.agents.scope_of(agent_id)` for the agent's live scope and registers the kernel's close there, so the kernel is closed as an effect of that scope. An agent that is gone has no scope to answer with, and no kernel is built for it. It keeps the releaser: closing the kernel another way drops the close from the agent's scope without running it.
       - title: A kernel's life
         text: |
           1. The first `run` for a namespace resolves the interpreter, builds the argv, wraps it with `ctx.sandbox.confine` when a backend is mounted and the agent holds a workspace, and spawns the guest with fd 3 inherited.

@@ -54,13 +54,15 @@ import shutil
 import socket
 import sys
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import anyio
 import pytest
 
 from ph.cordis import Context, maybe_await
 from ph.keys import SANDBOX, SUBPROCESS
+from ph.seams import sandbox_local
 from ph.seams.sandbox import Egress, SandboxError, SandboxPolicy, writable_paths
 from ph.seams.sandbox_egress import PROBE_HOST
 from ph.seams.sandbox_local import (
@@ -322,6 +324,86 @@ async def test_the_row_declines_rather_than_claiming_confinement_it_cannot_prove
             ctx.require(SANDBOX).confine(("cmd",), _policy())
     else:
         assert ctx.require(SANDBOX).enforcement == "full"
+
+
+async def test_a_bridge_that_fails_its_probe_leaves_no_close_on_the_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A proxy closed because its probe failed is closed through the releaser its
+    registration handed back, so the close leaves the row's scope as it runs.
+    Called bare, the close stayed registered for a proxy already closed, and ran
+    again when the row unmounted."""
+    closed: list[Path] = []
+
+    class Proxy:
+        tcp_port = None
+
+        def __init__(self, *, path: Path, permits: object, loopback: bool) -> None:
+            self.path = path
+
+        async def start(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(self.path)
+
+    async def socket_path(ctx: Context) -> Path:
+        return tmp_path / "egress.sock"
+
+    async def refused(*_: object) -> sandbox_local.SandboxProbe:
+        return sandbox_local.SandboxProbe(False, "the probe got out")
+
+    monkeypatch.setattr(sandbox_local, "EgressProxy", Proxy)
+    monkeypatch.setattr(sandbox_local, "egress_socket_path", socket_path)
+    monkeypatch.setattr(sandbox_local, "probe_egress", refused)
+    monkeypatch.setattr(sandbox_local, "_BRIDGE_VERDICT", None)
+    row = Context()
+    row.provide(SANDBOX, cast(Any, SimpleNamespace(permits=None)))
+    egress = sandbox_local._Egress()
+
+    await egress.mount(row, cast(Any, SimpleNamespace(needs_loopback=False)), tmp_path)
+
+    assert egress.proxy is None
+    assert closed == [tmp_path / "egress.sock"]
+    assert "sandbox-local(egress proxy)" not in [one.label for one in row._effects]
+    await row.dispose()
+    assert len(closed) == 1
+
+
+async def test_a_proxy_that_starts_half_way_is_closed_and_not_left_listening(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The close is registered before the start. A start that fails part-way, the
+    unix listener up and the loopback one refused, used to return before any close
+    existed, and the listener stayed for the life of the process."""
+    closed: list[Path] = []
+
+    class Proxy:
+        tcp_port = None
+
+        def __init__(self, *, path: Path, permits: object, loopback: bool) -> None:
+            self.path = path
+
+        async def start(self) -> None:
+            raise OSError("no loopback here")
+
+        async def aclose(self) -> None:
+            closed.append(self.path)
+
+    async def socket_path(ctx: Context) -> Path:
+        return tmp_path / "egress.sock"
+
+    monkeypatch.setattr(sandbox_local, "EgressProxy", Proxy)
+    monkeypatch.setattr(sandbox_local, "egress_socket_path", socket_path)
+    row = Context()
+    row.provide(SANDBOX, cast(Any, SimpleNamespace(permits=None)))
+    egress = sandbox_local._Egress()
+
+    await egress.mount(row, cast(Any, SimpleNamespace(needs_loopback=True)), tmp_path)
+
+    assert egress.verdict is not None and not egress.verdict.confines
+    assert closed == [tmp_path / "egress.sock"]
+    assert "sandbox-local(egress proxy)" not in [one.label for one in row._effects]
 
 
 async def test_the_verdict_reaches_ph_doctor_either_way(mount: MountProfile) -> None:

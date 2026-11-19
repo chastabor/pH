@@ -38,7 +38,7 @@ from typing import Any, get_args
 
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import Context, InactiveScopeError
 from ph.keys import WORKSPACE
 from ph.seams.workspace import (
     ContainmentTier,
@@ -373,6 +373,43 @@ async def test_re_acquiring_does_not_let_the_old_handle_evict_the_new_one(
     await first_scope.dispose()
 
     assert seam.of("a1") is second
+
+
+async def test_a_workspace_nobody_can_own_is_given_back_and_not_held(tmp_path: Path) -> None:
+    """An owner that went away while the tier made the tree refuses the release, and
+    the acquire fails. Nothing is held for the agent, the tree is released at once,
+    and a workspace the agent already held keeps its own release.
+
+    The entry used to be written, and the release it replaced dropped, before the
+    owner was asked: a refusal left `of()` answering with a workspace for good,
+    and both trees with nothing to release them.
+
+    Sabotage: write `_held` ahead of `effect` in `_track`, and the agent's entry
+    is the refused one, with no release.
+    """
+    released: list[Workspace] = []
+
+    async def release(workspace: Workspace) -> bool:
+        released.append(workspace)
+        return True
+
+    seam = workspace_seam(tmp_path / "scratch")
+    seam.register_provider(_Provider(answer=_worktree(tmp_path, release=release)))
+    first_scope = seam.ctx.scope("first")
+    first = await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path, scope=first_scope)
+    holding = seam._held["a1"]
+    gone = seam.ctx.scope("gone")
+    await gone.dispose()
+
+    with pytest.raises(InactiveScopeError):
+        await seam.acquire(session_id="s1", agent_id="a1", base=tmp_path, scope=gone)
+
+    # The record and not only the workspace: this tier answers with one value.
+    assert seam._held["a1"] is holding and seam.of("a1") is first
+    assert len(released) == 1, "the tree nobody could own was given back"
+    await first_scope.dispose()
+    assert seam.of("a1") is None
+    assert len(released) == 2
 
 
 async def test_a_ref_rides_both_halves_when_the_kind_has_one(tmp_path: Path) -> None:

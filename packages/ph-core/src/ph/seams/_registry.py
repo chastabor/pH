@@ -64,7 +64,6 @@ def claim_key[T](
     """
     if key in table:
         raise ValueError(f"{label}: {key!r} is already registered")
-    table[key] = value
 
     def release() -> None:
         if table.get(key) is value:
@@ -72,7 +71,11 @@ def claim_key[T](
         if then is not None:
             then()
 
-    return owner.add_disposer(release, label=f"{label}({key})")
+    # The teardown before the entry, here and in the two below: an owner that is
+    # down refuses, and written first the entry stayed with nothing to remove it.
+    releaser = owner.add_disposer(release, label=f"{label}({key})")
+    table[key] = value
+    return releaser
 
 
 def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, label: str) -> Disposer:
@@ -87,8 +90,9 @@ def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, labe
     contributing an equal entry would have one disposer take the other's, which
     is this module's whole complaint one container over.
     """
+    releaser = owner.add_disposer(lambda: remove_identical(entries, value), label=label)
     entries.append(value)
-    return owner.add_disposer(lambda: remove_identical(entries, value), label=label)
+    return releaser
 
 
 def claim_slot(
@@ -126,15 +130,21 @@ def claim_slot(
     if getattr(holder, attribute) is not None:
         raise RuntimeError(f"{label}: a provider is already registered")
     record = f"{attribute}_by"
-    setattr(holder, attribute, value)
-    setattr(holder, record, by)
 
     def release() -> None:
         if getattr(holder, attribute) is value:
             setattr(holder, attribute, None)
             setattr(holder, record, None)
 
-    return by.owner.add_disposer(release, label=label)
+    releaser = by.owner.add_disposer(release, label=label)
+    try:
+        # The record first: a holder that omits the field fails with nothing set.
+        setattr(holder, record, by)
+        setattr(holder, attribute, value)
+    except BaseException:
+        releaser.drop()
+        raise
+    return releaser
 
 
 class Registers[T](Protocol):

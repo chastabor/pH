@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from ph.cordis import Context, ScopedEntries, ScopedTable
+from ph.cordis import Context, InactiveScopeError, ScopedEntries, ScopedTable
 from ph.seams.skills import SkillRestriction
 from ph.testing import skill, skill_service
 
@@ -92,3 +92,23 @@ async def test_a_child_s_skill_filter_lifted_by_its_scope_refreshes_the_catalog(
     await child.dispose()
 
     assert skills._generation > before
+
+
+async def test_an_owner_that_is_down_is_refused_before_anything_is_changed() -> None:
+    """The teardown is registered before the change it undoes, so a refusal leaves
+    the table as it was. Applied first, the change stayed in a bucket keyed by a
+    scope that was already gone, which nothing would ever empty.
+
+    Sabotage: apply `mutate` before `add_disposer` in `claim`, and the table holds
+    the entry.
+    """
+    root = Context()
+    child = root.scope("child")
+    by = root.running_for(child)
+    await child.dispose()
+    table: ScopedEntries[str] = ScopedEntries()
+
+    with pytest.raises(InactiveScopeError):
+        table.add(by, "a", label="t")
+
+    assert not table and len(table) == 0

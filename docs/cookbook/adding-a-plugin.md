@@ -105,6 +105,47 @@ What `ctx.effect` and `ctx.add_disposer` hand back is a `Releaser`. Call it to
 release the artifact early. If the artifact is already gone another way, call
 `releaser.drop()` instead: the teardown leaves the scope without running.
 
+**Keep the `Releaser` whenever anything but the scope can end what you registered.**
+If your plugin keeps a table (runs by id, connections by name) and an entry can be
+deleted, replaced under its key, or ended early, the entry and its teardown are one
+holding and must end together:
+
+```python
+async def open(self, name: str, scope: Context) -> Connection:
+    if name in self._open:
+        await self.close(name)  # a replacement ends what it replaces, at the door
+
+    async def enter() -> Disposer:
+        connection = await connect(name)
+        self._open[name] = connection
+
+        async def release() -> None:
+            del self._open[name]
+            self._closing.pop(name, None)
+            await connection.aclose()
+
+        return release
+
+    # `effect` runs `release` at once if the scope went away during `connect`, so
+    # the entry is never left without it. Nothing suspends between the two lines.
+    self._closing[name] = await scope.effect(enter, label=f"connection({name})")
+    return self._open[name]
+
+
+async def close(self, name: str) -> None:
+    """The one door: an early close, a failed start and a replacement end here."""
+    await maybe_await(self._closing[name]())  # runs it once, and off the scope
+```
+
+The teardown removes its own entry outright, with no "is this still mine" check,
+because the door settles the releaser before anything else can take the key. Use
+`releaser.drop()` in place of the call when the door has already done the
+teardown's work itself.
+
+Throwing the `Releaser` away says nothing but your scope's unwind ends the thing,
+and `tests/test_holdings.py` will ask you to say why. The four rules are in
+`DESIGN.md` §2.5, "Holdings".
+
 ## Who is running matters
 
 Registrations record *who* made them (P6-12, P6-29). A body the seam invokes
