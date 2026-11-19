@@ -19,6 +19,7 @@ from ph.keys import AGENTS, SESSIONS
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
+    STATUS,
     SUSPENDED_DETAIL,
     ChildNotice,
     child_is_live,
@@ -35,8 +36,10 @@ from ph.testing import (
     MountProfile,
     admitted_child,
     assistant_payload,
+    delivered_ids,
     log_event,
     not_none,
+    session_of,
     stored_types,
 )
 
@@ -222,7 +225,8 @@ async def test_a_tombstoned_child_takes_no_more_statuses(mount: MountProfile) ->
     a revoked child one that ran and finished, with a notice telling its parent so.
     Each door refuses instead: nothing written, nobody told, and `None` for an answer.
 
-    Sabotage: drop the `_tombstoned` check from any one door, and its status is written.
+    Sabotage: drop the `_tombstoned` check from `record_waiting` or `record_started`, or
+    the `child_is_live` check from `record_ended`, and its status is written.
     """
     ctx = await mount()
     parent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("parent"), FAKE_OPTIONS)
@@ -239,6 +243,30 @@ async def test_a_tombstoned_child_takes_no_more_statuses(mount: MountProfile) ->
     state = child_state(child)
     assert (state.deleted, state.status, state.starts) == (True, "canceled", 0)
     assert not parent.inbox.has_pending
+
+
+async def test_a_child_is_ended_once(mount: MountProfile) -> None:
+    """A second ending of a child that ended — a failure after its `done`, a sweep
+    giving up on a child its refusal already ended — wrote over the first, and told
+    the parent twice: that it finished, and then that it failed. The door refuses it
+    and tells nobody. A finished child that is woken still starts again: only the
+    ending door holds a child to one.
+
+    Sabotage: drop the `child_is_live` check from `record_ended`, and the child ends
+    `done`, `error`, with two notices.
+    """
+    ctx = await mount()
+    parent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("parent"), FAKE_OPTIONS)
+    child = _child(ctx)
+    finished = ChildNotice(text="[child scout finished]", summary="scout finished")
+    failed = ChildNotice(text="[child scout failed]", summary="scout failed")
+
+    assert await record_ended(ctx, child, "done", notice=finished) is not None
+    assert await record_ended(ctx, child, "error", detail="too late", notice=failed) is None
+
+    assert [one.data["status"] for one in child.events if one.type == STATUS] == ["done"]
+    assert delivered_ids(session_of(parent)) == [finished.id]
+    assert await record_started(ctx, child, cause="rehydrated") is not None
 
 
 async def test_a_log_with_no_admission_is_not_a_child(mount: MountProfile) -> None:

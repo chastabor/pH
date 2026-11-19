@@ -51,8 +51,8 @@ from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.characters import head
-from ph.cordis import Context, InactiveScopeError, plugin
-from ph.json import JsonValue, dumps
+from ph.cordis import Context, Disposer, InactiveScopeError, maybe_await, plugin
+from ph.json import JsonObject, JsonValue, dumps
 from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.types import PluginSource, create_user_message
 from ph.persistence import cut_short_note
@@ -62,6 +62,7 @@ from ph.seams.subagents import (
     Access,
     ChildNotice,
     DowngradeReason,
+    SettledStatus,
     StatusCause,
     SubagentAwaiter,
     SubagentRequest,
@@ -360,11 +361,13 @@ class RlmChildProvider:
             # The child is an artifact of the *parent's* scope (I2), so a disposed
             # parent unwinds its children instead of leaving them running with nobody
             # to answer — and `delete()` becomes "release it early" rather than a
-            # second cleanup path that has to remember everything.
-            run.dispose = await parent.ctx.effect(
+            # second cleanup path that has to remember everything. That release is a
+            # revocation; the seam's own (`run.dispose`) is not.
+            teardown = await parent.ctx.effect(
                 lambda: partial(self._release, run_id, PARENT_TEARDOWN),
                 label=f"subagent:{run_id}",
             )
+            run.dispose = partial(self._dispose, run_id, teardown)
             # `resumed` is what makes a restart countable: without it the log holds
             # a `running` record per start and no way to tell a first one from a
             # fourth, which is the fold the ladder needs. A parent torn down under the
@@ -475,8 +478,12 @@ class RlmChildProvider:
         child.agent = self.ctx.require(AGENTS).create(session, child.options, parent=parent)
         await self._runtime(child, parent, session)
         # A fresh gate, which the awaiter already on the run reads at await time —
-        # its closure holds the `_Child`, not the old Event.
+        # its closure holds the `_Child`, not the old Event. And no answer until it
+        # gives one: the one it holds was to the question before, which a waiter on
+        # this one must not be handed, and which `suspend` would read as an ending,
+        # leaving a child it stopped mid-question `running` for a restart to count.
         child.finished = anyio.Event()
+        child.result = None
         await self._attach(child, parent, cause="rehydrated")
         return True
 
@@ -573,7 +580,6 @@ class RlmChildProvider:
                 # asked for is missing.
                 await self._fail(child, returned.problem, answer=answer)
                 return
-            child.result = SubagentResult(status="done", answer=answer, value=returned.value)
             # Silence is indistinguishable from a hang from the parent's side,
             # so a child that never sent a message is announced. A child that
             # *did* reply needs no notice — the reply is the notice — and its own
@@ -594,17 +600,9 @@ class RlmChildProvider:
             # The child's ending is on its own disk before its parent is handed the
             # answer (F1): `record_ended` flushes, and the waiters wake after it. The
             # notice rides on the ending, so a restart delivers one a crash held back.
-            ended = await record_ended(
-                self.ctx,
-                own,
-                "done",
-                notice=notice,
-                answerPreview=head(answer, self.config.answer_preview_chars) or None,
-            )
-            if ended is None:
-                # Tombstoned while its run was coming back from the release's
-                # cancel: not finished, and its tree keeps the mark it has.
-                child.result = None
+            if not await self._end(child, answer=answer, value=returned.value, notice=notice):
+                # Revoked while its run was coming back from the release's cancel:
+                # not finished, and its tree keeps the mark it has.
                 return
             # The other half of retain-by-default (P6-28): a child that finished
             # is a child whose checkout is not evidence of anything, so the mark
@@ -630,25 +628,54 @@ class RlmChildProvider:
         """End a child that failed, in the same order as any ending: the child's own
         account first, saying why, where its checkout is, and what it last said, then
         its parent's notice of it."""
-        run, own = child.run, child.session
-        assert own is not None, "a child fails only while it has its own log"
-        child.result = SubagentResult(status="error", answer=answer, error=message)
-        preview = head(answer, self.config.answer_preview_chars)
-        ended = await record_ended(
-            self.ctx,
-            own,
-            "error",
+        run = child.run
+        await self._end(
+            child,
+            answer=answer,
+            error=message,
             notice=ChildNotice(
                 text=f"[rlm child {run.name} ({run.id}) failed: {message}"
                 f"{self._evidence(child)}{said_text(answer)}]",
                 summary=f"{run.name} failed",
             ),
-            detail=message,
-            **({"answerPreview": preview} if preview else {}),
         )
-        if ended is None:
-            # Tombstoned meanwhile: revoked, which is what its log says it is.
-            child.result = None
+
+    async def _end(
+        self,
+        child: _Child,
+        /,
+        *,
+        answer: str,
+        notice: ChildNotice | None,
+        value: JsonObject | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """End `child` in its own log (`record_ended`), and hold what its waiters are
+        told: `done`, or `error` saying `error` when there is one. `False` when the
+        door refused the ending: revoked, or ended already. The record carries the
+        head of `answer` and, for a failure, `error` as its `detail`.
+
+        **Held before the ending is written**, not after: `suspend` reads a child that
+        holds nothing as one still working and writes `queued`, and the ending's flush
+        is an await it can land in. A refused ending puts back what was held before,
+        so a waiter hears what the child's log says rather than an ending it does not
+        hold: nothing, for a revoked child, or the `done` this drive wrote before
+        something after it raised.
+        """
+        own = child.session
+        assert own is not None, "a child ends only while it has its own log"
+        status: SettledStatus = "done" if error is None else "error"
+        fields: dict[str, JsonValue] = {}
+        if preview := head(answer, self.config.answer_preview_chars):
+            fields["answerPreview"] = preview
+        if error is not None:
+            fields["detail"] = error
+        held = child.result
+        child.result = SubagentResult(status=status, answer=answer, value=value, error=error)
+        if await record_ended(self.ctx, own, status, notice=notice, **fields) is not None:
+            return True
+        child.result = held
+        return False
 
     def _evidence(self, child: _Child) -> str:
         """Where the failed child's tree is, for the message that says it failed.
@@ -793,6 +820,20 @@ class RlmChildProvider:
         """
         return await self._release(run_id, reason)
 
+    async def _dispose(self, run_id: str, teardown: Disposer) -> None:
+        """`SubagentRun.dispose`: let go of a child the seam would not admit, without
+        revoking it. The seam ended it already, saying why (`_abandon`), and a refusal
+        is not a deletion.
+
+        Then the parent's teardown effect is released, which runs `_release` and finds
+        the child gone: an effect cannot be dropped without being run. **In that
+        order**: the other way round, the teardown revokes the child.
+        """
+        child = self._take(run_id)
+        if child is not None:
+            await self._drop(child)
+        await maybe_await(teardown())
+
     async def _release(self, run_id: str, reason: str) -> bool:
         """The one revocation path, whether the model asked or the parent unwound.
 
@@ -816,9 +857,26 @@ class RlmChildProvider:
         **A settled child is not settled again.** Its drive wrote `done` or `error`, and a
         `canceled` written over that turned a finished child into a revoked one.
         """
-        child = self._children.pop(run_id, None)
+        child = self._take(run_id)
         if child is None:
             return False
+        # The ending and the tombstone together (S14), in the child's own log and on
+        # its disk before anything is let go — and the ending at all, because a
+        # revoked child is not merely absent: a panel that knew only `deleted` could
+        # not say whether it had run.
+        own = self._child_log(child)
+        if own is not None:
+            await record_deleted(self.ctx, own, reason)
+        await self._drop(child)
+        return True
+
+    def _take(self, run_id: str) -> _Child | None:
+        """Take `run_id`'s child off this provider and stop it — its queued job and its
+        agent — before anything about it is written. `None` for a child it does not
+        hold, or holds no longer."""
+        child = self._children.pop(run_id, None)
+        if child is None:
+            return None
         if child.job_id is not None:
             # Queued, never ran: `Job.cancel` stops the wait for a slot it will
             # now never take. A body parked on a limiter reads no token, so
@@ -829,13 +887,11 @@ class RlmChildProvider:
             self.ctx.require(JOBS).cancel(child.job_id)
         if child.agent is not None:
             child.agent.cancel(AgentCancelCause(kind="parent"))
-        # The ending and the tombstone together (S14), in the child's own log and on
-        # its disk before anything is let go — and the ending at all, because a
-        # revoked child is not merely absent: a panel that knew only `deleted` could
-        # not say whether it had run.
-        own = self._child_log(child)
-        if own is not None:
-            await record_deleted(self.ctx, own, reason)
+        return child
+
+    async def _drop(self, child: _Child) -> None:
+        """Let go of a child `_take` stopped: its waiters woken, its scope released, and
+        the seam told it is gone."""
         self._let_go(child)
         await self._quiesce(child)
         # `get`, not attribute access: on the parent-teardown path this runs while
@@ -843,8 +899,7 @@ class RlmChildProvider:
         # a teardown that raised would abort the rest of the unwind.
         registry = self.ctx.get(SUBAGENTS)
         if registry is not None:
-            registry.forget(run_id)
-        return True
+            registry.forget(child.run.id)
 
     def suspend(self) -> None:
         """Stop every child this provider holds, and revoke none of them (S1).

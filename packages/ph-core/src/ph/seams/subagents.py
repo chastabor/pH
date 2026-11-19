@@ -826,8 +826,10 @@ class SubagentRun(WireForm):
     """Awaits quiescence and reports the outcome. `None` from a provider whose
     children cannot be waited on."""
     dispose: Disposer | None = None
-    """Releases the child early. Registered as an effect of the parent's scope by
-    the provider, so a disposed parent unwinds its children (I2)."""
+    """Stops and lets go of a child the seam would not admit, **without revoking it**:
+    no tombstone, since a refusal is not a deletion. Called once, after the seam has
+    ended the child (`SubagentService._abandon`). A parent's teardown, and a delete,
+    reach a provider's children by other paths, and those revoke."""
     grant: Grant | None = None
     """What this child was bounded to, stamped by the seam once it has applied it.
 
@@ -1083,6 +1085,9 @@ def _tombstoned(child: Session, status: SubagentStatus) -> bool:
     turned a revoked child into one that ran and finished, and its ending's notice
     told the parent so. The tombstone is in the log before that wait starts, so it
     is the doors that hold the rule, whichever provider is driving.
+
+    `record_started` and `record_waiting` ask only this, and not whether the child
+    ended, because a finished child that is woken writes `running` over its `done`.
     """
     if child.latest(DELETED) is None:
         return False
@@ -1151,11 +1156,14 @@ async def record_ended(
     `error`, saying why, with a notice of the seam's own in place of the provider's,
     which was worded for an answer.
 
-    `None`, with nothing written and nobody told, for a child tombstoned already
-    (`_tombstoned`): the revocation wrote its ending, and the parent that revoked it is
-    owed no notice of one.
+    **A child is ended once**, as `record_deleted` settles one once. `None`, with
+    nothing written and nobody told, for a child that is no longer live: tombstoned,
+    whose revocation wrote its ending and whose parent is owed no notice of one, or
+    ended already, whose parent was told then. Each provider and seam path that ends
+    a child relies on this rather than asking first.
     """
-    if _tombstoned(child, status):
+    if not child_is_live(_standing(ctx, child)):
+        log.debug("ph.seams.subagents: %s has ended; `%s` not written", child.id, status)
         return None
     fields: dict[str, JsonValue] = dict(extra)
     problem = settle_value(child).problem if status == "done" else ""
@@ -1452,22 +1460,30 @@ async def record_deleted(ctx: Context, child: Session, /, reason: str) -> None:
     Apart, a flush between them left a child `canceled` and not deleted. A child
     that already settled is not settled again: a `canceled` over its `done` turned a
     finished child into a revoked one. Whether it ended is read from its own log,
-    not from a caller's flag, so the rule has one reader — through the seam's cached
-    fold when there is one, since a long log refolded per revocation is a parent's
-    teardown paying for every child it had. A child tombstoned already is left as it
-    is, and **what it left unfinished beneath it ends with it** (`_end_beneath`).
+    not from a caller's flag (`_standing`). A child
+    tombstoned already is left as it is, and **what it left unfinished beneath it
+    ends with it** (`_end_beneath`).
     """
     await _tombstone(ctx, child, reason)
     await _end_beneath(ctx, child)
+
+
+def _standing(ctx: Context, child: Session) -> ChildState:
+    """Whether `child` ended or was revoked, for the two doors that will not do either
+    twice (`record_ended`, `record_deleted`). Through the seam's cached fold when there
+    is one, since a long log refolded per revocation is a parent's teardown paying for
+    every child it had; from the log itself when there is none, or when the child has
+    no admission for the seam to know it by."""
+    service = ctx.get(SUBAGENTS)
+    known = service.state(child.id) if service is not None else None
+    return known if known is not None else child_state(child)
 
 
 async def _tombstone(ctx: Context, child: Session, reason: str) -> None:
     """`record_deleted`'s own write, without taking anything beneath the child with
     it: what `_revoke_beneath` writes on each descendant, since its walk already
     reaches every level."""
-    service = ctx.get(SUBAGENTS)
-    known = service.state(child.id) if service is not None else None
-    state = known if known is not None else child_state(child)
+    state = _standing(ctx, child)
     if state.deleted:
         return
     with child.batch() as batch:
@@ -2260,10 +2276,9 @@ class SubagentService:
         delivered the way any ending's is. A spawn refused at admission does not: its
         refusal is the caller's answer already.
 
-        **A child that ended already is not ended again**, as `record_deleted` will
-        not settle one twice: a readmission `_admit` refused is ended by `_abandon`,
-        and the sweep that catches the refusal comes here for the same child. A
-        second ending told its parent twice.
+        A child that ended already is left as it ended (`record_ended`): a readmission
+        `_admit` refused is ended by `_abandon`, and the sweep that catches the
+        refusal comes here for the same child.
 
         Best effort, and never raised: this is how the seam gives up on a child —
         refused, unresumable, spent — and a root coming back must not be held
@@ -2272,8 +2287,6 @@ class SubagentService:
         """
 
         async def end(child: Session) -> None:
-            if not child_is_live(self._folds.read(child)):
-                return
             notice = (
                 _failed_notice(child, detail, summary="was given up on") if tell_parent else None
             )
@@ -2328,10 +2341,10 @@ class SubagentService:
     async def _abandon(self, run: SubagentRun, why: str, *, tell_parent: bool) -> None:
         """End and release a child this seam has decided not to admit (K3).
 
-        **Ended first, saying `why`, then released.** A provider's release tombstones
-        the child, and a tombstoned child takes no status after it (`_tombstoned`),
-        so an ending written second was refused. The release finds it ended and
-        writes no `canceled` over that.
+        **Ended first, saying `why`, then released**, so its account is on its disk
+        before anything is let go, as a revocation's is (`record_deleted`). The
+        release revokes nothing (`SubagentRun.dispose`), so a refused child reads
+        `error`, not deleted.
 
         Best-effort: the refusal is what the caller has to see, and a disposer
         that throws must not replace it with its own exception. `releasing`

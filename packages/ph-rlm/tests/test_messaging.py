@@ -32,9 +32,11 @@ from ph.keys import AGENTS, JOBS, SESSIONS, SUBAGENTS
 from ph.llm.types import ToolCallBlock, text_of
 from ph.seams.subagents import (
     STATUS,
+    SUSPENDED_DETAIL,
     FamilyRole,
     StatusCause,
     SubagentRequest,
+    child_state,
     family_reach,
     reachable_family,
 )
@@ -52,6 +54,7 @@ from ph.testing import (
     resume_stored,
     run_tool,
     settle_background,
+    settled,
     stored_events,
     tool_result_payload,
 )
@@ -428,6 +431,35 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
     assert not [event for event in session.events if event.type.startswith("subagent/")], (
         "the wake was recorded in the parent's log"
     )
+
+
+async def test_a_child_woken_and_stopped_mid_question_is_suspended(
+    family_ctx: MountedRuntime, gate: ModelGate
+) -> None:
+    """A woken child holds no answer until it gives one. It held its answer to the
+    question before, so a mount going away while it worked on the next read it as
+    settled: no `queued` written, and its log left `running`, which the next start
+    counts as a crash on the child's retry ladder. And a waiter on the new question
+    could be handed the old answer.
+
+    Sabotage: drop `child.result = None` from `RlmChildProvider.rehydrate`, and the
+    woken child's last status is `running`.
+    """
+    ctx, session, parent = await family_ctx()
+    run = await _spawn(ctx, parent, "scout")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
+    gate.release_one()
+    await settle_background(ctx)
+    await _send(
+        ctx, parent, session, message="one more thing", receiver_role="child", receiver_name="scout"
+    )
+    await settled(lambda: gate.arrived == 2, "the woken child to reach the model")
+    log = not_none(ctx.require(SESSIONS).get(run.session_id))
+
+    await ctx.root.dispose()
+
+    state = child_state(log)
+    assert (state.status, state.detail) == ("queued", SUSPENDED_DETAIL)
 
 
 async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) -> None:

@@ -721,6 +721,8 @@ nodes:
           - "`maxConcurrent` is per parent: ten roots at four each is forty children. The host's bound is `jobs.concurrency.subagent`."
           - "There is no `default_access` option; the request's default is `read`."
           - "A tombstoned child takes no status after its tombstone: the seam's status doors refuse one. So a child deleted while its drive is coming through its gate stays `canceled`, and its parent gets no notice of an ending."
+          - "A child is ended once: a second ending is refused, and its parent is told once."
+          - "A child the seam refuses, at a spawn or a readmission, is ended `error` and released without a tombstone. A refusal is not a revocation."
       - links:
           - {to: "edge:admit", label: "Admitting the child"}
           - {to: "security#node:subagents", label: "The spawn door and its checks"}

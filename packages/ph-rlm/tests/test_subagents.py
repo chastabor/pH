@@ -95,6 +95,7 @@ from ph.seams.subagents import (
     StatusCause,
     SubagentRequest,
     SubagentRun,
+    SubagentService,
     SubagentSpawnError,
     child_is_live,
     child_state,
@@ -118,8 +119,10 @@ from ph.testing import (
     MountProfile,
     StubWorkspaceProvider,
     assistant_payload,
+    delivered_ids,
     log_event,
     not_none,
+    raising,
     reconciled_call,
     resume_stored,
     run_tool,
@@ -346,9 +349,12 @@ async def test_a_child_whose_admission_cannot_be_written_is_not_started(
 
     The refusal reaches the caller, the child never reaches the model, and it is
     ended in its own log — so nothing holds the parent out of passivation for a child
-    that never ran.
+    that never ran. And not revoked: a refusal is not a deletion, and the release
+    that tombstoned it said `parent-teardown` of a parent that was still there.
 
     Sabotage: open the gate whether or not the write worked, and the child runs.
+    Point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`, and it is
+    deleted.
     """
     ctx, session, parent = await delegating()
 
@@ -367,6 +373,7 @@ async def test_a_child_whose_admission_cannot_be_written_is_not_started(
     (state,) = ctx.require(SUBAGENTS).children(session.id).values()
     assert state.status == "error"
     assert not child_is_live(state)
+    assert not state.deleted, "a refusal is not a revocation"
 
 
 async def test_an_interrupted_spawn_is_answered_with_the_handle_it_admitted(
@@ -796,8 +803,9 @@ async def test_a_child_deleted_as_it_is_admitted_stays_revoked(
     told the parent that the child it had just deleted "completed without sending a
     reply".
 
-    Sabotage: drop the `_tombstoned` check from `record_started` and `record_ended`, and
-    the statuses are `canceled`, `running`, `done`, with the notice delivered. Have
+    Sabotage: drop the `_tombstoned` check from `record_started` and the `child_is_live`
+    check from `record_ended`, and the statuses are `canceled`, `running`, `done`, with
+    the notice delivered. Have
     the drive carry on past a refused start, and whoever awaits the child is told
     `done`.
     """
@@ -812,6 +820,30 @@ async def test_a_child_deleted_as_it_is_admitted_stays_revoked(
     assert (state.deleted, state.status, state.starts) == (True, "canceled", 0)
     assert (await run.result()).status == "error", "revoked, not finished"
     assert _notices(session) == []
+
+
+async def test_a_failure_after_a_child_finished_does_not_end_it_again(
+    delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child is ended once. Something that raised after its `done` was written — the
+    mark on its tree withdrawn, here — reached the drive's failure path, which wrote
+    `error` over the `done` with a notice of its own: the parent was told the child
+    finished and then that it failed, and whoever awaited it was handed the failure.
+    The door refuses the second ending, and the waiter is handed what the log holds.
+
+    Sabotage: drop the `child_is_live` check from `record_ended`, and the statuses end
+    `done`, `error`, with two notices.
+    """
+    monkeypatch.setattr(
+        RlmChildProvider, "_withdraw", raising(RuntimeError("the mark could not be withdrawn"))
+    )
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "finish quietly")
+    await settle_background(ctx)
+
+    assert _statuses(ctx, run) == ["running", "done"]
+    assert (await run.result()).status == "done"
+    assert len(_notices(session)) == 1
 
 
 async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRuntime) -> None:
@@ -2038,6 +2070,42 @@ async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
     assert state.status == "error"
     assert "could not be resumed" in not_none(state.detail)
     assert not child_is_live(state), "a root cannot be passivated while this reads live"
+
+
+async def test_a_readmission_the_seam_refuses_is_ended_and_not_revoked(
+    delegating: MountedRuntime,
+    gate: ModelGate,
+    mount: MountProfile,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child the seam refuses at readmission is ended, saying why, its parent is
+    told once, and it is not revoked.
+
+    The refusal released it through the provider's revocation, which tombstoned it
+    `parent-teardown` for a parent that was still there. Worse, its notice then rode
+    a deleted child, and the sweep that brings a parent back delivers no deleted
+    child's notice, so a crash before the parent's next write lost it for good. Not
+    deleted, the child is one that sweep delivers again (`test_child_logs`).
+
+    Sabotage: point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`, and the
+    child is deleted, `parent-teardown`.
+    """
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "refused next time")
+    await settled(lambda: gate.arrived == 1, "the child to reach the model")
+    await _persisted(ctx, session)
+
+    monkeypatch.setattr(
+        SubagentService,
+        "_enforce",
+        raising(SubagentSpawnError("its ceiling cannot be applied now")),
+    )
+    revived_ctx, revived, _parent = await _restart(mount, session.id)
+
+    state = _state(revived_ctx, run)
+    assert (state.status, state.deleted) == ("error", False)
+    assert "its ceiling cannot be applied now" in not_none(state.detail)
+    assert delivered_ids(revived) == [not_none(state.notice).id]
 
 
 # ------------------------------------------------- a child asked a second thing --

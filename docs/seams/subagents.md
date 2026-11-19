@@ -638,9 +638,22 @@ no notice, and the two that return their record return `None`. A revocation wait
 for the child's disk after it writes the tombstone, and a provider's drive can come
 back inside that wait: a `running` and a `done` written then made a revoked child
 read as one that ran and finished, and told its parent so. A provider that gets
-`None` from `record_started` does not start the attempt. A path that both ends and
-releases a child ends it first, which is the order a refused admission takes: its
-ending says why, and the release adds the tombstone without a `canceled` over it.
+`None` from `record_started` does not start the attempt.
+
+A child is ended once. `record_ended` refuses any child that is no longer live,
+tombstoned or ended already, as `record_deleted` settles one once: a second ending
+wrote over the first and told the parent twice, "finished" and then "failed". The
+other two doors refuse only a tombstone, because a finished child that is woken
+starts again over its `done`. A provider that gets `None` from `record_ended` hands
+its waiters what they held before, not the ending it was refused.
+
+A refusal is not a revocation. A child the seam will not admit, at a spawn or a
+readmission, is ended `error` saying why, and then released through
+`SubagentRun.dispose`, which revokes nothing: no tombstone. The provider's own
+release, the effect a parent's teardown runs, is the revocation. A refused child
+released through it was tombstoned `parent-teardown` for a parent that was still
+there, and the notice its ending carried rode a deleted child, which the resume
+sweep does not deliver again after a crash.
 
 A mount going away is not a revocation. The provider suspends each unfinished
 child instead: `queued` with `SUSPENDED_DETAIL` in its own log, no tombstone, and

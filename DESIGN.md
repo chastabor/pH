@@ -64,7 +64,7 @@ of it.
 |---|---|
 | Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~126 000 lines |
-| Tests | 4 610 collected |
+| Tests | 4 613 collected |
 | Registered plugins | 110 across the `ph.plugins` entry-point group |
 | Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
 | Base profile | 61 rows (`ph/bundles/base.yaml`) |
@@ -1341,7 +1341,10 @@ child's own state whether it had already ended, and never writes `canceled` over
 `done`, which turned a finished child into a revoked one. And nothing is written
 over a tombstone: the status doors (`record_waiting`, `record_started`,
 `record_ended`) refuse a tombstoned child, since a drive coming back while the
-revocation waited on the disk wrote `running` and `done` after it.
+revocation waited on the disk wrote `running` and `done` after it. `record_ended`
+also refuses a child that ended already, so a child is ended, and its parent told,
+once. A child the seam refuses is ended and released, not revoked:
+`SubagentRun.dispose` writes no tombstone.
 
 `SETTLED_STATUSES` is a real constant for a real reason: a hand-written copy was
 once wrong in three of its four members and pinned every parent forever

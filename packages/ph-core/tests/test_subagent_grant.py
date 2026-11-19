@@ -45,7 +45,6 @@ from ph.seams.subagents import (
     SubagentRun,
     SubagentSpawnError,
     child_is_live,
-    record_deleted,
 )
 from ph.system_prompt import render_prompt
 from ph.testing import (
@@ -783,85 +782,29 @@ async def test_a_readmit_the_ceiling_refuses_leaves_no_child_behind(
     catches the refusal ends it too, which told the parent twice.
 
     Sabotage: call `_enforce` directly in `_readmit_one` and `released` is empty.
-    Drop the already-ended check from `_end_child`, and there are two notices.
+    Drop the `child_is_live` check from `record_ended`, and there are two notices.
     """
     ctx = await mount()
+    for name in ("review", "deploy"):
+        ctx.require(SKILLS).register(skill(name))
     provider = _ReadmittingProvider(inner=StubSubagentProvider(root=ctx))
-    parent, run = await _readmitted(ctx, provider)
+    ctx.require(SUBAGENTS).register_provider("realistic", provider)
+    parent = _agent(ctx)
+    run = await ctx.require(SUBAGENTS).start(
+        "realistic", SubagentRequest(prompt="go", parent=parent, skills=("review",))
+    )
+    assert provider.released == [], "the first admission stands"
+    # What a daemon restart finds: the child admitted, never driven, and nothing
+    # in memory. `resume_children` skips ids it already holds.
+    ctx.require(SUBAGENTS)._runs.pop(run.id)
+
+    await ctx.require(SUBAGENTS).resume_children(parent, retry_limit=3)
 
     assert provider.released == [run.id], "the readmitted child was left running"
     assert ctx.require(SUBAGENTS).get(run.id) is None, "a refused readmit is not a live run"
     child = _child(ctx, parent, run.id)
     assert child.status == "error"
     assert not child_is_live(child), "the parent cannot passivate while this reads live"
-    assert delivered_ids(parent.session) == [not_none(child.notice).id]
-
-
-async def _readmitted(ctx: Context, provider: _RealisticProvider) -> tuple[Any, SubagentRun]:
-    """`provider`'s child, admitted with a skill, and then what a daemon restart finds:
-    admitted, never driven, and nothing in memory, which `resume_children` brings
-    back (it skips ids it already holds)."""
-    for name in ("review", "deploy"):
-        ctx.require(SKILLS).register(skill(name))
-    subagents = ctx.require(SUBAGENTS)
-    subagents.register_provider("realistic", provider)
-    parent = _agent(ctx)
-    run = await subagents.start(
-        "realistic", SubagentRequest(prompt="go", parent=parent, skills=("review",))
-    )
-    assert provider.released == [], "the first admission stands"
-    subagents._runs.pop(run.id)
-    await subagents.resume_children(parent, retry_limit=3)
-    return parent, run
-
-
-@dataclass(slots=True)
-class _TombstoningProvider(_ReadmittingProvider):
-    """`_ReadmittingProvider`, releasing the way a provider that drives its children
-    does: with a tombstone in the child's own log (`record_deleted`)."""
-
-    async def readmit(
-        self, request: SubagentRequest, *, run_id: str, session_id: str, restarts: int = 0
-    ) -> SubagentRun | None:
-        # Named, not `super()`: a `slots=True` dataclass is a new class, which the
-        # zero-argument form cannot find.
-        run = await _ReadmittingProvider.readmit(
-            self, request, run_id=run_id, session_id=session_id, restarts=restarts
-        )
-        assert run is not None
-        root = self.inner.root
-
-        async def release() -> None:
-            self.released.append(run.id)
-            await record_deleted(root, not_none(root.require(SESSIONS).get(session_id)), "refused")
-
-        run.dispose = release
-        return run
-
-
-async def test_a_readmit_the_ceiling_refuses_ends_before_it_is_released(
-    mount: MountProfile,
-) -> None:
-    """A provider's release tombstones its child, and a tombstoned child takes no
-    status after it. So the seam ends a refused child first, saying why, and the
-    release leaves that ending standing: `error` and a tombstone, not `canceled`.
-
-    And its parent is told, once. A spawn's refusal is its caller's answer, but a
-    readmission has no caller: the sweep's own ending used to tell the parent, after
-    the release, where the door now refuses it.
-
-    Sabotage: release before ending in `_abandon`, and the child reads `canceled`
-    with its parent told nothing.
-    """
-    ctx = await mount()
-    provider = _TombstoningProvider(inner=StubSubagentProvider(root=ctx))
-    parent, run = await _readmitted(ctx, provider)
-
-    assert provider.released == [run.id]
-    child = _child(ctx, parent, run.id)
-    assert (child.status, child.deleted) == ("error", True)
-    log = not_none(ctx.require(SESSIONS).get(run.session_id))
-    assert [one.data["status"] for one in log.events if one.type == "subagent/status"] == ["error"]
     assert delivered_ids(parent.session) == [not_none(child.notice).id]
 
 
