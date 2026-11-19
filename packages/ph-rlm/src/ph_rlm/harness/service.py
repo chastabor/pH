@@ -132,7 +132,14 @@ class HarnessService:
     _merged: dict[str, tuple[HarnessState, HarnessState, HarnessState]] = field(
         default_factory=dict
     )
-    """Per session: `(local, global, merged)` — the memo `state()` reads through."""
+    """Per session: `(local, global, merged)` — the memo `state()` reads through. Let
+    go with the session (`forget`)."""
+
+    def forget(self, session_id: str) -> None:
+        """A session left the store: its memo and its fold go with it, or the mount
+        kept one of each per session it was ever asked about."""
+        self._merged.pop(session_id, None)
+        self._local.forget(session_id)
 
     # ------------------------------------------------------------------ read --
 

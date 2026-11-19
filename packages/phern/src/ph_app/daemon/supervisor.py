@@ -236,6 +236,13 @@ class _Mounting:
 
     done: anyio.Event = field(default_factory=anyio.Event)
     root: Root | None = None
+    replacing: Root | None = None
+    """The root a restart is replacing (`Supervisor.restart`), `None` for a mount.
+
+    Out of the table from the moment it is unmounted and until its successor is
+    whole, and still the root a connection attached to its id is watching: a detach
+    in that window reaches it here (`Supervisor.holder`), rather than finding
+    nothing and having the restart move the departed watcher to the new root."""
     error: Exception | None = None
     """What the mount raised, re-raised into every caller waiting on it. A
     cancellation is not stored: it leaves through the task group, and the waiters
@@ -454,6 +461,17 @@ class Root:
     """
     waiting: MemoryObjectReceiveStream[None]
     exits: AsyncExitStack
+    driving: anyio.CancelScope = field(default_factory=anyio.CancelScope)
+    """The scope of this root's own task (`Supervisor._run`), which `_unmount` cancels
+    once the root is released (D1).
+
+    Closing the wake ends a task that waits for work and nothing else: one inside a
+    turn, or parked on a person, ran on against a disposed mount for the life of the
+    daemon. Canceled **after** the release, so the log on disk is the one the
+    release left — a turn cut by a shutdown stays open for the next daemon's
+    resumer — and what the task writes as it ends goes nowhere."""
+    stopped: anyio.Event = field(default_factory=anyio.Event)
+    """Set when this root's task has ended, which `_unmount` waits for."""
     recovery: Recovery = field(default_factory=lambda: Recovery(attempts=0, failed=False))
     """The retry ladder's state (P5-04), folded from the log when this root
     starts and maintained by `retry`/`give_up`/`recovered` from there.
@@ -562,9 +580,11 @@ class Root:
 
         A full channel means the task has wakes pending and has not reached them
         yet, so it will drain this work too — the inbox is the queue, and this is
-        only the doorbell.
+        only the doorbell. **A closed one is a root that has been released** (D6):
+        what rang — a listener during shutdown, a credential arriving — rang for
+        nobody, and the message is in the log for the next mount.
         """
-        with suppress(anyio.WouldBlock):
+        with suppress(anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
             self.wake.send_nowait(None)
 
     def subscribe(self, subscriber: Subscriber) -> None:
@@ -1080,7 +1100,7 @@ class Supervisor:
     session id, each with its root: the root's own or a child's, since a root resumes
     into whatever its family lost. Through any door, a barrier before a model request
     among them, as the store says it (`session/unwritten`, heard in `_start`), and at
-    the unwind, as the mount's last write keeps it (`_release`). A log leaves when a
+    the unwind, as the mount's last write keeps it (`_unmount`). A log leaves when a
     later write of it succeeds. `daemon/status` lists the roots, and readiness is no
     while there is one: a daemon that cannot write is one an orchestrator should stop
     sending work to, loudly rather than as a warning in a log file."""
@@ -1213,19 +1233,27 @@ class Supervisor:
         its id as it opens. Nobody can ask for that root before this returns, so it
         takes neither the fast path nor `_mounting`; `_in_flight` still holds it for
         `aclose`.
+
+        **The table holds only whole roots** (D5), so the fast path cannot hand out
+        one still being built: `_start` puts a root there as its last step. A mount
+        or a restart of this id in flight is waited for ahead of the fast path, so a
+        caller arriving as a restart begins is handed the new root, not the one
+        about to be unmounted under it.
         """
-        if root_id is not None and (root := self.roots.get(root_id)) is not None:
-            return root
         asked = root_id or "a new root"
         if self._closing:
-            # Handlers outlive the start of teardown, so a client can still ask
-            # for a root while `aclose` is unwinding the ones it has. Building
-            # one now is work nothing would ever release.
+            # First, ahead of the fast path (D7): handlers outlive the start of
+            # teardown, and a root handed out now is one `aclose` releases under
+            # the handler. Building one is work nothing would ever release.
             raise RootStartAbandoned(f"the daemon is shutting down and will not mount {asked}")
         # Registered and spawned without awaiting, which is what lets two callers
         # share one mount: nothing can interleave between the lookup and the
         # assignment, so the loser of the race finds the winner's record.
         pending = self._mounting.get(root_id) if root_id is not None else None
+        if pending is None and root_id is not None:
+            root = self.roots.get(root_id)
+            if root is not None:
+                return root
         if pending is None:
             pending = _Mounting()
             self._in_flight.add(pending)
@@ -1255,7 +1283,7 @@ class Supervisor:
         """Build one root on the supervisor's own task, and publish the answer.
 
         `_starting` is held *here* rather than in `start`, which is the half that
-        keeps passivation honest: the lock orders a mount against `_passivate`,
+        keeps passivation honest: the lock orders a mount against `passivate`,
         and a caller that walked away must not take that ordering with it.
 
         Only `Exception` is caught. A cancellation is the task group going away,
@@ -1271,10 +1299,16 @@ class Supervisor:
         except Exception as error:
             pending.error = error
         finally:
-            if root_id is not None:
-                self._mounting.pop(root_id, None)
-            self._in_flight.discard(pending)
-            pending.done.set()
+            self._settled(root_id, pending)
+
+    def _settled(self, root_id: str | None, pending: _Mounting) -> None:
+        """A mount or a restart is done, either way: its record leaves both tables —
+        by identity, since it is the only one this call registered — and its waiters
+        are woken."""
+        if root_id is not None and self._mounting.get(root_id) is pending:
+            del self._mounting[root_id]
+        self._in_flight.discard(pending)
+        pending.done.set()
 
     async def _start(
         self,
@@ -1382,31 +1416,6 @@ class Supervisor:
             # the count over and retry forever. What it already did is the
             # journal's `CLIENT_COMMAND` index, folded from the same log.
             root.recovery = recovery_of(session)
-
-            # On the stack rather than on a later line, because the entry has to
-            # go in *before* the awaits below: a readmitted child starts a drive
-            # job owned by this root's scope, and `resume_children` looks the
-            # root up. So whatever unwinds the stack takes the half-built root
-            # with it, rather than leaving an entry `start`'s fast path would
-            # hand out with no task behind it.
-            #
-            # Identity-checked, the way `ph.seams._registry.claim_key` is for a
-            # table owned by a `Context` — the owner here is the exit stack, whose
-            # ordering matters, so the check is spelled rather than borrowed.
-            # On the ordinary path this travels to `root.exits`
-            # and runs at *release*, and a passivation that pops its root and
-            # then releases it can overlap a fresh `start` of the same id, where
-            # a bare delete would evict the live replacement.
-            def forget() -> None:
-                if self.roots.get(root.id) is root:
-                    del self.roots[root.id]
-
-            exits.callback(forget)
-            self.roots[root.id] = root
-            # A root brings its store, which a rebuild in doubt can read through, and
-            # its own quiet window, which may be the soonest to end.
-            self.scheduler.notice()
-            self.releaser.notice()
             # **A named profile that moved since this root began** (S6): kept,
             # unless the person's own file moved and a person is here to ask — then
             # held, and asked, before anything runs on either version.
@@ -1445,6 +1454,9 @@ class Supervisor:
             # supply in a second, and the one that arrives readmits them
             # (`credential_supplied`). They stay live in their own logs meanwhile,
             # which is what keeps the root mounted and on the live-roots index.
+            # Not in the table yet (D5): nothing a sweep readmits looks the root
+            # up by id, and a caller handed it now would miss the events its relay,
+            # registered below, exists to send.
             if not root.held:
                 await self._resume_children(root)
             _say_what_waits(root)
@@ -1610,7 +1622,6 @@ class Supervisor:
             ctx.on("agent/status", announce)
             ctx.on("commands/change", verbs)
             ctx.on("screens/change", drew)
-            self.tasks.start_soon(self._run, root)
             if root.agent.inbox.has_pending and not root.recovery.failed:
                 # Work the log holds that no turn claimed: a prompt acked and
                 # flushed before the last process died, or left behind by a
@@ -1621,14 +1632,15 @@ class Supervisor:
                 # the message a root gave up on is still in its inbox, and a ring
                 # here would be one more attempt per daemon lifetime, which is
                 # the retry-forever the folded count exists to end. That root
-                # waits for a person, as `give_up` said it would.
+                # waits for a person, as `give_up` said it would. The wake channel
+                # holds the ring until the task below starts.
                 root.ring()
+            asking: anyio.CancelScope | None = None
             if root.held_on_profile:
                 # The ask ends with the root: released first, it is asked again at
                 # the next start, where the hold is found again.
                 asking = anyio.CancelScope()
                 exits.callback(asking.cancel)
-                self.tasks.start_soon(self._decide_profile, root, asking)
             # Ours now: the `async with` unwinds a stack that has been emptied,
             # so a failure anywhere above disposes everything it entered and a
             # success hands the whole stack to the root. The hand-rolled
@@ -1637,6 +1649,20 @@ class Supervisor:
             # `session.observe` callback all sat outside it, and which side of
             # that boundary a new line lands on was invisible.
             root.exits = exits.pop_all()
+            # **Whole, so in the table, with its task** (D5, Holdings rule 1): one
+            # step with nothing awaited, after everything above that could fail.
+            # In earlier, a second caller was handed a root still being built —
+            # its children not yet readmitted, its relay not yet registered — and a
+            # build that then failed left that caller holding a root that never
+            # ran. `_unmount` is the one door out of the table.
+            self.roots[root.id] = root
+            self.tasks.start_soon(self._run, root)
+            if asking is not None:
+                self.tasks.start_soon(self._decide_profile, root, asking)
+            # A root brings its store, which a rebuild in doubt can read through, and
+            # its own quiet window, which may be the soonest to end.
+            self.scheduler.notice()
+            self.releaser.notice()
             # On the record as held busy, or not at all (P13-01): what the next
             # daemon reads to know this root is worth mounting.
             self._note_live(root)
@@ -1689,16 +1715,25 @@ class Supervisor:
 
         Crashes and their ladder belong to `_drive`, so nothing raising out of a root can
         cancel the supervisor's task group and take every *other* root down with it.
+
+        Within `root.driving`, which the root's release cancels (`_unmount`): the wake
+        closing ends this loop only while it waits for work.
         """
-        async with root.waiting:
-            async for _ in root.waiting:
-                # Held for a credential (T5) or a profile decision (S6): the message
-                # stays in the inbox, and whatever releases the hold rings again.
-                # A ring whose message a running turn already took is a ring for
-                # nothing: `run()` on an empty inbox opens and closes an empty turn.
-                if root.agent.status != "idle" or not root.agent.inbox.has_pending or root.held:
-                    continue
-                await self._drive(root)
+        try:
+            with root.driving:
+                async with root.waiting:
+                    async for _ in root.waiting:
+                        # Held for a credential (T5) or a profile decision (S6): the
+                        # message stays in the inbox, and whatever releases the hold
+                        # rings again. A ring whose message a running turn already
+                        # took is a ring for nothing: `run()` on an empty inbox opens
+                        # and closes an empty turn.
+                        agent = root.agent
+                        if agent.status != "idle" or not agent.inbox.has_pending or root.held:
+                            continue
+                        await self._drive(root)
+        finally:
+            root.stopped.set()
 
     async def set_model(
         self, root: Root, chosen: ModelEntry, *, source: OverrideSource, command: str
@@ -1776,7 +1811,7 @@ class Supervisor:
         told `passivated`, and its context is gone.
         """
         root.family.due = False
-        if self.roots.get(root.id) is not root or not root.subscribers:
+        if not self._holds(root) or not root.subscribers:
             return
         rows = family_rows(root)
         if rows == root.family.sent:
@@ -1818,7 +1853,7 @@ class Supervisor:
                 await record_declined(root.ctx, root.session, change.now)
         except Exception:
             log.exception("ph_app.daemon: root %s: the profile decision failed", root.id)
-        if self.roots.get(root.id) is not root:
+        if not self._holds(root):
             return
         root.held_on_profile = False
         if not root.held:
@@ -1838,34 +1873,88 @@ class Supervisor:
         An adopted version that will not mount is withdrawn by `_start`, so the root
         comes back on what it ran in, and its log says why (`profile/withdrawn`).
         Returns the new root, or `None` when it did not start at all.
+
+        **A mount, so the supervisor's work** (D2), as `start` makes one: the remount
+        runs on `self.tasks` under a `_Mounting` record, and this only waits for it.
+        Run on the caller's task, a client that disconnected mid-restart canceled it
+        between the unmount and the mount, and the root was gone from the table with
+        nothing said and its watchers left on a dead root. The record is also what a
+        `start` of this id waits on meanwhile, and what a detach finds the old root
+        by (`holder`). A second restart of the same root joins the first.
         """
-        async with self._starting:
-            if self.roots.get(root.id) is not root:
+        pending = self._mounting.get(root.id)
+        if pending is None:
+            if self._closing or not self._holds(root):
                 return None
-            await self._unmount(root)
-            try:
-                back = await self._start(root.id, cwd=None, choice=ModelChoice())
-            except Exception:
-                log.exception(
-                    "ph_app.daemon: root %s did not start again on its new profile", root.id
-                )
-                # Its watchers are still on it, so the old root can say so.
-                root.publish(SessionStatusNotice(session_id=root.id, status="failed"))
-                return None
-        for watcher in root.subscribers:
+            pending = _Mounting(replacing=root)
+            self._in_flight.add(pending)
+            self._mounting[root.id] = pending
+            self.tasks.start_soon(self._remount, root, pending)
+        await pending.done.wait()
+        return pending.root
+
+    async def _remount(self, root: Root, pending: _Mounting) -> None:
+        """`restart`'s work, on the supervisor's task: unmount `root`, mount its log
+        again, and hand the new root what the old one's watchers had."""
+        try:
+            async with self._starting:
+                if not self._holds(root):
+                    return
+                await self._unmount(root, why="restarted from its log")
+                try:
+                    back = await self._start(root.id, cwd=None, choice=ModelChoice())
+                except Exception as error:
+                    log.exception(
+                        "ph_app.daemon: root %s did not start again on its new profile", root.id
+                    )
+                    # Its watchers are still on it, so the old root can say so; then
+                    # they are let go, since nothing of it is left to watch.
+                    root.publish(SessionStatusNotice(session_id=root.id, status="failed"))
+                    root.subscribers.clear()
+                    pending.error = error
+                    return
+                # Before anything is awaited: `back` is in the table, and a detach
+                # now finds it there rather than the root it replaced.
+                self._carry(root, back)
+                pending.root = back
+        finally:
+            self._settled(root.id, pending)
+
+    def _carry(self, old: Root, back: Root) -> None:
+        """Move what a restarted root's watchers had onto its successor (Holdings
+        rule 3): moved, not copied, so nothing the old root says afterwards reaches
+        the new root's watchers (D1).
+
+        The composer's tray and the desk's count go too: a chip dropped while it was
+        held is still staged, and an ask numbered again from 1 could meet a front
+        end still filing one under that name (`AskDesk.asked`). Then every watcher is
+        told what changed: the route, the verbs and the screens are the new mount's.
+        """
+        for watcher in old.subscribers:
             back.subscribe(watcher)
-        # The composer's tray and the desk's count go with the root: a chip dropped
-        # while it was held is still staged, and an ask numbered again from 1 could
-        # meet a front end still filing one under that name (`AskDesk.asked`).
-        back.staged = root.staged
-        if back.desk is not None and root.desk is not None:
-            back.desk.asked = root.desk.asked
-            for who in root.desk.front_ends:
+        old.subscribers.clear()
+        back.staged = old.staged
+        if back.desk is not None and old.desk is not None:
+            back.desk.asked = old.desk.asked
+            for who in old.desk.front_ends:
                 back.desk.join(who)
         back.publish(back.status_notice())
         back.publish(SessionCommandsNotice(session_id=back.id, commands=commands_of(back)))
         back.publish(SessionScreensNotice(session_id=back.id, screens=screens_of(back)))
-        return back
+
+    def _holds(self, root: Root) -> bool:
+        """Whether `root` is the one this supervisor holds under its id."""
+        return self.roots.get(root.id) is root
+
+    def holder(self, root_id: str) -> Root | None:
+        """The root a connection attached to `root_id` is watching (D8): the table's,
+        or, while a restart is between unmounting one and mounting the next, the one
+        it is replacing."""
+        root = self.roots.get(root_id)
+        if root is not None:
+            return root
+        pending = self._mounting.get(root_id)
+        return pending.replacing if pending is not None else None
 
     async def adopt(self, root: Root, version: ProfileBase) -> None:
         """Accept `version` for `root`'s next start — `phern profiles adopt` (S6).
@@ -1946,10 +2035,18 @@ class Supervisor:
 
         The delay is spent before the retry, not after the failure, so a root that gives
         up does so immediately rather than sleeping first.
+
+        **Only while the root is the table's** (D1). One released under its turn has
+        nothing left to retry — its release wrote what there was and unwound what it
+        held — and a ladder climbed for it wrote `supervisor/retry` into a log already
+        given back, and told `retrying` to watchers a restart had handed to its
+        successor.
         """
-        while True:
+        while self._holds(root):
             try:
                 await root.agent.run()
+                if not self._holds(root):
+                    return
                 await root.ctx.require(SESSIONS).flush(root.session)
                 if root.recovery.attempts or root.recovery.failed:
                     # Only after a ladder was actually climbed, so an ordinary
@@ -1966,6 +2063,13 @@ class Supervisor:
                 # was only ever asked to stop.
                 raise
             except Exception as error:
+                if not self._holds(root):
+                    log.debug(
+                        "ph_app.daemon: root %s was released under a turn that then failed: %s",
+                        root.id,
+                        error_message(error),
+                    )
+                    return
                 log.exception("ph_app.daemon: root %s crashed outside a turn", root.id)
                 state = root.recovery
                 if state.spent:
@@ -2667,7 +2771,7 @@ class Supervisor:
     async def verify_settled(self, root: Root) -> None:
         """Check `root` now if anything in its mount was written since its last check.
 
-        The last look before a release (`_passivate`): the verifier would get to it
+        The last look before a release (`passivate`): the verifier would get to it
         after `verify_after`, and by then its caches are gone. Free when nothing new
         was written.
         """
@@ -2766,23 +2870,6 @@ class Supervisor:
         for root in list(self.roots.values()):
             root.unreachable(note)
             await self._flush(root)
-
-    async def _release(self, root: Root) -> None:
-        """Flush a root's log, then unwind everything it took.
-
-        One spelling, because there are two callers — `aclose` at shutdown and
-        `passivate` when a root goes quiet — and this pair has diverged twice: an earlier
-        `aclose` skipped `exits.aclose()` when the flush raised, leaving an unwritable
-        root's context undisposed. Whatever joins root teardown next — a lease, a
-        reclaim, a cache eviction — has one place to be added.
-        """
-        await self._flush(root)
-        try:
-            await root.exits.aclose()
-        except Exception:
-            log.warning("ph_app.daemon: root %s did not unwind cleanly", root.id, exc_info=True)
-        for session_id, reason in unwritten_at_unwind(root.ctx).items():
-            self._could_not_write(root, session_id, reason)
 
     async def _flush(self, root: Root) -> None:
         """Write `root`'s log, or carry on without it: the crash a ladder retries may
@@ -3022,13 +3109,21 @@ class Supervisor:
             return []
         released: list[str] = []
         for root in list(self.roots.values()):
-            if self.passivatable(root, now=stamp, after=window):
-                await self.passivate(root, now=stamp)
+            if self.passivatable(root, now=stamp, after=window) and await self.passivate(
+                root, now=stamp, after=window
+            ):
                 released.append(root.id)
         return released
 
-    async def passivate(self, root: Root, *, now: int) -> None:
-        """Release a root's process-side state, keeping its session on disk.
+    async def passivate(self, root: Root, *, now: int, after: float | None = None) -> bool:
+        """Release a root's process-side state, keeping its session on disk. Whether it
+        was released.
+
+        With `after`, **only if it is still quiet once the lock is held** (D4): the
+        release pass decided, then waited for `_starting`, and a client that attached
+        and prompted in that wait had its root recorded `passivated` and cut short.
+        Asked with the same `now`, so a prompt in the wait — a newer last event —
+        reads as no quiet at all. Without it, released as asked.
 
         **Rehydration is already written**: `start()` resumes any root whose log exists
         (P5-01), so waking one is the ordinary path rather than a second mechanism.
@@ -3047,29 +3142,52 @@ class Supervisor:
             # the outgoing root has not released yet: `session_already_active`
             # for a session nobody is using. `session/attach` made that
             # reachable by waking a passivated root through `start`.
-            if self.roots.get(root.id) is not root:
-                return
-            await self._passivate(root, now=now)
+            if not self._holds(root) or (
+                after is not None and not self.passivatable(root, now=now, after=after)
+            ):
+                return False
+            # Out of the table before anything is awaited, as `_unmount` would take
+            # it: a caller from here on mounts the log again, after this release.
+            del self.roots[root.id]
+            # Measured first: a violation the check below records is a new last
+            # event, and the release would then claim a root idle for no time at all.
+            idle_ms = root.idle_for(now)
+            # The last look at its caches before they are gone (P12-04): a drift
+            # found now is recorded in the log a resume will read, rather than lost.
+            await self.verify_settled(root)
+            root.passivated(idle_ms)
+            log.info(
+                "ph_app.daemon: passivating root %s after %d minutes idle",
+                root.id,
+                idle_ms // 60_000,
+            )
+            # A quiet root owes nothing a resumer should mount it for — unless a
+            # goal is still open, which the entry keeps so a watchdog can say so.
+            self._note_live(root)
+            await self._unmount(root, why="released after going quiet")
+            return True
 
-    async def _passivate(self, root: Root, *, now: int) -> None:
-        # Measured first: a violation the check below records is a new last event,
-        # and the release would then claim a root idle for no time at all.
-        idle_ms = root.idle_for(now)
-        # The last look at its caches before they are gone (P12-04): a drift found
-        # now is recorded in the log a resume will read, rather than lost with them.
-        await self.verify_settled(root)
-        root.passivated(idle_ms)
-        log.info(
-            "ph_app.daemon: passivating root %s after %d minutes idle", root.id, idle_ms // 60_000
-        )
-        # A quiet root owes nothing a resumer should mount it for — unless a goal
-        # is still open, which the entry keeps so a watchdog can say so.
-        self._note_live(root)
-        await self._unmount(root)
+    async def _unmount(self, root: Root, *, why: str) -> None:
+        """The one door a root leaves by: a passivation's, a restart's and a shutdown's.
 
-    async def _unmount(self, root: Root) -> None:
-        """Take a root out of the table and unwind it: a passivation's, and a remount's."""
-        self.roots.pop(root.id, None)
+        In this order, each for a reason (Holdings rules 2 and 4):
+
+        1. **Out of the table, before anything is awaited**, and only if it is this
+           root that is there: a caller from here on mounts its log again, after
+           this release (`_starting` orders the two), rather than being handed a
+           root on its way out.
+        2. Its wake closed, so a task waiting for work leaves its loop.
+        3. Released: flushed, then unwound. One spelling for every way out — this
+           pair diverged twice when shutdown and passivation each had their own: an
+           earlier `aclose` skipped `exits.aclose()` when the flush raised, leaving an
+           unwritable root's context undisposed.
+        4. **Its task ended, after the release** (D1): one inside a turn or parked on
+           a person ran on against a disposed mount. After, so the log on disk is the
+           one the release left — a turn cut by a shutdown stays open for the next
+           daemon's resumer — and what the task writes as it ends reaches nothing.
+        """
+        if self._holds(root):
+            del self.roots[root.id]
         subagents = root.ctx.get(SUBAGENTS)
         if subagents is not None:
             # The children it read for this root would outlive the root otherwise:
@@ -3080,7 +3198,15 @@ class Supervisor:
         if schedule is not None:
             schedule.forget_session(root.id)
         await root.wake.aclose()
-        await self._release(root)
+        await self._flush(root)
+        try:
+            await root.exits.aclose()
+        except Exception:
+            log.warning("ph_app.daemon: root %s did not unwind cleanly", root.id, exc_info=True)
+        for session_id, reason in unwritten_at_unwind(root.ctx).items():
+            self._could_not_write(root, session_id, reason)
+        root.driving.cancel(why)
+        await root.stopped.wait()
 
     async def aclose(self, *, deadline: float | None = None) -> None:
         """Close every root's wake channel and unwind its context.
@@ -3130,8 +3256,10 @@ class Supervisor:
         for root in roots:
             if deadline is not None:
                 root.ctx.unwind_by(deadline)
-            await self._release(root)
-        self.roots.clear()
+            # Through the one door, so each root leaves the table as it is released
+            # rather than all of them after the last (D7), and its task ends after
+            # its release — the turn a shutdown cuts stays cut on disk.
+            await self._unmount(root, why="the daemon stopped")
         if self._live is not None:
             # Under the same `deadline` as the rest, with no bound of its own: the
             # write runs in this task, and a thread's write is not abandoned on a

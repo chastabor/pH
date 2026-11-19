@@ -80,7 +80,7 @@ from ._registry import claim_entry, claim_slot
 from .diagnostics import Diagnostic, contribute
 from .sandbox import SandboxPolicy
 from .telemetry import ops_record
-from .workspace_provision import ProvisionEntry, ProvisionReport
+from .workspace_provision import ProvisionEntry, ProvisionReport, ProvisionStop
 
 _LOG = log_writer(__name__)
 
@@ -932,6 +932,26 @@ class _Held:
     The release closure reads it here rather than capturing it, so the two halves of
     the pair cannot disagree about which log they belong to.
     """
+    copying: _Copy | None = None
+    """The provisioning copy running into this tree, while it runs (W1)."""
+
+
+@dataclass(slots=True, eq=False)
+class _Copy:
+    """A provisioning copy under way, as a release mid-copy needs it (W1).
+
+    The workspace is held before it is provisioned, so its scope can release it while
+    the copy runs on a thread no cancel reaches: the release read a workspace that
+    said nothing was provisioned, committed the half-copied materials to the agent's
+    branch as its work, and removed the tree under the copy. Now it stops the copy,
+    waits for it, and counts every one of these targets as provisioned.
+    """
+
+    targets: tuple[str, ...]
+    """What is being provisioned, whether or not it arrived: all of it is the seam's,
+    as reclaim after a crash counts it (S13)."""
+    stop: ProvisionStop = field(default_factory=ProvisionStop)
+    done: anyio.Event = field(default_factory=anyio.Event)
 
 
 @dataclass(slots=True)
@@ -1231,6 +1251,15 @@ class WorkspaceSeam:
                 )
                 if site is not None:
                     await self._take_back(site, agent_id, session_id)
+            except BaseException:
+                # Stopped inside the tier (W2): a turn stopped while its worktree was
+                # being cut. What the tier made at the site it named is taken back now,
+                # as for a tier that raised, rather than left for the next
+                # `session/loaded` of this session, which for a child may never come.
+                if site is not None:
+                    with releasing():
+                        await self._take_back(site, agent_id, session_id)
+                raise
             else:
                 if workspace is None:
                     # No reason is fabricated: a provider that declined without
@@ -1285,7 +1314,24 @@ class WorkspaceSeam:
             # leaves no directory to reclaim, so its record waits for the step's
             # own barrier.
             await session_written(self.ctx, session)
-        held.workspace = await self._provision(workspace, base, materials)
+        copy = _Copy(targets=tuple(entry.target for entry in materials)) if materials else None
+        held.copying = copy
+        try:
+            provisioned = await self._provision(
+                workspace, base, materials, copy.stop if copy is not None else None
+            )
+        finally:
+            held.copying = None
+            if copy is not None:
+                copy.done.set()
+        if self._held.get(agent_id) is not held:
+            # Released while it was provisioned (W1): its release stopped the copy and
+            # gave the tree back, and `workspace/disposed` is already in the log. Not
+            # handed out, and nothing more said about a tree that is gone.
+            raise InactiveScopeError(
+                f"agent {agent_id}'s workspace was released while it was being provisioned"
+            )
+        held.workspace = provisioned
         if session is not None and held.workspace.provision_failures:
             _LOG.append(
                 session,
@@ -1347,7 +1393,11 @@ class WorkspaceSeam:
             await self._reclaim(provider, record, "reclaim", own=True)
 
     async def _provision(
-        self, workspace: Workspace, base: Path, materials: Sequence[ProvisionEntry]
+        self,
+        workspace: Workspace,
+        base: Path,
+        materials: Sequence[ProvisionEntry],
+        stop: ProvisionStop | None,
     ) -> Workspace:
         """Put the configured materials in a *fresh* root (E14) — and into one the tier
         reused (`Workspace.reused`), only what it lacks: the rest arrived when it was
@@ -1358,7 +1408,11 @@ class WorkspaceSeam:
         # Qualified: `provision` on this class is the *registration*; the module
         # function is the work.
         report: ProvisionReport = await workspace_provision.provision(
-            materials, base=base, root=workspace.root, fill=workspace.reused
+            materials,
+            base=base,
+            root=workspace.root,
+            fill=workspace.reused,
+            stop=stop,
         )
         if report.failed:
             log.warning(
@@ -1448,6 +1502,14 @@ class WorkspaceSeam:
             async def release() -> None:
                 del self._held[agent_id]
                 current = held.workspace
+                copy = held.copying
+                if copy is not None:
+                    # Mid-copy (W1): stopped before its next file, and waited for, so
+                    # the tree is not removed under the copy's thread; and everything
+                    # it was putting there is the seam's, never the agent's work.
+                    copy.stop.set()
+                    await copy.done.wait()
+                    current = replace(current, provisioned=copy.targets)
                 kept = True if current.release is None else await current.release(current)
                 if held.session is not None:
                     # After the act, which is idempotent: an open `acquired` is its

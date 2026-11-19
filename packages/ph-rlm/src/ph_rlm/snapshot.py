@@ -383,7 +383,18 @@ async def apply(ctx: Context, config: Config) -> None:
     """
     policy = KernelSnapshotPolicy(ctx=ctx, inline_blob_max=config.inline_blob_max)
     ctx.provide(KERNEL_SNAPSHOTS, policy)
-    ctx.require(PYTHON_RUNTIME).snapshots = policy
+    runtime = ctx.require(PYTHON_RUNTIME)
+
+    def take_back() -> None:
+        # Taken back with the row, or the runtime went on recording into a policy
+        # whose row was gone — and only while it is still this row's, as
+        # `claim_slot` releases (Holdings rule 4).
+        if runtime.snapshots is policy:
+            runtime.snapshots = None
+
+    # The take-back before the write it undoes (Holdings rule 1).
+    ctx.add_disposer(take_back, label="rlm-kernel-snapshot(runtime)")
+    runtime.snapshots = policy
 
     def claim_kernel_blobs(scope: Context) -> None:
         """Contribute this row's blobs to the seam's open-time sweep (P6-15).

@@ -683,11 +683,13 @@ class UtcpSeam:
                 # The owner's: the run ends when the agent whose tree it works
                 # on does. Stopped as well when the manual's row unmounts.
                 scope=owner.ctx,
+                on_settled=lambda _job: self._unreached(runs),
             )
         except Exception:
             log.warning("ph_utcp: no %s run was started", name, exc_info=True)
-            if self.runs.get(key) is runs[0]:
-                del self.runs[key]
+            # Ended as well as taken off: a call that joined it meanwhile asks the
+            # command itself rather than waiting out `wait_s` on a run never started.
+            self._take_off(runs[0])
             return None
         for run in runs:
             run.job = job
@@ -719,14 +721,34 @@ class UtcpSeam:
                 log.warning("ph_utcp: the %s could not be run", run.background.label, exc_info=True)
                 raise
             finally:
-                if self.runs.get(key) is run:
-                    del self.runs[key]
-                run.ended.set()
+                self._take_off(run)
                 # In the same step as `ended`: a call still waiting has not
                 # resumed, so `waiting` says truly whether one takes the result.
                 self._ended(run)
             if job.token.canceled:
                 return
+
+    def _unreached(self, runs: Sequence[_Run]) -> None:
+        """End every run of a settled job that its body never reached (S6).
+
+        The first run is on the table before its job starts, so a call meanwhile
+        joins it, and a run is ended only inside the body: a job canceled before the
+        body ran — or stopped after an earlier run, before this one — left a run
+        whose `ended` never set, which every later call joined, waited out `wait_s`
+        on, and no run was started again. Ended with no result and no error, which a
+        joined call reads as nothing to take and asks the command itself.
+        """
+        for run in runs:
+            if not run.ended.is_set():
+                self._take_off(run)
+
+    def _take_off(self, run: _Run) -> None:
+        """Take `run` off the table while it is still the one there, and end it: the
+        one way a run leaves, whether it ran, failed to start, or was never reached."""
+        key = (run.name, run.owner.id)
+        if self.runs.get(key) is run:
+            del self.runs[key]
+        run.ended.set()
 
     def _ended(self, run: _Run) -> None:
         """Tell `run`'s agent how it ended, unless a call is taking its result or

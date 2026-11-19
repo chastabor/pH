@@ -352,7 +352,7 @@ async def test_a_root_is_checked_before_it_is_released(
 ) -> None:
     """The last look at a root's caches, recorded in the log a resume will read.
 
-    Sabotage: drop `verify_settled` from `_passivate`, and the drift leaves with
+    Sabotage: drop `verify_settled` from `passivate`, and the drift leaves with
     the caches that held it.
     """
     async with supervised(tmp_path, monkeypatch) as supervisor:

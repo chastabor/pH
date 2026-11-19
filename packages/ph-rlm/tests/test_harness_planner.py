@@ -362,6 +362,31 @@ async def test_a_second_pass_is_refused_while_one_is_running(refining: Refining)
     assert len([event for event in session.events if event.type == REFINED]) == 1
 
 
+async def test_a_pass_canceled_before_it_ran_does_not_block_the_next(
+    refining: Refining,
+) -> None:
+    """S6. The "already running" mark comes down however the pass's job ends.
+
+    It was taken down inside the job's body, which a job canceled before it ran
+    never enters: `/refine` then answered "already running" for that session for
+    the life of the mount.
+
+    Sabotage: take the mark down in the body again, and the second `/refine` is
+    refused.
+    """
+    ctx, session, agent = await refining()
+    script(ctx, planner=json.dumps(PROPOSAL))
+
+    await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
+    (job,) = ctx.require(JOBS).list()
+    job.cancel()
+    await settle_background(ctx)
+
+    second = await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
+    assert second is None or "already running" not in second, second
+    await settle_background(ctx)
+
+
 async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
     """Released, not abandoned (`jobs.forget`): the work is over, so the entry
     goes. Otherwise an auto-refining session accretes one job per pass."""

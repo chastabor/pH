@@ -21,15 +21,17 @@ the generic code**, in the row whose entire purpose is telling an operator why.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import anyio
 import pytest
 
-from ph.cordis import Context
+from ph.cordis import Context, InactiveScopeError
 from ph.keys import AGENTS, SESSIONS, SUBPROCESS, WORKSPACE
 from ph.seams import workspace_git, workspace_provision
 from ph.seams.subprocess import SubprocessSpawnSpec, scrub_env
@@ -1082,6 +1084,93 @@ async def test_a_crash_reclaim_keeps_a_provisioned_secret_off_the_branch(
     assert code == 0 and out == "the agent did this\n", "the crash path lost the work"
     code, _, _ = await git(ctx, base, "show", "ph/s1/a1:secret.env")
     assert code != 0, "a crash committed a provisioned credential to the agent's branch"
+
+
+async def test_a_release_mid_copy_stops_it_and_keeps_its_materials_off_the_branch(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W1. A workspace released while it is provisioned stops the copy and is not
+    handed out.
+
+    It is held before it is provisioned, so its scope can release it mid-copy. The
+    release read a workspace that said nothing was provisioned: what had been copied
+    was committed to the agent's branch as its work, the tree was removed under the
+    copy's thread, and `_acquire` then logged `workspace/provisioned` after
+    `workspace/disposed` and handed back a workspace whose tree was gone.
+
+    Sabotage: release without stopping and waiting for the copy, and the copied
+    file is on the branch.
+    """
+    ctx = await mount(
+        TIER_ROW, {"id": "workspace-lifecycle", "config": {"provision": [{"source": "deps"}]}}
+    )
+    base = await git_repo(ctx, tmp_path / "repo")
+    (base / "deps").mkdir()
+    for name in ("a.txt", "b.txt"):
+        (base / "deps" / name).write_text(f"{name}\n", encoding="utf-8")
+    session = ctx.require(SESSIONS).create("s1")
+    seam = ctx.require(WORKSPACE)
+
+    # Held on the copy's own thread before its second file, so one material is
+    # half there when the release comes.
+    second, go = threading.Event(), threading.Event()
+    original = workspace_provision._Cloner.copy
+    copied: list[str] = []
+
+    def held(self: Any, source: str | Path, dest: str | Path) -> None:  # noqa: ANN401
+        if copied:
+            second.set()
+            go.wait(10)
+        original(self, source, dest)
+        copied.append(Path(source).name)
+
+    monkeypatch.setattr(workspace_provision._Cloner, "copy", held)
+    outcome: list[str] = []
+
+    async def acquire() -> None:
+        try:
+            await seam.acquire(
+                session_id="s1", agent_id="a1", base=base, access="write", session=session
+            )
+            outcome.append("handed out")
+        except InactiveScopeError:
+            outcome.append("refused")
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(acquire)
+        await anyio.to_thread.run_sync(second.wait, 10)
+        tasks.start_soon(seam.dispose, "a1")
+        await anyio.sleep(0.1)
+        go.set()
+
+    assert outcome == ["refused"], "a workspace released mid-copy was handed out"
+    code, _, _ = await git(ctx, base, "show", "ph/s1/a1:deps/a.txt")
+    assert code != 0, "a provisioned material was committed to the agent's branch"
+    closing = [one for one in session.events if one.type.startswith("workspace/")]
+    assert closing[-1].type == "workspace/disposed", [one.type for one in closing]
+
+
+async def test_a_released_tree_is_no_longer_pinned(mount: MountProfile, tmp_path: Path) -> None:
+    """The pin memo goes with the tree it names.
+
+    `_pinned` remembers the last tree pinned for each worktree root, so a cell that
+    changed nothing costs no `update-ref`. Nothing took a root out when its tree was
+    released, so a long-lived mount kept one entry per worktree it ever made.
+
+    Sabotage: drop the pop from `_release`, and the released root is still pinned.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    seam = ctx.require(WORKSPACE)
+    workspace = await seam.acquire(session_id="s1", agent_id="a1", base=base, access="write")
+    provider = seam.provider
+    assert isinstance(provider, workspace_git.GitWorktreeProvider)
+    (workspace.root / "work.txt").write_text("work\n", encoding="utf-8")
+    assert await provider.capture(workspace) is not None
+    assert workspace.root in provider._pinned
+
+    await seam.dispose("a1")
+
+    assert workspace.root not in provider._pinned
 
 
 # ------------------------------------------ what git is told, and where it looks --

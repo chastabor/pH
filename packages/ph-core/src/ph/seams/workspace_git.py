@@ -633,6 +633,9 @@ class GitWorktreeProvider:
         commit or a removal that failed leaves the tree on disk and says `True`, which
         keeps the field a record instead of a statement of policy.
         """
+        # The pin memo goes with the tree it names, or it kept one entry per
+        # worktree the mount ever made.
+        self._pinned.pop(path, None)
         if not path.exists():
             # Disposed already. Reconciliation and the scope that acquired the tree
             # can both reach this — and now that the ordinary path *removes*, the

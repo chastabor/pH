@@ -365,6 +365,29 @@ async def test_the_mounted_meter_forgets_a_disposed_session(mount: MountProfile)
     assert session.id not in meter._nodes
 
 
+async def test_a_read_after_the_session_left_keeps_nothing(mount: MountProfile) -> None:
+    """A reader still holding a session the store let go does not put it back.
+
+    `forget` runs on `session/disposed`, and `node_tokens` made the session's table
+    again on the next read — a status line drawn once more, a check finishing — so
+    the entry outlived the session for good.
+
+    Sabotage: `setdefault` in `node_tokens` again, and the session is back.
+    """
+    ctx = await mount()
+    meter = ctx.require(TOKEN_METER)
+    session = ctx.require(SESSIONS).create("s")
+    _counted(session)
+    log_event(session, "user/message", user_payload("z" * 400, "m3"), SurfaceIntent("append"))
+    meter.baseline(session)
+    ctx.require(SESSIONS).dispose(session.id)
+
+    first = meter.baseline(session).tokens
+
+    assert session.id not in meter._nodes
+    assert meter.baseline(session).tokens == first, "still answered, from a fresh count"
+
+
 def test_pressure_needs_a_known_window() -> None:
     meter = TokenMeter(ctx=None)  # type: ignore[arg-type]
     session = Session("s")

@@ -35,6 +35,11 @@ giving up means building over another process's tree. And each caller raises the
 error its own callers already catch. So this owns the mechanism and `LockBusy`
 is the one thing it throws for contention, for the caller to translate.
 
+**And one that is not a file at all** (`KeyedLocks`): an `anyio.Lock` per key, for
+work in this process that one key's callers must take turns at — a parent's resume
+sweeps, an index's copy. Here because the table that holds them is the part that
+was got wrong twice: kept per key for good, it grew one lock per key ever asked.
+
 **Two locks are spelled elsewhere.**
 - **The orphan journal's** (`OrphanJournal._locked`). Its appends share a lock that
   its compaction takes whole, which `filelock` does not offer, and it is taken on
@@ -51,9 +56,11 @@ from __future__ import annotations
 import errno
 import fcntl
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Hashable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 
 import anyio
 from filelock import Timeout, UnixFileLock
@@ -61,6 +68,7 @@ from filelock import Timeout, UnixFileLock
 from .paths import filesystem_of
 
 __all__ = [
+    "KeyedLocks",
     "LockBusy",
     "LockUnsupported",
     "acquire_file_lock",
@@ -216,3 +224,72 @@ def describe_lock(directory: Path) -> list[tuple[str, str]]:
     else:
         rows.append(("probe", "a lock was taken and released"))
     return rows
+
+
+@dataclass(slots=True, eq=False)
+class _Turn:
+    """One key's lock, and how many hold or wait for it."""
+
+    lock: anyio.Lock = field(default_factory=anyio.Lock)
+    users: int = 0
+
+
+class KeyedLocks[K: Hashable]:
+    """One `anyio.Lock` per key, made when first wanted and gone with the last caller
+    holding or waiting for it — so the table is only as large as what is in use now.
+
+    `hold(key)` is an async context manager that can be entered again and again, as
+    an `anyio.Lock` can: a run that takes its turn many times keeps one handle.
+    """
+
+    __slots__ = ("_turns",)
+
+    def __init__(self) -> None:
+        self._turns: dict[K, _Turn] = {}
+
+    def hold(self, key: K) -> _Hold[K]:
+        """A handle that takes `key`'s turn on entry and gives it back on exit."""
+        return _Hold(self, key)
+
+    async def _acquire(self, key: K) -> None:
+        turn = self._turns.get(key)
+        if turn is None:
+            turn = self._turns[key] = _Turn()
+        turn.users += 1
+        try:
+            await turn.lock.acquire()
+        except BaseException:
+            self._leave(key, turn)
+            raise
+
+    def _release(self, key: K) -> None:
+        turn = self._turns[key]
+        turn.lock.release()
+        self._leave(key, turn)
+
+    def _leave(self, key: K, turn: _Turn) -> None:
+        turn.users -= 1
+        if not turn.users and self._turns.get(key) is turn:
+            del self._turns[key]
+
+    def __len__(self) -> int:
+        return len(self._turns)
+
+
+@dataclass(frozen=True, slots=True)
+class _Hold[K: Hashable]:
+    """`KeyedLocks.hold`'s handle."""
+
+    locks: KeyedLocks[K]
+    key: K
+
+    async def __aenter__(self) -> None:
+        await self.locks._acquire(self.key)
+
+    async def __aexit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.locks._release(self.key)

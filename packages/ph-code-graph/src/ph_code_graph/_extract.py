@@ -82,6 +82,14 @@ _fetch_refused = False
 """Whether a grammar fetch has failed in this process: the last `obtained`
 tries. Process-wide for `_configured`'s reason; `_reset` clears it."""
 
+_claims: list[_CacheClaim] = []
+"""Every mount's claim on the pack's cache, oldest first (`cache_release`): the
+newest is in force, and the base from before the first is what the last release
+puts back."""
+
+_base: Path | None = None
+"""What the cache was before the first claim still held was made."""
+
 INHERITS: dict[str, tuple[str, ...]] = {
     "typescript": ("javascript",),
     "tsx": ("javascript",),
@@ -163,22 +171,48 @@ def cache_release(directory: Path) -> Callable[[], None]:
     # `PackConfig(cache_dir=...)` makes the pack append its own suffix a second
     # time and the restore nests instead of restoring. Caught by the test for
     # this function, which is the argument for having written one.
+    #
+    # **Each release takes back its own claim and no other** (Holdings rule 4). It
+    # restored whatever was set before it, so two mounts released out of order reset
+    # the cache under the one still up, and the last release then restored a
+    # directory already gone with its row. The newest claim still held is in force;
+    # with none left, the base from before the first.
+    # Recorded once the pack took it (Holdings rule 1): a directory it refused —
+    # an unwritable `$PH_CACHE` — raises out of here with no release handed back,
+    # and a claim recorded first stayed on top of the stack for good.
+    global _base
     previous = _configured
     use_cache(directory)
+    if not _claims:
+        _base = previous
+    claim = _CacheClaim(directory)
+    _claims.append(claim)
 
     def restore() -> None:
         # Best-effort and logged rather than raised: a disposer that throws is
         # logged and the unwind continues anyway, so failing loudly here would
         # only obscure whatever else the scope was releasing.
+        if claim not in _claims:
+            return
+        _claims.remove(claim)
+        wanted = _claims[-1].directory if _claims else _base
         try:
-            if previous is None:
+            if wanted is None:
                 _reset()
-            else:
-                use_cache(previous)
+            elif wanted != _configured:
+                use_cache(wanted)
         except Exception:  # pragma: no cover - a library that cannot be restored
             log.warning("ph_code_graph: could not restore the grammar cache", exc_info=True)
 
     return restore
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _CacheClaim:
+    """One mount's claim on the pack's cache: compared by identity, so two mounts
+    naming one directory are two claims."""
+
+    directory: Path
 
 
 def use_cache(directory: Path) -> Path:

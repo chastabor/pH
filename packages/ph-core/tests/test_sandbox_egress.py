@@ -16,6 +16,7 @@ enforces, or where a `bwrap` host has no `socat`.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import http.server
 import json
@@ -23,7 +24,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -398,3 +399,49 @@ async def test_the_bridge_is_claimed_only_after_its_probe(mount: MountProfile) -
     # And what the seam says follows from it.
     assert ctx.require(SANDBOX).allowances == Allowances(network=NetworkAllowance())
     assert "reachable through the egress proxy" in ctx.require(SANDBOX).network_posture()
+
+
+async def test_a_connection_that_arrives_as_the_proxy_closes_is_not_served() -> None:
+    """A connection the listener accepted and the loop had not stepped yet, when the
+    row let go of the proxy, is closed unserved.
+
+    `aclose` canceled the connections it could see; one spawned but not yet run
+    added itself after the table was cleared, served its request, and reported a
+    refusal to an `on_denied` whose row had unmounted.
+
+    Sabotage: drop the `_closing` check from `_handle`, and the refusal is reported.
+    """
+    refused: list[object] = []
+    proxy = await _proxy(lambda h, p: False)
+    proxy.on_denied = lambda *args: refused.append(args)
+    await proxy.aclose()
+
+    reader = asyncio.StreamReader()
+    credential = base64.b64encode(b"a1:ph").decode()
+    request = (
+        f"CONNECT example.invalid:443 HTTP/1.1\r\nProxy-Authorization: Basic {credential}\r\n\r\n"
+    )
+    reader.feed_data(request.encode())
+    reader.feed_eof()
+    written: list[bytes] = []
+
+    class Writer:
+        def write(self, data: bytes) -> None:
+            written.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        def is_closing(self) -> bool:
+            return False
+
+        async def wait_closed(self) -> None:
+            return None
+
+    await proxy._handle(reader, cast(Any, Writer()))
+
+    assert refused == [], "a refusal was reported after the proxy closed"
+    assert written == []

@@ -1405,6 +1405,54 @@ async def test_an_agents_scope_is_answered_only_while_it_can_take_an_effect(
     assert agents.scope_of(agent.id) is None
 
 
+async def test_an_ending_agent_is_not_handed_out(mount: MountProfile) -> None:
+    """S3. `get` answers the live agent, and an agent whose scope is down is ending.
+
+    The roster entry is taken back by the scope's own teardown, near its end, so for
+    the whole of that teardown `get` handed out an agent that was going: a message
+    sent to it was acknowledged and steered into an inbox its dispose had cleared or
+    was about to. Declined, a sender asks the seam to wake the child, which knows it
+    is ending and says so, and the sender is told the message did not land.
+
+    Sabotage: answer the roster entry whatever its scope's state, and `during`
+    holds the agent.
+    """
+    ctx = await mount()
+    agents = ctx.require(AGENTS)
+    agent = agents.create(ctx.require(SESSIONS).create("s"), FAKE)
+    during: list[object] = []
+    agent.ctx.add_disposer(lambda: during.append(agents.get(agent.id)), label="asks")
+
+    assert agents.get(agent.id) is agent
+    await agent.ctx.dispose()
+
+    assert during == [None]
+
+
+async def test_an_ending_agents_roster_entry_takes_only_itself_out(mount: MountProfile) -> None:
+    """A teardown takes back only what its registration put there (Holdings rule 4).
+
+    `_forget` popped the roster by id. An agent made again for the same session while
+    the first was still ending — a readmission landing in the first one's teardown —
+    was listed under that id, and the first one's `_forget` then took the new
+    agent's entry out: listed nowhere, never announced as disposed.
+
+    Sabotage: pop by id in `_forget` again, and the new agent is not listed.
+    """
+    ctx = await mount()
+    agents = ctx.require(AGENTS)
+    session = ctx.require(SESSIONS).create("s")
+    first = agents.create(session, FAKE)
+    made: list[object] = []
+    # Runs before the roster entry's own disposer, which was registered first.
+    first.ctx.add_disposer(lambda: made.append(agents.create(session, FAKE)), label="again")
+
+    await first.ctx.dispose()
+
+    (second,) = made
+    assert agents.get(session.id) is second, "the ending agent took its successor's entry"
+
+
 async def test_an_agent_whose_driver_could_not_be_built_leaves_no_scope(
     mount: MountProfile,
 ) -> None:

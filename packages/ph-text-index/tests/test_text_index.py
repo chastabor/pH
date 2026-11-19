@@ -2114,3 +2114,24 @@ def test_a_long_line_is_cut_between_characters_never_through_one() -> None:
     assert cut_between(by_weight)
     first = head_of(EMOJI_FAMILY * 30, by_bytes)
     assert first and not first.replace(EMOJI_FAMILY, "")
+
+
+async def test_a_guard_nobody_holds_or_waits_for_is_not_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-index lock is gone with its last holder and waiter.
+
+    `_guards` made one lock per index directory and kept it for the life of the
+    mount: one per worktree an agent ever searched.
+
+    Sabotage: keep the lock in a plain table again, and it is still there.
+    """
+    monkeypatch.setattr(TextIndexSeam, "root", lambda self, workspace: workspace / "index")
+    seam = TextIndexSeam(ctx=Context(), config=Config())
+    guard = seam.guard(tmp_path)
+    async with guard:
+        assert len(seam._guards) == 1
+    async with guard:
+        pass
+
+    assert len(seam._guards) == 0

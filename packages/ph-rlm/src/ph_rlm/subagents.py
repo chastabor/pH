@@ -51,7 +51,7 @@ from pydantic import Field
 
 from ph.agent.types import AgentCancelCause, AgentDriver, AgentHandle, AgentOptions
 from ph.characters import head
-from ph.cordis import Context, InactiveScopeError, Releaser, plugin
+from ph.cordis import Context, InactiveScopeError, Releaser, plugin, releasing
 from ph.json import JsonObject, JsonValue, dumps
 from ph.keys import AGENTS, FS, JOBS, SESSIONS, SUBAGENTS, WORKSPACE
 from ph.llm.types import PluginSource, create_user_message
@@ -313,11 +313,15 @@ class RlmChildProvider:
             granted, downgrade = await self._workspace(
                 parent, child_agent, child_session, request.access
             )
-        except InactiveScopeError:
+        except BaseException:
             # The parent went away while this child was being built — its scope,
-            # and the child's agent inside it, were disposed under the await.
-            # Nothing names the child yet, so its session is let go rather than
-            # tombstoned; the seam turns the scope error into the refusal.
+            # and the child's agent inside it, were disposed under the await — or
+            # the build was stopped there (S5). Either way the agent goes, and its
+            # session, which nothing names yet, is let go rather than tombstoned; the
+            # seam turns a gone parent's scope error into the refusal. Shielded, since
+            # a cancel is one of the ways here.
+            with releasing():
+                await self.ctx.require(AGENTS).dispose(child_agent.id)
             self.ctx.require(SESSIONS).dispose(child_session.id)
             raise
 
@@ -381,6 +385,14 @@ class RlmChildProvider:
             # Ended rather than left live: the release a disposed parent runs, run now.
             # If the parent's own teardown got here first, this finds nothing.
             await self._release(run_id, PARENT_TEARDOWN)
+            raise
+        except BaseException:
+            # Stopped while it was wired up, or the job would not start (S5): let go of
+            # as a child the seam would not admit is (`_dispose`), with no tombstone —
+            # its admission is the seam's to write, after this returns, and a
+            # readmission's is left for the next sweep to try again.
+            with releasing():
+                await self._dispose(run_id)
             raise
         return run
 
@@ -478,16 +490,32 @@ class RlmChildProvider:
         if parent is None:
             log.debug("ph_rlm.subagents: %s has no live parent to own its drive", run_id)
             return False
-        child.agent = self.ctx.require(AGENTS).create(session, child.options, parent=parent)
-        await self._runtime(child, parent, session)
-        # A fresh gate, which the awaiter already on the run reads at await time —
-        # its closure holds the `_Child`, not the old Event. And no answer until it
-        # gives one: the one it holds was to the question before, which a waiter on
-        # this one must not be handed, and which `suspend` would read as an ending,
-        # leaving a child it stopped mid-question `running` for a restart to count.
-        child.finished = anyio.Event()
-        child.result = None
-        await self._attach(child, parent, cause="rehydrated")
+        agents = self.ctx.require(AGENTS)
+        child.agent = agents.create(session, child.options, parent=parent)
+        settled = child.finished, child.result
+        try:
+            await self._runtime(child, parent, session)
+            # A fresh gate, which the awaiter already on the run reads at await time
+            # — its closure holds the `_Child`, not the old Event. And no answer until
+            # it gives one: the one it holds was to the question before, which a
+            # waiter on this one must not be handed, and which `suspend` would read as
+            # an ending, leaving a child it stopped mid-question `running` for a
+            # restart to count.
+            child.finished = anyio.Event()
+            child.result = None
+            await self._attach(child, parent, cause="rehydrated")
+        except BaseException:
+            # **Settled again, as it was** (S4): an agent set and never driven made
+            # every later wake answer "already running" and every later send land in
+            # an inbox nobody read. A kernel cancels a binding call when its cell
+            # settles, so a cell stopped mid-send is enough. The answer it held is
+            # put back for whoever still waits on it.
+            child.finished, child.result = settled
+            agent, child.agent = child.agent, None
+            if agent is not None:
+                with releasing():
+                    await agents.dispose(agent.id)
+            raise
         return True
 
     async def _runtime(self, child: _Child, parent: AgentHandle, session: Session) -> None:

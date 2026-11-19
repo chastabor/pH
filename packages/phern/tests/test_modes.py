@@ -416,6 +416,114 @@ async def test_every_host_sweeps_the_children_a_stopped_run_left_working(
     assert bounds == [CHILD_RETRY_LIMIT], "the daemon's own ladder bound, not another"
 
 
+async def test_an_rpc_sweep_that_failed_is_run_again_at_the_next_prompt(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D9. The served agent is recorded once its children are swept, not before.
+
+    `served.agent` was set before `resume_children`, and every later prompt skips
+    the agent's creation and the sweep with it: one sweep that raised left the
+    session's children unreadmitted for the life of the server. A start that fails
+    ends what it started (Holdings rule 2): the agent is disposed and its wake
+    listener removed, so the next prompt makes both again and sweeps.
+
+    Sabotage: set `served.agent` before the sweep again, and the second prompt
+    sweeps nothing.
+    """
+    swept: list[str] = []
+
+    async def failing_once(ctx: Any, agent: Any) -> Any:  # noqa: ANN401
+        swept.append(agent.id)
+        if len(swept) == 1:
+            raise RuntimeError("a child log would not read")
+        return []
+
+    monkeypatch.setattr(rpc_mode, "resume_children", failing_once)
+    out = io.StringIO()
+    async with AsyncExitStack() as exits, anyio.create_task_group() as tasks:
+        server = RpcServer(profile=profile, exits=exits, out=out, tasks=tasks)
+        await server.handle(dict(request(1, "session/new", {"sessionId": "swept"})))
+        await server.handle(
+            dict(request(2, "session/prompt", {"sessionId": "swept", "prompt": "a"}))
+        )
+        assert server._served["swept"].agent is None, "an agent whose sweep failed is served"
+        await server.handle(
+            dict(request(3, "session/prompt", {"sessionId": "swept", "prompt": "b"}))
+        )
+        tasks.cancel_scope.cancel()
+    assert len(swept) == 2, "the second prompt did not sweep again"
+
+
+async def test_a_new_rpc_session_that_opened_nothing_leaves_no_mount(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `session/new` whose open fails takes its mount down with it.
+
+    A new session's mount is filed under the id it opens with, so one that opened
+    nothing was found by nothing, and stayed mounted until the server ended — one
+    whole profile per failed request.
+
+    Sabotage: drop the unwind from `RpcServer._open`, and the mount is still up.
+    """
+    mounts: list[Context] = []
+
+    async def refused(ctx: Context, start: Any) -> Any:  # noqa: ANN401
+        mounts.append(ctx)
+        raise RuntimeError("the store would not open it")
+
+    monkeypatch.setattr(rpc_mode, "open_root", refused)
+    out = io.StringIO()
+    async with AsyncExitStack() as exits:
+        server = RpcServer(profile=profile, exits=exits, out=out)
+        await server.handle(dict(request(1, "session/new", {})))
+        assert len(mounts) == 1
+        assert not mounts[0].active, "a mount nothing can find is still up"
+
+
+async def test_a_woken_turn_says_nothing_once_its_peer_is_done(
+    profile: Profile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's output ends with its peer, a turn still running included.
+
+    A turn a child's notice woke is canceled when the peer says `shutdown` or closes
+    stdin, and its `finally` still wrote `session.status idle` — a frame after the
+    end, to a peer that may have closed the pipe.
+
+    Sabotage: drop the `ended` check from `_write`, and `idle` follows the end.
+    """
+    from ph.llm.fake import FakeAdapter
+
+    out = io.StringIO()
+    async with AsyncExitStack() as exits, anyio.create_task_group() as tasks:
+        server = RpcServer(profile=profile, exits=exits, out=out, tasks=tasks)
+        await server.handle(dict(request(1, "session/new", {"sessionId": "woken"})))
+        await server.handle(
+            dict(request(2, "session/prompt", {"sessionId": "woken", "prompt": "hi"}))
+        )
+        served = server._served["woken"]
+        session = served.ctx.require(SESSIONS).require("woken")
+        child = admitted_child(served.ctx, session, "r1")
+
+        async def held(self: object, options: object) -> Any:  # noqa: ANN401
+            await anyio.sleep_forever()
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(FakeAdapter, "stream", held)
+        await record_ended(
+            served.ctx, child, "done", notice=ChildNotice(text="[r1 finished]", summary="done")
+        )
+        await settled(
+            lambda: served.agent is not None and served.agent.status == "running", "woken"
+        )
+        server.end()
+    statuses = [
+        frame["params"]["status"]
+        for frame in (json.loads(line) for line in out.getvalue().splitlines())
+        if frame.get("method") == "session.status"
+    ]
+    assert statuses == ["running", "idle", "running"], "a frame after the end"
+
+
 async def test_a_childs_ending_runs_a_turn_between_rpc_prompts(profile: Profile) -> None:
     """P13-05 in rpc mode. Between prompts the served agent is idle and nothing else
     runs it, so a readmitted child's result sat in its inbox until the peer's next

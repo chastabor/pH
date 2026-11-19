@@ -341,6 +341,14 @@ def _refuse_decision(decision: Never, *, hook: str, expected: str) -> NoReturn:
     raise TypeError(f"{hook} must resolve to {expected}")
 
 
+def _projection_key(execution: ToolExecution) -> tuple[str, str]:
+    """Whose call this is, and its id: an agent's id is its session's, and a call with
+    neither is the deployment's own."""
+    if execution.agent is not None:
+        return execution.agent.id, execution.call_id
+    return (execution.session.id if execution.session is not None else ""), execution.call_id
+
+
 @dataclass(slots=True)
 class ToolRuntime:
     """The service published as `ctx.tools`."""
@@ -353,12 +361,15 @@ class ToolRuntime:
     _generation: int = 0
     """Bumped on every mutation. The view cache is valid for one generation."""
     _views: dict[tuple[Context | None, ...], tuple[int, _View]] = field(default_factory=dict)
-    _projecting: dict[str, ToolRunContext] = field(default_factory=dict)
-    """The runs currently inside `tools/post-execute`, by call id — what
-    `projected` renders against.
+    _projecting: dict[tuple[str, str], ToolRunContext] = field(default_factory=dict)
+    """The runs currently inside `tools/post-execute`, by whose call and its id
+    (`_projection_key`) — what `projected` renders against.
 
     Keyed by call because a policy row asking for a projection is answering
-    about *its* call, and several can be in the waterfall at once."""
+    about *its* call, and several can be in the waterfall at once. **And by whose**
+    (T2): an id minted for a call its provider did not name is the same for two
+    agents at the same turn, step and index, and by id alone the second call's
+    entry replaced the first's and its `finally` took it down under the first."""
 
     # ---------------------------------------------------------- registration --
 
@@ -520,17 +531,22 @@ class ToolRuntime:
         )
 
     def present_as(self, mode: PresentationMode, *, scope: Context | None = None) -> Disposer:
-        """Declare the presentation for one agent, shadowing the deployment default."""
+        """Declare the presentation for one agent, shadowing the deployment default.
+
+        One per scope, as one transport is (`present_transport`): a second overwrote
+        the first, and either release cleared the field whatever it then held, so
+        what survived depended on the order the two were let go.
+        """
+
+        def claim(layer: _Layer) -> None:
+            if layer.mode is not None:
+                raise ValueError(f'this scope already presents its tools as "{layer.mode}"')
+            layer.mode = mode
 
         def clear(layer: _Layer) -> None:
             layer.mode = None
 
-        return self._claim(
-            scope,
-            lambda layer: setattr(layer, "mode", mode),
-            clear,
-            "tools.present_as",
-        )
+        return self._claim(scope, claim, clear, "tools.present_as")
 
     def present_transport(
         self, presentation: TransportPresentation, *, scope: Context | None = None
@@ -991,7 +1007,7 @@ class ToolRuntime:
         this way supplies the content back, and `_post_execute` then renders
         nothing.
         """
-        run = self._projecting.get(execution.call_id)
+        run = self._projecting.get(_projection_key(execution))
         return None if run is None else self._render(run, value)
 
     def projected_content(
@@ -1421,13 +1437,17 @@ class ToolRuntime:
         # answer has to come from this run's binding rather than a fresh
         # lookup. Popped in a `finally` so a row that raises cannot leave the
         # call behind to be answered about later.
-        self._projecting[execution.call_id] = run
+        key = _projection_key(execution)
+        self._projecting[key] = run
         try:
             decision = await self.ctx.waterfall(
                 "tools/post-execute", execution, result, inner=inner, scope=execution.scope
             )
         finally:
-            self._projecting.pop(execution.call_id, None)
+            # Only this run's (Holdings rule 4): another with the same key would be
+            # a different call, and this one's ending is not its ending.
+            if self._projecting.get(key) is run:
+                del self._projecting[key]
         if isinstance(decision, Block):
             # A block exposes only the context its own decision supplied:
             # context the body deferred belonged to an outcome that no longer

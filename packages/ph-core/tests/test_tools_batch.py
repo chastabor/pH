@@ -17,7 +17,7 @@ import anyio
 import pytest
 
 from ph.cancel import CancelToken
-from ph.json import as_obj, as_seq
+from ph.json import as_obj, as_seq, as_str
 from ph.llm.types import ToolCallBlock, create_user_message
 from ph.session import Session
 from ph.testing import StubAgent, parked_gate, raising, session_of, simple_tool, tool_runtime
@@ -377,3 +377,75 @@ async def test_a_raise_still_answers_every_call_it_logged(
         as_obj(as_obj(one.data["message"])["source"])["callId"] for one in results
     }
     assert all(one.data["failureKind"] == "aborted" for one in results)
+
+
+def _answered(agent: StubAgent) -> tuple[set[str], set[str]]:
+    """The ids the step's `tool/call` records name, and those its `tool/result`
+    records answer."""
+    events = session_of(agent).events
+    calls = {as_str(as_obj(e.data)["callId"]) for e in events if e.type == "tool/call"}
+    results = {
+        as_str(as_obj(as_obj(e.data["message"])["source"])["callId"])
+        for e in events
+        if e.type == "tool/result"
+    }
+    return calls, results
+
+
+async def test_a_cancel_from_outside_still_answers_every_call_of_the_step() -> None:
+    """T1. A stop that does not come through the token still closes every pair.
+
+    `SIGINT` on `phern -p`, a released root's task: the cancel reaches the batch as
+    an anyio cancellation, not through the loop's own token, and the answers were
+    ordinary code after the task group, which the cancel skipped. The turn then
+    closed, so repair had nothing open to close on resume, and every later request
+    carried a `tool_use` with no `tool_result`.
+
+    Sabotage: drop the `except BaseException` answering from `_run_group`, and the
+    started calls are left unanswered.
+    """
+    root, tools, agent, trace = _setup()
+    tools.register(_slow("slow", trace, 30.0, safe=True))
+    tools.register(_slow("also", trace, 30.0, safe=True))
+    tools.register(_slow("after", trace, 0.0, safe=False))
+
+    async with anyio.create_task_group() as step:
+        step.start_soon(_run, root, agent, "slow", "also", "after")
+        await anyio.sleep(0.05)
+        assert "slow:start" in trace and "also:start" in trace
+        step.cancel_scope.cancel()
+
+    calls, results = _answered(agent)
+    assert len(calls) == 3, "every call the model asked for is on record"
+    assert calls == results, f"unanswered: {sorted(calls - results)}"
+
+
+async def test_a_group_that_raises_answers_the_groups_behind_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T1. A raise in one group still answers the calls queued behind it.
+
+    `answer_uncommitted` closes the calls of the group that raised, and the batch
+    returned nothing for the groups after it: an exclusive call that raised left
+    every call behind it as a `tool_use` nothing answers.
+
+    Sabotage: drop the `except BaseException` from `execute_tool_calls`, and the
+    call behind the exclusive one is unanswered.
+    """
+    root, tools, agent, trace = _setup()
+    tools.register(_slow("first", trace, 0.0, safe=False))
+    tools.register(_slow("second", trace, 0.0, safe=True))
+    original = type(tools).dispatch
+
+    async def dispatch(self: ToolRuntime, run: Any) -> Any:  # noqa: ANN401
+        if run.execution.name == "first":
+            raise RuntimeError("the runtime fell over")
+        return await original(self, run)
+
+    monkeypatch.setattr(ToolRuntime, "dispatch", dispatch)
+    with pytest.raises(RuntimeError, match="fell over"):
+        await _run(root, agent, "first", "second")
+
+    calls, results = _answered(agent)
+    assert len(calls) == 2, "the call behind the raise has no record"
+    assert calls == results

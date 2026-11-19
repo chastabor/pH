@@ -170,14 +170,21 @@ class TuiScreenRegistry:
         entry = _Entry(screen=screen, owner=owner)
         changed = partial(self.ctx.emit, "screens/change")
         release = claim_key(owner, self._entries, screen.id, entry, label="screen", then=changed)
-        for front_end in self._front_ends:
-            self._draw(front_end, entry)
-        changed()
 
         def undraw_and_release() -> None:
             self._undraw(screen.id)
             release()
 
+        try:
+            for front_end in self._front_ends:
+                self._draw(front_end, entry)
+        except BaseException:
+            # A presenter that raised (Holdings rule 2): the registration ends here,
+            # or the id stayed taken with no disposer handed to anyone, and a second
+            # try was refused as a duplicate.
+            undraw_and_release()
+            raise
+        changed()
         return undraw_and_release
 
     def present_with(self, present: ScreenPresenter, *, scope: Context | None = None) -> Disposer:
@@ -191,13 +198,17 @@ class TuiScreenRegistry:
         released = claim_entry(
             self.ctx.owner_for(scope), self._front_ends, front_end, label="tui-screens(front-end)"
         )
-        for entry in self._ordered():
-            self._draw(front_end, entry)
 
         def detach() -> None:
             released()
             front_end.undraw()
 
+        try:
+            for entry in self._ordered():
+                self._draw(front_end, entry)
+        except BaseException:
+            detach()
+            raise
         return detach
 
     def list(self) -> list[ScreenDefinition]:

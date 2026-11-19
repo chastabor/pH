@@ -54,7 +54,7 @@ from pydantic import PositiveFloat
 
 from ph.cancel import CancelToken, first_of, is_canceled
 from ph.characters import capped_text, head_bytes, stream_decoder, utf8_size
-from ph.cordis import Context, Disposer, InactiveScopeError, Releaser, plugin
+from ph.cordis import Context, Disposer, InactiveScopeError, Releaser, plugin, releasing
 from ph.json import as_int, as_str, thaw_json
 from ph.keys import AGENTS, CODE_RUNTIME
 from ph.orphans import OrphanJournal, host_journal, signal_child
@@ -444,6 +444,10 @@ class Kernel:
     waits, so a guest cannot block on a full pipe — and quoted by `_boot_said`
     when boot fails, which is the one moment it is worth having."""
     _alive: bool = False
+    _closed: bool = False
+    """Closed for good (`aclose`), as against stopped for a restart (`_teardown`): a
+    run that already held this kernel when its namespace was closed is refused,
+    rather than starting a guest no table holds and no close reaches (K1)."""
     _reset_notice: bool = False
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
     _send_lock: anyio.Lock = field(default_factory=anyio.Lock)
@@ -531,7 +535,19 @@ class Kernel:
             # orphan is ours before killing it, and the pid it holds is the
             # wrapper's.
             self.journal.record(pid=pid, argv=spawn, label=self.namespace)
+        try:
+            await self._boot(namespaces)
+        except BaseException:
+            # **A boot that does not finish takes its guest down** (K2), however it
+            # ends: `_alive` is set ahead of `boot-ack`, so a stop between the two
+            # left a guest the next run took for ready — no start, no restore, and
+            # its cell sent to a guest still booting. `_teardown` shields itself.
+            await self._teardown(ask=False)
+            raise
 
+    async def _boot(self, namespaces: list[dict[str, Any]]) -> None:
+        """Hand a spawned guest its boot frame and wait for it to say it is ready."""
+        assert self._process is not None
         await self._send(
             self.limits.to_boot(
                 namespaces=namespaces, namespace_id=self.namespace, skills=self.skills
@@ -560,16 +576,14 @@ class Kernel:
         except TimeoutError as timeout:
             # Quoted here too, and this is the branch that catches a wrapper which
             # *hangs* rather than exits — the egress shim waiting on its readiness
-            # poll, a bind that never completes. Read before `aclose`, which drops
-            # the process this reads from.
+            # poll, a bind that never completes. Read here, before `start` tears
+            # down the process this reads from.
             said = first_line(self._boot_said())
-            await self.aclose()
             raise KernelDied(
                 f"the runtime did not report ready within {self.boot_timeout}s "
                 f"({self.environment.describe()})" + (f": {said}" if said else "")
             ) from timeout
         if fault is not None:
-            await self.aclose()
             raise KernelDied(fault)
 
     async def _collect_boot_noise(self, stream: Any) -> None:  # noqa: ANN401
@@ -711,6 +725,8 @@ class Kernel:
     ) -> CodeRunResult:
         """Run one program to settlement. Serialized: one namespace, one program."""
         async with self._lock:
+            if self._closed:
+                raise KernelDied(f"the runtime for {self.namespace} was closed; its agent is gone")
             restarted = False
             if not self._alive:
                 await self.start([_declare(namespace) for namespace in namespaces])
@@ -730,17 +746,26 @@ class Kernel:
                 },
                 probed_at=anyio.current_time(),
             )
-            async with anyio.create_task_group() as tasks:
-                process = self._process
-                tasks.start_soon(self._drain, process.stdout if process else None, active)
-                tasks.start_soon(self._drain, process.stderr if process else None, active)
-                # The stop ladder's clock, as a sibling rather than as an
-                # interruption of the read — `_pump` says why.
-                tasks.start_soon(self._watch, active, token, tasks)
-                await self._send(RunFrame(id=active.run_id, program=program))
-                await self._pump(active, tasks)
-                # The drains and any in-flight call tasks belong to this run.
-                tasks.cancel_scope.cancel()
+            try:
+                async with anyio.create_task_group() as tasks:
+                    process = self._process
+                    tasks.start_soon(self._drain, process.stdout if process else None, active)
+                    tasks.start_soon(self._drain, process.stderr if process else None, active)
+                    # The stop ladder's clock, as a sibling rather than as an
+                    # interruption of the read — `_pump` says why.
+                    tasks.start_soon(self._watch, active, token, tasks)
+                    await self._send(RunFrame(id=active.run_id, program=program))
+                    await self._pump(active, tasks)
+                    # The drains and any in-flight call tasks belong to this run.
+                    tasks.cancel_scope.cancel()
+            except BaseException:
+                # **A run that does not settle takes its guest down** (K2). A stop
+                # through `token` takes the abort ladder and settles; one from outside
+                # — the tool call's task canceled — skipped it, and the guest ran the
+                # cell on and kept the next run waiting behind it. The next run starts
+                # a guest and restores what the log holds of the namespace.
+                await self._teardown(ask=False)
+                raise
 
             if active.failure is not None:
                 # C3: the refusal ends the tool call, not just the program, so it
@@ -1310,11 +1335,41 @@ class Kernel:
     # ---------------------------------------------------------------- close --
 
     async def aclose(self) -> None:
-        """Ask, then wait, then kill — and reap on every path (F4)."""
+        """Ask, then wait, then kill — and reap on every path (F4). For good: a run
+        that held this kernel is refused from now on (K1)."""
+        self._closed = True
         await self._teardown()
 
-    async def _teardown(self) -> None:
+    async def _teardown(self, *, ask: bool = True) -> None:
+        """Stop the guest, whatever stops this: a restart's, a close's, a failed boot's.
+
+        **Shielded, and its last steps in a `finally`** (K2). The process is detached
+        from the kernel first, so a stop landing in the polite shutdown skipped the
+        kill, `_alive = False`, the reap and the journal's entry, and nothing would
+        come back for the guest. A journal entry is dropped only once the process is
+        reaped, so one a cut-short close leaves running is still the orphan sweep's.
+
+        `ask=False` kills without asking first: for a guest that is being thrown away
+        mid-boot or mid-cell, which is usually one that cannot read the ask — a cell
+        blocking its loop — so asking only spent `shutdown_grace` before the kill.
+        """
         process, self._process = self._process, None
+        try:
+            with releasing():
+                await self._stop(process, ask=ask)
+        finally:
+            self._alive = False
+            if process is not None:
+                if process.returncode is None:
+                    self._kill_group(process)
+                elif process.pid is not None and self.journal is not None:
+                    self.journal.forget(process.pid)
+            self._close_channel()
+
+    async def _stop(self, process: anyio.abc.Process | None, *, ask: bool) -> None:
+        """Ask the guest to leave, wait, kill it if it will not, and reap it."""
+        if process is not None and process.returncode is None and not ask:
+            self._kill_group(process)
         if process is not None and process.returncode is None:
             # **Bounded, because the ask is a write and the peer may not be
             # reading.** A guest spinning in Python drains nothing, so the socket
@@ -1336,7 +1391,6 @@ class Kernel:
                 await process.wait()
             if process.returncode is None:
                 self._kill_group(process)
-        self._alive = False
         if process is not None:
             # A child that exited while the parent lives and is never reaped is a
             # zombie; this is the `finally` that prevents one (F4).
@@ -1348,8 +1402,9 @@ class Kernel:
             # else is looking. After the reap the group is named by the guest's
             # pid, since the reap has taken `getpgid`'s answer away.
             self._kill_group(process)
-            if process.pid is not None and self.journal is not None:
-                self.journal.forget(process.pid)
+
+    def _close_channel(self) -> None:
+        """Close the host's end of the guest's socket, waking a read parked on it."""
         if self._sock is not None:
             # `notify_closing` before the close, because `_pump`'s read has no
             # timeout of its own any more and this is what ends it. Closing an

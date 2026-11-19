@@ -78,7 +78,7 @@ import importlib.util
 import logging
 from collections import Counter
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -94,7 +94,7 @@ from ph.keys import COMMANDS, FS, TOOLS
 from ph.llm.adapter import refused_share, too_long_facts
 from ph.llm.tokens import BYTES_PER_TOKEN
 from ph.llm.types import CONTEXT_WINDOW_EXCEEDED, ContentBlock
-from ph.locks import file_lock_held
+from ph.locks import KeyedLocks, file_lock_held
 from ph.seams._registry import claim_slot, contribute_item
 from ph.seams.changes import TreeState, tree_state
 from ph.seams.commands import CommandContext, Provisioning, install_or_status
@@ -259,8 +259,9 @@ class TextIndexSeam:
     provider_by: Running | None = None
     _indexes: dict[Path, TextIndex] = field(default_factory=dict)
     """Per index directory, the copy this seam last loaded or wrote."""
-    _guards: dict[Path, anyio.Lock] = field(default_factory=dict)
-    """Per index directory, what keeps one use of the copy from another's.
+    _guards: KeyedLocks[Path] = field(default_factory=KeyedLocks)
+    """Per index directory, what keeps one use of the copy from another's — held only
+    while somebody holds or waits for it, or it kept one lock per worktree searched.
 
     Where one mount both indexes and searches, a run and a search share one
     copy: the run adds a document's passages in a worker thread while a search
@@ -349,9 +350,9 @@ class TextIndexSeam:
             calibrate=self.config.calibrate,
         )
 
-    def guard(self, workspace: Path) -> anyio.Lock:
+    def guard(self, workspace: Path) -> AbstractAsyncContextManager[None]:
         """The lock around each use of this workspace's copy. See `_guards`."""
-        return self._guards.setdefault(self.root(workspace), anyio.Lock())
+        return self._guards.hold(self.root(workspace))
 
     def indexing(self, workspace: Path) -> bool:
         """Whether a run is building this workspace's index right now: one holds

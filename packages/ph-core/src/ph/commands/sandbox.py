@@ -331,6 +331,9 @@ async def apply(ctx: Context, config: None) -> None:
         scope=ctx,
     )
     denials = _Denials()
+    # A session's count goes with the session, or the cache kept one per session it
+    # was ever asked about, for the life of the mount.
+    ctx.on("session/disposed", lambda session: denials.cache.forget(session.id))
     contribute_item(
         ctx,
         TUI_STATUS,

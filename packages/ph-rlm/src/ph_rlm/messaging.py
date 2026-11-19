@@ -184,6 +184,13 @@ class _Limiter:
         bucket.tokens -= 1
         return True
 
+    def forget(self, agent_id: str) -> None:
+        """Drop every bucket naming `agent_id`, on either side: an agent that has gone
+        sends and receives nothing more, and a long-lived root kept one bucket per
+        child it ever wrote to."""
+        for pair in [pair for pair in self._buckets if agent_id in pair]:
+            del self._buckets[pair]
+
 
 def render_received(
     *, sender_label: str, sender_id: str, target_id: str, message_id: str, body: str
@@ -220,6 +227,8 @@ async def apply(ctx: Context, config: Config) -> None:
     """Register the send/observe tools, the family guard, and the two namespaces."""
     tools = ctx.require(TOOLS)
     limiter = _Limiter(capacity=config.rate_capacity, refill_seconds=config.rate_refill_seconds)
+    # An agent's id is its session's.
+    ctx.on("session/disposed", lambda session: limiter.forget(session.id))
 
     def family(agent_id: str) -> dict[str, FamilyRole]:
         return reachable_family(ctx.require(SESSIONS).list(), agent_id)

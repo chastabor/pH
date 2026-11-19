@@ -30,7 +30,7 @@ from runtime_helpers import dispatch_names, run_python_cell, settled_dispatches
 from ph.agent.types import AgentDriver
 from ph.cordis import Context
 from ph.json import as_seq
-from ph.keys import SYSTEM_PROMPT, TOOLS
+from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.system_prompt import render_prompt
 from ph.tools import Accept, ToolExecution
 from ph_rlm.context_loader import LOADED, Corpus, Document, render_manifest
@@ -361,3 +361,26 @@ async def test_a_corpus_under_the_threshold_stands_down(
 
     assert ctx.get("context_corpus") is None
     assert "context_search" not in ctx.require(TOOLS).names(scope=agent.ctx)
+
+
+async def test_a_sessions_note_goes_with_the_session(
+    mounted_runtime: MountedRuntime, tmp_path: Path
+) -> None:
+    """The note settled at a session's first announce is let go with the session.
+
+    `_notes` is a per-session memo, and nothing took a session out when the store
+    let it go: one entry per session the mount ever announced to.
+
+    Sabotage: drop the `session/disposed` listener from the row, and the note stays.
+    """
+    source = tmp_path / "notes.md"
+    source.write_text("original content\n")
+    sources = [{"kind": "path", "value": str(source)}]
+    ctx, session, _agent = await mounted_runtime(session_id="c1", extra_rows=[row(sources)])
+    service = ctx.require(CONTEXT_CORPUS)
+    service.announce(session)
+    assert session.id in service._notes
+
+    ctx.require(SESSIONS).dispose(session.id)
+
+    assert session.id not in service._notes

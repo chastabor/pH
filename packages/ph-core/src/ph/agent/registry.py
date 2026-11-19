@@ -187,8 +187,17 @@ class AgentRegistry:
         A plugin that has an agent id — a runtime keyed by it, a policy folding
         its session — reaches the agent's scope and session through here, instead
         of shadowing the registry with its own `agent/created` side table.
+
+        **Live means its scope is up** (S3), as `scope_of` answers. The roster entry
+        is taken back by the scope's own teardown, near its end, so for the whole of
+        that teardown the entry named an agent that was going: a message sent to it
+        was acknowledged and steered into an inbox its dispose had cleared. Declined
+        here, a sender asks the seam to wake it (`ensure_addressable`), whose
+        provider knows the agent it still holds is ending and refuses, and the
+        sender is told the message did not land.
         """
-        return self._agents.get(agent_id)
+        agent = self._agents.get(agent_id)
+        return agent if agent is not None and agent.ctx.active else None
 
     def scope_of(self, agent_id: str) -> Context | None:
         """The live agent's own scope, or `None` when nobody knows the id or its
@@ -198,8 +207,8 @@ class AgentRegistry:
         workspace, a kernel — and makes it that agent's effect. A scope that is
         down is declined: a registration on a dead lifetime is one nothing unwinds.
         """
-        agent = self._agents.get(agent_id)
-        return agent.ctx if agent is not None and agent.ctx.active else None
+        agent = self.get(agent_id)
+        return agent.ctx if agent is not None else None
 
     def list(self) -> list[AgentDriver]:
         """Every live agent, for a sweep that must visit all of them."""
@@ -217,8 +226,12 @@ class AgentRegistry:
         and an async one runs after this returns either way, since `emit` schedules it
         without awaiting it.
         """
-        if self._agents.pop(agent.id, None) is None:
+        # **Only this agent's entry** (Holdings rule 4): one made again for the same
+        # session while this one was still ending holds the id now, and this
+        # teardown taking it out left that agent listed nowhere.
+        if self._agents.get(agent.id) is not agent:
             return
+        del self._agents[agent.id]
         agent.ctx.emit("agent/disposed", agent)
 
     async def dispose(self, agent_id: str) -> None:

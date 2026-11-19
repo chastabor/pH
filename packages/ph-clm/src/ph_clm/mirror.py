@@ -63,7 +63,7 @@ import os
 import re
 import stat
 from collections.abc import Iterable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -73,8 +73,9 @@ import anyio
 
 from ph.agent.types import AgentHandle, RequestProposal
 from ph.cordis import Context, Next, plugin
-from ph.keys import SYSTEM_PROMPT, TOOLS
+from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import LlmCallConfig, TextBlock, ToolCallBlock, ToolResultBlock
+from ph.locks import KeyedLocks
 from ph.paths import write_atomic
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.workspace import scratch_of
@@ -382,7 +383,8 @@ class MirrorService:
     """Each session's files, by session id, with the `(mtime_ns, size)` this process
     last wrote each at: a call that left a file alone costs an `lstat`, not a parse;
     a file not here is not this process's; and these are what `forget` deletes."""
-    _locks: dict[Path, anyio.Lock] = field(default_factory=dict)
+    _locks: KeyedLocks[Path] = field(default_factory=KeyedLocks)
+    """One use of a context file at a time, held only while somebody uses it."""
 
     def __post_init__(self) -> None:
         self._shown = SessionFoldCache(self.fold, extend=self.extend)
@@ -441,10 +443,21 @@ class MirrorService:
             return await self.render(session, agent)
 
     async def render(self, session: Session, agent: AgentHandle) -> Path:
-        """Write the file for the surface as it stands."""
+        """Write the file for the surface as it stands.
+
+        **Only for a session the store still holds.** The write runs on a thread, and
+        `forget` — on `session/disposed` — can run while it does: recorded after that,
+        the file was kept under a session nothing would forget again, and stayed in
+        the agent's scratch. It is taken back instead (Holdings rule 4: the record and
+        the file are one holding, and `forget` was its door out).
+        """
         path = self.path(session, agent)
         text = render(session, self.editor.sections(session), self._shown.read(session))
         written = await anyio.to_thread.run_sync(partial(_write, path, text))
+        if self.ctx.require(SESSIONS).get(session.id) is not session:
+            self._shown.forget(session.id)
+            await anyio.to_thread.run_sync(partial(_remove, path))
+            return path
         self._written.setdefault(session.id, {})[path] = written
         return path
 
@@ -491,14 +504,11 @@ class MirrorService:
         A directory something else wrote into stays.
         """
         for path in self._written.pop(session_id, {}):
-            self._locks.pop(path, None)
-            path.unlink(missing_ok=True)
-            with suppress(OSError):
-                path.parent.rmdir()
+            _remove(path)
         self._shown.forget(session_id)
 
-    def _lock(self, path: Path) -> anyio.Lock:
-        return self._locks.get(path) or self._locks.setdefault(path, anyio.Lock())
+    def _lock(self, path: Path) -> AbstractAsyncContextManager[None]:
+        return self._locks.hold(path)
 
     def _apply(self, session: Session, text: str, call_id: str | None) -> list[Revision]:
         drafts = compile_drafts(
@@ -595,6 +605,13 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 # ------------------------------------------------------------------ helpers --
+
+
+def _remove(path: Path) -> None:
+    """A context file, and its directory when nothing else is in it."""
+    path.unlink(missing_ok=True)
+    with suppress(OSError):
+        path.parent.rmdir()
 
 
 def _write(path: Path, text: str) -> tuple[int, int]:

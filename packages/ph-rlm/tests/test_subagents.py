@@ -48,9 +48,11 @@ than a degradation.
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from rlm_fixtures import (
     BINDINGS_ROW,
@@ -1928,6 +1930,77 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
     assert _state(revived_ctx, leaf).awaiting is None
 
 
+async def test_two_sweeps_of_one_parent_readmit_a_child_once(
+    delegating: MountedRuntime,
+    gate: ModelGate,
+    mount: MountProfile,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """S1. Sweeps of one parent take turns, so a child is readmitted by one of them.
+
+    `_resume` read `state.run_id in self._runs`, then awaited before `_admit` wrote
+    the entry, so two sweeps that overlapped both readmitted the child: the loser's
+    `open_child_log` failed on the live session, and its `except Exception` ended
+    the winner's child — a false failure in its log, with its own children revoked
+    for good. Two `credentials/store` requests in a row are two such sweeps.
+
+    The second waits for the first and reads the state it left, so a credential
+    that arrived meanwhile is not missed.
+
+    Here the loser's hold write meets the log the winner holds (`SessionForkError`),
+    and its attempt to end the child fails too, so the child survives by the order
+    two writes happened to land in. The attempt is what is asserted.
+
+    Sabotage: drop the per-parent lock from `readmit_waiting`, and the second sweep
+    tries to end the child.
+    """
+    monkeypatch.delenv(GRANDCHILD_KEY, raising=False)
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    _keyed(ctx)
+    keyed = ModelChoice(provider="keyed", model="k1")
+    _middle, leaf = await _grandchild(ctx, parent, gate, choice=keyed)
+
+    revived_ctx, _revived, revived_parent = await _restart(mount, session.id, prepare=_keyed)
+    assert _state(revived_ctx, leaf).awaiting == GRANDCHILD_KEY, "held by name"
+
+    revived_ctx.require(CREDENTIALS).provide_value(GRANDCHILD_KEY, "supplied")
+    seam = revived_ctx.require(SUBAGENTS)
+    revived: list[str] = []
+    # The first sweep is held inside the provider, between its check of `_runs` and
+    # its admission, until the second has readmitted the child — the window two
+    # overlapping sweeps share. Bounded, because one sweep at a time never makes
+    # the second call this waits for.
+    original = RlmChildProvider.readmit
+    calls: list[str] = []
+    second_done = anyio.Event()
+
+    async def readmit(self: RlmChildProvider, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        calls.append(kwargs["run_id"])
+        if len(calls) == 1:
+            with anyio.move_on_after(0.3):
+                await second_done.wait()
+            return await original(self, *args, **kwargs)
+        try:
+            return await original(self, *args, **kwargs)
+        finally:
+            second_done.set()
+
+    monkeypatch.setattr(RlmChildProvider, "readmit", readmit)
+
+    async def sweep() -> None:
+        revived.extend(await seam.readmit_waiting(revived_parent, retry_limit=RETRIES))
+
+    async with anyio.create_task_group() as sweeps:
+        sweeps.start_soon(sweep)
+        sweeps.start_soon(sweep)
+
+    assert revived.count(leaf.id) == 1, revived
+    assert child_is_live(_state(revived_ctx, leaf)), "the second sweep ended the first's child"
+    gave_up = [record.message for record in caplog.records if "could not be" in record.message]
+    assert gave_up == [], "a sweep gave up on a child another sweep was readmitting"
+
+
 async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
@@ -2197,3 +2270,71 @@ async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
     again = ctx.require(WORKSPACE).of(run.session_id)
     assert again is not None
     assert again.kind == "worktree-ephemeral", "a second question must not widen the first's grant"
+
+
+async def test_a_rehydration_that_is_stopped_leaves_the_child_wakeable(
+    delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S4. A rehydration that fails or is stopped after its agent is made ends that agent.
+
+    `child.agent` was set before the runtime and the drive were, so one stopped in
+    between — a kernel cancels a binding call when its cell settles, so a cell
+    stopped mid-send is enough — left an agent nothing drove: every later wake
+    answered "already running" and every later send landed in an inbox nobody read.
+
+    Sabotage: drop the `except BaseException` from `rehydrate`, and the second wake
+    is refused.
+    """
+    ctx, _session, parent = await delegating()
+    run = await _spawn(ctx, parent, "answer twice")
+    await settle_background(ctx)
+    answered = await run.result()
+
+    original = RlmChildProvider._runtime
+    calls: list[int] = []
+
+    async def stopped_once(self: RlmChildProvider, *args: Any) -> None:  # noqa: ANN401
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("the cell that asked was stopped")
+        await original(self, *args)
+
+    monkeypatch.setattr(RlmChildProvider, "_runtime", stopped_once)
+    with pytest.raises(RuntimeError, match="was stopped"):
+        await ctx.require(SUBAGENTS).rehydrate(run.id)
+    assert ctx.require(AGENTS).get(run.session_id) is None, "an agent nothing drives"
+    assert await run.result() == answered, "a waiter lost the answer it had"
+
+    assert await ctx.require(SUBAGENTS).rehydrate(run.id), "the child can no longer be woken"
+    await settle_background(ctx)
+
+
+async def test_a_spawn_stopped_while_its_workspace_is_taken_leaves_no_agent(
+    delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5. The rlm build ends what it made on every way out, not on a gone parent alone.
+
+    `_admit` let go of the child's session when the parent went away under the
+    workspace's acquire, and of nothing when the spawn was stopped there instead: the
+    agent and its open session stayed until the parent's scope went.
+
+    Sabotage: catch `InactiveScopeError` alone around `_workspace` again, and the
+    child's agent is still registered.
+    """
+    ctx, _session, parent = await delegating()
+    taking = anyio.Event()
+
+    async def stuck(self: RlmChildProvider, *args: Any) -> Any:  # noqa: ANN401
+        taking.set()
+        await anyio.sleep_forever()
+
+    monkeypatch.setattr(RlmChildProvider, "_workspace", stuck)
+    agents = {agent.id for agent in ctx.require(AGENTS).list()}
+    sessions = {one.id for one in ctx.require(SESSIONS).list()}
+    async with anyio.create_task_group() as spawning:
+        spawning.start_soon(partial(_spawn, ctx, parent, "do the work"))
+        await taking.wait()
+        spawning.cancel_scope.cancel()
+
+    assert {agent.id for agent in ctx.require(AGENTS).list()} == agents
+    assert {one.id for one in ctx.require(SESSIONS).list()} == sessions

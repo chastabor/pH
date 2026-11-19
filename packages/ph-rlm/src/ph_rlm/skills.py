@@ -25,6 +25,7 @@ import tomllib
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Protocol
 
 import anyio
 from pydantic import Field
@@ -36,7 +37,7 @@ from ph.wire import WireModel
 
 from .keys import PYTHON_RUNTIME
 
-__all__ = ["Config", "PythonSkill", "apply"]
+__all__ = ["Config", "PythonSkill", "apply", "give_to_runtime"]
 
 log = logging.getLogger("ph_rlm.skills")
 
@@ -107,6 +108,43 @@ def _module_name(directory: Path) -> str | None:
     return str(name).replace("-", "_") if isinstance(name, str) and name else None
 
 
+class _SkillHolder(Protocol):
+    """What `give_to_runtime` writes: `PythonCodeRuntime`'s two skill lists."""
+
+    skills: tuple[str, ...]
+    skill_modules: tuple[str, ...]
+
+
+def give_to_runtime(
+    ctx: Context, runtime: _SkillHolder, requirements: tuple[str, ...], modules: tuple[str, ...]
+) -> None:
+    """Add a row's skills to the runtime's lists, and take them back as the row goes.
+
+    **Taken back, one occurrence each** (Holdings rules 2 and 4): the row appended
+    and kept nothing to undo it with, so a row mounted again added its packages a
+    second time, and one let go left them for every later kernel to install and
+    import. Another row's entries, an equal one included, are left where they are.
+    """
+
+    def take_back() -> None:
+        runtime.skills = _without(runtime.skills, requirements)
+        runtime.skill_modules = _without(runtime.skill_modules, modules)
+
+    # The take-back before the write it undoes (Holdings rule 1).
+    ctx.add_disposer(take_back, label="rlm-skills-python(runtime)")
+    runtime.skills = (*runtime.skills, *requirements)
+    runtime.skill_modules = (*runtime.skill_modules, *modules)
+
+
+def _without(held: tuple[str, ...], gone: tuple[str, ...]) -> tuple[str, ...]:
+    """`held` less one occurrence of each of `gone`, in order."""
+    left = list(held)
+    for one in gone:
+        if one in left:
+            left.remove(one)
+    return tuple(left)
+
+
 @plugin("rlm-skills-python", affects="environment", config=Config, inject=[SKILLS, PYTHON_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
     """Discover skills, register them, and make their packages importable.
@@ -132,8 +170,7 @@ async def apply(ctx: Context, config: Config) -> None:
     runtime = ctx.require(PYTHON_RUNTIME)
     requirements = tuple(one.requirement for one in found if one.requirement is not None)
     modules = tuple(one.module for one in found if one.module is not None)
-    runtime.skills = (*runtime.skills, *requirements)
-    runtime.skill_modules = (*runtime.skill_modules, *modules)
+    give_to_runtime(ctx, runtime, requirements, modules)
     log.info(
         "ph_rlm.skills: %s skill(s), %s importable: %s",
         len(found),

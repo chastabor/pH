@@ -166,6 +166,14 @@ ONLY_ITS_SCOPE: dict[str, str] = {
     "ph_app.adapters.openai_compatible:apply:llm({})": ROW,
     "ph_app.adapters.openai_compatible:apply:uploader({})": ROW,
     "ph_app.adapters.openai_compatible:apply:http({})": ROW,
+    "ph_rlm.snapshot:apply:rlm-kernel-snapshot(runtime)": (
+        "the row's policy, on the runtime another row owns: `provide` lets one realm "
+        "hold one, and the take-back clears it only while it is still this one"
+    ),
+    "ph_rlm.skills:give_to_runtime:rlm-skills-python(runtime)": (
+        "the row's own entries in the runtime's lists, taken back one occurrence each; "
+        "nothing else removes them"
+    ),
     # An agent's scope, made by the call that registers on it. The scope is the
     # agent: `dispose(agent_id)` ends it by disposing that scope, and `_forget`
     # pops the roster first so the second of the two doors finds nothing. The

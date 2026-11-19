@@ -161,6 +161,7 @@ async def apply(ctx: Context, config: Config) -> None:
     """Mount the harness: the state, the prompt section, `/refine`, auto-refine."""
     service = HarnessService(ctx=ctx, directory=resolve_roots().harness_dir())
     ctx.provide(HARNESS, service)
+    ctx.on("session/disposed", lambda session: service.forget(session.id))
     planner = RefinementPlanner(
         ctx=ctx,
         service=service,
@@ -249,23 +250,26 @@ async def apply(ctx: Context, config: Config) -> None:
         """Run one pass as a job owned by the agent's scope."""
 
         async def body(job: Job) -> str:
-            try:
-                # Raced against the job's own token: a job's cancellation is
-                # cooperative, and a pass is a model call or two that would otherwise
-                # run on after its scope was disposed, past a mount's bounded
-                # teardown or a daemon's shutdown.
-                refined = await raced(job.token, lambda: refine(request))
-                return refined if refined is not None else "refinement canceled"
-            finally:
-                running.discard(request.session.id)
-                # Released, not abandoned: the work is over, so the entry goes
-                # rather than sitting in the table until the agent does. Without
-                # this an auto-refining session accretes one job per pass. `get`,
-                # as `_quiesce` reads it: a pass its owner stopped at a mount's
-                # unwind ends after the row that holds the table has gone.
-                jobs = ctx.get(JOBS)
-                if jobs is not None:
-                    jobs.forget(job.id)
+            # Raced against the job's own token: a job's cancellation is
+            # cooperative, and a pass is a model call or two that would otherwise
+            # run on after its scope was disposed, past a mount's bounded teardown
+            # or a daemon's shutdown.
+            refined = await raced(job.token, lambda: refine(request))
+            return refined if refined is not None else "refinement canceled"
+
+        def settled(job: Job) -> None:
+            # However the job ended, one canceled before `body` ran included (S6):
+            # taken down in `body`, the mark outlived such a job, and the session
+            # answered "already running" for the life of the mount.
+            running.discard(request.session.id)
+            # Released, not abandoned: the work is over, so the entry goes rather
+            # than sitting in the table until the agent does. Without this an
+            # auto-refining session accretes one job per pass. `get`, as `_quiesce`
+            # reads it: a pass its owner stopped at a mount's unwind ends after the
+            # row that holds the table has gone.
+            jobs = ctx.get(JOBS)
+            if jobs is not None:
+                jobs.forget(job.id)
 
         running.add(request.session.id)
         try:
@@ -274,6 +278,7 @@ async def apply(ctx: Context, config: Config) -> None:
                 label=f"refine {request.session.id} ({request.trigger})",
                 run=body,
                 scope=request.agent.ctx,
+                on_settled=settled,
             )
         except BaseException:
             # A start that failed never ran `body`, so nothing else would take

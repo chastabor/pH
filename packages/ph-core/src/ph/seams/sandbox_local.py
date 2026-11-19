@@ -63,10 +63,12 @@ lands on the command, with and without the `env` prefix; fd 3 crosses; and
 from __future__ import annotations
 
 import logging
+import math
 import os
 import shlex
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
@@ -804,8 +806,19 @@ async def egress_socket_path(ctx: Context) -> Path:
 # --------------------------------------------------------------------- row --
 
 
-_BRIDGE_VERDICT: SandboxProbe | None = None
-"""What `probe_egress` learned, remembered for the life of the process.
+BRIDGE_RETRY_SECONDS = 300.0
+"""How long a probe that failed is believed before a mount asks again.
+
+Not for the life of the process, as a failure used to be: one slow or unlucky probe
+then declined egress to every root mounted after it. Not at every mount either: on
+a host with the prerequisites but a bridge that fails, each probe spawns a confined
+command and can wait out its connect timeout, which a daemon mounting a burst of
+roots would pay once per root."""
+
+_BRIDGE_VERDICT: tuple[SandboxProbe, float] | None = None
+"""What `probe_egress` learned, and until when it is believed (`time.monotonic`): a
+bridge it proved, for the life of the process; one it could not, for
+`BRIDGE_RETRY_SECONDS`.
 
 **Per process, never persisted, and deliberately unlike the filesystem probe.**
 That one refuses to be cached at all because
@@ -874,9 +887,13 @@ class _Egress:
         # one, else the shim's fixed number inside the namespace. Read from the
         # proxy rather than re-derived from the backend, so there is one answer.
         bridge = Egress(socket=str(path), port=proxy.tcp_port or EGRESS_PORT)
-        if _BRIDGE_VERDICT is None:
-            _BRIDGE_VERDICT = await probe_egress(ctx, backend, bridge, scratch)
-        self.verdict = _BRIDGE_VERDICT
+        known = _BRIDGE_VERDICT
+        if known is not None and time.monotonic() < known[1]:
+            self.verdict = known[0]
+        else:
+            self.verdict = await probe_egress(ctx, backend, bridge, scratch)
+            until = math.inf if self.verdict.confines else time.monotonic() + BRIDGE_RETRY_SECONDS
+            _BRIDGE_VERDICT = (self.verdict, until)
         if not self.verdict.confines:
             log.info("ph.seams.sandbox_local: no egress bridge — %s", self.verdict.because)
             # Through the releaser, so the close leaves the row's scope as it runs:

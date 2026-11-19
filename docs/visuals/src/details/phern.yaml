@@ -559,11 +559,11 @@ nodes:
     blocks:
       - title: The life of a root
         text: |
-          1. **Started** by any verb that names it through `Supervisor.start`: `session/new`, `session/attach`, a mutation, a schedule coming due, or a resume pass. Two callers naming one new root share one mount.
+          1. **Started** by any verb that names it through `Supervisor.start`: `session/new`, `session/attach`, a mutation, a schedule coming due, or a resume pass. Two callers naming one new root share one mount, and a root enters the table only once its build is done.
           2. **Mounted** by `ph_app.runtime.mount_session` in the environment its own log records, under the session's lease.
           3. **Driven**: a prompt is spliced into the agent's inbox (logged first), the doorbell rings, the root's task runs the turn.
           4. **Watched**: every record is published to subscribers as `session.event`; status changes as `session.status`.
-          5. **Released** (passivated) after `--passivate-after` minutes of quiet (90 by default) when nothing holds it: `supervisor/passivated` is written, the log is flushed, the mount is unwound and the lease released.
+          5. **Released** (passivated) after `--passivate-after` minutes of quiet (90 by default) when nothing holds it, asked again once the release holds its lock: the root leaves the table, `supervisor/passivated` is written, the log is flushed, the mount is unwound and the lease released, and then the root's task is ended. A restart and a shutdown leave by the same steps.
           6. **Resumed** by the next verb that names it. The same path as a first start; the log is the only input.
       - title: What holds a root mounted
         list:
@@ -1213,7 +1213,7 @@ edges:
           - "An act that raises settles its key `unknown`. The retry is told so; it is not silently refused or silently repeated."
           - "If the flush after an act fails, the reply is still sent: the act happened. The root is marked unwritten and reported in `daemon/status`."
           - "`session/cancel`, `session/new`, `attachment/put`, `credentials/store` and `session/adopt` take no key. Each is idempotent by construction."
-          - "A handler is canceled when its client's socket closes. A mount in progress is the supervisor's task and finishes anyway."
+          - "A handler is canceled when its client's socket closes. A mount or a restart in progress is the supervisor's task and finishes anyway."
 
   supervisor-runtime:
     transport: call

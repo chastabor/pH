@@ -229,6 +229,7 @@ class JobService:
         scope: Context | None = None,
         slot: Slot | None = None,
         on_queued: Callable[[], None] | None = None,
+        on_settled: Callable[[Job], None] | None = None,
     ) -> Job:
         """Start one background job, owned by `scope` (default: this seam's).
 
@@ -251,6 +252,13 @@ class JobService:
         for a stated reason: a callable on a registry's value is a row body the
         ownership walk has to classify, and this one is the caller's own, handed
         back to the caller, rather than a registration.
+
+        **`on_settled` is called however the job ends** (S6): done, failed, canceled
+        while it ran — or canceled before it ran, whether waiting for a slot or before
+        its first step, which never enters `run`. It is where a producer takes down
+        what it put up for the job; inside `run`, an entry outlived every job that
+        never got there. Called before `job/settled` is announced, and not at all if
+        `start` raises, which the caller sees.
         """
         job = Job(id=f"{kind}-{secrets.token_hex(4)}", kind=kind, label=label, token=CancelToken())
         waits = self._waits(kind, slot)
@@ -317,6 +325,11 @@ class JobService:
                     for queue in waits:
                         queue.limiter.release()
                 self._leave(waits)
+                if on_settled is not None:
+                    try:
+                        on_settled(job)
+                    except Exception:
+                        log.exception("ph.seams.jobs: settling job %s raised", job.id)
                 self.ctx.emit("job/settled", job)
 
         try:
@@ -389,20 +402,33 @@ class JobService:
         `finally` has one rule — release everything, or nothing — rather than a
         list of what happened to be acquired.
         """
+        if job.token.canceled:
+            # Canceled before it began to wait: nothing to announce, nothing taken.
+            # `on_queued` here had a producer record a wait for work that would
+            # never run.
+            return False
         if on_queued is not None and any(queue.limiter.available_tokens < 1 for queue in waits):
             on_queued()
         taken: list[_Queue] = []
-        with anyio.CancelScope() as waiting:
-            job.waiting = waiting
-            for queue in waits:
-                await queue.limiter.acquire()
-                taken.append(queue)
-        job.waiting = None
-        if not waiting.cancelled_caught:
-            return True
-        for queue in taken:
-            queue.limiter.release()
-        return False
+        holds = False
+        try:
+            with anyio.CancelScope() as waiting:
+                job.waiting = waiting
+                for queue in waits:
+                    await queue.limiter.acquire()
+                    taken.append(queue)
+            holds = not waiting.cancelled_caught
+        finally:
+            job.waiting = None
+            # Whatever ended the wait — its own cancel, or a stop from outside it,
+            # such as the task group a bound service runs its bodies in going away —
+            # gives back what it had taken. Released on the own cancel alone, an
+            # outside stop kept the narrower queue's place, and a job still waiting
+            # in that queue waited for good.
+            if not holds:
+                for queue in taken:
+                    queue.limiter.release()
+        return holds
 
     def _leave(self, waits: Sequence[_Queue]) -> None:
         """Drop this job's places, and each queue once nobody holds one."""

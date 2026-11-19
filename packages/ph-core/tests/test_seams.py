@@ -1285,6 +1285,36 @@ async def test_a_job_runs_and_reports() -> None:
     assert job.result == 42
 
 
+async def test_a_job_canceled_before_it_runs_still_settles_its_producer() -> None:
+    """S6. `on_settled` is called however a job ends, one that never ran included.
+
+    A producer that took its entry down inside the job's body — the harness's
+    "already running" mark, a utcp run a later call joins — kept it for good when
+    the job was canceled before the body ran: canceled while it waited for a slot,
+    or before its first step.
+
+    Sabotage: call `on_settled` only after `run` returns, and the canceled job is
+    never reported.
+    """
+    root = Context()
+    service = JobService(ctx=root)
+    settled_jobs: list[tuple[str, str]] = []
+
+    def note(job: Job) -> None:
+        settled_jobs.append((job.label, job.state))
+
+    ran: list[str] = []
+    stopped = await service.start(
+        kind="test", label="stopped", run=lambda _job: ran.append("x"), on_settled=note
+    )
+    stopped.cancel()
+    await service.start(kind="test", label="ran", run=lambda _job: 42, on_settled=note)
+    await service.settled()
+
+    assert ran == []
+    assert sorted(settled_jobs) == [("ran", "done"), ("stopped", "canceled")]
+
+
 async def test_settled_waits_for_every_body_even_one_whose_owner_has_gone() -> None:
     """`settled()` is the wait a teardown no longer does. It counts bodies rather than
     reading the table, which drops an abandoned job while its body may still be
@@ -1471,6 +1501,68 @@ async def test_a_failed_job_frees_its_slot() -> None:
     assert first.state == "failed"
     assert second.state == "done", "the failure kept the slot"
     assert second.result == "ran"
+
+
+async def test_a_job_stopped_from_outside_while_it_waits_gives_its_places_back() -> None:
+    """A job waiting for its second queue, stopped by a cancel that is not its own,
+    gives back the place it already took in the first.
+
+    `_take` released what it had taken only when its own wait scope was canceled; a
+    cancel from outside it — the task group a bound service runs its bodies in going
+    away — kept the narrower queue's token taken, and a job still waiting in that
+    queue waited for good.
+
+    Sabotage: release only on the wait's own cancel again, and the last job never
+    runs.
+    """
+    root = Context()
+    service = JobService(ctx=root, caps={"test": 1})
+    gate = anyio.Event()
+
+    async def hold(_job: Job) -> None:
+        await gate.wait()
+
+    async with anyio.create_task_group() as outer:
+        async with anyio.create_task_group() as first:
+            service.bind(first)
+            await service.start(kind="test", label="holds the cap", run=hold)
+            await service.start(kind="test", label="holds k", run=hold, slot=("k", 1))
+            await anyio.sleep(0.05)
+            service.bind(outer)
+            last = await service.start(
+                kind="test", label="after", run=lambda _job: "ran", slot=("k", 1)
+            )
+            await anyio.sleep(0.05)
+            first.cancel_scope.cancel()
+        await settled(lambda: last.state == "done", "the job behind the stopped one to run")
+
+
+async def test_a_job_canceled_before_it_waits_is_not_announced_as_queued() -> None:
+    """`on_queued` is for a job that waits; one canceled before it began does not.
+
+    It fired for a job whose token was already canceled, and the producer recorded a
+    wait — a child's `queued` status, with its reason — for work that would never
+    run.
+
+    Sabotage: drop the canceled check before `on_queued`, and the wait is recorded.
+    """
+    root = Context()
+    service = JobService(ctx=root, caps={"test": 1})
+    gate = anyio.Event()
+    queued: list[str] = []
+
+    async def hold(_job: Job) -> None:
+        await gate.wait()
+
+    await service.start(kind="test", label="holds the cap", run=hold)
+    stopped = await service.start(
+        kind="test", label="stopped", run=hold, on_queued=lambda: queued.append("stopped")
+    )
+    stopped.cancel()
+    gate.set()
+    await service.settled()
+
+    assert queued == [], "a canceled job was announced as waiting"
 
 
 async def test_a_job_stopped_by_a_base_exception_is_not_still_running() -> None:
@@ -1776,6 +1868,34 @@ def _screen(screen_id: str, **overrides: Any) -> ScreenDefinition:  # noqa: ANN4
         build=lambda session: (screen_id, session),
         **overrides,
     )
+
+
+async def test_a_screen_a_presenter_refused_is_not_left_claimed() -> None:
+    """A registration that fails ends what it made (Holdings rule 2).
+
+    The screen was claimed in the table, then drawn on each front end; a presenter
+    that raised left the claim with no disposer handed back, so the id stayed taken
+    until the row unmounted and a second try was refused as a duplicate.
+
+    Sabotage: drop the `except BaseException` from `register`, and the second try is
+    refused.
+    """
+    root = Context()
+    registry = TuiScreenRegistry(ctx=root)
+    calls: list[str] = []
+
+    def present(screen: ScreenDefinition) -> None:
+        calls.append(screen.id)
+        if len(calls) == 1:
+            raise RuntimeError("the front end fell over")
+
+    registry.present_with(present)
+    screen = ScreenDefinition(id="stats", label="Stats", build=lambda _ctx: None)
+    with pytest.raises(RuntimeError, match="fell over"):
+        registry.register(screen)
+    assert registry.get("stats") is None, "a refused screen is still claimed"
+    registry.register(screen)
+    assert registry.get("stats") is screen
 
 
 async def test_screens_list_in_slot_order_then_id() -> None:

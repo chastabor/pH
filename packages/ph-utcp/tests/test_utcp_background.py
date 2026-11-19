@@ -221,6 +221,31 @@ async def test_a_call_that_its_run_outlasts_is_answered_and_the_agent_told_when_
     assert _started(tmp_path) == ["held"], "the call that was answered started no second run"
 
 
+async def test_a_run_whose_job_is_canceled_before_it_starts_is_not_left_to_join(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """S6. A run its job never reached is ended, and taken off the table.
+
+    The run was registered before its job started, so a later call would join it
+    rather than start a second, and it was ended only inside the job's body: a job
+    canceled before that body ran left a run whose `ended` never set, which every
+    later call joined, waited out `wait_s` on, and no run was started again.
+
+    Sabotage: end the runs in the body alone, and the run is still on the table.
+    """
+    ctx = await mount(_row(tmp_path))
+    agent = new_agent(ctx)
+    utcp = ctx.require(UTCP)
+
+    run = await utcp._start("fx", utcp.manuals["fx"], agent, [("build", {"mode": "held"})])
+    assert run is not None and run.job is not None
+    run.job.cancel()
+
+    await settled(lambda: run.ended.is_set(), "the run that never ran to end", seconds=10)
+    assert not utcp.runs
+    assert _started(tmp_path) == []
+
+
 async def test_a_run_that_ends_within_the_wait_answers_the_call_and_nobody_is_told_twice(
     mount: MountProfile, tmp_path: Path
 ) -> None:

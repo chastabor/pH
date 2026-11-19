@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.agent.types import AgentOptions
@@ -44,7 +45,7 @@ from ph.llm.types import (
 )
 from ph.seams.attachments import digest_of
 from ph.seams.credentials import CredentialService
-from ph.testing import MountProfile, as_kind, block_text, live_settles
+from ph.testing import MountProfile, as_kind, block_text, live_settles, settled
 from ph_app.adapters._http import HttpClient, failure_from_status
 from ph_app.adapters.google import (
     MAX_TRANSFERS,
@@ -332,6 +333,37 @@ async def test_a_transfer_that_ran_out_of_patience_is_resumed_not_re_sent(
     # *maybe sent* (S9), and the step after it settled the transfer that happened.
     (record,) = live_settles(session, "attachment/uploaded")
     assert record.data["mime"] == "video/mp4"
+
+
+async def test_a_transfer_whose_turn_was_stopped_while_it_processed_is_not_re_sent(
+    mount: MountProfile, wire: _FileApi
+) -> None:
+    """The file is remembered as soon as it is stored, not when patience runs out.
+
+    `_pending` was written only on the readiness timeout, so a turn stopped while
+    the provider was still processing the file — a person's interrupt, a release —
+    forgot a transfer that had happened, and the next step sent every byte again.
+
+    Sabotage: remember the file in `_ready`'s timeout alone again, and the second
+    step transfers a second copy.
+    """
+    wire.processing = 100  # still processing when the turn is stopped
+    ctx: Context = await mount(ROUTE, profile=PROFILE)
+    session = ctx.require(SESSIONS).create("stopped")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+
+    agent.followup(await _attached(ctx))
+    async with anyio.create_task_group() as turn:
+        turn.start_soon(agent.run)
+        await settled(lambda: wire.polls >= 1, "the upload to be polled")
+        turn.cancel_scope.cancel()
+    assert wire.uploaded == ["files/clip1"]
+
+    wire.state["files/clip1"] = 0
+    await agent.prompt("is it ready now?")
+
+    assert wire.uploaded == ["files/clip1"], "the stopped step's transfer was sent again"
+    assert wire.referenced(wire.bodies[-1]) == ["https://files.example/files/clip1"]
 
 
 async def test_a_remembered_file_that_is_gone_is_uploaded_again(

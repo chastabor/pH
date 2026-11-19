@@ -24,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import anyio
 import pytest
 
 from ph.cancel import CancelToken
@@ -650,3 +651,74 @@ async def test_a_projection_outside_a_running_call_is_declined() -> None:
     ).execution
 
     assert runtime.projected(execution, "anything") is None
+
+
+async def test_two_agents_calls_with_one_id_are_projected_apart() -> None:
+    """T2. A call in `tools/post-execute` is found by its agent and its id.
+
+    Keyed by call id alone, and ids minted for calls a provider did not name are
+    the same for two agents at the same turn, step and index: the second call's
+    entry replaced the first's, and the second's `finally` then took it down while
+    the first was still asking, so the first was told there was nothing to project.
+
+    Sabotage: key `_projecting` by the call id alone again, and the first agent's
+    projection is declined.
+    """
+    ctx, runtime = tool_runtime()
+    first = StubAgent(ctx.scope("first"), agent_id="first")
+    second = StubAgent(ctx.scope("second"), agent_id="second")
+    asking, answered = anyio.Event(), anyio.Event()
+    seen: dict[str, Any] = {}
+
+    async def measure(
+        execution: Any,  # noqa: ANN401
+        result: Any,  # noqa: ANN401
+        next_: Callable[..., Awaitable[Any]],
+    ) -> Any:  # noqa: ANN401
+        if execution.agent is first:
+            asking.set()
+            await answered.wait()
+        name = "first" if execution.agent is first else "second"
+        seen[name] = runtime.projected(execution, "a replacement")
+        return await next_(execution, result)
+
+    ctx.on("tools/post-execute", measure)
+    for agent in (first, second):
+        runtime.register(simple_tool("same", lambda _args, _run: "x"), scope=agent.ctx)
+
+    async def call(agent: StubAgent) -> None:
+        await runtime.execute(
+            ToolExecutionInput(
+                call_id="call-1-1-0-0",
+                name="same",
+                arguments={},
+                scope=boundary_for(None, agent),
+                agent=agent,
+            )
+        )
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(call, first)
+        await asking.wait()
+        await call(second)
+        answered.set()
+
+    assert seen["second"] is not None
+    assert seen["first"] is not None, "the first agent's call was declined a projection"
+
+
+async def test_a_second_presentation_on_one_scope_is_refused() -> None:
+    """One presentation per scope, as one transport per scope is.
+
+    A second `present_as` on a scope overwrote the first's mode, and either one's
+    release cleared the field whatever it then held: the presentation that survived
+    depended on the order the two were let go.
+
+    Sabotage: overwrite in `present_as` again, and the second claim is taken.
+    """
+    ctx, runtime = tool_runtime()
+    agent = StubAgent(ctx.scope("agent"))
+    runtime.present_as("code", scope=agent.ctx)
+
+    with pytest.raises(ValueError, match="already presents"):
+        runtime.present_as("native", scope=agent.ctx)

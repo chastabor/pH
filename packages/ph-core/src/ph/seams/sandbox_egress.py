@@ -261,7 +261,11 @@ class EgressProxy:
     concrete class carries — and `start_server` returns exactly that."""
     _connections: set[asyncio.Task[object]] = field(default_factory=set, repr=False)
     """Every connection being served, so `aclose` can end the tunnels the server's
-    own `close` leaves running."""
+    own `close` leaves running. Each takes itself out as it ends."""
+    _closing: bool = field(default=False, repr=False)
+    """Set as `aclose` begins: a connection the listener spawned and the loop had not
+    stepped yet is not in `_connections` to be canceled, and is closed unserved by
+    `_handle` instead — it reported refusals to a row that had unmounted."""
 
     @property
     def tcp_port(self) -> int | None:
@@ -303,6 +307,7 @@ class EgressProxy:
         spawned running, which for a tunnel means until the far end hangs up — so
         the in-flight ones are canceled here rather than outliving the row.
         """
+        self._closing = True
         servers = [server for server in (self._server, self._tcp) if server is not None]
         # Cleared before the close, so `tcp_port` reads `None` from the moment the
         # row starts letting go rather than after the last tunnel drains.
@@ -317,7 +322,6 @@ class EgressProxy:
             # `wait`, not `await task`: the latter re-raises the cancellation into
             # whoever is disposing the row.
             await asyncio.wait(pending, timeout=5)
-        self._connections.clear()
         for server in servers:
             with suppress(Exception):
                 await server.wait_closed()
@@ -329,6 +333,11 @@ class EgressProxy:
             self.path.parent.rmdir()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._closing:
+            # Accepted before the close and run after it: nothing is served for a
+            # row that has let go, and nothing is reported to it.
+            await _close(writer)
+            return
         task = asyncio.current_task()
         if task is not None:
             self._connections.add(task)

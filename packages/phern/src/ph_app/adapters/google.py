@@ -326,6 +326,12 @@ class GoogleAdapter:
             uri = as_str(record.get("uri"))
             if not uri:
                 raise LlmError("the files API returned no uri", "REQUEST_FAILED")
+            # Remembered the moment the bytes are stored, not when the wait for
+            # them runs out: a turn stopped while the provider processes the file
+            # — an interrupt, a release — otherwise forgot a transfer that had
+            # happened, and the next step sent every byte again.
+            if name := as_str(record.get("name")):
+                self._pending[ref.attachment_id] = name
             record = await self._ready(record, ref.attachment_id)
         except Exception:
             # Counted only when this attempt has nothing to resume from. A
@@ -422,17 +428,17 @@ class GoogleAdapter:
     async def _ready(self, record: dict[str, Any], attachment_id: str) -> dict[str, Any]:
         """Poll until the file is `ACTIVE`, or give up inside the budget.
 
-        Giving up **remembers the file** so the next attempt resumes against it
-        rather than re-sending it; `_resume` is the other half. `FAILED` does not,
-        and the asymmetry is the point: the provider has said this file will never
-        work, so the useful thing is to forget it and fall back to the bytes,
-        where a slow one is worth waiting for on the next step.
+        Giving up leaves the file **remembered**, as `upload` recorded it once it was
+        stored, so the next attempt resumes against it rather than re-sending it;
+        `_resume` is the other half. `FAILED` forgets it, and the asymmetry is the
+        point: the provider has said this file will never work, so the useful thing
+        is to fall back to the bytes, where a slow one is worth waiting for on the
+        next step.
         """
         name = as_str(record.get("name"))
         waited = 0
         while as_str(record.get("state"), "ACTIVE") == "PROCESSING":
             if waited >= self.config.upload_ready_ms:
-                self._pending[attachment_id] = name
                 raise LlmError(f"{name} was still processing after the upload budget", TIMEOUT)
             await anyio.sleep(UPLOAD_POLL_MS / 1000)
             waited += UPLOAD_POLL_MS

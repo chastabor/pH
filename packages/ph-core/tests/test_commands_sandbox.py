@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from ph.agent.types import AgentOptions
+from ph.commands import sandbox as sandbox_command
 from ph.cordis import Context
 from ph.json import as_obj, as_seq
 from ph.keys import AGENTS, COMMANDS, MOUNT, SANDBOX, SESSIONS, TUI_STATUS
@@ -188,3 +189,34 @@ async def test_the_footer_counts_refusals_and_show_lists_them(mount: MountProfil
     shown = await _run(ctx, "/sandbox", session=session)
     assert "denied this session: 2" in shown
     assert "Sandbox blocked network access to h:443" in shown
+
+
+async def test_a_sessions_refusal_count_goes_with_the_session(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The footer's cached count of a session's refusals is let go with the session.
+
+    The fold cache kept one count per session it was ever asked about, for the life
+    of the mount; nothing took a session out when the store let it go.
+
+    Sabotage: drop the `session/disposed` listener from the row, and the count stays.
+    """
+    made: list[Any] = []
+    original = sandbox_command._Denials
+
+    def recorded() -> Any:  # noqa: ANN401
+        denials = original()
+        made.append(denials)
+        return denials
+
+    monkeypatch.setattr(sandbox_command, "_Denials", recorded)
+    ctx = await mount()
+    (denials,) = made
+    session = ctx.require(SESSIONS).create("s")
+    denials.reading(session)
+    assert denials.cache.stale([session]) == []
+    assert "s" in denials.cache._entries
+
+    ctx.require(SESSIONS).dispose(session.id)
+
+    assert "s" not in denials.cache._entries

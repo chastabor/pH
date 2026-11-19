@@ -540,6 +540,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
     service = ContextService(corpus=corpus)
     ctx.provide(CONTEXT_CORPUS, service)
+    # A session's settled note goes with it (`ContextService._notes`).
+    ctx.on("session/disposed", lambda session: service._notes.pop(session.id, None))
 
     def search(args: SearchArgs, _run: object) -> dict[str, Any]:
         return corpus.search(

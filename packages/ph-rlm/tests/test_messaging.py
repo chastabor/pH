@@ -65,6 +65,7 @@ from ph_rlm.messaging import (
     OBSERVE_GET_TOOL,
     OUT_OF_REACH,
     SEND_TOOL,
+    _Limiter,
     render_received,
     replied_to_parent,
 )
@@ -785,3 +786,20 @@ def test_the_received_rendering_is_prime_agents() -> None:
     assert "Message id: m-1" in text
     # The body is last and verbatim, after a blank line.
     assert text.endswith("\n\nthe answer")
+
+
+async def test_a_rate_limit_lets_go_of_an_agent_that_has_gone() -> None:
+    """The buckets naming an agent go with it, whichever side of a pair it was.
+
+    One bucket per sender and target, made on the first send and never taken out:
+    a long-lived root that delegates kept one per child it ever wrote to.
+
+    Sabotage: leave `forget` empty, and the pairs are still held.
+    """
+    limiter = _Limiter(capacity=2, refill_seconds=1.0)
+    assert limiter.take("root", "child") and limiter.take("child", "root")
+    assert limiter.take("root", "sibling")
+
+    limiter.forget("child")
+
+    assert set(limiter._buckets) == {("root", "sibling")}

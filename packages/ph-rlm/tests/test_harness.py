@@ -97,6 +97,24 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
 # --------------------------------------------------------------- the fold --
 
 
+async def test_a_sessions_merged_state_goes_with_the_session(harnessed: Harnessed) -> None:
+    """The per-session memo `state()` reads through is let go with the session.
+
+    `_merged` kept one `(local, global, merged)` triple per session the mount ever
+    asked about, and its fold cache one fold, for the life of the mount.
+
+    Sabotage: drop the `session/disposed` listener from the row, and the memo stays.
+    """
+    ctx, session, _agent = await harnessed()
+    harness = ctx.require(HARNESS)
+    harness.state(session)
+    assert session.id in harness._merged
+
+    ctx.require(SESSIONS).dispose(session.id)
+
+    assert session.id not in harness._merged
+
+
 async def test_an_applied_refinement_is_the_state(harnessed: Harnessed) -> None:
     ctx, session, agent = await harnessed()
     record = await ctx.require(HARNESS).apply(

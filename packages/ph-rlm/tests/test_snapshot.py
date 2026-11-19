@@ -45,7 +45,7 @@ from runtime_helpers import run_cell
 
 from ph.cordis import DEPLOYMENT, InactiveScopeError
 from ph.json import as_seq, as_str
-from ph.keys import AGENTS, COMPACTION, SESSIONS, SPILL_STORE
+from ph.keys import AGENTS, COMPACTION, MOUNT, SESSIONS, SPILL_STORE
 from ph.llm.types import text_of
 from ph.seams import spill as spill_module
 from ph.session import IGNORABLE_SESSION_EVENT_TYPES, SurfaceIntent
@@ -181,6 +181,22 @@ async def test_no_kernel_is_built_for_an_agent_that_is_gone(
 
     assert agent.id not in runtime._kernels
     assert agent.id not in runtime._closers
+
+
+async def test_a_snapshot_policy_goes_with_its_row(mounted_runtime: MountedRuntime) -> None:
+    """The row takes its policy back off the runtime as it unmounts.
+
+    The row set `runtime.snapshots` and nothing took it back: a row let go left the
+    runtime recording into a policy whose row was gone.
+
+    Sabotage: drop the take-back from the row, and the policy outlives it.
+    """
+    ctx, _session, _agent = await mounted_runtime(session_id="snapshot-row")
+    runtime = ctx.require(PYTHON_RUNTIME)
+    assert runtime.snapshots is not None
+    await ctx.require(MOUNT).forks["rlm-kernel-snapshot"].dispose()
+
+    assert runtime.snapshots is None
 
 
 async def test_a_crash_does_not_silently_reconstitute_the_namespace(

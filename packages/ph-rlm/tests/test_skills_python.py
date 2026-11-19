@@ -16,20 +16,21 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from rlm_fixtures import HOST_RUNTIME_ROW, MountedRuntime
 from runtime_helpers import run_python_cell
 
-from ph.cordis import DEPLOYMENT
+from ph.cordis import DEPLOYMENT, Context
 from ph.keys import AGENTS, SESSIONS, SKILLS, SYSTEM_PROMPT
 from ph.seams.skills import discover_skills
 from ph.system_prompt import render_prompt
 from ph.testing import FAKE_OPTIONS, MountProfile, not_none
 from ph.testing import write_skill as write_skill_md
 from ph_rlm.keys import PYTHON_RUNTIME
-from ph_rlm.skills import python_half
+from ph_rlm.skills import give_to_runtime, python_half
 
 pytestmark = pytest.mark.anyio
 
@@ -135,6 +136,28 @@ async def test_the_row_registers_the_catalog_and_feeds_the_runtime(
     assert runtime.skills == (str(tmp_path / "acme-websearch"),)
     assert runtime.skill_modules == ("acme_websearch",)
     assert "note-taking" not in " ".join(runtime.skill_modules), "a docs-only skill was installed"
+
+
+async def test_what_a_row_gave_the_runtime_goes_with_the_row() -> None:
+    """A row takes back the skills it added to the runtime when it unmounts.
+
+    The row appended its requirements and modules to tuples the runtime keeps, and
+    took nothing back: a row mounted again added them a second time, and one let
+    go left its packages for every later kernel to install and import.
+
+    Sabotage: drop the take-back from `give_to_runtime`, and the first row's skills
+    stay after it goes.
+    """
+    root = Context()
+    runtime = SimpleNamespace(skills=(), skill_modules=())
+    first, second = root.scope("first"), root.scope("second")
+    give_to_runtime(first, runtime, ("/skills/a",), ("a",))
+    give_to_runtime(second, runtime, ("/skills/b",), ("b",))
+
+    await first.dispose()
+
+    assert runtime.skills == ("/skills/b",)
+    assert runtime.skill_modules == ("b",)
 
 
 async def test_the_catalog_reaches_the_prompt_without_the_bodies(

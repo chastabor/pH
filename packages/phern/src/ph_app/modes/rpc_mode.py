@@ -26,7 +26,7 @@ import anyio
 from anyio.abc import TaskGroup
 
 from ph.agent.types import AgentDriver
-from ph.cordis import DEPLOYMENT, Context, Profile
+from ph.cordis import DEPLOYMENT, Context, Profile, releasing
 from ph.json import dumps
 from ph.keys import AGENTS, SESSIONS, TOOLS
 from ph.llm.types import user_text
@@ -95,6 +95,9 @@ class _Served:
     start: RecordedStart
     """What it is opened with (`open_root`): its start as read before the mount, and
     once it is open, its own id and family."""
+    exits: AsyncExitStack
+    """This mount's own unwind, on the server's (`RpcServer.exits`): its own so a new
+    session's mount that opened nothing can go at once (`RpcServer._open`)."""
     agent: AgentDriver | None = None
     driving: anyio.Lock = field(default_factory=anyio.Lock)
     """Held while this server drives the agent (`RpcServer._drive`): a prompt and a
@@ -121,6 +124,8 @@ class RpcServer:
     tasks: TaskGroup | None = None
     """Where a turn nobody prompted runs — a parent woken by a child's ending notice
     between prompts (P13-05). `None`, as a test builds one, runs none."""
+    ended: bool = False
+    """Whether the peer is done (`end`): nothing is written to it after."""
     _served: dict[str, _Served] = field(default_factory=dict)
     _deployment: Context | None = None
 
@@ -131,10 +136,17 @@ class RpcServer:
         served = self._served.get(session_id) if session_id else None
         if served is None:
             start = await read_start(session_id)
-            # An adopted version the loader refuses is taken back there, as the
-            # daemon's roots and `phern -p` do; its log says why.
-            ctx, _ = await mount_session(self.exits, start, self.profile)
-            served = _Served(ctx, start)
+            own = AsyncExitStack()
+            try:
+                # An adopted version the loader refuses is taken back there, as the
+                # daemon's roots and `phern -p` do; its log says why.
+                ctx, _ = await mount_session(own, start, self.profile)
+            except BaseException:
+                with releasing():
+                    await own.aclose()
+                raise
+            self.exits.push_async_callback(own.aclose)
+            served = _Served(ctx, start, own)
             if session_id:
                 self._served[session_id] = served
         return served
@@ -142,8 +154,19 @@ class RpcServer:
     async def _open(self, served: _Served) -> Session:
         """Open a session on its mount, and file the mount under its id. A session about
         to be made gets its id from `open_session`, which does not search the store for
-        an id it made, as `phern -p`'s does."""
-        session = await open_root(served.ctx, served.start)
+        an id it made, as `phern -p`'s does.
+
+        **A new session's mount that opened nothing goes now** (Holdings rule 2): it
+        is filed under the id it opens with, so nothing would find it again, and it
+        stayed mounted — rows, plugins, a profile's worth — until the server ended.
+        A named one stays, filed, for the next request to open."""
+        try:
+            session = await open_root(served.ctx, served.start)
+        except BaseException:
+            if served.start.session_id is None:
+                with releasing():
+                    await served.exits.aclose()
+            raise
         served.start = replace(served.start, session_id=session.id, family=session.header.family)
         self._served[session.id] = served
         self._attach(served.ctx, session)
@@ -165,7 +188,18 @@ class RpcServer:
             self._deployment = await self.exits.enter_async_context(mounted(self.profile))
         return self._deployment
 
+    def end(self) -> None:
+        """The peer is done — it said `shutdown`, or its end of stdin closed: nothing
+        more is written to it, and a turn a child's notice woke ends with the server's
+        tasks. Said first, since a turn canceled here still says `idle` on its way
+        out, a frame after the end to a peer that may have closed the pipe."""
+        self.ended = True
+        if self.tasks is not None:
+            self.tasks.cancel_scope.cancel()
+
     def _write(self, payload: Frame) -> None:
+        if self.ended:
+            return
         self.out.write(f"{dumps(payload)}\n")
         self.out.flush()
 
@@ -298,9 +332,24 @@ class RpcServer:
                 source="verb" if named else "cli",
                 command=f"session/prompt {asked.spelled}" if named else asked.flags,
             )
-            agent = served.agent = ctx.require(AGENTS).create(session, entry.options())
-            ctx.on("agent/woken", partial(self._woken, served))
-            await resume_children(ctx, agent)
+            agents = ctx.require(AGENTS)
+            agent = agents.create(session, entry.options())
+            # Before the sweep, which may deliver a readmitted child's notice itself;
+            # the listener reads `served.agent`, so a ring before it is set runs
+            # nothing and the notice waits in the inbox for this prompt's drive.
+            unheard = ctx.on("agent/woken", partial(self._woken, served))
+            try:
+                await resume_children(ctx, agent)
+            except BaseException:
+                # Served only once swept (D9, Holdings rule 2): recorded first, a
+                # sweep that raised was never run again, since every later prompt
+                # found an agent and skipped both. Ended here instead, so the next
+                # prompt makes it again and sweeps.
+                unheard()
+                with releasing():
+                    await agents.dispose(agent.id)
+                raise
+            served.agent = agent
         # Delivered, then driven through the one path a wake also takes, so a woken
         # turn in flight takes this prompt too rather than racing it.
         agent.followup(user_text(params.prompt))
@@ -325,7 +374,7 @@ async def run_rpc(
         finally:
             # A turn a child's notice woke (P13-05) ends with the peer: cancelled
             # before the group waits for it, and the mounts unwind after.
-            tasks.cancel_scope.cancel()
+            server.end()
     return server.unwritten()
 
 

@@ -41,6 +41,7 @@ import fcntl
 import logging
 import os
 import shutil
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,7 @@ __all__ = [
     "ProvisionMode",
     "ProvisionRefused",
     "ProvisionReport",
+    "ProvisionStop",
     "provision",
     "resolve_entry",
 ]
@@ -235,8 +237,23 @@ def _contained(base: Path, relative: str, *, label: str, leaf: bool = True) -> P
     return resolved
 
 
+ProvisionStop: TypeAlias = threading.Event
+"""Asks a copy under way to stop before its next file (W1): set from the event loop,
+read on the copy's own thread, so a thread-safe flag and not an `anyio.Event`."""
+
+
+class _Stopped(Exception):
+    """Raised on the copy's thread when its `ProvisionStop` is set; `provision` ends
+    there and reports what it finished."""
+
+
 async def provision(
-    entries: Sequence[ProvisionEntry], *, base: Path, root: Path, fill: bool = False
+    entries: Sequence[ProvisionEntry],
+    *,
+    base: Path,
+    root: Path,
+    fill: bool = False,
+    stop: ProvisionStop | None = None,
 ) -> ProvisionReport:
     """Put every material in place, and report rather than raise.
 
@@ -247,26 +264,39 @@ async def provision(
     is put there, down to a file inside a copied directory, and nothing present is
     replaced. It was provisioned when it was made — or part-way, by a process that
     crashed mid-copy — and the agent may have edited it since.
+
+    `stop` ends the copy before its next file once set (W1). The thread cannot be
+    canceled, so a release that must not take the tree from under it asks it to stop
+    here, and waits at most one file for it to return. What it did not reach is in
+    neither half of the report.
     """
     if not entries:
         return ProvisionReport()
-    return await anyio.to_thread.run_sync(lambda: _provision_sync(entries, base, root, fill))
+    return await anyio.to_thread.run_sync(lambda: _provision_sync(entries, base, root, fill, stop))
 
 
 def _provision_sync(
-    entries: Sequence[ProvisionEntry], base: Path, root: Path, fill: bool
+    entries: Sequence[ProvisionEntry],
+    base: Path,
+    root: Path,
+    fill: bool,
+    stop: ProvisionStop | None = None,
 ) -> ProvisionReport:
     provisioned: list[str] = []
     failed: list[str] = []
     clone = _Cloner()
     for entry in entries:
+        if stop is not None and stop.is_set():
+            break
         try:
             source, dest = resolve_entry(entry, base=base, root=root)
             if not source.exists():
                 if not entry.optional:
                     failed.append(f"{entry.target}: {entry.source} is not in the project")
                 continue
-            _materialize(source, dest, entry.mode, clone, fill=fill)
+            _materialize(source, dest, entry.mode, clone, fill=fill, stop=stop)
+        except _Stopped:
+            break
         except ProvisionRefused as refusal:
             failed.append(f"{entry.target}: {refusal}")
             log.warning("ph.seams.workspace_provision: refused %s (%s)", entry.target, refusal)
@@ -278,8 +308,28 @@ def _provision_sync(
     return ProvisionReport(provisioned=tuple(provisioned), failed=tuple(failed))
 
 
+def _stoppable(
+    copy: Callable[[str | Path, str | Path], None], stop: ProvisionStop
+) -> Callable[[str | Path, str | Path], None]:
+    """`copy`, refusing to start a file once `stop` is set: `copytree` calls it per
+    file, so a stop lands between two files rather than after the whole tree."""
+
+    def checked(source: str | Path, dest: str | Path) -> None:
+        if stop.is_set():
+            raise _Stopped
+        copy(source, dest)
+
+    return checked
+
+
 def _materialize(
-    source: Path, dest: Path, mode: ProvisionMode, clone: _Cloner, *, fill: bool
+    source: Path,
+    dest: Path,
+    mode: ProvisionMode,
+    clone: _Cloner,
+    *,
+    fill: bool,
+    stop: ProvisionStop | None = None,
 ) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if mode == "symlink":
@@ -298,7 +348,9 @@ def _materialize(
             _remove(dest)
         elif not (_real_dir(source) and _real_dir(dest)):
             return
-    copy = os.link if mode == "hardlink" else clone.copy
+    copy: Callable[[str | Path, str | Path], None] = os.link if mode == "hardlink" else clone.copy
+    if stop is not None:
+        copy = _stoppable(copy, stop)
     if source.is_dir():
         # `shutil.copytree`, not a hand-rolled walk. `symlinks=True` is the
         # load-bearing argument: `os.walk` puts a symlinked *directory* in

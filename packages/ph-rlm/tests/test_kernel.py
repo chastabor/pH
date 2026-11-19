@@ -63,6 +63,7 @@ from ph_rlm.kernel.manager import (
     RESET_NOTICE,
     Config,
     Kernel,
+    KernelDied,
     KernelLimits,
     frame_cap,
 )
@@ -772,6 +773,114 @@ async def test_close_is_idempotent(make_kernel: MakeKernel) -> None:
     kernel = await make_kernel()
     await kernel.aclose()
     await kernel.aclose()
+
+
+async def test_a_closed_kernel_starts_no_guest_for_a_run_that_held_it(
+    make_kernel: MakeKernel,
+) -> None:
+    """K1. A kernel closed for good refuses a run rather than starting a guest.
+
+    `close_namespace` takes the kernel out of the table and closes it, and a run
+    that already held the reference found `not _alive` and started a guest nothing
+    tracked: out of the table, so no later close reached it.
+
+    Sabotage: drop the `_closed` check from `run`, and a guest is running again.
+    """
+    kernel = await make_kernel()
+    await kernel.aclose()
+
+    with pytest.raises(KernelDied, match="closed"):
+        await kernel.run("1", (), None)
+    assert kernel._process is None, "a guest was started for a closed kernel"
+
+
+async def test_a_boot_stopped_from_outside_leaves_no_half_booted_guest(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K2. A hard stop during boot takes the guest down rather than leaving it live.
+
+    `_alive` is set before `boot-ack`, so a stop between the two left a guest the
+    next run took for ready: it skipped the start and the restore, and sent its
+    cell to a guest that had not finished booting.
+
+    Sabotage: drop the `except BaseException` around the boot, and the kernel
+    reads alive with a guest still there.
+    """
+    kernel = await make_kernel()
+    await kernel.aclose()
+    kernel._closed = False
+    waiting = anyio.Event()
+
+    async def never_acked(self: Kernel) -> str | None:
+        waiting.set()
+        await anyio.sleep_forever()
+        return None  # pragma: no cover
+
+    monkeypatch.setattr(Kernel, "_await_boot_ack", never_acked)
+    async with anyio.create_task_group() as booting:
+        booting.start_soon(kernel.start, [])
+        await waiting.wait()
+        booting.cancel_scope.cancel()
+
+    assert not kernel._alive, "a guest that never acked reads as ready"
+    assert kernel._process is None
+
+
+async def test_a_run_stopped_from_outside_does_not_leave_its_cell_running(
+    make_kernel: MakeKernel,
+) -> None:
+    """K2. A hard stop mid-run ends the guest, so the next run is not refused.
+
+    A stop through the run's token takes the abort ladder; one from outside — the
+    tool call's task canceled — skipped it, and the guest ran the cell on and
+    answered the next run "a program is already running".
+
+    Sabotage: drop the `except BaseException` around the run, and the next run
+    meets the cell still running.
+    """
+    kernel = await make_kernel()
+    async with anyio.create_task_group() as running:
+        running.start_soon(kernel.run, "import time\ntime.sleep(30)", (), None)
+        await anyio.sleep(0.5)
+        running.cancel_scope.cancel()
+
+    with anyio.fail_after(10):
+        result = await kernel.run("1 + 1", (), None)
+    assert result.error is None, result.error
+    assert result.value == 2
+
+
+async def test_a_close_stopped_from_outside_still_kills_and_forgets_the_guest(
+    make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """K2. The teardown finishes under a stop: the guest is killed, reaped and forgotten.
+
+    The process is detached from the kernel first, so a stop during the polite
+    shutdown skipped the kill, `_alive = False` and the journal entry's removal,
+    and nothing would come back for the guest.
+
+    Sabotage: drop the shield from `_teardown`, and the guest outlives the close.
+    """
+    kernel = await make_kernel()
+    pid = kernel._process.pid
+    asked = anyio.Event()
+    original = Kernel._send
+
+    async def ignored(self: Kernel, frame: Any) -> None:  # noqa: ANN401
+        if type(frame).__name__ == "ShutdownFrame":
+            asked.set()
+            await anyio.sleep(kernel.shutdown_grace * 2)
+            return
+        await original(self, frame)
+
+    monkeypatch.setattr(Kernel, "_send", ignored)
+    async with anyio.create_task_group() as closing:
+        closing.start_soon(kernel.aclose)
+        await asked.wait()
+        closing.cancel_scope.cancel()
+
+    assert not kernel._alive
+    assert not process_alive(pid), f"pid {pid} outlived a canceled close"
 
 
 async def _ok(**_arguments: object) -> None:

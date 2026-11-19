@@ -41,6 +41,7 @@ import anyio
 from pydantic import Field, ValidationError
 
 from ..agent.types import AgentDriver, AgentHandle, AgentOptions
+from ..cancel import reason_of
 from ..cordis import (
     ChildReach,
     Context,
@@ -81,6 +82,7 @@ from ..llm.types import (
     text_of,
     unmapped_effort,
 )
+from ..locks import KeyedLocks
 from ..persistence.jsonl import LogDamaged
 from ..persistence.opening import open_session, stored_session
 from ..persistence.protocol import SessionArchive
@@ -1707,6 +1709,20 @@ class SubagentService:
     _spawning: dict[str, set[str]] = field(default_factory=dict)
     """The names of each parent's spawns past the guards and not yet admitted, by
     parent id (`child_counts`)."""
+    _sweeps: KeyedLocks[str] = field(default_factory=KeyedLocks)
+    """One sweep of a parent's children at a time, by parent id (S1); a second waits.
+
+    `_resume` asks `state.run_id in self._runs` and then awaits — a hold written,
+    a log opened — before `_admit` writes the entry, so two sweeps of one parent
+    that overlapped both took the same child to readmit: the second's write or
+    open failed on the log the first held, and its `except Exception` ended the
+    child the first was putting back, telling the parent it had failed. Two
+    `credentials/store` requests in a row are two such sweeps.
+
+    **Waits rather than skips**: the second reads the state the first left, so a
+    credential that arrived while the first ran is not missed. Per parent, so a
+    readmitted child's own sweep (`_sweep_readmitted`) and the descent in
+    `readmit_waiting` take their own turn rather than this one."""
 
     def register_provider(
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
@@ -2446,10 +2462,21 @@ class SubagentService:
                     f"subagent {run.name}: its admission could not be written to its "
                     "own log, so it was not started"
                 )
-        except SubagentSpawnError as refused:
+        except BaseException as stopped:
+            # **Any way out ends what the provider started** (S2, Holdings rule 2),
+            # not a refusal alone: a cancel at the admission's flush, or anything
+            # else raised past `provider.start`, left a child driving toward a gate
+            # nobody would open, an admission with no ending, and nothing in `_runs`
+            # for a delete to reach. Shielded, since a cancel is one of the ways.
             # A spawn's refusal is its caller's answer; a readmission has no caller,
             # so its parent is told here, on the one ending the child gets.
-            await self._abandon(run, str(refused), tell_parent=not record)
+            why = (
+                str(stopped)
+                if isinstance(stopped, SubagentSpawnError)
+                else f"subagent {run.name} was not admitted: {reason_of(stopped)}"
+            )
+            with releasing():
+                await self._abandon(run, why, tell_parent=not record)
             raise
         self._runs[run.id] = run
         return run
@@ -2762,7 +2789,13 @@ class SubagentService:
         were read; for any other, the store answers when they are."""
         parent_id = session.header.delegating_parent
         if parent_id:
-            self._live.get(parent_id, set()).discard(session.id)
+            live = self._live.get(parent_id)
+            if live is not None:
+                live.discard(session.id)
+                # Gone with its last child, or the table kept one empty set per
+                # parent that ever delegated.
+                if not live:
+                    del self._live[parent_id]
             stored = self._stored.get(parent_id)
             state = self._folds.read(session)
             if stored is not None and state.admitted:
@@ -2888,8 +2921,9 @@ class SubagentService:
         session = parent.session
         if session is None:
             return []
-        await self.load_children(session.id, session.header.family)
-        return await self._resume(parent, retry_limit=retry_limit)
+        async with self._sweeps.hold(session.id):
+            await self.load_children(session.id, session.header.family)
+            return await self._resume(parent, retry_limit=retry_limit)
 
     async def readmit_waiting(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
         """Put back to work the children of `parent` held for a credential that has
@@ -2908,8 +2942,9 @@ class SubagentService:
         session = parent.session
         if session is None:
             return []
-        await self.load_children(session.id, session.header.family)
-        revived = list(await self._resume(parent, retry_limit=retry_limit))
+        async with self._sweeps.hold(session.id):
+            await self.load_children(session.id, session.header.family)
+            revived = list(await self._resume(parent, retry_limit=retry_limit))
         for state in self.children(session.id).values():
             child = self.ctx.require(AGENTS).get(state.session_id)
             if child is not None:

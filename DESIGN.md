@@ -64,7 +64,7 @@ of it.
 |---|---|
 | Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~126 000 lines |
-| Tests | 4 639 collected |
+| Tests | 4 690 collected |
 | Registered plugins | 110 across the `ph.plugins` entry-point group |
 | Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
 | Base profile | 61 rows (`ph/bundles/base.yaml`) |
@@ -1119,7 +1119,7 @@ the tombstone is the record.
 |---|---|---|---|
 | **Clean dispose** | mode completion, or wire `shutdown` | **none** — there is no `supervisor/shutdown` type | the whole log, including what the unwind itself appended (`workspace/disposed`, tombstones): `write_on_unwind` runs after every scope below the mount has unwound |
 | **Passivation** | idle ≥ `PASSIVATE_AFTER` (90 min), released at the moment the window ends (`Supervisor.releaser`, no sweep) | `supervisor/passivated {idleMs}`, **write-ahead** | the JSONL: journal, schedules, ladder state, all re-folded on next start |
-| **Retry ladder** | any `Exception` from a root's task | `supervisor/retry` before each attempt; `supervisor/failed` on give-up; `supervisor/recovered` on success | the root stays **mounted** and still accepts wakes |
+| **Retry ladder** | any `Exception` from a root's task, while the root is still the one mounted under its id | `supervisor/retry` before each attempt; `supervisor/failed` on give-up; `supervisor/recovered` on success | the root stays **mounted** and still accepts wakes |
 | **Daemon unreachable** | socket `(st_dev, st_ino)` changed | `supervisor/unreachable`, to **every** root, each flushed | everything — **roots keep working** |
 | **Session lease (I-5)** | a second daemon opens a held log | **none** — an error frame, `session_already_active` | the first daemon is unaffected |
 | **Mount abandoned** | shutdown reaches a root still being built, or a client asks for one after `aclose` has begun | **none** — an error frame, `root_start_abandoned` | nothing of that root: it never reached `self.roots`, and the build unwinds itself |
@@ -1136,6 +1136,17 @@ live subagent, or a live schedule (`supervisor.py`). A passivated root
 is resumable through the ordinary `start()` path — but while passivated,
 `session/status` and friends return `no_such_session`, because `_root()` looks
 only in the live map.
+
+**A root is a holding** (§2.5), and the live map is its entry. It goes into
+`Supervisor.roots` as the last step of its build, so nothing is handed a root whose
+children are not yet readmitted or whose events are not yet relayed; and it leaves
+by one door, `_unmount`, which a passivation, a restart and a shutdown all take:
+out of the map before anything is awaited, its wake closed, its log flushed and its
+mount unwound, and **then its task ended**. After the release, so a turn a shutdown
+cut stays open on disk for the next daemon's resumer, and nothing the ended task
+writes reaches a log or a watcher. A restart is a mount like any other, run on the
+supervisor's task group: a client that disconnects mid-restart does not leave the
+root gone, and its watchers are moved to the new root rather than copied.
 
 **The retry ladder** is three delays `(0.25, 1.0, 5.0)`; the fourth consecutive
 crash gives up. Its state is **folded from the log, not remembered** — and

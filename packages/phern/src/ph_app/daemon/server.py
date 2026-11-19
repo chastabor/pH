@@ -1063,10 +1063,14 @@ class _Connection:
         client's `asks` capability rather than anything about the attach: a
         follower like `phern agents attach` watches without ever declaring it and
         is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
+
+        **Subscribed on every attach** (D3): `attached` is by id, and a root released
+        and mounted again is a new object. Guarded on the id, a connection that had
+        attached to the first was never subscribed to the second. A set add needs no
+        guard.
         """
-        if root.id not in self.attached:
-            self.attached.add(root.id)
-            root.subscribe(self.notify)
+        self.attached.add(root.id)
+        root.subscribe(self.notify)
         if "asks" in self.declared and root.desk is not None:
             root.desk.join(self)
 
@@ -1080,10 +1084,14 @@ class _Connection:
         has said it is no longer watching, which it therefore never answers. Only
         `serve`'s teardown had the whole triple, and only because the TUI closes
         the socket right after detaching.
+
+        Through `holder` (D8): during a restart the root is out of the table, and the
+        detach reaches the one being replaced rather than nothing — after which the
+        restart would have moved this connection to the new root.
         """
         was_attached = root_id in self.attached
         self.attached.discard(root_id)
-        root = self.server.supervisor.roots.get(root_id)
+        root = self.server.supervisor.holder(root_id)
         if root is not None:
             root.unsubscribe(self.notify)
             if root.desk is not None:

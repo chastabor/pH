@@ -108,34 +108,49 @@ async def execute_tool_calls(
     ]
 
     index = 0
+    covered = 0
+    """How far the calls are answered if what runs now raises: a group answers its
+    own on the way out (`_run_group`), so while one runs, through its end."""
     concluded = False
-    while index < len(planned):
-        # Classified fresh each round, so a registry change between groups can
-        # still turn a later call into a barrier.
-        mode = tools.execution_mode(planned[index].call).kind
-        group = planned[index:] if mode == "parallel" else [planned[index]]
-        outcome = await _run_group(
-            tools, session, turn, step, group, mode, token, accept_context, max_parallel
-        )
-        index += outcome.consumed
-        concluded = concluded or outcome.concluded
-        if outcome.aborted:
-            for skipped in planned[index:]:
-                _append_skipped(session, turn, step, skipped.block)
-            return BatchOutcome(concluded=concluded, aborted=True)
-        if concluded:
-            # **A group that ended the turn ends the step** (C13). `concluded`
-            # was folded here and read by the driver, but the loop went on
-            # opening the next barrier — so an exclusive call queued behind a
-            # parallel run dispatched *after* the turn was over.
-            # `Deny.concludes_turn` promises "the batch already in flight still
-            # settles — what ends is what comes after it", and a group that has
-            # not started is what comes after it. It bites hardest on a fan-out,
-            # which is the shape where a ceiling is most likely to be reached
-            # mid-step and where the calls behind it spawn children.
-            for skipped in planned[index:]:
-                _append_skipped(session, turn, step, skipped.block, concluded_result())
-            return BatchOutcome(concluded=True, aborted=False)
+    try:
+        while index < len(planned):
+            covered = index
+            # Classified fresh each round, so a registry change between groups can
+            # still turn a later call into a barrier.
+            mode = tools.execution_mode(planned[index].call).kind
+            group = planned[index:] if mode == "parallel" else [planned[index]]
+            covered = index + len(group)
+            outcome = await _run_group(
+                tools, session, turn, step, group, mode, token, accept_context, max_parallel
+            )
+            index += outcome.consumed
+            concluded = concluded or outcome.concluded
+            if outcome.aborted:
+                for skipped in planned[index:]:
+                    _append_skipped(session, turn, step, skipped.block)
+                return BatchOutcome(concluded=concluded, aborted=True)
+            if concluded:
+                # **A group that ended the turn ends the step** (C13). `concluded`
+                # was folded here and read by the driver, but the loop went on
+                # opening the next barrier — so an exclusive call queued behind a
+                # parallel run dispatched *after* the turn was over.
+                # `Deny.concludes_turn` promises "the batch already in flight still
+                # settles — what ends is what comes after it", and a group that has
+                # not started is what comes after it. It bites hardest on a fan-out,
+                # which is the shape where a ceiling is most likely to be reached
+                # mid-step and where the calls behind it spawn children.
+                for skipped in planned[index:]:
+                    _append_skipped(session, turn, step, skipped.block, concluded_result())
+                return BatchOutcome(concluded=True, aborted=False)
+    except BaseException:
+        # **The calls behind a group that raised are answered too** (T1). A raise
+        # from a group, or a stop from outside the token, left every call queued
+        # behind it as a `tool_use` with no `tool_result`: the turn then closed, so
+        # repair had nothing open to close, and every later request was refused.
+        # Synchronous appends, so nothing here can be cut short by the stop.
+        for skipped in planned[covered:]:
+            _append_skipped(session, turn, step, skipped.block)
+        raise
     return BatchOutcome(concluded=concluded, aborted=False)
 
 
@@ -223,18 +238,6 @@ async def _run_group(
             scope.start_soon(run_one, started)
             started += 1
 
-    async with anyio.create_task_group() as scope:
-        await fill_pool(scope)
-        while in_flight:
-            index = await settled_recv.receive()
-            in_flight.discard(index)
-            await commit_ready()
-            aborted = aborted or token.canceled
-            if failure is not None:
-                # Stop replenishing; the task group still drains what started.
-                break
-            await fill_pool(scope)
-
     def answer_uncommitted() -> None:
         """Close every call this group logged and did not answer (C8).
 
@@ -257,18 +260,37 @@ async def _run_group(
             if index >= started or call_seqs[index] < 0:
                 _append_skipped(session, turn, step, block)
                 continue
+            # A call still in flight when a stop arrived was dispatched, and may
+            # have done what it was asked: not the "safe to retry" of one that
+            # never reached its body.
+            began = slots[index] is not None or index in in_flight
             _append_result(
-                session,
-                turn,
-                step,
-                block,
-                aborted_result(started=slots[index] is not None),
-                call_seqs[index],
+                session, turn, step, block, aborted_result(started=began), call_seqs[index]
             )
 
-    settled_send.close()
-    settled_recv.close()
-    await commit_ready()
+    try:
+        async with anyio.create_task_group() as scope:
+            await fill_pool(scope)
+            while in_flight:
+                index = await settled_recv.receive()
+                in_flight.discard(index)
+                await commit_ready()
+                aborted = aborted or token.canceled
+                if failure is not None:
+                    # Stop replenishing; the task group still drains what started.
+                    break
+                await fill_pool(scope)
+        await commit_ready()
+    except BaseException:
+        # **A stop from outside the token answers too** (T1): `SIGINT` on a
+        # one-shot, a released root's task. It reaches the group as a cancellation
+        # of the task group, and skipped every answer written below it. The same
+        # synchronous appends, so the stop cannot cut them short.
+        answer_uncommitted()
+        raise
+    finally:
+        settled_send.close()
+        settled_recv.close()
     if failure is not None:
         answer_uncommitted()
         raise failure

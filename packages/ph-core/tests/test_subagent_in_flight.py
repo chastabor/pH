@@ -23,6 +23,7 @@ from ph.seams.subagents import (
     ChildCounts,
     SubagentRequest,
     SubagentSpawnError,
+    child_is_live,
 )
 from ph.session import Session, session_written
 from ph.testing import (
@@ -182,3 +183,60 @@ async def test_a_name_a_spawn_cannot_have_is_refused_before_its_provider(
         await subagents.start("stub", SubagentRequest(prompt="one", parent=parent, name=name))
 
     assert provider.requests == []
+
+
+async def test_a_spawn_canceled_while_its_admission_is_written_is_ended(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S2. Any way out of an admission ends the child the provider started.
+
+    `_admit` released a started child only on `SubagentSpawnError`, so a spawn whose
+    caller was canceled while the admission was flushed — a person stopping the
+    turn, a released root — left an admission with no ending: a child that reads as
+    working, holding its parent out of release, with nothing in `_runs` for a
+    delete to reach.
+
+    Sabotage: catch `SubagentSpawnError` alone in `_admit` again, and the child
+    reads live.
+    """
+    ctx = await mount()
+    session, parent = _parent(ctx)
+    subagents = ctx.require(SUBAGENTS)
+    subagents.register_provider("stub", StubSubagentProvider(root=ctx))
+    writing = anyio.Event()
+
+    async def held_write(ctx: Context, child: Session) -> bool:
+        if not writing.is_set():
+            writing.set()
+            await anyio.sleep_forever()
+        return await session_written(ctx, child)
+
+    monkeypatch.setattr(subagents_seam, "session_written", held_write)
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(subagents.start, "stub", SubagentRequest(prompt="one", parent=parent))
+        await writing.wait()
+        tasks.cancel_scope.cancel()
+
+    (child,) = subagents.children(session.id).values()
+    assert not child_is_live(child), f"a canceled spawn's child reads {child.status}"
+    assert subagents.list(parent_id=parent.id) == []
+
+
+async def test_a_parent_whose_children_have_all_gone_keeps_no_entry(mount: MountProfile) -> None:
+    """The live-children table drops a parent with its last child.
+
+    A child let go was discarded from its parent's set and the set kept, empty, for
+    the life of the mount: one entry per parent that ever delegated.
+
+    Sabotage: discard without dropping the empty set, and the parent is still listed.
+    """
+    ctx = await mount()
+    session, parent = _parent(ctx)
+    subagents = ctx.require(SUBAGENTS)
+    subagents.register_provider("stub", StubSubagentProvider(root=ctx))
+    run = await subagents.start("stub", SubagentRequest(prompt="one", parent=parent))
+    assert session.id in subagents._live
+
+    ctx.require(SESSIONS).dispose(run.session_id)
+
+    assert session.id not in subagents._live

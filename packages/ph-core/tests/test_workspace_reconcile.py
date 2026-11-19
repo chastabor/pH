@@ -21,6 +21,7 @@ from __future__ import annotations
 import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -368,6 +369,53 @@ async def test_a_tier_that_raised_part_way_is_taken_back_at_once(
         (tmp_path / "trees" / "a", "worktree")
     ]
     assert workspace_survivors(session) == []
+
+
+@dataclass(slots=True)
+class _Stuck(_HalfMade):
+    """Makes its tree, then waits for good: what a stop lands on mid-acquire."""
+
+    made: anyio.Event = field(default_factory=anyio.Event)
+
+    async def acquire(self, **kwargs: Any) -> None:  # noqa: ANN401
+        (self.root / str(kwargs["agent_id"])).mkdir(parents=True)
+        self.made.set()
+        await anyio.sleep_forever()
+
+
+async def test_a_tier_stopped_part_way_is_taken_back_at_once(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """W2. A stop inside the tier's acquire takes back what it made, as a raise does.
+
+    Only `except Exception` reached `_take_back`, so a cancel there — a turn
+    stopped while a worktree was being cut — left the tree for the next
+    `session/loaded` of that session to find, which for a child may be never.
+
+    Sabotage: drop the `except BaseException` from `_acquire`, and nothing is
+    reclaimed.
+    """
+    ctx = await mount()
+    tier = _Stuck(root=tmp_path / "trees")
+    ctx.require(WORKSPACE).register_provider(tier)
+    session = ctx.require(SESSIONS).create("s")
+
+    async with anyio.create_task_group() as acquiring:
+        acquiring.start_soon(
+            partial(
+                ctx.require(WORKSPACE).acquire,
+                session_id="s",
+                agent_id="a",
+                base=tmp_path,
+                session=session,
+            )
+        )
+        await tier.made.wait()
+        acquiring.cancel_scope.cancel()
+
+    assert [(one.root, one.kind) for one in tier.reclaimed] == [
+        (tmp_path / "trees" / "a", "worktree")
+    ]
 
 
 # -------------------------------------------- reconciling while an agent arrives --

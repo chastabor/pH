@@ -53,6 +53,7 @@ from __future__ import annotations
 import shutil
 import socket
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -326,13 +327,12 @@ async def test_the_row_declines_rather_than_claiming_confinement_it_cannot_prove
         assert ctx.require(SANDBOX).enforcement == "full"
 
 
-async def test_a_bridge_that_fails_its_probe_leaves_no_close_on_the_row(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A proxy closed because its probe failed is closed through the releaser its
-    registration handed back, so the close leaves the row's scope as it runs.
-    Called bare, the close stayed registered for a proxy already closed, and ran
-    again when the row unmounted."""
+def _fake_proxy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, starts: bool = True
+) -> list[Path]:
+    """Stand a fake `EgressProxy` in for the real one, its socket under `tmp_path`,
+    and forget any verdict an earlier mount left. Returns the path of every proxy
+    closed; `starts=False` is one whose start fails part-way."""
     closed: list[Path] = []
 
     class Proxy:
@@ -342,7 +342,8 @@ async def test_a_bridge_that_fails_its_probe_leaves_no_close_on_the_row(
             self.path = path
 
         async def start(self) -> None:
-            return None
+            if not starts:
+                raise OSError("no loopback here")
 
         async def aclose(self) -> None:
             closed.append(self.path)
@@ -350,13 +351,36 @@ async def test_a_bridge_that_fails_its_probe_leaves_no_close_on_the_row(
     async def socket_path(ctx: Context) -> Path:
         return tmp_path / "egress.sock"
 
-    async def refused(*_: object) -> sandbox_local.SandboxProbe:
-        return sandbox_local.SandboxProbe(False, "the probe got out")
-
     monkeypatch.setattr(sandbox_local, "EgressProxy", Proxy)
     monkeypatch.setattr(sandbox_local, "egress_socket_path", socket_path)
-    monkeypatch.setattr(sandbox_local, "probe_egress", refused)
     monkeypatch.setattr(sandbox_local, "_BRIDGE_VERDICT", None)
+    return closed
+
+
+def _probing(
+    monkeypatch: pytest.MonkeyPatch, *answers: sandbox_local.SandboxProbe
+) -> list[sandbox_local.SandboxProbe]:
+    """Answer each probe with the next of `answers`, the last repeated. Returns the
+    answers given, one per probe asked."""
+    asked: list[sandbox_local.SandboxProbe] = []
+
+    async def probe(*_: object) -> sandbox_local.SandboxProbe:
+        asked.append(answers[min(len(asked), len(answers) - 1)])
+        return asked[-1]
+
+    monkeypatch.setattr(sandbox_local, "probe_egress", probe)
+    return asked
+
+
+async def test_a_bridge_that_fails_its_probe_leaves_no_close_on_the_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A proxy closed because its probe failed is closed through the releaser its
+    registration handed back, so the close leaves the row's scope as it runs.
+    Called bare, the close stayed registered for a proxy already closed, and ran
+    again when the row unmounted."""
+    closed = _fake_proxy(monkeypatch, tmp_path)
+    _probing(monkeypatch, sandbox_local.SandboxProbe(False, "the probe got out"))
     row = Context()
     row.provide(SANDBOX, cast(Any, SimpleNamespace(permits=None)))
     egress = sandbox_local._Egress()
@@ -370,31 +394,56 @@ async def test_a_bridge_that_fails_its_probe_leaves_no_close_on_the_row(
     assert len(closed) == 1
 
 
+async def test_a_bridge_the_probe_failed_is_asked_again_once_its_window_ends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A probe that failed is believed for `BRIDGE_RETRY_SECONDS`, not for the life
+    of the process; a bridge it proved is believed for good.
+
+    A failure was memoized with a success, so a probe that failed once (a slow host,
+    a timeout) declined egress to every root the process mounted after. Asked at
+    every mount instead, a burst of mounts on a host whose bridge fails paid a
+    confined spawn and its timeout per root.
+
+    Sabotage: memoize a failure for good again, and the third mount is not asked.
+    """
+    _fake_proxy(monkeypatch, tmp_path)
+    asked = _probing(
+        monkeypatch,
+        sandbox_local.SandboxProbe(False, "the bridge did not answer"),
+        sandbox_local.SandboxProbe(True, "reachable from inside"),
+    )
+    backend = cast(Any, SimpleNamespace(needs_loopback=False))
+
+    async def mounted() -> sandbox_local._Egress:
+        row = Context()
+        seam = SimpleNamespace(permits=None, register_egress=lambda bridge: None)
+        row.provide(SANDBOX, cast(Any, seam))
+        egress = sandbox_local._Egress()
+        await egress.mount(row, backend, tmp_path)
+        await row.dispose()
+        return egress
+
+    await mounted()
+    await mounted()
+    assert len(asked) == 1, "a failure was asked again inside its window"
+
+    later = time.monotonic() + sandbox_local.BRIDGE_RETRY_SECONDS + 1
+    monkeypatch.setattr(sandbox_local, "time", SimpleNamespace(monotonic=lambda: later))
+    await mounted()
+    last = await mounted()
+
+    assert len(asked) == 2, "a failed probe was remembered for good, or a proved one was not"
+    assert last.verdict is not None and last.verdict.confines
+
+
 async def test_a_proxy_that_starts_half_way_is_closed_and_not_left_listening(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The close is registered before the start. A start that fails part-way, the
     unix listener up and the loopback one refused, used to return before any close
     existed, and the listener stayed for the life of the process."""
-    closed: list[Path] = []
-
-    class Proxy:
-        tcp_port = None
-
-        def __init__(self, *, path: Path, permits: object, loopback: bool) -> None:
-            self.path = path
-
-        async def start(self) -> None:
-            raise OSError("no loopback here")
-
-        async def aclose(self) -> None:
-            closed.append(self.path)
-
-    async def socket_path(ctx: Context) -> Path:
-        return tmp_path / "egress.sock"
-
-    monkeypatch.setattr(sandbox_local, "EgressProxy", Proxy)
-    monkeypatch.setattr(sandbox_local, "egress_socket_path", socket_path)
+    closed = _fake_proxy(monkeypatch, tmp_path, starts=False)
     row = Context()
     row.provide(SANDBOX, cast(Any, SimpleNamespace(permits=None)))
     egress = sandbox_local._Egress()

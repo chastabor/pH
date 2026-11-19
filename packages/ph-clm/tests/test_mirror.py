@@ -23,6 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 from clm_helpers import (
     CALL_ID,
@@ -59,6 +60,7 @@ from ph.testing import (
     simple_tool,
     user_payload,
 )
+from ph_clm import mirror
 from ph_clm.keys import CLM, CLM_MIRROR
 from ph_clm.kinds import DECLINED, REVISED
 from ph_clm.mirror import MirrorService, parse
@@ -460,6 +462,33 @@ async def test_the_file_goes_with_its_session(mount: MountProfile) -> None:
     ctx.require(SESSIONS).dispose(agent.session.id)
 
     assert not path.exists() and not path.parent.exists()
+
+
+async def test_a_file_written_as_its_session_goes_is_not_left_behind(
+    mount: MountProfile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render whose session was let go while it wrote takes its file back.
+
+    The write runs on a thread, and `forget` — on `session/disposed` — can run while
+    it does: the render then recorded the file under a session nothing would forget
+    again, and the file stayed in the agent's scratch for good.
+
+    Sabotage: drop the check after the write in `render`, and the file is still
+    there.
+    """
+    ctx, agent, path = await _ready(mount)
+    original = mirror._write
+
+    def disposed_meanwhile(target: Path, text: str) -> Any:  # noqa: ANN401
+        written = original(target, text)
+        anyio.from_thread.run_sync(ctx.require(SESSIONS).dispose, agent.session.id)
+        return written
+
+    monkeypatch.setattr(mirror, "_write", disposed_meanwhile)
+    await ctx.require(CLM_MIRROR).render(agent.session, agent)
+
+    assert not path.exists(), "a file was left for a session that has gone"
+    assert agent.session.id not in ctx.require(CLM_MIRROR)._written
 
 
 def _linked(path: Path, secret: Path) -> None:

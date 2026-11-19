@@ -1408,3 +1408,34 @@ async def test_a_forgotten_symbols_docstring_stops_being_searchable(
     assert gone.value["symbols"] == [], (
         "a docstring posting outlived its symbol and answered for the one that took its id"
     )
+
+
+def test_two_mounts_released_out_of_order_leave_the_one_still_mounted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each release takes back only its own claim on the grammar cache (Holdings
+    rule 4).
+
+    The release restored whatever was set before its claim. Two mounts in one
+    process, the first released first, reset the cache under the second while it was
+    still mounted; releasing the second then restored the first's directory, by then
+    gone with its row.
+
+    Sabotage: restore the previous base in `cache_release` again, and the second
+    mount's cache is lost when the first is released.
+    """
+    import tree_sitter_language_pack as pack
+
+    from ph_code_graph._extract import cache_release, use_cache
+
+    monkeypatch.delenv("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR", raising=False)
+    base, first, second = tmp_path / "base", tmp_path / "one", tmp_path / "two"
+    use_cache(base)
+
+    release_first = cache_release(first)
+    release_second = cache_release(second)
+    release_first()
+    assert str(second) in pack.cache_dir(), "the mount still up lost its cache"
+
+    release_second()
+    assert str(base) in pack.cache_dir(), "the base was not restored once both had gone"

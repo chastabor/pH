@@ -33,7 +33,7 @@ from typing import Any, assert_never
 from pydantic import ValidationError
 
 from ..cordis import Context, plugin
-from ..keys import TOKEN_METER, TUI_STATUS
+from ..keys import SESSIONS, TOKEN_METER, TUI_STATUS
 from ..llm.types import (
     AttachmentRef,
     MediaBlock,
@@ -350,7 +350,15 @@ class TokenMeter:
         baseline, a section map, a context edit pricing what it replaces — and kept
         for the session's life, since a node's event never changes. `0` for a node
         that projects to no message."""
-        known = self._nodes.setdefault(session.id, {})
+        known = self._nodes.get(session.id)
+        if known is None:
+            known = {}
+            # Kept only for a session the store still holds: `forget` ran on
+            # `session/disposed`, and a reader still holding the session — a status
+            # line drawn once more — put it back for good.
+            store = None if self.ctx is None else self.ctx.get(SESSIONS)
+            if store is None or store.get(session.id) is session:
+                self._nodes[session.id] = known
         tokens = known.get(seq)
         if tokens is None:
             event = session.at(seq)
