@@ -26,7 +26,7 @@ from ..agent.types import AgentDriver, AgentHandle, AgentOptions, AgentStatus
 from ..cancel import CancelToken
 from ..cordis import DEPLOYMENT, Boundary, Context, Next
 from ..host import host_config_path, load_host_config
-from ..json import JsonValue, as_str, dumps
+from ..json import JsonValue, as_obj, as_seq, as_str, dumps
 from ..keys import AGENTS, JOBS, SESSION_PERSISTENCE, SESSIONS, SKILLS, TOOLS
 from ..llm.types import (
     ContentBlock,
@@ -1079,6 +1079,17 @@ async def resume_stored(ctx: Context, session_id: str) -> Session:
 def stored_types(ctx: Context, session_id: str) -> list[str]:
     """The event types `stored_events` reads."""
     return [event.type for event in stored_events(ctx, session_id)]
+
+
+def delivered_ids(log: Session) -> list[str]:
+    """The id of each message delivered into `log`'s inbox, in order and repeats
+    kept, as its `agent/inbox/spliced` records say: how a test counts a notice."""
+    return [
+        as_str(as_obj(message).get("id"))
+        for event in log.events
+        if event.type == "agent/inbox/spliced"
+        for message in as_seq(event.data.get("inserted"))
+    ]
 
 
 def live_settles(session: Session, event_type: str) -> list[SessionEvent]:

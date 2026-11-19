@@ -556,7 +556,10 @@ class RlmChildProvider:
             # child's state folds status last-write-wins and a woken child that is
             # working must not read as not-running. A restart is on its own disk
             # before the attempt it counts (S10) — the seam's door keeps that rule.
-            await record_started(self.ctx, own, cause=cause)
+            # And it refuses a child tombstoned already: a release still waiting on
+            # the disk has not set `finished` yet, and owns the ending all the same.
+            if await record_started(self.ctx, own, cause=cause) is None:
+                return
             agent = child.agent
             assert agent is not None, "a child runs only after it has an agent"
             await agent.run()
@@ -591,13 +594,18 @@ class RlmChildProvider:
             # The child's ending is on its own disk before its parent is handed the
             # answer (F1): `record_ended` flushes, and the waiters wake after it. The
             # notice rides on the ending, so a restart delivers one a crash held back.
-            await record_ended(
+            ended = await record_ended(
                 self.ctx,
                 own,
                 "done",
                 notice=notice,
                 answerPreview=head(answer, self.config.answer_preview_chars) or None,
             )
+            if ended is None:
+                # Tombstoned while its run was coming back from the release's
+                # cancel: not finished, and its tree keeps the mark it has.
+                child.result = None
+                return
             # The other half of retain-by-default (P6-28): a child that finished
             # is a child whose checkout is not evidence of anything, so the mark
             # taken at acquire is withdrawn and `worktree-ephemeral` keeps its
@@ -626,7 +634,7 @@ class RlmChildProvider:
         assert own is not None, "a child fails only while it has its own log"
         child.result = SubagentResult(status="error", answer=answer, error=message)
         preview = head(answer, self.config.answer_preview_chars)
-        await record_ended(
+        ended = await record_ended(
             self.ctx,
             own,
             "error",
@@ -638,6 +646,9 @@ class RlmChildProvider:
             detail=message,
             **({"answerPreview": preview} if preview else {}),
         )
+        if ended is None:
+            # Tombstoned meanwhile: revoked, which is what its log says it is.
+            child.result = None
 
     def _evidence(self, child: _Child) -> str:
         """Where the failed child's tree is, for the message that says it failed.

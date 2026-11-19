@@ -67,7 +67,7 @@ PRESETS: dict[PresetName, PermissionPreset] = {
         name="danger-full-access",
         sandbox_mode="danger-full-access",
         approval_policy="never",
-        summary="No confinement and no prompts. The name is the warning.",
+        summary="No confinement and no prompts: a call that would ask is refused.",
     ),
 }
 

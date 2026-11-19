@@ -367,7 +367,8 @@ name. Two `register` methods in two classes are one name to this index.
 Every answer that could be ambiguous carries `definitions` — how many places
 that name is defined — and the rendered text says so outright when it is above
 one, so the model sees the ambiguity instead of being handed one of the
-possibilities. `mode=define` is how it disambiguates.
+possibilities. `mode=define` lists the definitions. It does not say which of
+them an edge belongs to; nothing in a name-based index can.
 
 Resolving properly means an import graph, scope, and per-language type
 inference. In the Rust/Node CodeGraph that is 29,708 lines of TypeScript, and

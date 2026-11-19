@@ -553,11 +553,13 @@ draw at the moment it would have to commit one — the first document is the mos
 clustered prefix there is.
 
 So it is committed in exactly the situation upstream describes: the index is
-**empty** and the incoming batch is large enough (1 024 rows) to sample from,
-in which case a random sample of that batch *is* a representative draw and
-calibrating before the add is the documented order. Otherwise the index stays
-uncalibrated, which is plain TurboQuant — good rather than wrong. `calibrate:
-false` turns even that off.
+**empty** and the first add is large enough (1 024 rows) to sample from, in
+which case a random sample of it *is* a representative draw and calibrating
+before the add is the documented order. An add is one document, not one
+indexing run, so this is rare: the first document indexed has to be cut into
+1 024 passages or more by itself. Otherwise the index stays uncalibrated, which
+is plain TurboQuant — good rather than wrong. `calibrate: false` turns even
+that off.
 
 ## Using it from the RLM
 

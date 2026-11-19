@@ -190,8 +190,9 @@ and the bundle — not the row — picks a number.
 `tests/` — 26 modules. `test_protocol_mirror.py` is the contract between this
 package and `ph-runtime-guest`: the two halves of the fd-3 protocol are written
 twice on purpose (the guest must not import the harness), and that test compares
-`PROTOCOL_VERSION`, every frame's required and optional field set, and the
-truncation marker byte for byte. `test_governance_gate.py` runs real cells in a real kernel against
+every frame's required and optional field set and the truncation marker byte
+for byte. `PROTOCOL_VERSION` and three more constants are declared once, in the
+guest, and the test checks that the host imports them. `test_governance_gate.py` runs real cells in a real kernel against
 the **shipped** profile — not hand-picked rows — to pin the claim the whole
 package rests on: one cell is one tool call, but forty writes are forty
 governance evaluations. `test_conformance.py` inverts the usual arrangement and

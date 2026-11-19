@@ -82,14 +82,15 @@ IntentOrphan: TypeAlias = Literal[Unsettled, "owner-settles"]
 
 * `outcome-unknown` — the act may have happened. Repair writes the settle saying
   so, which is the one honest thing a log can say about an effect it did not see
-  finish: a shell command, a daemon verb.
-* `not-started` — the act cannot have happened without its settle: the process
-  that would have acted died holding the question. Repair writes it as not
-  started: an approval nobody answered, a question nobody saw.
-* `owner-settles` — repair leaves it. The owning seam can *look* — a workspace
-  tree is on disk or it is not — and reconciles on open, as
-  `WorkspaceSeam.reconcile` already does. A guess from repair would be worse
-  than the owner's look.
+  finish: a shell command, a daemon verb, an approval or a question a crash cut
+  short. Every kind repair settles is declared this way.
+* `not-started` — the act cannot have happened without its settle, and repair
+  writes it as not started. No kind is declared this way: `not-started` is
+  written by the journal, for a durable kind whose opening record could not be
+  flushed (`IntentJournal.open`), so nobody was asked and nothing ran.
+* `owner-settles` — repair leaves it. The owning seam can *look* and reconciles
+  on open: a credential hold, whose resume check sees whether the name has
+  arrived. A guess from repair would be worse than the owner's look.
 """
 
 Barrier: TypeAlias = Literal["durable", "buffered", "tools-body"]

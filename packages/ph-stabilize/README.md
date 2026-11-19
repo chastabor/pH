@@ -50,9 +50,10 @@ somebody's longest legitimate turn.
 
 The two that ship **off** are off for a different reason: they hand the model a
 tool or keep a turn going, and that is a posture a profile chooses rather than
-inherits. `rlm-stable` is the profile that chooses it — and the reason the
-bundle reaching every profile does not thereby give every deployment a todo
-tool.
+inherits. `rlm-stable` chooses the first: it turns `tool-todo` on, which is why
+the bundle reaching every profile does not thereby give every deployment a todo
+tool. No shipped profile turns `skill-steps` on. A profile or a `--patch` that
+wants it turns on both rows.
 
 Two rows are **not** inert on arrival. `permissions-fs` ships a rule sending
 writes outside the agent's workspace to `interrupt`. That is E6's intended
@@ -219,9 +220,15 @@ escape hatch, but it is matched against the decoded strings.
 - **`skill-steps` holds the model to its own accepted plan, not to reality.**
   Marking a step done is still the model's word; it asserts only that work
   remains which *can* begin, and never claims to know which step is running.
-  Gates that check the world are `ctx.goals` and `ctx.approval`. It is also
-  useless without `tool-todo` — the list it seeds is that row's — so a profile
-  enabling one enables both.
+  Gates that check the world are `ctx.goals` and `ctx.approval`. It also needs
+  `tool-todo` beside it, and nothing checks that it is there. The list it seeds
+  is that row's: without `write_todos` the steps are still seeded and the turn
+  is still nudged, but the model cannot mark a step done, so the row spends its
+  nudges and stands down. A profile that turns `skill-steps` on turns on both.
+- **Nothing shipped switches `hitl`'s mode during a session.** The mode in force
+  is the last `approval/mode` record, else the row's `mode`, and `set_mode`
+  writes that record, but no command or key calls it. Today the mode is what
+  the profile's row says.
 - **A decision model is asked, never relied on.** `skill-steps` asks one whether
   a turn is ending to wait for a person (`ctx.llm.decide`), and holds its nudge
   when it is. A route that cannot be asked — unregistered, down, slow, answering

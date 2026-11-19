@@ -21,6 +21,11 @@
 # down entirely and the corpus behaves conventionally — the threshold Q4
 # settled on, so a small `context/` directory costs nothing and a large one
 # becomes a thing the model queries rather than a thing it is handed.
+#
+# No `sources` are named here, and a row with none stands down, so as shipped
+# this switches the row on and loads nothing. A deployment names its corpus in
+# its own profile, restating `minChars` beside it: an entry's `config` replaces
+# the row's whole config.
 - id: rlm-context-loader
   disabled: false
   config:

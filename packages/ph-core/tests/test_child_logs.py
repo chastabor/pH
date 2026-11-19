@@ -19,7 +19,7 @@ import pytest
 
 from ph.agent.types import AgentDriver, AgentOptions
 from ph.cordis import Context
-from ph.json import JsonValue, as_obj, as_seq, as_str
+from ph.json import JsonValue
 from ph.keys import AGENTS, SESSION_PERSISTENCE, SESSIONS, SKILLS, SUBAGENTS, TOOLS
 from ph.llm.types import Sampling, text_of
 from ph.seams.subagents import (
@@ -51,6 +51,7 @@ from ph.testing import (
     StubSubagentProvider,
     admitted_child,
     assistant_payload,
+    delivered_ids,
     log_event,
     models_overlay,
     not_none,
@@ -794,13 +795,7 @@ async def test_a_child_that_ends_takes_what_it_left_unfinished_with_it(
 
 def _notices(parent: Session, notice: ChildNotice) -> int:
     """How many times `notice` reached `parent`'s inbox, as its log records it."""
-    delivered = [
-        as_str(as_obj(message).get("id"))
-        for event in parent.events
-        if event.type == "agent/inbox/spliced"
-        for message in as_seq(event.data.get("inserted"))
-    ]
-    return delivered.count(notice.id)
+    return delivered_ids(parent).count(notice.id)
 
 
 async def test_an_ending_carries_its_notice_to_the_parent(mount: MountProfile) -> None:

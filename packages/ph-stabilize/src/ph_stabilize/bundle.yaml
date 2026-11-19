@@ -30,9 +30,11 @@
 # A skill that declares `steps:` becomes work the model must finish, and a
 # listener on `agent/turn-stopping` objects while any of it is startable (P7-18).
 # `disabled` for `tool-todo`'s reason and one more: this row can keep a turn
-# going, which is a posture a deployment chooses rather than inherits. Useless
-# without `tool-todo` — the list it seeds is that row's — so a profile that
-# enables this enables both.
+# going, which is a posture a deployment chooses rather than inherits. It needs
+# `tool-todo` beside it and nothing checks for it: the list it seeds is that
+# row's, and without `write_todos` the model is nudged about steps it cannot
+# mark done. So a profile that turns this on turns on both. No shipped profile
+# turns this one on (`rlm-stable` turns on `tool-todo` alone).
 - id: skill-steps
   name: skill-steps
   disabled: true

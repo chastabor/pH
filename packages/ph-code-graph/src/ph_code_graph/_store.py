@@ -1,4 +1,5 @@
-"""The graph on disk: four tables, an FTS index, and one recursive query.
+"""The graph on disk: four tables and a small `meta`, an FTS index, and one
+recursive query.
 
 ## Why the standard library and not `pyturso`
 
@@ -20,7 +21,9 @@ dependency to add. If turso grows both, this is one import.
 
 ## The schema, and what it deliberately is not
 
-`files` · `symbols` · `refs` · `imports`, plus `symbols_fts`. A **name-based**
+`files` · `symbols` · `refs` · `imports`, plus `symbols_fts`, and `meta` for the
+two facts about the store itself: its schema version and the version-control
+token it was last indexed at. A **name-based**
 graph: a reference records the name it used, and `callers`/`callees` join on
 that name. It is not a resolved graph — two `register` methods in two classes
 are one name here — and every query that could be ambiguous reports how many

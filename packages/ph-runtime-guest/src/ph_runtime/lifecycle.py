@@ -15,7 +15,8 @@ mechanism, and two of the three live in the guest's gift:
   removes that window, and a thread blocked in `kevent` costs nothing while the
   host lives.
 * **Windows** — the host's job: a Job Object with `KILL_ON_JOB_CLOSE`. Nothing
-  to do here, and it is the tidiest of the three.
+  to do here, and it is the tidiest of the three. The host does not create one
+  yet, so on Windows its orphan journal is the only cover.
 
 **Why the socket is not enough, and why this is a thread.** The guest's ordinary
 "host is gone" signal is the socket's EOF (`Channel.receive` returns `None`), and

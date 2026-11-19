@@ -401,12 +401,11 @@ topics:
           - "Change is detected by digest of the pickle, after serializing. Only `bytes`, `str`, `int`, `float`, `complex`, `bool` and `None` are skipped by identity; every other variable is pickled after every cell."
           - "Without `dill` in the venv, a cell-defined function, class or lambda is reported `unpicklable`."
           - "A refusal is reported once. A variable that stays too large is not mentioned again."
-      - title: Where a doc and the code differ
+      - title: Byte caps and parent death
         tone: limit
         list:
-          - "The package README says macOS watches `os.getppid()`. The code waits on a kqueue exit event."
-          - "The README's sample row comments `maxValueBytes` as *per snapshotted variable*. It caps the cell's value; `maxSnapshotBytes` caps a variable."
-          - "The README says the mirror test compares `PROTOCOL_VERSION`. The host now imports it from the guest, and the test checks that it is the same object."
+          - "`maxValueBytes` caps the value a cell returns; `maxSnapshotBytes` caps one snapshotted variable."
+          - "On macOS the guest waits on a kqueue exit event for its parent. On Windows nothing kills an orphan yet: the host's Job Object is not built, and the orphan journal is the only cover."
       - links:
           - {to: "topic:boundary", label: "The process boundary"}
           - {to: "topic:durability", label: "What survives a restart"}

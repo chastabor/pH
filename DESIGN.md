@@ -38,17 +38,20 @@ of it.
 ├──────────────────────────────────────────────────────────────────────────┤
 │ plugin bundles  (YAML rows; each row = one plugin module + config)       │
 │   ph-core       llm · session · tools · system-prompt · agent · loop     │
-│                 persistence · 27 capability seams · builtin tools        │
+│                 persistence · 30 capability seams · builtin tools        │
 │   ph-rlm        code-runtime-python · bindings · subagent provider       │
 │                 messaging · registry · harness (/refine) · presentation  │
 │   ph-stabilize  todo · result-offload · compaction · limits · hitl       │
 │                 memory · skills-progressive                              │
+│   ph-clm        context tools: the model edits what it sees              │
+│   ph-utcp       the tools a UTCP manual names, as pH tools               │
+│   ph-code-graph · ph-text-index   code and text indexes, as UTCP tools   │
 ├──────────────────────────────────────────────────────────────────────────┤
 │ ph.cordis       Context · services · effects · scopes/isolation          │
 │                 Profile → Mount (rows → plugin tree) · patches · entry pts │
 │                 4 dispatch modes · event declaration registry            │
 └──────────────────────────────────────────────────────────────────────────┘
-                              ┊ fd 3, framed protocol v2
+                              ┊ fd 3, framed protocol v4
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ ph-runtime-guest   the guest half of the code runtime, in its own venv   │
 │                    imports neither ph-core nor ph-rlm, by construction   │
@@ -61,15 +64,15 @@ of it.
 |---|---|
 | Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~126 000 lines |
-| Tests | 4 607 collected |
+| Tests | 4 610 collected |
 | Registered plugins | 110 across the `ph.plugins` entry-point group |
 | Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
 | Base profile | 61 rows (`ph/bundles/base.yaml`) |
-| Capability seams | 27 service keys across 26 modules |
+| Capability seams | 30 service keys across 29 modules |
 | Declared bus events | 46 |
 | Python | ≥ 3.12 |
 
-### The five packages
+### The nine packages
 
 **`ph-core`** — cordis, the session log, the LLM vocabulary, the tool pipeline,
 the agent loop, and every capability seam. Nothing here knows about a terminal.
@@ -96,6 +99,22 @@ grandchild's output need not be untangled from frames. **It imports neither
 `ph-core` nor `ph-rlm`** — verified, zero such imports — because "the process
 boundary exists so that model code cannot reach the harness, and importing the
 harness would put it back inside" (`ph_runtime/__init__.py`).
+
+**`ph-clm`** — context tools, after Context Language Models: the model
+tombstones, replaces and rewrites sections of what it sees. Each edit is a
+surface `replace`, so the log keeps every original (I4).
+
+**`ph-utcp`** — one row, `utcp`, that turns the tools a UTCP manual names into
+pH tools. The two index packages register their manuals with it, and their
+tools run as one-shot commands (`ph.toolcli`, in `ph-core`): one command is one
+call, and a credential reaches a command through the manual's `pass_env`.
+
+**`ph-code-graph`** — `code_index` and `code_graph`: a name-based graph of a
+codebase, built with tree-sitter and kept in stdlib `sqlite3`, published as a
+UTCP manual.
+
+**`ph-text-index`** — `text_index` and `text_search`: semantic retrieval over
+the agent's own documents on a local turbovec index, published the same way.
 
 ---
 
@@ -567,7 +586,7 @@ That is the design. The implementation is richer, and the difference matters.
 
 ### 3.1 Not every seam has a provider
 
-Of **27 service keys** across `ph/seams/`, only **six** hold a provider slot. The
+Of **30 service keys** across `ph/seams/`, only **six** hold a provider slot. The
 rest are contribution tables or plain services. A reader who expects the triad
 everywhere will misread two thirds of the directory.
 
@@ -1319,7 +1338,10 @@ only children held in memory, and one an earlier process had settled answered
 `False`. `record_deleted` lands the `canceled` and the tombstone in one batch, since
 a flush between them left a child canceled and not deleted. It also reads from the
 child's own state whether it had already ended, and never writes `canceled` over a
-`done`, which turned a finished child into a revoked one.
+`done`, which turned a finished child into a revoked one. And nothing is written
+over a tombstone: the status doors (`record_waiting`, `record_started`,
+`record_ended`) refuse a tombstoned child, since a drive coming back while the
+revocation waited on the disk wrote `running` and `done` after it.
 
 `SETTLED_STATUSES` is a real constant for a real reason: a hand-written copy was
 once wrong in three of its four members and pinned every parent forever

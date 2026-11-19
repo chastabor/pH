@@ -720,7 +720,7 @@ nodes:
         list:
           - "`maxConcurrent` is per parent: ten roots at four each is forty children. The host's bound is `jobs.concurrency.subagent`."
           - "There is no `default_access` option; the request's default is `read`."
-          - "A child deleted right after it was admitted was seen, in a scratch run with the fake model, to record `running` and `done` after its tombstone. Not investigated."
+          - "A tombstoned child takes no status after its tombstone: the seam's status doors refuse one. So a child deleted while its drive is coming through its gate stays `canceled`, and its parent gets no notice of an ending."
       - links:
           - {to: "edge:admit", label: "Admitting the child"}
           - {to: "security#node:subagents", label: "The spawn door and its checks"}

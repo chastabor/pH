@@ -16,9 +16,13 @@ of the row's gate: *TUI close leaves the root running*.
 two clients may watch one root and one client may watch two — and a reconnect is
 an attach rather than a resume, because the root never stopped.
 
-What this row deliberately does not do: capabilities, cursors and command
-journaling (P5-02), leases against a second daemon (P5-03), crash retries
-(P5-04), passivation (P5-05). The supervisor is the thing those attach to.
+What the row started without has since attached to it. Capabilities, cursors and
+the command journal are the front door's (`server.py`, P5-02). A second daemon is
+refused by the session lease each root's log is held under (P5-03). The crash
+ladder is `recovery.py`'s, applied to each root's task here (P5-04). Releasing a
+quiet root is this module's (`passivate`, P5-05), and so is bringing one back
+after a restart (`rehydrate`, `resume_owed`). `NON_GUARANTEES` below says what a
+daemon still does not promise.
 
 @module ph_app.daemon.supervisor
 """

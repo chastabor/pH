@@ -34,8 +34,21 @@ answer = await run.result()                      # only if you want to block
 ## `access` defaults to read (E4)
 
 A child asks for the workspace guarantee it needs, and the default is the
-conservative one — a delegation that never mentions `access` **cannot silently
-receive a writable repo**.
+conservative one. A delegation that never mentions `access` asks for `read`.
+That is a request, and what it gets depends on the tier in force:
+
+- with a tier that can isolate (the `rlm` bundle's `child_tier: worktree`, in a git
+  or jj repository), a `read` child gets a checkout of its own whose writes are
+  discarded, and `granted_access` is `read`;
+- with no tier in force (no workspace provider row, a tier unset or `advisory`, or
+  a directory that is not a repository), it gets its parent's own tree, which is
+  writable, and `granted_access` says `write`. The spawn is not refused, and no
+  downgrade reason is recorded;
+- with no workspace seam mounted at all, `granted_access` is `read` with the
+  downgrade reason `workspace-not-mounted`, since nothing there can promise a tree.
+
+So a `read` child can receive a writable repo. It cannot receive one *silently*:
+the admission records what was granted.
 
 The handle reports both, and they may differ:
 
@@ -161,8 +174,11 @@ never gets a mount of its own:
 - each row it keeps is asked of its own plugin, which declares how a child holds
   less of it (`plugin(..., narrows=)`, `ph.cordis.child_limit`):
   - `models` — the default must be a key the parent lists, and is the child's model;
-  - `sandbox-policy` — a `read-only` default makes the child read-only; one wider
-    than the parent's posture is refused;
+  - `sandbox-policy` — a default wider than the parent's posture is refused. A
+    `read-only` default refuses a spawn that asks for `access: write`, and does no
+    more than that: the child's sandbox mode is still read from its own log and
+    then from the row its parent's mount runs, so this `defaultMode` is not
+    applied to it;
   - `skills-progressive` — the paths must be a subset of the parent's, and only
     skills found under them stay;
   - `sandbox-allow` — the writable directories must be the parent's or inside them,
@@ -615,6 +631,16 @@ one. A child tombstoned already is left as it is, so a teardown and a cascade th
 both reach one child write one tombstone. The transcript stays on disk, because a
 parent looking for what a revoked child did should find the revocation, not a gap.
 A deleted child is never rehydrated.
+
+A tombstoned child takes no status after its tombstone. The three status doors
+(`record_waiting`, `record_started`, `record_ended`) write nothing for one, deliver
+no notice, and the two that return their record return `None`. A revocation waits
+for the child's disk after it writes the tombstone, and a provider's drive can come
+back inside that wait: a `running` and a `done` written then made a revoked child
+read as one that ran and finished, and told its parent so. A provider that gets
+`None` from `record_started` does not start the attempt. A path that both ends and
+releases a child ends it first, which is the order a refused admission takes: its
+ending says why, and the release adds the tombstone without a `canceled` over it.
 
 A mount going away is not a revocation. The provider suspends each unfinished
 child instead: `queued` with `SUSPENDED_DETAIL` in its own log, no tombstone, and

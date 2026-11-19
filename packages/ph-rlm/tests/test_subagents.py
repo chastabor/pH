@@ -327,7 +327,7 @@ async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
 
     async def watched(
         scope: Context, child: Session, *, cause: StatusCause | None = None
-    ) -> SessionEvent:
+    ) -> SessionEvent | None:
         seen.append(stored_types(ctx, child.id))
         return await original(scope, child, cause=cause)
 
@@ -784,6 +784,34 @@ async def test_deleting_a_child_leaves_a_tombstone(
     # The child's log is still there — a tombstone is not a deletion.
     assert ctx.require(SESSIONS).get(run.session_id) is not None
     assert _about_children(session) == []
+
+
+async def test_a_child_deleted_as_it_is_admitted_stays_revoked(
+    delegating: MountedRuntime,
+) -> None:
+    """Deleted before its drive took a step, with nothing holding it: the release
+    writes the tombstone and waits for the child's disk, and the drive comes through
+    its gate inside that wait, before the release has marked the child finished. It
+    wrote `running`, ran an agent whose task the cancel had taken, wrote `done`, and
+    told the parent that the child it had just deleted "completed without sending a
+    reply".
+
+    Sabotage: drop the `_tombstoned` check from `record_started` and `record_ended`, and
+    the statuses are `canceled`, `running`, `done`, with the notice delivered. Have
+    the drive carry on past a refused start, and whoever awaits the child is told
+    `done`.
+    """
+    ctx, session, parent = await delegating()
+    run = await _spawn(ctx, parent, "doomed")
+
+    assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user") is True
+    await settle_background(ctx)
+
+    assert _statuses(ctx, run) == ["canceled"]
+    state = _state(ctx, run)
+    assert (state.deleted, state.status, state.starts) == (True, "canceled", 0)
+    assert (await run.result()).status == "error", "revoked, not finished"
+    assert _notices(session) == []
 
 
 async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRuntime) -> None:
@@ -1784,7 +1812,7 @@ async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
 
     async def watched(
         scope: Context, child: Session, *, cause: StatusCause | None = None
-    ) -> SessionEvent:
+    ) -> SessionEvent | None:
         if child.id == middle.session_id:
             readmitted = {run.id for run in revived[0].require(SUBAGENTS).list()}
             swept_first.append(leaf.id in readmitted)

@@ -1065,8 +1065,29 @@ def record_waiting(child: Session, /, **extra: JsonValue) -> None:
     has one spelling, and so the writers-of-record table can hold a provider to it:
     a provider that appends a status of its own fails `test_log_writers`, which is
     what keeps these doors from being optional.
+
+    Nothing is written for a tombstoned child (`_tombstoned`).
     """
+    if _tombstoned(child, "queued"):
+        return
     _append_status(child, "queued", **extra)
+
+
+def _tombstoned(child: Session, status: SubagentStatus) -> bool:
+    """Whether `child` is tombstoned, and so takes no status after it.
+
+    A revocation writes the ending and the tombstone and then waits for the disk
+    (`record_deleted`), and a provider's drive can come back from its own wait
+    inside that one: past its gate, or out of a run the revocation canceled. The
+    fold takes the last status it reads, so a `running` or a `done` written then
+    turned a revoked child into one that ran and finished, and its ending's notice
+    told the parent so. The tombstone is in the log before that wait starts, so it
+    is the doors that hold the rule, whichever provider is driving.
+    """
+    if child.latest(DELETED) is None:
+        return False
+    log.debug("ph.seams.subagents: %s is tombstoned; `%s` not written", child.id, status)
+    return True
 
 
 def _append_status(
@@ -1077,7 +1098,7 @@ def _append_status(
 
 async def record_started(
     ctx: Context, child: Session, /, *, cause: StatusCause | None = None
-) -> SessionEvent:
+) -> SessionEvent | None:
     """`running`, for a child about to take its turn — **on its own disk first when it
     is a restart** (S10). The caller starts the attempt after this returns.
 
@@ -1090,7 +1111,12 @@ async def record_started(
 
     Best effort: a log that cannot be written has bigger problems than this count,
     and refusing the child its turn would not write the record either.
+
+    `None`, with nothing written, for a child tombstoned already (`_tombstoned`): it was
+    revoked while its drive waited, and the caller does not start the attempt.
     """
+    if _tombstoned(child, "running"):
+        return None
     event = _append_status(child, "running", **({} if cause is None else {"cause": cause}))
     if cause == "resumed":
         await session_written(ctx, child)
@@ -1105,7 +1131,7 @@ async def record_ended(
     *,
     notice: ChildNotice | None = None,
     **extra: JsonValue,
-) -> SessionEvent:
+) -> SessionEvent | None:
     """A child's ending, in its own log — **on its disk before the caller hands the
     result to the parent** (F1).
 
@@ -1124,7 +1150,13 @@ async def record_ended(
     ends it: the door settles it (`settle_value`) and ends a child that has none as
     `error`, saying why, with a notice of the seam's own in place of the provider's,
     which was worded for an answer.
+
+    `None`, with nothing written and nobody told, for a child tombstoned already
+    (`_tombstoned`): the revocation wrote its ending, and the parent that revoked it is
+    owed no notice of one.
     """
+    if _tombstoned(child, status):
+        return None
     fields: dict[str, JsonValue] = dict(extra)
     problem = settle_value(child).problem if status == "done" else ""
     failed = _failed_notice(child, problem, summary="returned no value") if problem else None
@@ -2228,17 +2260,24 @@ class SubagentService:
         delivered the way any ending's is. A spawn refused at admission does not: its
         refusal is the caller's answer already.
 
+        **A child that ended already is not ended again**, as `record_deleted` will
+        not settle one twice: a readmission `_admit` refused is ended by `_abandon`,
+        and the sweep that catches the refusal comes here for the same child. A
+        second ending told its parent twice.
+
         Best effort, and never raised: this is how the seam gives up on a child —
         refused, unresumable, spent — and a root coming back must not be held
         hostage by a log it could not write. A child whose spawn was refused before
         it had a log leaves nothing to end.
         """
 
-        async def end(child: Session) -> SessionEvent:
+        async def end(child: Session) -> None:
+            if not child_is_live(self._folds.read(child)):
+                return
             notice = (
                 _failed_notice(child, detail, summary="was given up on") if tell_parent else None
             )
-            return await record_ended(self.ctx, child, "error", detail=detail, notice=notice)
+            await record_ended(self.ctx, child, "error", detail=detail, notice=notice)
 
         try:
             await self._write_child(session_id, end)
@@ -2286,14 +2325,20 @@ class SubagentService:
         finally:
             sessions.dispose(session_id)
 
-    async def _abandon(self, run: SubagentRun) -> None:
-        """Release a child this seam has decided not to admit (K3).
+    async def _abandon(self, run: SubagentRun, why: str, *, tell_parent: bool) -> None:
+        """End and release a child this seam has decided not to admit (K3).
+
+        **Ended first, saying `why`, then released.** A provider's release tombstones
+        the child, and a tombstoned child takes no status after it (`_tombstoned`),
+        so an ending written second was refused. The release finds it ended and
+        writes no `canceled` over that.
 
         Best-effort: the refusal is what the caller has to see, and a disposer
         that throws must not replace it with its own exception. `releasing`
         rather than a bare shield for the reason it gives — a disposer that hangs
         must not make the refusal unkillable.
         """
+        await self._end_child(run.session_id, why, tell_parent=tell_parent)
         if run.dispose is None:
             return
         with releasing(), suppress(Exception):
@@ -2316,8 +2361,8 @@ class SubagentService:
         `_enforce` reads `run.scope`, which only the provider can produce, so the
         check cannot move ahead of the spawn — and by the time it refuses there
         is a child driving. Three things then have to happen and no two of them
-        are optional: the child is released, its admission is *ended* in the log,
-        and the refusal reaches the caller.
+        are optional: its admission is *ended* in the log, the child is released
+        (`_abandon` does both, in that order), and the refusal reaches the caller.
 
         `start` had all three and `_readmit_one` had none of them: it called
         `_enforce` bare, so a `check_grant` refusal after a profile edit left the
@@ -2389,8 +2434,9 @@ class SubagentService:
                     "own log, so it was not started"
                 )
         except SubagentSpawnError as refused:
-            await self._abandon(run)
-            await self._end_child(run.session_id, str(refused))
+            # A spawn's refusal is its caller's answer; a readmission has no caller,
+            # so its parent is told here, on the one ending the child gets.
+            await self._abandon(run, str(refused), tell_parent=not record)
             raise
         self._runs[run.id] = run
         return run

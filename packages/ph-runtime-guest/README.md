@@ -96,8 +96,10 @@ The OS does not do what one would hope: a parent's death does not kill its
 children (POSIX re-parents them to PID 1) and `atexit` never runs under
 `SIGKILL`. Each platform needs its own mechanism and only one is in the guest's
 gift — **Linux** sets `prctl(PR_SET_PDEATHSIG, SIGKILL)` here; **macOS** has no
-equivalent, so a daemon thread watches `os.getppid()` and `os._exit`s when it
-changes; **Windows** is the host's job, a Job Object with `KILL_ON_JOB_CLOSE`.
+equivalent, so a daemon thread waits on a kqueue exit event for the parent
+(`EVFILT_PROC` / `NOTE_EXIT`) and `os._exit`s when it arrives; **Windows** is
+the host's job, a Job Object with `KILL_ON_JOB_CLOSE`, and the host does not
+create one yet, so there the journal below is all there is.
 The host's orphan journal is the backstop for all three.
 
 ## Configuring it
@@ -116,8 +118,8 @@ nothing to guess and a changed default cannot mean two things at once.
     cpuSeconds: 30           # per cell, not per kernel — RLIMIT_CPU is re-armed each run
     addressSpaceBytes: 2147483648
     maxLogBytes: 65536       # per stream
-    maxValueBytes: 65536     # per snapshotted variable
-    maxSnapshotBytes: 16777216
+    maxValueBytes: 65536     # the value a cell returns
+    maxSnapshotBytes: 16777216   # per snapshotted variable
     skills: ["acme-websearch"]
 ```
 
@@ -141,12 +143,14 @@ the full row table.
 
 ## Limitations, and things that are deliberate
 
-- **The protocol is written twice and neither side imports the other.**
-  `ph_rlm.kernel.protocol` is the twin. What keeps them honest is
-  `packages/ph-rlm/tests/test_protocol_mirror.py`, which compares
-  `PROTOCOL_VERSION`, every frame's required and optional field set, and the
-  truncation marker byte for byte. **That test is the contract**; there is no
-  shared module to fall back on.
+- **The frames are written twice, and this package imports nothing of the
+  host's.** `ph_rlm.kernel.protocol` is the twin. Four constants are declared
+  once, here, and the host imports them: `PROTOCOL_VERSION`, `PROTOCOL_FD`,
+  `FD_ENV` and `NAMESPACE_ENV`. What keeps the rest honest is
+  `packages/ph-rlm/tests/test_protocol_mirror.py`, which checks that the host
+  does import those four, and compares every frame's required and optional
+  field set and the truncation marker byte for byte. **That test is the
+  contract**; the frame tables have no shared module to fall back on.
 - **A refusal is not catchable.** `ToolFailed` is the program's to handle — a
   timeout, a bad argument, a missing file — and catching it to try something
   else is exactly right. `RunStopped` derives from `BaseException` so

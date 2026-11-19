@@ -15,11 +15,12 @@ from __future__ import annotations
 import pytest
 
 from ph.cordis import Context
-from ph.keys import SESSIONS
+from ph.keys import AGENTS, SESSIONS
 from ph.seams.subagents import (
     ADMITTED,
     DELETED,
     SUSPENDED_DETAIL,
+    ChildNotice,
     child_is_live,
     child_state,
     record_deleted,
@@ -29,7 +30,15 @@ from ph.seams.subagents import (
     restarts_since_progress,
 )
 from ph.session import Session, SurfaceIntent
-from ph.testing import MountProfile, admitted_child, assistant_payload, log_event, stored_types
+from ph.testing import (
+    FAKE_OPTIONS,
+    MountProfile,
+    admitted_child,
+    assistant_payload,
+    log_event,
+    not_none,
+    stored_types,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -72,7 +81,7 @@ async def test_a_first_start_rides_the_next_flush(mount: MountProfile) -> None:
     ctx = await mount()
     child = _child(ctx)
 
-    event = await record_started(ctx, child)
+    event = not_none(await record_started(ctx, child))
 
     assert event.data == {"status": "running"}
     assert stored_types(ctx, child.id) == []
@@ -93,7 +102,7 @@ async def test_an_ending_is_on_the_childs_disk_before_the_result_is_handed_over(
     log_event(child, "turn/start", {"turn": 1})
     _answer(child, "42")
 
-    ended = await record_ended(ctx, child, "done", answerPreview="42")
+    ended = not_none(await record_ended(ctx, child, "done", answerPreview="42"))
 
     assert stored_types(ctx, child.id)[-2:] == ["assistant/message", "subagent/status"]
     assert ended.data == {"status": "done", "answerPreview": "42"}
@@ -204,6 +213,32 @@ async def test_a_child_is_tombstoned_once(mount: MountProfile) -> None:
     await record_deleted(ctx, child, "parent-teardown")
 
     assert [one.data["reason"] for one in child.events if one.type == DELETED] == ["not needed"]
+
+
+async def test_a_tombstoned_child_takes_no_more_statuses(mount: MountProfile) -> None:
+    """A revocation waits for the child's disk after it writes the tombstone, and a
+    drive that comes back inside that wait finds a child it may still write to. The
+    fold takes the last status it reads, so a `running` and a `done` written then made
+    a revoked child one that ran and finished, with a notice telling its parent so.
+    Each door refuses instead: nothing written, nobody told, and `None` for an answer.
+
+    Sabotage: drop the `_tombstoned` check from any one door, and its status is written.
+    """
+    ctx = await mount()
+    parent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("parent"), FAKE_OPTIONS)
+    child = _child(ctx)
+    await record_deleted(ctx, child, "not needed")
+    written = len(child.events)
+
+    record_waiting(child, detail=SUSPENDED_DETAIL)
+    assert await record_started(ctx, child) is None
+    notice = ChildNotice(text="[child scout finished]", summary="scout finished")
+    assert await record_ended(ctx, child, "done", notice=notice) is None
+
+    assert len(child.events) == written
+    state = child_state(child)
+    assert (state.deleted, state.status, state.starts) == (True, "canceled", 0)
+    assert not parent.inbox.has_pending
 
 
 async def test_a_log_with_no_admission_is_not_a_child(mount: MountProfile) -> None:
