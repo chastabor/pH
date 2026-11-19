@@ -367,10 +367,6 @@ class IntentJournal:
             for finding in cache.stale(live)
         ]
 
-    def forget(self, session_id: str) -> None:
-        for cache in self._indexes.values():
-            cache.forget(session_id)
-
     def _index(self, session: Session, kind: IntentKind) -> _Index:
         cache = self._indexes.get(kind)
         if cache is None:

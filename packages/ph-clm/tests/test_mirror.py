@@ -469,9 +469,9 @@ async def test_a_file_written_as_its_session_goes_is_not_left_behind(
 ) -> None:
     """A render whose session was let go while it wrote takes its file back.
 
-    The write runs on a thread, and `forget` — on `session/disposed` — can run while
-    it does: the render then recorded the file under a session nothing would forget
-    again, and the file stayed in the agent's scratch for good.
+    The write runs on a thread, and the session can be let go while it does: the
+    render then recorded the file under a session nothing would forget again, and
+    the file stayed in the agent's scratch for good.
 
     Sabotage: drop the check after the write in `render`, and the file is still
     there.

@@ -34,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from ph.session import Session, SessionTable
 from ph.text import thousands
 
 __all__ = ["Readouts", "Shares"]
@@ -93,10 +94,11 @@ class Shares:
 class Readouts:
     """Which thresholds each session's context has reached, and when that rises."""
 
-    _reached: dict[str, int] = field(default_factory=dict)
+    _reached: SessionTable[int] = field(default_factory=SessionTable)
+    """Per session, and gone with it."""
 
     def crossed(
-        self, session_id: str, shares: Shares, before: int, most: int, measure: Callable[[], int]
+        self, session: Session, shares: Shares, before: int, most: int, measure: Callable[[], int]
     ) -> int | None:
         """When a result takes the context from `before` tokens to at most `most`: the
         tokens after, if that reached a threshold this session had not; `None`
@@ -108,13 +110,10 @@ class Readouts:
         cross nothing.
         """
         floor = shares.reached(before)
-        known = self._reached.get(session_id, floor)
+        known = self._reached.get(session, floor)
         after = measure() if shares.reached(most) > floor else None
         level = floor if after is None else shares.reached(after)
-        self._reached[session_id] = level
+        self._reached.keep(session, level)
         if level <= known:
             return None
         return measure() if after is None else after
-
-    def forget(self, session_id: str) -> None:
-        self._reached.pop(session_id, None)

@@ -316,6 +316,13 @@ class SessionStore:
             return
         entry.unobserve()
         self.ctx.emit("session/disposed", entry.session)
+        # After the event, so a listener that reads the session's cached folds on
+        # its way out (`SubagentService._let_go`) still finds them.
+        for release in entry.session.mark_disposed():
+            try:
+                release(entry.session)
+            except Exception:
+                log.exception("ph.session: a release of session %s failed", session_id)
 
     async def flush(self, session: Session) -> None:
         """Await every backend's drain for this session — **ancestors first**.
@@ -717,5 +724,4 @@ async def apply(ctx: Context, config: None) -> None:
     ctx.provide(SESSIONS, sessions)
     journal = IntentJournal(sessions=sessions)
     ctx.provide(INTENTS, journal)
-    ctx.on("session/disposed", lambda session: journal.forget(session.id))
     contribute_fold_cache(ctx, id="intent-fold-cache", subject="intent index", stale=journal.stale)

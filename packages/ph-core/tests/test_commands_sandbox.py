@@ -199,7 +199,8 @@ async def test_a_sessions_refusal_count_goes_with_the_session(
     The fold cache kept one count per session it was ever asked about, for the life
     of the mount; nothing took a session out when the store let it go.
 
-    Sabotage: drop the `session/disposed` listener from the row, and the count stays.
+    Sabotage: drop the `mark_disposed` releases from `SessionStore.dispose`, and the
+    count stays.
     """
     made: list[Any] = []
     original = sandbox_command._Denials
@@ -215,8 +216,8 @@ async def test_a_sessions_refusal_count_goes_with_the_session(
     session = ctx.require(SESSIONS).create("s")
     denials.reading(session)
     assert denials.cache.stale([session]) == []
-    assert "s" in denials.cache._entries
+    assert len(denials.cache) == 1
 
     ctx.require(SESSIONS).dispose(session.id)
 
-    assert "s" not in denials.cache._entries
+    assert len(denials.cache) == 0

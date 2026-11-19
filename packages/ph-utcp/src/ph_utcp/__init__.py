@@ -370,9 +370,11 @@ class UtcpSeam:
     """The manuals that gave tools, by name — what a run is started from."""
     runs: dict[tuple[str, str], _Run] = field(default_factory=dict)
     """The run going for each tree, by manual and the id of the tree's owner."""
-    warmed: set[tuple[str, str]] = field(default_factory=set)
-    """The trees, by manual and owner, whose tools have been run unasked once.
-    Once: the next step would only index the tree again for nobody."""
+    warmed: dict[tuple[str, str], Releaser] = field(default_factory=dict)
+    """The trees, by manual and owner, whose tools have been run unasked once, each
+    with what takes the mark back as its owner goes (`_warm`). Once: the next step
+    would only index the tree again for nobody. A manual that goes takes its marks
+    and drops what would have taken them back (`add`'s `forget`)."""
 
     # ----------------------------------------------------------- registering --
 
@@ -416,7 +418,8 @@ class UtcpSeam:
             del self.states[name]
             del self._forgets[name]
             self.manuals.pop(name, None)
-            self.warmed = {key for key in self.warmed if key[0] != name}
+            for key in [key for key in self.warmed if key[0] == name]:
+                self.warmed.pop(key).drop()
             for key in [key for key in self.runs if key[0] == name]:
                 job = self.runs.pop(key).job
                 if job is not None:
@@ -934,12 +937,27 @@ class UtcpSeam:
                     continue
                 if (name, agent.id) in self.warmed:
                     continue
-                self.warmed.add((name, agent.id))
+                self._warm(name, agent)
                 if (name, agent.id) not in self.runs:
                     await self._start(
                         name, manual, agent, [(tool, {}) for tool in background.tools]
                     )
         return await next_()
+
+    def _warm(self, name: str, agent: AgentHandle) -> None:
+        """Mark a tree warmed, for as long as its owner lives.
+
+        The mark is the agent's and goes with it: kept past that, the table held one
+        per root agent the process ever stepped. One holding (Holdings rule 1): the
+        take-back is registered, then the mark written, and a manual that goes first
+        drops it unrun.
+        """
+        key = (name, agent.id)
+
+        def take_back() -> None:
+            del self.warmed[key]
+
+        self.warmed[key] = agent.ctx.add_disposer(take_back, label="utcp-warmed")
 
     # ------------------------------------------------------------- the tool --
 

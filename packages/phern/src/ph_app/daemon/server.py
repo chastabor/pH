@@ -1064,10 +1064,8 @@ class _Connection:
         follower like `phern agents attach` watches without ever declaring it and
         is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
 
-        **Subscribed on every attach** (D3): `attached` is by id, and a root released
-        and mounted again is a new object. Guarded on the id, a connection that had
-        attached to the first was never subscribed to the second. A set add needs no
-        guard.
+        **Subscribed on every attach** (D3), into the audience of the root's id,
+        which every mount of that id shares (`Audience`). A set add needs no guard.
         """
         self.attached.add(root.id)
         root.subscribe(self.notify)
@@ -1085,17 +1083,13 @@ class _Connection:
         `serve`'s teardown had the whole triple, and only because the TUI closes
         the socket right after detaching.
 
-        Through `holder` (D8): during a restart the root is out of the table, and the
-        detach reaches the one being replaced rather than nothing — after which the
-        restart would have moved this connection to the new root.
+        By id, as it attached (`Supervisor.part`, D8): the audience is the id's, so a
+        detach lands whether a root is mounted under it or a restart is between
+        unmounting one and mounting the next.
         """
         was_attached = root_id in self.attached
         self.attached.discard(root_id)
-        root = self.server.supervisor.holder(root_id)
-        if root is not None:
-            root.unsubscribe(self.notify)
-            if root.desk is not None:
-                root.desk.leave(self)
+        self.server.supervisor.part(root_id, self.notify, self)
         return was_attached
 
     async def _detach(self, params: SessionParams) -> SessionDetached:

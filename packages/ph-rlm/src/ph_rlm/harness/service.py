@@ -51,6 +51,7 @@ from ph.session import (
     IntentNotDurable,
     Session,
     SessionFoldCache,
+    SessionTable,
     intents_of,
     session_written,
 )
@@ -129,17 +130,11 @@ class HarnessService:
     """`$PH_HOME/harness` — the global log and the human-facing projection."""
     _local: SessionFoldCache[HarnessState] = field(default_factory=local_fold_cache)
     _global_cache: tuple[int, HarnessState] | None = None
-    _merged: dict[str, tuple[HarnessState, HarnessState, HarnessState]] = field(
-        default_factory=dict
+    _merged: SessionTable[tuple[HarnessState, HarnessState, HarnessState]] = field(
+        default_factory=SessionTable
     )
     """Per session: `(local, global, merged)` — the memo `state()` reads through. Let
-    go with the session (`forget`)."""
-
-    def forget(self, session_id: str) -> None:
-        """A session left the store: its memo and its fold go with it, or the mount
-        kept one of each per session it was ever asked about."""
-        self._merged.pop(session_id, None)
-        self._local.forget(session_id)
+    go with the session, as `_local` is."""
 
     # ------------------------------------------------------------------ read --
 
@@ -188,11 +183,11 @@ class HarnessService:
         if session is None:
             return world
         local = self.local(session)
-        memo = self._merged.get(session.id)
+        memo = self._merged.get(session)
         if memo is not None and memo[0] is local and memo[1] is world:
             return memo[2]
         merged = local.merged_with(world)
-        self._merged[session.id] = (local, world, merged)
+        self._merged.keep(session, (local, world, merged))
         return merged
 
     # -------------------------------------------------------------- validate --

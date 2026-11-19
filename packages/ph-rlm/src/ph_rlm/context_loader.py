@@ -60,7 +60,7 @@ from ph.cordis import Context, plugin
 from ph.json import JsonObject, as_str
 from ph.keys import FS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ContentBlock
-from ph.session import Session
+from ph.session import Session, SessionTable
 from ph.session.writers import log_writer
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ph.tools import ToolModel, define_tool, text_content
@@ -399,11 +399,11 @@ class ContextService:
     """The service published as `ctx.context_corpus`."""
 
     corpus: Corpus
-    _notes: dict[str, str] = field(default_factory=dict)
+    _notes: SessionTable[str] = field(default_factory=SessionTable)
     """Per session id: the note settled at first announce. The log stays the
     durable answer — a resume re-reads it through `session.latest` — this only
     stops every prompt assembly from re-asking a question whose answer cannot
-    change while this mount lives."""
+    change while this mount lives. Gone with the session."""
     _rendered: dict[str, str] = field(default_factory=dict)
     """Per note: the rendered manifest, which is otherwise rebuilt every step."""
 
@@ -425,14 +425,12 @@ class ContextService:
         """
         if session is None:
             return ""
-        cached = self._notes.get(session.id)
+        cached = self._notes.get(session)
         if cached is not None:
             return cached
         previous = session.latest(LOADED)
         if previous is not None and as_str(previous.data.get("digest")) == self.corpus.digest:
-            note = as_str(previous.data.get("note"))
-            self._notes[session.id] = note
-            return note
+            return self._notes.keep(session, as_str(previous.data.get("note")))
 
         note = ""
         if previous is not None:
@@ -461,8 +459,7 @@ class ContextService:
                 "note": note,
             },
         )
-        self._notes[session.id] = note
-        return note
+        return self._notes.keep(session, note)
 
 
 class SearchArgs(ToolModel):
@@ -540,8 +537,6 @@ async def apply(ctx: Context, config: Config) -> None:
 
     service = ContextService(corpus=corpus)
     ctx.provide(CONTEXT_CORPUS, service)
-    # A session's settled note goes with it (`ContextService._notes`).
-    ctx.on("session/disposed", lambda session: service._notes.pop(session.id, None))
 
     def search(args: SearchArgs, _run: object) -> dict[str, Any]:
         return corpus.search(

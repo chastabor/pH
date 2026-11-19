@@ -472,16 +472,25 @@ async def test_a_forgotten_manual_is_warmed_again_when_it_comes_back(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """Forgetting a manual cancels the runs it started, so that they were started
-    goes with them: the manual added again starts its eager run again."""
+    goes with them: the manual added again starts its eager run again. And what
+    would have taken the mark back as its agent went is dropped from the agent
+    (Holdings rule 3), not left to run against a mark that is gone.
+
+    Sabotage: pop the mark in `forget` without `drop()`, and its take-back stays.
+    """
     ctx = await mount(_row())
     seam = ctx.require(UTCP)
     row = ctx.scope("a-row-with-a-manual")
     await seam.add(Manual.model_validate(_manual(tmp_path)), scope=row)
-    seam.warmed.update({("fx", "an-agent"), ("another", "an-agent")})
+    agent = new_agent(ctx)
+    seam._warm("fx", agent)
+    seam._warm("another", agent)
 
     await row.dispose()
 
-    assert seam.warmed == {("another", "an-agent")}
+    assert set(seam.warmed) == {("another", agent.id)}
+    taking_back = [one for one in agent.ctx._effects if one.label == "utcp-warmed"]
+    assert len(taking_back) == 1, "the forgotten manual's take-back stayed on its agent"
 
 
 # ----------------------------------------------------------------- confined --

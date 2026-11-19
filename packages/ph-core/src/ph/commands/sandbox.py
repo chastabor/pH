@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -282,15 +282,6 @@ class _Denials:
         default_factory=lambda: SessionFoldCache(denial_count, extend=extend_denial_count)
     )
 
-    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
-        """Cached refusal counts that no longer equal their fold (I6).
-
-        The lightest of the six folds and still worth polling: this number is the
-        footer's account of how much the sandbox refused, and a count that drifted
-        down is the reassuring direction to drift.
-        """
-        return self.cache.stale(sessions)
-
     def reading(self, session: Session) -> StatusReading | None:
         denied = self.cache.read(session)
         if denied == 0:
@@ -331,15 +322,17 @@ async def apply(ctx: Context, config: None) -> None:
         scope=ctx,
     )
     denials = _Denials()
-    # A session's count goes with the session, or the cache kept one per session it
-    # was ever asked about, for the life of the mount.
-    ctx.on("session/disposed", lambda session: denials.cache.forget(session.id))
     contribute_item(
         ctx,
         TUI_STATUS,
         StatusField(id="sandbox", read=denials.reading, order=12),
         label="sandbox(status)",
     )
+    # The lightest of the six folds and still worth polling: this number is the
+    # footer's account of how much the sandbox refused, and a count that drifted
+    # down is the reassuring direction to drift. Declared, the count also goes with
+    # its session, and the footer drawn once more for a session that has gone files
+    # nothing.
     contribute_fold_cache(
-        ctx, id="sandbox-fold-cache", subject="sandbox refusal count", stale=denials.stale_folds
+        ctx, id="sandbox-fold-cache", subject="sandbox refusal count", stale=denials.cache.stale
     )

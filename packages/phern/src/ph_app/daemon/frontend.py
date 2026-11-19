@@ -106,24 +106,14 @@ class AskDesk:
     """The answerers a root registers, and the front ends they reach."""
 
     root: Root
-    front_ends: set[FrontEnd] = field(default_factory=set)
     asks: dict[str, PendingAsk] = field(default_factory=dict)
-    asked: int = 0
-    """How many asks this desk has named. The next is `ask-<asked + 1>`.
 
-    The desk names each ask itself, because nothing the seams hand it is unique.
-    The Continual Harness's `refine` approvals have no call id, which leaves only
-    the tool name, and a question's `ask_id` is whatever its caller passed. Two
-    asks under one name shared an entry in `asks`: the first to finish took the
-    other's with it, and the root read as idle while still parked on a person.
-
-    Unique within this root only, and on purpose: a root is self-contained and
-    coordinates with no other. Every ask frame and `ask.settled` carries the root's
-    `sessionId`, so a front end attached to two roots files an ask by both
-    (`AskKey`, each frame's `key`). A root started again has a new desk, counting
-    from 1 again. That is safe because `Supervisor.passivatable` never releases a
-    root with a front end attached, and a front end that loses the daemon takes its
-    own modals down."""
+    @property
+    def front_ends(self) -> set[FrontEnd]:
+        """The attached connections that can answer. The id's, not this desk's
+        (`Audience.front_ends`): a root started again has a new desk, and whoever
+        was answering for the last one is answering for this one."""
+        return self.root.audience.front_ends
 
     # ------------------------------------------------------------- wiring --
 
@@ -171,9 +161,6 @@ class AskDesk:
         for pending in list(self.asks.values()):
             if pending.tasks is not None:
                 pending.tasks.start_soon(self._deliver, who, pending)
-
-    def leave(self, who: FrontEnd) -> None:
-        self.front_ends.discard(who)
 
     @property
     def waiting(self) -> bool:
@@ -283,8 +270,9 @@ class AskDesk:
     # ------------------------------------------------------------ the ask --
 
     def _name(self) -> str:
-        self.asked += 1
-        return f"ask-{self.asked}"
+        audience = self.root.audience
+        audience.asked += 1
+        return f"ask-{audience.asked}"
 
     async def _ask(self, ask: ApprovalAsk | QuestionAsk | ProfileAsk) -> dict[str, Any]:
         """Put one question to every front end and wait for the first answer.

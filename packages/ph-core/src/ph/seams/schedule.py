@@ -391,19 +391,6 @@ class ScheduleService:
         """Every schedule this log knows about, folded at most once per append."""
         return self._states.read(session)
 
-    def forget_session(self, session_id: str) -> None:
-        """Drop what this service cached about one session."""
-        self._states.forget(session_id)
-
-    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
-        """Cached schedule tables that no longer equal their fold (I6).
-
-        Asked of the cache rather than reconstructed here. A drifted table is how
-        a canceled schedule keeps firing, or a live one stops being claimed —
-        both silent, because the log would still say the right thing.
-        """
-        return self._states.stale(sessions)
-
     def create(self, session: Session, schedule: Schedule) -> Schedule:
         """Record a schedule. It is live from the moment the event lands.
 
@@ -606,15 +593,15 @@ async def apply(ctx: Context, config: Config) -> None:
     index = IndexWriter(ScheduleIndex(resolve_roots().home), ctx) if config.index else None
     service = ScheduleService(index=index)
     ctx.provide(SCHEDULE, service)
-    # The cache is bounded by live sessions, and this is what makes that true —
-    # the same line `subagents` uses for the same reason.
-    ctx.on("session/disposed", lambda session: service.forget_session(session.id))
     # Opening a session reconciles its entry (P6-23, I-6): one left stale by a
     # tick or a cancel whose write was lost corrects itself here. An index that
     # cannot vouch for itself is a daemon's to rebuild (`rebuild_index`, S18). The
     # write is skipped when nothing moved, so the ordinary open costs a fold the
     # cache already has.
     ctx.on("session/created", lambda session: service.reindex(session))
+    # A drifted table is how a canceled schedule keeps firing, or a live one stops
+    # being claimed — both silent, because the log would still say the right thing.
+    # Declaring the cache is also what bounds it by live sessions.
     contribute_fold_cache(
-        ctx, id="schedule-fold-cache", subject="schedule table", stale=service.stale_folds
+        ctx, id="schedule-fold-cache", subject="schedule table", stale=service._states.stale
     )

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from functools import cache
 
@@ -30,7 +30,9 @@ __all__ = [
     "REPO",
     "ParsedModule",
     "import_base",
+    "own_nodes",
     "parsed_modules",
+    "qualified",
     "workspace_modules",
     "workspace_packages",
     "workspace_tests",
@@ -117,3 +119,33 @@ def import_base(module: str, is_package: bool, node: ast.ImportFrom) -> str:
     parts = package.split(".")
     parts = parts[: len(parts) - (node.level - 1)]
     return ".".join([*parts, base] if base else parts)
+
+
+def qualified(tree: ast.Module) -> Iterator[tuple[str, ast.AST]]:
+    """Every function and class in a module, with its dotted name.
+
+    One walker for the gates whose tables are keyed `module:Class.function`
+    (`test_holdings.py`, `test_session_tables.py`), so the names the tables are
+    written in cannot come apart.
+    """
+
+    def walk(node: ast.AST, path: tuple[str, ...]) -> Iterator[tuple[str, ast.AST]]:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                inner = (*path, child.name)
+                yield ".".join(inner), child
+                yield from walk(child, inner)
+            else:
+                yield from walk(child, path)
+
+    yield from walk(tree, ())
+
+
+def own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """The nodes of one function or module, lambdas included, not those of the
+    functions and classes it defines: what that scope's own code does."""
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+        yield child
+        yield from own_nodes(child)

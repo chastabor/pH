@@ -325,7 +325,7 @@ def test_a_node_added_and_shadowed_since_the_reply_counts_neither_way() -> None:
     assert meter.baseline(session).tokens == 1_050 + meter.measure(_summary("short"))
 
 
-def test_each_node_is_estimated_once_and_forgotten_with_its_session() -> None:
+def test_each_node_is_estimated_once() -> None:
     """Every check until the next response asks about the same nodes; a long result
     is tokenized once."""
     measured: list[int] = []
@@ -344,10 +344,6 @@ def test_each_node_is_estimated_once_and_forgotten_with_its_session() -> None:
     assert meter.baseline(session).tokens == first
     assert len(measured) == 1
 
-    meter.forget(session.id)
-    meter.baseline(session)
-    assert len(measured) == 2
-
 
 async def test_the_mounted_meter_forgets_a_disposed_session(mount: MountProfile) -> None:
     """The estimates `baseline` keeps are let go when the session leaves the store,
@@ -358,21 +354,22 @@ async def test_the_mounted_meter_forgets_a_disposed_session(mount: MountProfile)
     _counted(session)
     log_event(session, "user/message", user_payload("z" * 400, "m3"), SurfaceIntent("append"))
     meter.baseline(session)
-    assert session.id in meter._nodes
+    assert session in meter._nodes
 
     ctx.require(SESSIONS).dispose(session.id)
 
-    assert session.id not in meter._nodes
+    assert session not in meter._nodes
 
 
 async def test_a_read_after_the_session_left_keeps_nothing(mount: MountProfile) -> None:
     """A reader still holding a session the store let go does not put it back.
 
-    `forget` runs on `session/disposed`, and `node_tokens` made the session's table
-    again on the next read — a status line drawn once more, a check finishing — so
-    the entry outlived the session for good.
+    The estimates went on `session/disposed`, and `node_tokens` made the session's
+    table again on the next read — a status line drawn once more, a check finishing
+    — so the entry outlived the session for good.
 
-    Sabotage: `setdefault` in `node_tokens` again, and the session is back.
+    Sabotage: `SessionTable.keep` filing whatever it is handed, and the session is
+    back.
     """
     ctx = await mount()
     meter = ctx.require(TOKEN_METER)
@@ -384,7 +381,7 @@ async def test_a_read_after_the_session_left_keeps_nothing(mount: MountProfile) 
 
     first = meter.baseline(session).tokens
 
-    assert session.id not in meter._nodes
+    assert session not in meter._nodes
     assert meter.baseline(session).tokens == first, "still answered, from a fresh count"
 
 

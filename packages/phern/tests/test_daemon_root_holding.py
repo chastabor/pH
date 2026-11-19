@@ -115,16 +115,17 @@ async def test_a_turn_that_fails_after_its_root_left_takes_no_ladder(
     assert "supervisor/retry" not in [event.type for event in root.session.events]
 
 
-async def test_a_restart_moves_its_watchers_rather_than_copying_them(
+async def test_what_a_replaced_root_still_says_reaches_nobody(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """D1, D8. What the old root still says after a restart reaches nobody.
 
     The watchers were copied to the successor and left on the old root, so anything
     the old root published afterwards — a ladder's `retrying`, a `failed` — reached
-    the watchers of the live root under the same id.
+    the watchers of the live root under the same id. They are the id's now
+    (`Audience`), and a root leaves its id's audience as its unmount ends.
 
-    Sabotage: copy without clearing, and the old root's notice is heard.
+    Sabotage: leave the unmounted root its audience, and its notice is heard.
     """
     async with supervised(tmp_path, monkeypatch) as supervisor:
         old = await supervisor.start("r")
@@ -132,7 +133,7 @@ async def test_a_restart_moves_its_watchers_rather_than_copying_them(
         old.subscribe(lambda _method, payload: heard.append(payload.get("status")))
         back = await supervisor.restart(old)
         assert back is not None and back is not old
-        assert len(back.subscribers) == 1, "the watcher moved"
+        assert len(back.subscribers) == 1, "whoever was attached is watching the new root"
         old.publish(SessionStatusNotice(session_id="r", status="failed"))
     assert "failed" not in heard, "the old root still reaches its successor's watchers"
 
@@ -197,14 +198,16 @@ async def test_attaching_again_after_a_release_watches_the_new_root(tmp_path: Pa
 async def test_a_watcher_that_leaves_during_a_restart_is_not_moved_to_the_new_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D8. A detach during a restart reaches the root being replaced.
+    """D8. A detach during a restart lands, though no root is under the id.
 
     `_part` looked the root up by id, and a restart has taken it out of the table
     until the new one is whole: the detach found nothing, and the restart then
     moved the departed connection to the new root, which it held mounted for a
-    watcher that had left.
+    watcher that had left. A connection parts from its id's audience now
+    (`Supervisor.part`), which is there whether a root is or not.
 
-    Sabotage: look up `roots` alone in `_part`, and the new root has a watcher.
+    Sabotage: have `part` do nothing unless a root is mounted, and the new root
+    has a watcher.
     """
     async with running(tmp_path) as daemon:
         client = await daemon.client()
@@ -220,6 +223,124 @@ async def test_a_watcher_that_leaves_during_a_restart_is_not_moved_to_the_new_ro
             release.set()
         await until(lambda: daemon.holds("r") and daemon.held("r") is not old, what="the restart")
         assert not daemon.held("r").subscribers, "the departed watcher was moved"
+
+
+# ------------------------------------------- the audience: the id's, not a root's --
+
+
+async def test_a_restarted_root_has_what_its_watchers_had(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tray and the ask count are the id's, as the watchers are.
+
+    A restart used to copy each onto the new root by hand, so a field added to one
+    side was a field to remember on the other. The new root reads its id's
+    audience, and there is nothing to carry.
+
+    Sabotage: hand each `Root` an `Audience()` of its own in `_start`, and the new
+    root has none of it.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        old = await supervisor.start("r")
+        heard: list[Any] = []
+
+        def watcher(_method: str, payload: dict[str, Any]) -> None:
+            heard.append(payload)
+
+        old.subscribe(watcher)
+        tray = old.staged
+        old.audience.asked = 3
+
+        back = await supervisor.restart(old)
+
+        assert back is not None and back is not old
+        assert back.subscribers == {watcher}
+        assert back.staged is tray
+        assert back.audience.asked == 3
+
+
+async def test_watchers_of_a_restart_that_failed_hear_the_next_mount(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart that does not come back tells whoever is attached, and leaves them
+    attached to the id: the next mount of it is theirs to hear.
+
+    They used to be cleared off the dead root, while each connection still held the
+    id as attached, so a prompt that mounted the root again ran in front of nobody.
+
+    Sabotage: clear the audience's subscribers where the restart fails, and the new
+    root has no watcher.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        old = await supervisor.start("r")
+        heard: list[Any] = []
+
+        def watcher(_method: str, payload: dict[str, Any]) -> None:
+            heard.append(payload.get("status"))
+
+        old.subscribe(watcher)
+        starting = Supervisor._start
+
+        async def refused(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+            raise RuntimeError("the profile would not mount")
+
+        monkeypatch.setattr(Supervisor, "_start", refused)
+        assert await supervisor.restart(old) is None
+        assert "failed" in heard
+        assert "r" not in supervisor.roots and "r" in supervisor.audiences
+
+        monkeypatch.setattr(Supervisor, "_start", starting)
+        again = await supervisor.start("r")
+
+        assert again.subscribers == {watcher}
+
+
+async def test_an_audience_goes_with_the_last_of_what_held_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`Supervisor.audiences` is by id and outlives a root, so each thing that can be
+    the last to hold one lets it go: a root unmounted with nobody attached, a mount
+    that failed, and the last watcher of an id nothing is mounted under.
+
+    Sabotage: make `_unattended` do nothing, and all three are left in the table.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        quiet = await supervisor.start("quiet")
+        assert "quiet" in supervisor.audiences
+        await supervisor.passivate(quiet, now=now_ms())
+        assert "quiet" not in supervisor.audiences, "released with nobody attached"
+
+        checking = Supervisor._check_credential
+
+        async def refused(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("the build failed after the root was made")
+
+        monkeypatch.setattr(Supervisor, "_check_credential", refused)
+        with pytest.raises(RuntimeError, match="the build failed"):
+            await supervisor.start("never")
+        assert "never" not in supervisor.audiences, "a mount that failed"
+        monkeypatch.setattr(Supervisor, "_check_credential", checking)
+
+        watched = await supervisor.start("watched")
+
+        def watcher(_method: str, _payload: dict[str, Any]) -> None:
+            return None
+
+        front_end: Any = object()
+        watched.subscribe(watcher)
+        watched.audience.front_ends.add(front_end)
+        starting = Supervisor._start
+
+        async def will_not(*_args: Any, **_kwargs: Any) -> Any:  # noqa: ANN401
+            raise RuntimeError("the profile would not mount")
+
+        monkeypatch.setattr(Supervisor, "_start", will_not)
+        assert await supervisor.restart(watched) is None
+        monkeypatch.setattr(Supervisor, "_start", starting)
+        assert "watched" in supervisor.audiences, "still attached, to an id with no root"
+        supervisor.part("watched", watcher, front_end)
+        assert "watched" not in supervisor.audiences, "the last watcher left"
+        assert supervisor.audiences == {}
 
 
 # -------------------------------------------------- D4: release, decided --

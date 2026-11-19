@@ -64,7 +64,7 @@ of it.
 |---|---|
 | Packages | 9 (`phern`, `ph-core`, `ph-rlm`, `ph-runtime-guest`, `ph-stabilize`, `ph-clm`, `ph-utcp`, `ph-text-index`, `ph-code-graph`) |
 | Source | ~126 000 lines |
-| Tests | 4 690 collected |
+| Tests | 4 711 collected |
 | Registered plugins | 110 across the `ph.plugins` entry-point group |
 | Installable bundles | 6 (`rlm`, `stabilize`, `clm`, `utcp`, `code-graph`, `text-index`) via `ph.bundles` |
 | Base profile | 61 rows (`ph/bundles/base.yaml`) |
@@ -412,6 +412,42 @@ The same rules cover a record of an ending. What says a thing is over is written
 at its one ending door, and the door drops whatever teardown would have said so
 later: a deleted sub-agent has no revocation left on its parent's scope, and a job
 its owner released is not canceled when the service unwinds.
+
+#### Per-session tables: what a row keeps for each session
+
+A row that remembers something for each session it is asked about (a cached fold,
+the files it wrote, a count it reached) holds one entry per session, and the
+session leaving the store is that entry's door. Each row used to write the door by
+hand, a `ctx.on("session/disposed", ...)` that popped its own dict, and it went
+wrong two ways. One row never subscribed, so it kept an entry for every session of
+its mount's life, which in a long-lived root is one per child it ever ran. And a
+row that did subscribe was read once more after the event (a status line drawn
+again, another listener of the same disposal) and filed the entry again, with
+nothing left to forget it.
+
+`ph.session.SessionTable` is the standard for both, and **the session is its
+scope**. Filing an entry asks the session to release it when its store lets it go
+(`Session.when_disposed`, run by `SessionStore.dispose` after `session/disposed`
+is told, so a listener reading a cached fold on the way out still finds it).
+Whatever the entry stood for goes through the same door (`released`, which the
+context mirror uses to delete a session's files). A session that has already gone
+says so, and `keep` files nothing for it while handing the value back, so a late
+read is answered and nothing is kept. A table needs no context and no declaring:
+one built anywhere is bounded by the sessions it holds. It is keyed by the session
+object, since a log opened twice in one process is two sessions under one id. A
+session no store ever held is never let go, and keeps its entries as long as it
+lives, which is what a test building sessions by hand wants.
+
+A `SessionFoldCache` keeps its entries in one, so every fold cache is bounded the
+same way with nothing for its row to write.
+
+`tests/test_session_tables.py` holds the tree to this from both sides. It reads
+every package for a hand-written `session/disposed` listener, and each one says
+why what it forgets is not a table (state meant to outlive its session, state not
+keyed by one session). And for every shipped profile that boots without a key it
+runs a turn, lets the session go, reads it once more, and looks through what the
+process holds for anything still keyed by it, so a plain dict nobody forgets is
+caught the same as a table.
 
 > **That ordering is load-bearing and is a real constraint on plugin authors.**
 > An effect registered *about* a child runs **after** that child's scope is
@@ -1146,7 +1182,21 @@ mount unwound, and **then its task ended**. After the release, so a turn a shutd
 cut stays open on disk for the next daemon's resumer, and nothing the ended task
 writes reaches a log or a watcher. A restart is a mount like any other, run on the
 supervisor's task group: a client that disconnects mid-restart does not leave the
-root gone, and its watchers are moved to the new root rather than copied.
+root gone.
+
+**Who is attached belongs to the id, not to the root.** A connection attaches to a
+session id, and a root is one mount of it: released and mounted again, or
+restarted on a new profile, it is a new object under the same id. So the watchers,
+the front ends that answer for a person, the composer's tray and the count that
+names each ask are kept per id (`Supervisor.audiences`, an `Audience` each), and
+every mount of an id reads the same one. A restart has nothing to carry, a detach
+during one lands whether or not a root is in the map, and a restart that fails
+leaves its watchers attached to hear the next mount. A root leaves its id's
+audience as its unmount ends, so nothing it says afterwards reaches the next
+mount's watchers. A watcher leaves the one way, `Audience.drop`, whether it
+detached or could not be told, and the last one leaving is what lets the root be
+released. The audience itself lasts while somebody is attached or the id has a
+root, mounted or on its way, and leaves by one door (`_unattended`).
 
 **The retry ladder** is three delays `(0.25, 1.0, 5.0)`; the fourth consecutive
 crash gives up. Its state is **folded from the log, not remembered** — and

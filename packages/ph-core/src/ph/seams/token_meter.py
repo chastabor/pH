@@ -33,7 +33,7 @@ from typing import Any, assert_never
 from pydantic import ValidationError
 
 from ..cordis import Context, plugin
-from ..keys import SESSIONS, TOKEN_METER, TUI_STATUS
+from ..keys import TOKEN_METER, TUI_STATUS
 from ..llm.types import (
     AttachmentRef,
     MediaBlock,
@@ -45,7 +45,7 @@ from ..llm.types import (
     ToolResultBlock,
     text_of,
 )
-from ..session import Session, SessionEvent, derive_event_message, shadowed_by
+from ..session import Session, SessionEvent, SessionTable, derive_event_message, shadowed_by
 from ..text import thousands
 from ._registry import contribute_item
 from .tui_status import StatusField, StatusReading
@@ -136,10 +136,11 @@ class TokenMeter:
     ctx: Context
     _encoder: Any = None
     _encoder_tried: bool = False
-    _nodes: dict[str, dict[int, int]] = field(default_factory=dict)
+    _nodes: SessionTable[dict[int, int]] = field(default_factory=SessionTable)
     """Each surface node's estimate, by session id and seq (`node_tokens`): a node's
     event never changes, so neither does its estimate, and a long result is tokenized
-    once — not on every check until the next response, nor again by each reader."""
+    once — not on every check until the next response, nor again by each reader.
+    Kept only for a session the store holds, and gone with it."""
 
     def _encode(self, text: str) -> int:
         if not self._encoder_tried:
@@ -211,10 +212,6 @@ class TokenMeter:
         """
         found = session.projection("assistant/message", _reported_at)
         return None if found is None else found[1]
-
-    def forget(self, session_id: str) -> None:
-        """A session left the store: its node estimates go with it."""
-        self._nodes.pop(session_id, None)
 
     def reasoning_reading(self, session: Session) -> StatusReading | None:
         """What the route asks the model to spend on thinking, or nothing.
@@ -350,15 +347,10 @@ class TokenMeter:
         baseline, a section map, a context edit pricing what it replaces — and kept
         for the session's life, since a node's event never changes. `0` for a node
         that projects to no message."""
-        known = self._nodes.get(session.id)
-        if known is None:
-            known = {}
-            # Kept only for a session the store still holds: `forget` ran on
-            # `session/disposed`, and a reader still holding the session — a status
-            # line drawn once more — put it back for good.
-            store = None if self.ctx is None else self.ctx.get(SESSIONS)
-            if store is None or store.get(session.id) is session:
-                self._nodes[session.id] = known
+        # Kept only for a session the store still holds: a reader still holding one
+        # that has gone — a status line drawn once more — is answered and files
+        # nothing (`ph.session.tables`).
+        known = self._nodes.setdefault(session, dict)
         tokens = known.get(seq)
         if tokens is None:
             event = session.at(seq)
@@ -423,7 +415,6 @@ async def apply(ctx: Context, config: None) -> None:
     """Mount the token meter, and the one reading it can answer for a footer."""
     meter = TokenMeter(ctx=ctx)
     ctx.provide(TOKEN_METER, meter)
-    ctx.on("session/disposed", lambda session: meter.forget(session.id))
     # `contribute_item` rather than an `inject`, for `diagnostics`' reason: this
     # row must activate in a profile that mounts no front end at all, and a
     # dependency on `ctx.tui_status` would make the meter — which compaction

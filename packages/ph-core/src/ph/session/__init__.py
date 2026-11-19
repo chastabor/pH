@@ -21,7 +21,7 @@ from .events import (
     is_surface_eligible_type,
     now_ms,
 )
-from .folds import SessionFoldCache, SessionLog
+from .folds import SessionFoldCache
 from .intents import (
     UNSETTLED,
     Barrier,
@@ -119,6 +119,7 @@ from .surface import (
     is_surface_event,
     shadowed_by,
 )
+from .tables import SessionTable
 
 __all__ = [
     "AUDIT_ONLY_SESSION_EVENT_TYPES",
@@ -155,9 +156,9 @@ __all__ = [
     "SessionForkError",
     "SessionHeader",
     "SessionKind",
-    "SessionLog",
     "SessionObserver",
     "SessionStore",
+    "SessionTable",
     "SettledBy",
     "SurfaceError",
     "SurfaceFoldReplacement",

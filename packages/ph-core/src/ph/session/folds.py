@@ -44,33 +44,22 @@ drifted rather than that one did.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Any, Protocol
+from typing import Any
 
-__all__ = ["SessionFoldCache", "SessionLog"]
+from .session import Session
+from .tables import SessionTable
 
-
-class SessionLog(Protocol):
-    """What a fold cache needs of a log: an identity and a length.
-
-    Exported, unlike the `_Log` it was: `ph.testing.VerifyingFoldCache` subclasses
-    `SessionFoldCache` from another package and has to name this to override
-    `read` — which it could not, so it widened the parameter to `Any` instead. A
-    Protocol a subclass must spell is not private."""
-
-    @property
-    def id(self) -> str: ...
-
-    @property
-    def seq(self) -> int: ...
+__all__ = ["SessionFoldCache"]
 
 
 class SessionFoldCache[T]:
     """One cached fold per session, recomputed only when the log grew.
 
     Bounded by live sessions rather than by history: an entry is *replaced*, not
-    accumulated, so a million-event session holds one value. `forget` is for a
-    consumer that also tracks session disposal and would rather not keep the last
-    projection of a session nobody can reach.
+    accumulated, so a million-event session holds one value. And by live sessions
+    in the store's sense: the entries are a `SessionTable`, so a session the store
+    lets go takes its entry, and a read of one that has already gone is answered
+    without being filed.
     """
 
     __slots__ = ("_compute", "_entries", "_extend")
@@ -83,9 +72,9 @@ class SessionFoldCache[T]:
     ) -> None:
         self._compute = compute
         self._extend = extend
-        self._entries: dict[str, tuple[int, T]] = {}
+        self._entries: SessionTable[tuple[int, T]] = SessionTable()
 
-    def read(self, session: SessionLog) -> T:
+    def read(self, session: Session) -> T:
         """The fold over this session, folded at most once per appended event.
 
         With `extend`, a miss folds only the new slice: `session.seq` bumps on
@@ -96,17 +85,17 @@ class SessionFoldCache[T]:
         prefix: extending the fold of a prefix must equal folding the whole log.
         Without it a miss refolds from zero, which is still correct.
         """
-        cached = self._entries.get(session.id)
+        cached = self._entries.get(session)
         if cached is not None and cached[0] == session.seq:
             return cached[1]
         if cached is not None and self._extend is not None and session.seq > cached[0]:
             value = self._extend(cached[1], session, cached[0])
         else:
             value = self._compute(session)
-        self._entries[session.id] = (session.seq, value)
+        self._entries.keep(session, (session.seq, value))
         return value
 
-    def stale(self, sessions: Iterable[SessionLog]) -> list[str]:
+    def stale(self, sessions: Iterable[Session]) -> list[str]:
         """Every cached answer that no longer equals the fold of its log (I6).
 
         Here rather than in the invariant row that declares it, for
@@ -129,7 +118,7 @@ class SessionFoldCache[T]:
         """
         found: list[str] = []
         for session in sessions:
-            cached = self._entries.get(session.id)
+            cached = self._entries.get(session)
             if cached is None or cached[0] != session.seq:
                 continue
             fresh = self._compute(session)
@@ -140,8 +129,9 @@ class SessionFoldCache[T]:
                 )
         return found
 
-    def forget(self, session_id: str) -> None:
-        self._entries.pop(session_id, None)
+    def forget(self, session: Session) -> None:
+        self._entries.forget(session)
 
-    def clear(self) -> None:
-        self._entries.clear()
+    def __len__(self) -> int:
+        """How many sessions have a cached answer."""
+        return len(self._entries)

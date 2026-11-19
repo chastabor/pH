@@ -1536,7 +1536,7 @@ async def test_a_turn_ending_lets_the_root_go(
 async def test_the_last_watcher_leaving_lets_the_root_go(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Sabotage: drop `recheck()` from `Root.unsubscribe`, and the root stays."""
+    """Sabotage: drop `emptied()` from `Audience.drop`, and the root stays."""
     async with _releasing(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("watched")
 
@@ -1546,7 +1546,7 @@ async def test_the_last_watcher_leaving_lets_the_root_go(
         root.subscribe(watcher)
         await _still_mounted(supervisor, "watched")
 
-        root.unsubscribe(watcher)
+        root.audience.drop(watcher)
         await _released(supervisor, "watched")
 
 

@@ -482,6 +482,9 @@ async def apply(ctx: Context, config: Config) -> None:
     # is built. It has the strongest claim of the six to being polled: this fold
     # is the only thing standing between a looping agent and an unbounded run, and
     # every way it could drift drifts *low* — the direction that stops refusing.
+    # Declaring it is also what lets a session's counts go with the session: this
+    # row never subscribed to `session/disposed`, and kept them for every child a
+    # long-lived root ever ran.
     contribute_fold_cache(ctx, id="limits-fold-cache", subject="limit count", stale=counts.stale)
 
     # ------------------------------------------------------- model calls --

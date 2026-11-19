@@ -146,6 +146,28 @@ Throwing the `Releaser` away says nothing but your scope's unwind ends the thing
 and `tests/test_holdings.py` will ask you to say why. The four rules are in
 `DESIGN.md` §2.5, "Holdings".
 
+### What you keep per session
+
+If the row remembers something for each session, keep it in a
+`ph.session.SessionTable` and not in a dict you forget from by hand:
+
+```python
+seen: SessionTable[int] = SessionTable()
+
+
+def count(session: Session) -> int:
+    return seen.keep(session, seen.get(session, 0) + 1)
+```
+
+The entry goes when the store lets the session go, and `keep` files nothing for a
+session that has already gone, so a late read cannot put it back. There is nothing
+to wire: the session is the table's scope. Pass `released=` when an entry stands
+for something else that must go with it (files, a handle). A fold over the log is
+a `SessionFoldCache`, which keeps its entries in one. A
+`ctx.on("session/disposed", ...)` of your own will be asked by
+`tests/test_session_tables.py` why neither fits (`DESIGN.md` §2.5, "Per-session
+tables").
+
 ## Who is running matters
 
 Registrations record *who* made them (P6-12, P6-29). A body the seam invokes

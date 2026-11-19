@@ -62,7 +62,7 @@ from __future__ import annotations
 import os
 import re
 import stat
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -73,13 +73,13 @@ import anyio
 
 from ph.agent.types import AgentHandle, RequestProposal
 from ph.cordis import Context, Next, plugin
-from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.keys import SYSTEM_PROMPT, TOOLS
 from ph.llm.types import LlmCallConfig, TextBlock, ToolCallBlock, ToolResultBlock
 from ph.locks import KeyedLocks
 from ph.paths import write_atomic
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.workspace import scratch_of
-from ph.session import Session, SessionFoldCache, derive_event_message
+from ph.session import Session, SessionFoldCache, SessionTable, derive_event_message
 from ph.session.writers import log_writer
 from ph.system_prompt.assembly import ORDER_TOOL_GUIDANCE, AssembleContext, PromptSection
 from ph.text import one_line, thousands
@@ -379,15 +379,17 @@ class MirrorService:
     ctx: Context
     editor: Editor
     _shown: SessionFoldCache[dict[int, Shown]] = field(init=False)
-    _written: dict[str, dict[Path, tuple[int, int]]] = field(default_factory=dict)
+    _written: SessionTable[dict[Path, tuple[int, int]]] = field(init=False)
     """Each session's files, by session id, with the `(mtime_ns, size)` this process
     last wrote each at: a call that left a file alone costs an `lstat`, not a parse;
-    a file not here is not this process's; and these are what `forget` deletes."""
+    a file not here is not this process's; and these are what go with the session
+    (`_remove_all`, as the store lets it go)."""
     _locks: KeyedLocks[Path] = field(default_factory=KeyedLocks)
     """One use of a context file at a time, held only while somebody uses it."""
 
     def __post_init__(self) -> None:
         self._shown = SessionFoldCache(self.fold, extend=self.extend)
+        self._written = SessionTable(released=_remove_all)
 
     def fold(self, session: Session) -> dict[int, Shown]:
         return self.extend({}, session, 0)
@@ -414,10 +416,6 @@ class MirrorService:
             )
         return known
 
-    def stale(self, sessions: Iterable[Session]) -> list[str]:
-        """The fold cache's own drift check, for its invariant row."""
-        return self._shown.stale(sessions)
-
     def blocks(self, session: Session) -> list[Block]:
         """Every section as the file shows it now."""
         shown = self._shown.read(session)
@@ -437,7 +435,7 @@ class MirrorService:
         """
         path = self.path(session, agent)
         async with self._lock(path):
-            written = self._written.get(session.id, {}).get(path)
+            written = self._written.get(session, {}).get(path)
             if written is not None and _signature(path) not in (written, None):
                 _decline(session, "outside", None, OUTSIDE)
             return await self.render(session, agent)
@@ -446,19 +444,18 @@ class MirrorService:
         """Write the file for the surface as it stands.
 
         **Only for a session the store still holds.** The write runs on a thread, and
-        `forget` — on `session/disposed` — can run while it does: recorded after that,
-        the file was kept under a session nothing would forget again, and stayed in
-        the agent's scratch. It is taken back instead (Holdings rule 4: the record and
-        the file are one holding, and `forget` was its door out).
+        the session can be let go while it does: recorded after that, the file was
+        kept under a session nothing would forget again, and stayed in the agent's
+        scratch. It is taken back instead (Holdings rule 4: the record and the file
+        are one holding, and the session leaving was its door out).
         """
         path = self.path(session, agent)
         text = render(session, self.editor.sections(session), self._shown.read(session))
         written = await anyio.to_thread.run_sync(partial(_write, path, text))
-        if self.ctx.require(SESSIONS).get(session.id) is not session:
-            self._shown.forget(session.id)
+        if session.disposed:
             await anyio.to_thread.run_sync(partial(_remove, path))
             return path
-        self._written.setdefault(session.id, {})[path] = written
+        self._written.setdefault(session, dict)[path] = written
         return path
 
     async def read_back(
@@ -472,7 +469,7 @@ class MirrorService:
             found = _signature(path)
             if found is None:
                 return None
-            written = self._written.get(session.id, {}).get(path)
+            written = self._written.get(session, {}).get(path)
             if written is None:
                 # Not this process's: a leftover from before a restart, possibly half
                 # written by a call the log shows interrupted. Rewritten, never
@@ -492,20 +489,10 @@ class MirrorService:
                     "context as it stands; edit it again.]"
                 )
             if not revisions:
-                self._written[session.id][path] = found
+                self._written.setdefault(session, dict)[path] = found
                 return None
             await self.render(session, agent)
             return f"[context file applied. {receipt(revisions)}]"
-
-    def forget(self, session_id: str) -> None:
-        """A session left the store: its files go, and everything kept about them.
-
-        Synchronous, because `session/disposed` is: an `unlink` and an `rmdir` per agent.
-        A directory something else wrote into stays.
-        """
-        for path in self._written.pop(session_id, {}):
-            _remove(path)
-        self._shown.forget(session_id)
 
     def _lock(self, path: Path) -> AbstractAsyncContextManager[None]:
         return self._locks.hold(path)
@@ -559,7 +546,7 @@ async def apply(ctx: Context, config: None) -> None:
     service = MirrorService(ctx=ctx, editor=ctx.require(CLM))
     ctx.provide(CLM_MIRROR, service)
     contribute_fold_cache(
-        ctx, id="clm-mirror-text", subject="context file text", stale=service.stale
+        ctx, id="clm-mirror-text", subject="context file text", stale=service._shown.stale
     )
 
     async def before_request(
@@ -591,7 +578,6 @@ async def apply(ctx: Context, config: None) -> None:
 
     ctx.on("agent/request", before_request)
     ctx.on("tools/post-execute", after_call)
-    ctx.on("session/disposed", lambda session: service.forget(session.id))
 
     def section(request: AssembleContext) -> str:
         agent, session = request.agent, request.session
@@ -612,6 +598,16 @@ def _remove(path: Path) -> None:
     path.unlink(missing_ok=True)
     with suppress(OSError):
         path.parent.rmdir()
+
+
+def _remove_all(files: dict[Path, tuple[int, int]]) -> None:
+    """A session's context files, as its record of them goes.
+
+    Synchronous, because the store's disposal is: an `unlink` and an `rmdir` per agent.
+    A directory something else wrote into stays.
+    """
+    for path in files:
+        _remove(path)
 
 
 def _write(path: Path, text: str) -> tuple[int, int]:

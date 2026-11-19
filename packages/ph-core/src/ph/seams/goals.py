@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Literal, TypeAlias
 
@@ -346,18 +346,6 @@ class GoalService:
     def states(self, session: Session) -> dict[str, GoalState]:
         return self._states.read(session)
 
-    def forget_session(self, session_id: str) -> None:
-        self._states.forget(session_id)
-
-    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
-        """Cached goal tables that no longer equal their fold (I6).
-
-        Asked of the cache rather than reconstructed here, and worth polling
-        because this fold is the one that decides when a run has spent its budget:
-        a table that drifted low hands an autonomous loop turns it already used.
-        """
-        return self._states.stale(sessions)
-
     def open(self, session: Session) -> GoalState | None:
         """The goal still being worked on, if there is one."""
         return open_goal(self.states(session))
@@ -426,7 +414,9 @@ async def apply(ctx: Context, config: None) -> None:
     """Publish `ctx.goals`."""
     service = GoalService(ctx=ctx)
     ctx.provide(GOALS, service)
-    ctx.on("session/disposed", lambda session: service.forget_session(session.id))
+    # Worth polling because this fold is the one that decides when a run has spent
+    # its budget: a table that drifted low hands an autonomous loop turns it
+    # already used.
     contribute_fold_cache(
-        ctx, id="goal-fold-cache", subject="goal table", stale=service.stale_folds
+        ctx, id="goal-fold-cache", subject="goal table", stale=service._states.stale
     )

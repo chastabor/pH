@@ -278,6 +278,7 @@ class Session:
         "_latest",
         "_log",
         "_observers",
+        "_on_disposed",
         "_publishing",
         "_revisions",
         "_surface",
@@ -298,6 +299,9 @@ class Session:
         self._surface = SurfaceManager(self._log)
         self._events_snapshot: tuple[SessionEvent, ...] | None = None
         self._observers: tuple[SessionObserver, ...] = ()
+        self._on_disposed: dict[Callable[[Session], None], None] | None = {}
+        """What waits for the store to let this session go (`when_disposed`), in the
+        order it asked; `None` once it has. A dict, so one callback asks once."""
         self._publishing = False
         self._batch: SessionBatch | None = None
         """The batch whose block is open, if any — one at a time, and the only one
@@ -445,6 +449,31 @@ class Session:
     @property
     def surface(self) -> SurfaceManager:
         return self._surface
+
+    @property
+    def disposed(self) -> bool:
+        """Whether the store that held this session has let it go."""
+        return self._on_disposed is None
+
+    def when_disposed(self, callback: Callable[[Session], None]) -> bool:
+        """Have `callback(self)` run once, when the store holding this session lets it
+        go (`SessionStore.dispose`). `False`, and nothing kept, once it has.
+
+        The session is the scope of what a row keeps about it (`SessionTable`), so
+        the release rides the session rather than the row: a table needs no context
+        to follow, and asking a second time is one registration, not two.
+        """
+        if self._on_disposed is None:
+            return False
+        self._on_disposed[callback] = None
+        return True
+
+    def mark_disposed(self) -> tuple[Callable[[Session], None], ...]:
+        """Record that the store has let this session go, and hand back what was
+        waiting for that, for the store to run. Only `SessionStore.dispose` calls it."""
+        waiting = tuple(self._on_disposed or ())
+        self._on_disposed = None
+        return waiting
 
     def observe(self, observer: SessionObserver) -> Callable[[], None]:
         """Subscribe to the post-commit append feed.

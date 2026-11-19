@@ -25,8 +25,10 @@ fails again under sabotage (`phern/tests/test_daemon_root_holding.py`,
 `Supervisor.roots` as its build's last step and leaves by one door, `_unmount` (out
 of the table, wake closed, released, then its task ended — after the release, so a
 turn a shutdown cut stays open on disk); a restart is a mount on the supervisor's
-task group; watchers are moved, not copied; `_join` subscribes on every attach and
-`_part` finds a root mid-restart through `Supervisor.holder`. DESIGN.md §5.4 says so.
+task group; `_join` subscribes on every attach. Who is attached is kept per session
+id since the follow-up below (`Supervisor.audiences`), which replaced moving the
+watchers on a restart and finding a root mid-restart through `Supervisor.holder`.
+DESIGN.md §5.4 says so.
 
 ## 2. Sub-agents (`ph-core/src/ph/seams/subagents.py`, `ph-rlm/src/ph_rlm/subagents.py`) — done 2026-11-19
 
@@ -102,3 +104,53 @@ taken back: the snapshot policy and the python skills' lists on `PythonCodeRunti
   `InactiveScopeError`.
 - A kernel closed for good refuses `run` with `KernelDied`.
 - An rpc session whose children sweep failed is not served until a prompt sweeps again.
+
+## After the plan: two of the skipped cleanups — done 2026-11-19
+
+Both were listed as skipped by the `/simplify` pass and taken up afterwards.
+
+**Per-session tables are a standard** (DESIGN.md §2.5, "Per-session tables").
+`ph.session.SessionTable` takes the session as its scope: filing an entry asks the
+session to release it when the store lets it go (`Session.when_disposed`, run by
+`SessionStore.dispose`), and nothing is filed for a session that has gone. It needs
+no context, and it is keyed by the session object. `SessionFoldCache` keeps its
+entries in one. Ten hand-written `session/disposed` listeners became tables (goals,
+schedule, sandbox refusals, the intent journal, the clm section map, readouts and
+mirror, the token meter, the rlm context loader and harness, session telemetry);
+three stay hand-written and say why in the gate (`tests/test_session_tables.py`).
+Found on the way and fixed: `ph_stabilize.limits` kept its counts for every session
+of its mount's life; every fold cache filed an entry again when read after its
+session had gone; `UtcpSeam.warmed` kept a mark per root agent ever stepped (now a
+kept `Releaser` per mark, dropped by the manual's `forget`). The gate's second half
+runs a turn in every shipped profile that boots without a key, lets the session
+go, reads it once more and searches what the process holds for anything keyed by
+it.
+
+**Who is attached is kept per session id** (DESIGN.md §5.4). `Supervisor.audiences`
+holds an `Audience` per id: watchers, answering front ends, the composer's tray and
+the ask count. A root reads its id's audience, so `_carry`, `Supervisor.holder` and
+`_Mounting.replacing` are gone, and `AskDesk.leave` with them; a connection parts
+through `Supervisor.part`, and a watcher leaves only through `Audience.drop`, which
+replaced `Root.unsubscribe` and `Root.unwatched`. Tests in
+`phern/tests/test_daemon_root_holding.py`.
+
+### Behavior changes from these two
+
+- `SessionFoldCache.forget` takes the session, not its id, and `SessionFoldCache.clear`
+  and the `SessionLog` protocol are gone (the cache reads a `Session`).
+- Gone, since each table now forgets by itself: `TokenMeter.forget`,
+  `MirrorService.forget` and `stale`, `SectionMap.forget`, `Readouts.forget`,
+  `HarnessService.forget`, `IntentJournal.forget`, `ScheduleService.forget_session`,
+  `GoalService.forget_session`, and the pass-through `stale_folds` on `GoalService`,
+  `ScheduleService`, `SubagentService` and `_Denials` (each row hands its cache's
+  `stale` to `contribute_fold_cache` directly). `SubagentService.forget_session`
+  no longer touches the fold cache.
+- `Readouts.crossed` takes the session, not its id.
+- `UtcpSeam.warmed` is a `dict` of each mark to the `Releaser` that takes it back.
+- `Root.unsubscribe` and `Root.unwatched` are gone; `AskDesk.asked` is gone (the
+  count is `Audience.asked`).
+- Watchers of a restart that fails are told `failed` and stay attached to the id;
+  they hear the next mount of it. They used to be dropped.
+- Watchers hear nothing an unmounted root says after its unmount ends.
+- The ask count goes on across a root started again while anybody is attached; it
+  restarted at 1 with each new desk except across a restart.

@@ -155,7 +155,7 @@ from ..runtime import mount_session, open_root, read_start
 from ..sessions import RecordedStart, not_a_root
 from ..shell import run_shell
 from .cards import CARD_EVENTS, presentation_of
-from .frontend import AskDesk
+from .frontend import AskDesk, FrontEnd
 from .planner import Planner
 from .profile_command import profile_command
 from .projections import commands_of, family_of, family_rows, readings_of, screens_of
@@ -236,13 +236,6 @@ class _Mounting:
 
     done: anyio.Event = field(default_factory=anyio.Event)
     root: Root | None = None
-    replacing: Root | None = None
-    """The root a restart is replacing (`Supervisor.restart`), `None` for a mount.
-
-    Out of the table from the moment it is unmounted and until its successor is
-    whole, and still the root a connection attached to its id is watching: a detach
-    in that window reaches it here (`Supervisor.holder`), rather than finding
-    nothing and having the restart move the departed watcher to the new root."""
     error: Exception | None = None
     """What the mount raised, re-raised into every caller waiting on it. A
     cancellation is not stored: it leaves through the task group, and the waiters
@@ -409,6 +402,106 @@ long as *some* wake reaches an idle task — the message itself is already in th
 agent's inbox and on disk."""
 
 Subscriber = Callable[[str, dict[str, Any]], None]
+
+
+def _nothing() -> None:
+    """The default for a callback nobody wired: `Supervisor.recheck_lifetime` on a
+    supervisor no server watches, `Root.recheck` on a root no supervisor started,
+    `Audience.emptied` on an audience no supervisor made."""
+
+
+@dataclass(slots=True, eq=False)
+class Audience:
+    """Who is attached to one session id, and what they share between them.
+
+    **Kept by id, not by root.** A connection attaches to an id, and a root is one
+    mount of it: released and mounted again, or restarted on a new profile, it is a
+    new object under the same id. While these lived on the root, each of those was
+    a hand-off somebody had to write and keep whole — a restart copied the watchers,
+    the tray, the desk's count and its front ends one by one, a detach during it had
+    to be pointed at the root being replaced, and a field added here was a field to
+    remember there. Held by id (`Supervisor.audiences`), a root reads the audience
+    of its id and a restart has nothing to carry.
+
+    **It lives while somebody is attached or its id has a root**, mounted or on its
+    way, and `Supervisor._unattended` is the one door it leaves by: asked when its
+    last watcher goes (`emptied`), when a root is unmounted, and when a mount
+    settles either way.
+    """
+
+    subscribers: set[Subscriber] = field(default_factory=set)
+    """Attached connections. A set of bound methods, which compare by
+    `(__self__, __func__)`, so attaching and detaching are symmetric without a
+    token table to keep in step."""
+    front_ends: set[FrontEnd] = field(default_factory=set)
+    """The attached connections that can answer for a person (`AskDesk`)."""
+    staged: Tray = field(default_factory=Tray)
+    """Attachments waiting for the next prompt — **the composer's tray, shared.**
+
+    Not in the log, and the distinction is the same one the private-composer rule
+    draws: text nobody has sent is not an act in the session, and neither is a
+    file nobody has sent. What makes it *shared* rather than per-client is that
+    the person who dropped a PNG on a browser tab and the person watching a
+    terminal are looking at one conversation, and a chip only one of them can see
+    is a composer the other cannot reason about.
+
+    Rule 6, said out loud: **this does not survive the daemon.** A root released
+    when it goes quiet, or a daemon that exits, loses the staging — while the *blob*
+    remains in the store, because `attachment/put` wrote it. So the cost of the
+    loss is re-dropping the file, not re-finding it, and nothing durable is
+    hiding here.
+    """
+    asked: int = 0
+    """How many asks have been named under this id. The next is `ask-<asked + 1>`.
+
+    `AskDesk` names each ask itself, because nothing the seams hand it is unique.
+    The Continual Harness's `refine` approvals have no call id, which leaves only
+    the tool name, and a question's `ask_id` is whatever its caller passed. Two asks
+    under one name shared an entry in the desk's `asks`: the first to finish took
+    the other's with it, and the root read as idle while still parked on a person.
+
+    Unique within this id only, and on purpose: a root is self-contained and
+    coordinates with no other. Every ask frame and `ask.settled` carries the root's
+    `sessionId`, so a front end attached to two roots files an ask by both
+    (`AskKey`, each frame's `key`). Here and not on the desk, which is a mount's: a
+    root started again that counted from 1 could meet a front end still filing an
+    ask under that name."""
+    emptied: Callable[[], None] = _nothing
+    """Say that the last watcher left, which may let the root go and the audience
+    with it. `Supervisor` wires it when it makes the audience."""
+
+    def drop(self, subscriber: Subscriber) -> None:
+        """Stop telling `subscriber`, and say so when nobody is left. The one way a
+        watcher leaves: a detach, and a watcher that could not be told."""
+        self.subscribers.discard(subscriber)
+        if not self.subscribers:
+            self.emptied()
+
+    def publish(self, notice: SessionNotice) -> None:
+        """Tell every watcher. A failing subscriber is dropped, not raised.
+
+        A client whose socket died — or one that cannot keep up — must not take the root
+        down with it, which is the inversion this row exists to prevent. Dropping happens
+        *here*, where the subscriber list is, so the policy has one owner.
+
+        The notice carries the name it travels under (`SessionNotice.METHOD`), so
+        the method and its payload cannot disagree — they were two arguments at
+        eight call sites with nothing checking they matched.
+        """
+        # Dumped **once**, above the loop, and the same dict handed to every
+        # watcher — which is what the hand-built payload did before it became a
+        # model. Inside the loop it was a re-serialize per subscriber: measured
+        # 3.70 / 5.00 / 6.26 ms for one turn at 1 / 3 / 5 watchers against a flat
+        # 3.7 hoisted. A fan-out must not be linear in the fan.
+        wire = notice.to_wire()
+        for subscriber in list(self.subscribers):
+            try:
+                subscriber(notice.METHOD, wire)
+            except Exception:
+                log.debug("ph_app.daemon: dropping a watcher that could not be told")
+                self.drop(subscriber)
+
+
 """`(event_name, payload)` — how a connection hears about a root it watches."""
 
 
@@ -431,11 +524,6 @@ class _FamilyFeed:
     due: bool = False
     """A push is scheduled and has not run yet: what coalesces a burst — a batch's
     `canceled` and its tombstone, eight children settling in one step — into one."""
-
-
-def _nothing() -> None:
-    """The default for a callback nobody wired: `Supervisor.recheck_lifetime` on a
-    supervisor no server watches, `Root.recheck` on a root no supervisor started."""
 
 
 @dataclass(slots=True)
@@ -480,26 +568,10 @@ class Root:
     `sessions/list`, and a whole-log scan per read puts that on the daemon's event
     loop. The commands a root already ran are the journal's index now
     (`CLIENT_COMMAND`), which is cached and extended rather than scanned."""
-    subscribers: set[Subscriber] = field(default_factory=set)
-    """Attached connections. A set of bound methods, which compare by
-    `(__self__, __func__)`, so attaching and detaching are symmetric without a
-    token table to keep in step."""
-    staged: Tray = field(default_factory=Tray)
-    """Attachments waiting for the next prompt — **the composer's tray, shared.**
-
-    Not in the log, and the distinction is the same one the private-composer rule
-    draws: text nobody has sent is not an act in the session, and neither is a
-    file nobody has sent. What makes it *shared* rather than per-client is that
-    the person who dropped a PNG on a browser tab and the person watching a
-    terminal are looking at one conversation, and a chip only one of them can see
-    is a composer the other cannot reason about.
-
-    Rule 6, said out loud: **this does not survive the daemon.** A root released
-    when it goes quiet, or a daemon that exits, loses the staging — while the *blob*
-    remains in the store, because `attachment/put` wrote it. So the cost of the
-    loss is re-dropping the file, not re-finding it, and nothing durable is
-    hiding here.
-    """
+    audience: Audience = field(default_factory=Audience)
+    """Who is attached to this root's id and what they share: the id's, which the
+    supervisor hands each mount of it (`Supervisor.audiences`). A root built by hand
+    has one of its own."""
     desk: AskDesk | None = None
     """This root's `AskDesk` — who gets asked when a turn needs a person (P5-13).
 
@@ -548,11 +620,6 @@ class Root:
     a person reads `waiting`), and the ladder ending either way (`failed`, or
     `recovered` back to `idle`). Without it each of those waited for some unrelated
     event to be noticed, which is what a sixty-second sweep used to cover for."""
-    unwatched: Callable[[], None] = _nothing
-    """Say that this root's last watcher left, which lets it be released. Not a
-    `recheck`: watchers are no term of what holds the daemon, so asking that again
-    (and possibly reading the schedule index to answer) would change nothing.
-    `Supervisor.start` points it at the releaser's notice."""
 
     @property
     def held(self) -> bool:
@@ -587,37 +654,22 @@ class Root:
         with suppress(anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
             self.wake.send_nowait(None)
 
+    @property
+    def subscribers(self) -> set[Subscriber]:
+        """The connections attached to this root's id (`Audience.subscribers`)."""
+        return self.audience.subscribers
+
+    @property
+    def staged(self) -> Tray:
+        """The composer's tray this root's watchers share (`Audience.staged`)."""
+        return self.audience.staged
+
     def subscribe(self, subscriber: Subscriber) -> None:
         self.subscribers.add(subscriber)
 
-    def unsubscribe(self, subscriber: Subscriber) -> None:
-        self.subscribers.discard(subscriber)
-        if not self.subscribers:
-            self.unwatched()
-
     def publish(self, notice: SessionNotice) -> None:
-        """Tell every watcher. A failing subscriber is dropped, not raised.
-
-        A client whose socket died — or one that cannot keep up — must not take the root
-        down with it, which is the inversion this row exists to prevent. Dropping happens
-        *here*, where the subscriber list is, so the policy has one owner.
-
-        The notice carries the name it travels under (`SessionNotice.METHOD`), so
-        the method and its payload cannot disagree — they were two arguments at
-        eight call sites with nothing checking they matched.
-        """
-        # Dumped **once**, above the loop, and the same dict handed to every
-        # watcher — which is what the hand-built payload did before it became a
-        # model. Inside the loop it was a re-serialize per subscriber: measured
-        # 3.70 / 5.00 / 6.26 ms for one turn at 1 / 3 / 5 watchers against a flat
-        # 3.7 hoisted. A fan-out must not be linear in the fan.
-        wire = notice.to_wire()
-        for subscriber in list(self.subscribers):
-            try:
-                subscriber(notice.METHOD, wire)
-            except Exception:
-                log.debug("ph_app.daemon: dropping a watcher of root %s", self.id)
-                self.unsubscribe(subscriber)
+        """Tell every watcher of this root's id (`Audience.publish`)."""
+        self.audience.publish(notice)
 
     @property
     def status(self) -> str:
@@ -1058,6 +1110,9 @@ class Supervisor:
     ask for. On for a deployment where nobody is — a fleet of roots driven only
     over the wire, where every prompt is a client's."""
     roots: dict[str, Root] = field(default_factory=dict)
+    audiences: dict[str, Audience] = field(default_factory=dict)
+    """Who is attached to each session id, and what they share (`Audience`). By id,
+    so every mount of an id reads the same one; emptied by `_unattended`."""
     recheck_lifetime: Callable[[], None] = _nothing
     """Say that what holds the *daemon* may have moved — `serve` points this at
     `DaemonServer.check_lifetime` (P9-06, P9-07).
@@ -1307,6 +1362,9 @@ class Supervisor:
         are woken."""
         if root_id is not None and self._mounting.get(root_id) is pending:
             del self._mounting[root_id]
+            # A mount that failed, or a restart that did, leaves no root under the
+            # id: its audience goes too, unless somebody is still attached.
+            self._unattended(root_id)
         self._in_flight.discard(pending)
         pending.done.set()
 
@@ -1378,7 +1436,15 @@ class Supervisor:
                 wake=wake,
                 waiting=waiting,
                 exits=exits,
+                # The id's, not this mount's: whoever attached to an earlier mount
+                # of it is watching this one, with the tray and the ask count they
+                # had (`Audience`).
+                audience=self._audience(session.id),
             )
+            # Nothing from here to the table may leave the audience behind for a
+            # root that never was (Holdings rule 1): one that somebody is attached
+            # to stays, and an empty one goes.
+            exits.callback(self._unattended, session.id)
             # The one thing standing between a gated tool call and a person
             # (P5-13). Registered here rather than by a row: the answerers are
             # this *deployment's* front-end channel, not a capability a profile
@@ -1387,7 +1453,6 @@ class Supervisor:
             for dispose in root.desk.attach():
                 exits.callback(dispose)
             root.recheck = self._recheck
-            root.unwatched = self.releaser.notice
 
             def woken(agent_: object) -> None:
                 """A message that asks this root to run reached its inbox (P13-05).
@@ -1867,9 +1932,11 @@ class Supervisor:
         What a "yes" to a moved profile does, and `/profile use` (S7): the new base is
         in the log, and a start is where a base takes effect, so the root is unmounted
         as a passivation would — without the passivation's record, since it did not go
-        quiet — and mounted again. Its watchers and answerers move to the new root,
-        which a connection finds by id, and are told what changed: the route, the
-        verbs and the screens are the new mount's. A prompt still in the inbox is rung by `_start`.
+        quiet — and mounted again. Whoever is attached stays attached: the audience
+        is the id's (`Audience`), so the new root has its watchers, its answerers,
+        its tray and its ask count from the moment it is built, and they are told
+        what changed: the route, the verbs and the screens are the new mount's. A
+        prompt still in the inbox is rung by `_start`.
         An adopted version that will not mount is withdrawn by `_start`, so the root
         comes back on what it ran in, and its log says why (`profile/withdrawn`).
         Returns the new root, or `None` when it did not start at all.
@@ -1878,15 +1945,15 @@ class Supervisor:
         runs on `self.tasks` under a `_Mounting` record, and this only waits for it.
         Run on the caller's task, a client that disconnected mid-restart canceled it
         between the unmount and the mount, and the root was gone from the table with
-        nothing said and its watchers left on a dead root. The record is also what a
-        `start` of this id waits on meanwhile, and what a detach finds the old root
-        by (`holder`). A second restart of the same root joins the first.
+        nothing said. The record is also what a `start` of this id waits on
+        meanwhile, and what keeps the id's audience while no root is under it. A
+        second restart of the same root joins the first.
         """
         pending = self._mounting.get(root.id)
         if pending is None:
             if self._closing or not self._holds(root):
                 return None
-            pending = _Mounting(replacing=root)
+            pending = _Mounting()
             self._in_flight.add(pending)
             self._mounting[root.id] = pending
             self.tasks.start_soon(self._remount, root, pending)
@@ -1895,7 +1962,7 @@ class Supervisor:
 
     async def _remount(self, root: Root, pending: _Mounting) -> None:
         """`restart`'s work, on the supervisor's task: unmount `root`, mount its log
-        again, and hand the new root what the old one's watchers had."""
+        again, and tell whoever is attached what the new mount changed."""
         try:
             async with self._starting:
                 if not self._holds(root):
@@ -1907,54 +1974,63 @@ class Supervisor:
                     log.exception(
                         "ph_app.daemon: root %s did not start again on its new profile", root.id
                     )
-                    # Its watchers are still on it, so the old root can say so; then
-                    # they are let go, since nothing of it is left to watch.
-                    root.publish(SessionStatusNotice(session_id=root.id, status="failed"))
-                    root.subscribers.clear()
+                    # Said to the id's audience, which the unmounted root has left.
+                    # They stay attached to the id: there is nothing mounted to
+                    # watch, and whatever is mounted under it next is theirs to hear.
+                    audience = self.audiences.get(root.id)
+                    if audience is not None:
+                        audience.publish(SessionStatusNotice(session_id=root.id, status="failed"))
                     pending.error = error
                     return
-                # Before anything is awaited: `back` is in the table, and a detach
-                # now finds it there rather than the root it replaced.
-                self._carry(root, back)
+                back.publish(back.status_notice())
+                back.publish(SessionCommandsNotice(session_id=back.id, commands=commands_of(back)))
+                back.publish(SessionScreensNotice(session_id=back.id, screens=screens_of(back)))
                 pending.root = back
         finally:
             self._settled(root.id, pending)
 
-    def _carry(self, old: Root, back: Root) -> None:
-        """Move what a restarted root's watchers had onto its successor (Holdings
-        rule 3): moved, not copied, so nothing the old root says afterwards reaches
-        the new root's watchers (D1).
+    def part(self, root_id: str, watcher: Subscriber, front_end: FrontEnd) -> None:
+        """A connection stops watching `root_id`, and stops answering for it.
 
-        The composer's tray and the desk's count go too: a chip dropped while it was
-        held is still staged, and an ask numbered again from 1 could meet a front
-        end still filing one under that name (`AskDesk.asked`). Then every watcher is
-        told what changed: the route, the verbs and the screens are the new mount's.
+        By id, as it attached: whether a root is mounted under it, being restarted,
+        or gone, the audience is where the connection is, so there is no window in
+        which a detach finds nothing and the watcher is left behind (D8).
         """
-        for watcher in old.subscribers:
-            back.subscribe(watcher)
-        old.subscribers.clear()
-        back.staged = old.staged
-        if back.desk is not None and old.desk is not None:
-            back.desk.asked = old.desk.asked
-            for who in old.desk.front_ends:
-                back.desk.join(who)
-        back.publish(back.status_notice())
-        back.publish(SessionCommandsNotice(session_id=back.id, commands=commands_of(back)))
-        back.publish(SessionScreensNotice(session_id=back.id, screens=screens_of(back)))
+        audience = self.audiences.get(root_id)
+        if audience is None:
+            return
+        audience.front_ends.discard(front_end)
+        audience.drop(watcher)
+
+    def _audience(self, root_id: str) -> Audience:
+        """`root_id`'s audience, made if there is none. Its last watcher leaving is
+        news twice: a root nobody watches may be released (not a `recheck` — watchers
+        are no term of what holds the daemon), and an audience nothing holds goes."""
+        audience = self.audiences.get(root_id)
+        if audience is None:
+            audience = self.audiences[root_id] = Audience()
+            audience.emptied = partial(self._emptied, root_id)
+        return audience
+
+    def _emptied(self, root_id: str) -> None:
+        self.releaser.notice()
+        self._unattended(root_id)
+
+    def _unattended(self, root_id: str) -> None:
+        """Let `root_id`'s audience go once nothing is left of it: nobody attached,
+        no root under the id, and no mount of it on its way. The one door an
+        audience leaves by (Holdings rule 2), asked by each thing that could have
+        been the last to hold it."""
+        audience = self.audiences.get(root_id)
+        if audience is None or audience.subscribers or audience.front_ends:
+            return
+        if root_id in self.roots or root_id in self._mounting:
+            return
+        del self.audiences[root_id]
 
     def _holds(self, root: Root) -> bool:
         """Whether `root` is the one this supervisor holds under its id."""
         return self.roots.get(root.id) is root
-
-    def holder(self, root_id: str) -> Root | None:
-        """The root a connection attached to `root_id` is watching (D8): the table's,
-        or, while a restart is between unmounting one and mounting the next, the one
-        it is replacing."""
-        root = self.roots.get(root_id)
-        if root is not None:
-            return root
-        pending = self._mounting.get(root_id)
-        return pending.replacing if pending is not None else None
 
     async def adopt(self, root: Root, version: ProfileBase) -> None:
         """Accept `version` for `root`'s next start — `phern profiles adopt` (S6).
@@ -3185,6 +3261,9 @@ class Supervisor:
            a person ran on against a disposed mount. After, so the log on disk is the
            one the release left — a turn cut by a shutdown stays open for the next
            daemon's resumer — and what the task writes as it ends reaches nothing.
+        5. **Out of its audience**, last, so whoever is attached hears the release
+           itself and nothing this root says after it: the audience is the id's, and
+           the next mount's to speak to.
         """
         if self._holds(root):
             del self.roots[root.id]
@@ -3194,9 +3273,6 @@ class Supervisor:
             # the seam keys them by the parent's id, and nothing else tells it this
             # one is gone.
             subagents.forget_session(root.id)
-        schedule = root.ctx.get(SCHEDULE)
-        if schedule is not None:
-            schedule.forget_session(root.id)
         await root.wake.aclose()
         await self._flush(root)
         try:
@@ -3207,6 +3283,9 @@ class Supervisor:
             self._could_not_write(root, session_id, reason)
         root.driving.cancel(why)
         await root.stopped.wait()
+        # Ended, so out of its id's audience (Holdings rule 3): the audience is the
+        # id's and the next mount's, and anything this root still says reaches nobody.
+        root.audience = Audience()
 
     async def aclose(self, *, deadline: float | None = None) -> None:
         """Close every root's wake channel and unwind its context.

@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from ph.agent.types import PreStepDecision, PreStepRequest
+from ph.keys import AGENTS
 from ph.llm.types import text_of
 from ph.testing import MountProfile, new_agent, run_tool, session_of, settled
 from ph_utcp import UTCP
@@ -378,6 +379,23 @@ async def test_a_root_agents_first_step_starts_the_run_and_only_a_change_is_news
     await run.ended.wait()
 
     assert _notes(quiet) == []
+
+
+async def test_a_warm_mark_goes_with_its_agent(mount: MountProfile, tmp_path: Path) -> None:
+    """The mark that a tree was warmed is its owner's: kept past the agent, the set
+    held one per root agent the process ever stepped.
+
+    Sabotage: drop the disposer in `_warm`, and the mark outlives the agent.
+    """
+    ctx = await mount(_row(tmp_path, eager=True))
+    agent, utcp = new_agent(ctx), ctx.require(UTCP)
+    await _first_step(ctx, agent)
+    await settled(lambda: bool(agent.inbox.next_step), "the completion note", seconds=30)
+    assert set(utcp.warmed) == {("fx", agent.id)}
+
+    await ctx.require(AGENTS).dispose(agent.id)
+
+    assert utcp.warmed == {}
 
 
 async def test_a_manual_with_eager_off_starts_nothing_until_its_tool_is_called(

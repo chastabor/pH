@@ -371,7 +371,7 @@ async def test_a_sessions_note_goes_with_the_session(
     `_notes` is a per-session memo, and nothing took a session out when the store
     let it go: one entry per session the mount ever announced to.
 
-    Sabotage: drop the `session/disposed` listener from the row, and the note stays.
+    Sabotage: make `_notes` a plain dict, and the note stays.
     """
     source = tmp_path / "notes.md"
     source.write_text("original content\n")
@@ -379,8 +379,8 @@ async def test_a_sessions_note_goes_with_the_session(
     ctx, session, _agent = await mounted_runtime(session_id="c1", extra_rows=[row(sources)])
     service = ctx.require(CONTEXT_CORPUS)
     service.announce(session)
-    assert session.id in service._notes
+    assert session in service._notes
 
     ctx.require(SESSIONS).dispose(session.id)
 
-    assert session.id not in service._notes
+    assert session not in service._notes

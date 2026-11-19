@@ -70,7 +70,7 @@ from ..cordis import (
 from ..json import PlainJsonValue, as_int, dumps, thaw_json
 from ..keys import SESSION_TELEMETRY, SESSIONS
 from ..paths import default_home_path, write_text_under
-from ..session import Session, SessionEvent, exported_fields, now_ms
+from ..session import Session, SessionEvent, SessionTable, exported_fields, now_ms
 from ..wire import WireModel
 from ._registry import claim_entry
 
@@ -165,8 +165,9 @@ class SessionTelemetry:
 
     ctx: Context
     _sinks: list[_Sink] = field(default_factory=list)
-    _cursors: dict[Session, _Cursor] = field(default_factory=dict)
-    """Per live session, how far the ledger has come through its log.
+    _cursors: SessionTable[_Cursor] = field(default_factory=SessionTable)
+    """Per live session, how far the ledger has come through its log, and gone with
+    the session.
 
     Keyed by the session and not its id, because a resume in the same process
     makes a second copy of a log under the same id, and a flush of the first
@@ -208,7 +209,7 @@ class SessionTelemetry:
     def _track(self, session: Session) -> None:
         """Read a session already live when the row activates from here on: what it
         held by then was this row's earlier life's to ship."""
-        self._cursors[session] = _Cursor(read=session.seq)
+        self._cursors.keep(session, _Cursor(read=session.seq))
 
     def _created(self, session: Session) -> None:
         """Start a new session's cursor where this process's own writing begins.
@@ -217,7 +218,7 @@ class SessionTelemetry:
         made: a fork's prefix was its parent's to ship, and a stored log was the run's
         that wrote it. So a resume's repair closers ship, because the store does not
         hold them yet; a cursor at the seed's end skipped them."""
-        self._cursors[session] = _Cursor(read=session.durable_length)
+        self._cursors.keep(session, _Cursor(read=session.durable_length))
 
     def _durable(self, session: Session, through: int) -> MaybeAwaitable[None]:
         """Ship what the ledger owes now that the log holds every event below `through`.
@@ -248,10 +249,6 @@ class SessionTelemetry:
             session_id=session.id,
             reason=reason,
         )
-
-    def _forget(self, session: Session) -> None:
-        """Drop one session's cursor."""
-        self._cursors.pop(session, None)
 
     async def observe(self, session: Session, events: Sequence[SessionEvent]) -> None:
         """Mirror session events onto the ledger channel, in the order given."""
@@ -364,4 +361,3 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.on("session/created", telemetry._created)
     ctx.on("session/durable", telemetry._durable)
     ctx.on("session/unwritten", telemetry._unwritten)
-    ctx.on("session/disposed", telemetry._forget)

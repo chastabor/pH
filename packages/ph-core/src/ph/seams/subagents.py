@@ -2783,10 +2783,11 @@ class SubagentService:
             self._live.setdefault(parent_id, set()).add(session.id)
 
     def _let_go(self, session: Session) -> None:
-        """A session was let go: forget its fold, and keep a child's last state as its
-        stored copy — the state its log now holds, which nothing will change until
-        this process opens it again. Kept only for a parent whose stored children
-        were read; for any other, the store answers when they are."""
+        """A session was let go: keep a child's last state as its stored copy — the
+        state its log now holds, which nothing will change until this process opens
+        it again. Kept only for a parent whose stored children were read; for any
+        other, the store answers when they are. Its fold goes with the session once
+        this has read it (`SessionTable`)."""
         parent_id = session.header.delegating_parent
         if parent_id:
             live = self._live.get(parent_id)
@@ -2800,25 +2801,13 @@ class SubagentService:
             state = self._folds.read(session)
             if stored is not None and state.admitted:
                 stored[session.id] = state
-        self._folds.forget(session.id)
 
     def forget_session(self, session_id: str) -> None:
-        """Drop what this service cached about one session: its own fold, and the
-        stored tree it read for it, every level of which `load_children` filed."""
-        self._folds.forget(session_id)
+        """Drop the stored tree this service read for one session, every level of
+        which `load_children` filed. Its own fold goes with the session itself."""
         for owner in [*(state.session_id for state in self.family(session_id)), session_id]:
             self._stored.pop(owner, None)
             self._unreadable.pop(owner, None)
-
-    def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
-        """Cached child states that no longer equal the fold of their log (I6).
-
-        Asked of the cache rather than reconstructed here. A child's state is what
-        the prompt tells its parent about it and what the interruption ladder counts
-        starts against, so a drifted one is a parent reasoning about a child its log
-        does not describe.
-        """
-        return self._folds.stale(sessions)
 
     def name_of(self, agent_id: str) -> str:
         """What an agent is called — the name its own admission records — or its id."""
@@ -3337,13 +3326,16 @@ async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
     service = SubagentService(ctx=ctx)
     ctx.provide(SUBAGENTS, service)
-    # A child let go keeps its last state as its stored copy, and its fold goes: a
-    # disposed session's cached projection is a value nobody can reach.
+    # A child let go keeps its last state as its stored copy; its fold goes with the
+    # session, after this listener has read it (`SessionStore.dispose`).
     ctx.on("session/created", service._published)
     ctx.on("session/disposed", service._let_go)
     ctx.on("agent/turn-stopping", _remind_owed)
+    # A child's state is what the prompt tells its parent about it and what the
+    # interruption ladder counts starts against, so a drifted one is a parent
+    # reasoning about a child its log does not describe.
     contribute_fold_cache(
-        ctx, id="subagent-fold-cache", subject="subagent state", stale=service.stale_folds
+        ctx, id="subagent-fold-cache", subject="subagent state", stale=service._folds.stale
     )
 
 

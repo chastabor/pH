@@ -374,7 +374,7 @@ def test_a_fold_cache_holds_one_value_per_session() -> None:
     assert cache.read(second) == 0
     assert len(cache._entries) == 2
 
-    cache.forget("a")
+    cache.forget(first)
     assert len(cache._entries) == 1
 
 

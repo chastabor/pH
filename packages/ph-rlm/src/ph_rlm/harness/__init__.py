@@ -161,7 +161,6 @@ async def apply(ctx: Context, config: Config) -> None:
     """Mount the harness: the state, the prompt section, `/refine`, auto-refine."""
     service = HarnessService(ctx=ctx, directory=resolve_roots().harness_dir())
     ctx.provide(HARNESS, service)
-    ctx.on("session/disposed", lambda session: service.forget(session.id))
     planner = RefinementPlanner(
         ctx=ctx,
         service=service,

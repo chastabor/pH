@@ -49,7 +49,7 @@ from collections.abc import Callable
 from itertools import combinations, pairwise
 from types import FrameType
 
-from ..session import Session, SessionFoldCache, SessionLog
+from ..session import Session, SessionFoldCache
 
 __all__ = ["VerifyingFoldCache", "assert_fold_laws", "check_fold_laws", "prefix_of"]
 
@@ -266,7 +266,7 @@ class VerifyingFoldCache[T](SessionFoldCache[T]):
     cost the cache exists to avoid, which is why this is a test double.
     """
 
-    def read(self, session: SessionLog) -> T:
+    def read(self, session: Session) -> T:
         value = super().read(session)
         cold = self._compute(session)
         if value != cold:

@@ -220,12 +220,6 @@ async def apply(ctx: Context, config: Config) -> None:
     contribute_fold_cache(ctx, id="clm-section-map", subject="section map", stale=mapper.stale)
     readouts = Readouts()
 
-    def forget(session: Session) -> None:
-        mapper.forget(session.id)
-        readouts.forget(session.id)
-
-    ctx.on("session/disposed", forget)
-
     async def after_call(
         execution: ToolExecution, result: ToolExecutionResult, next_: Next[PostToolDecision]
     ) -> PostToolDecision:
@@ -247,7 +241,7 @@ async def apply(ctx: Context, config: Config) -> None:
         # A token is at least a byte, so the result's UTF-8 length bounds its count, and
         # it is tokenized only when that bound could cross a threshold.
         after = readouts.crossed(
-            session.id,
+            session,
             shares,
             before,
             before + len(text.encode()),

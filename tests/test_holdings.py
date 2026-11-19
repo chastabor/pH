@@ -48,28 +48,12 @@ behavioral tests' job, and each holding below has one.
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterator
 
 import pytest
-from workspace_layout import parsed_modules
+from workspace_layout import own_nodes, parsed_modules, qualified
 
 REGISTERS = frozenset({"add_disposer", "effect"})
 """The two calls that put a teardown on a scope and hand back its `Releaser`."""
-
-
-def _qualified(tree: ast.Module) -> Iterator[tuple[str, ast.AST]]:
-    """Every function and class in a module, with its dotted name."""
-
-    def walk(node: ast.AST, path: tuple[str, ...]) -> Iterator[tuple[str, ast.AST]]:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-                inner = (*path, child.name)
-                yield ".".join(inner), child
-                yield from walk(child, inner)
-            else:
-                yield from walk(child, path)
-
-    yield from walk(tree, ())
 
 
 def _label(call: ast.Call) -> str:
@@ -87,16 +71,6 @@ def _label(call: ast.Call) -> str:
     return ""
 
 
-def _own_statements(scope: ast.AST) -> Iterator[ast.stmt]:
-    """The statements of one function or module, not those of what it defines."""
-    for child in ast.iter_child_nodes(scope):
-        if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
-            continue
-        if isinstance(child, ast.stmt):
-            yield child
-        yield from _own_statements(child)
-
-
 def _discarded() -> set[str]:
     """Every direct registration whose `Releaser` is thrown away, as
     `module:function:label`.
@@ -106,11 +80,11 @@ def _discarded() -> set[str]:
     """
     found: set[str] = set()
     for module, parsed in parsed_modules().items():
-        scopes: list[tuple[str, ast.AST]] = [("", parsed.tree), *_qualified(parsed.tree)]
+        scopes: list[tuple[str, ast.AST]] = [("", parsed.tree), *qualified(parsed.tree)]
         for name, scope in scopes:
             if isinstance(scope, ast.ClassDef):
                 continue
-            for statement in _own_statements(scope):
+            for statement in own_nodes(scope):
                 if not isinstance(statement, ast.Expr):
                     continue
                 value = statement.value
@@ -128,7 +102,7 @@ def _kept() -> set[str]:
     """Every class field whose annotation names `Releaser`, as `module:Class.field`."""
     found: set[str] = set()
     for module, parsed in parsed_modules().items():
-        for name, node in _qualified(parsed.tree):
+        for name, node in qualified(parsed.tree):
             if not isinstance(node, ast.ClassDef):
                 continue
             for entry in node.body:
@@ -216,6 +190,7 @@ ENDED_BY: dict[str, tuple[str, ...]] = {
     "ph_rlm.kernel.manager:PythonCodeRuntime._closers": ("PythonCodeRuntime.close_namespace",),
     "ph_rlm.subagents:_Child.teardown": ("RlmChildProvider._stop",),
     "ph_utcp:UtcpSeam._forgets": ("UtcpSeam.add",),
+    "ph_utcp:UtcpSeam.warmed": ("UtcpSeam.add",),
 }
 """Kept releasers, and the door each is settled at: run, or dropped unrun.
 
@@ -268,7 +243,7 @@ def test_a_named_door_settles_a_releaser(field: str) -> None:
     """
     module, _, owner = field.partition(":")
     attribute = owner.rpartition(".")[2]
-    functions = dict(_qualified(parsed_modules()[module].tree))
+    functions = dict(qualified(parsed_modules()[module].tree))
     for door in ENDED_BY[field]:
         assert door in functions, f"{field} names a door that does not exist: {door}"
         source = ast.unparse(functions[door])
