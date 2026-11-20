@@ -1,4 +1,5 @@
-"""A person's named profile: `extends` a shipped profile, and the rows that differ (S2).
+"""A named profile of the user: it `extends` a shipped profile and holds the rows
+that differ (S2).
 
 ```yaml
 # $PH_HOME/profiles/work.yaml
@@ -11,19 +12,22 @@ rows:
         main: {provider: anthropic, model: claude-sonnet-5}
 ```
 
-**Sparse** (decision 8): only the rows that differ from the profile it extends,
-which supplies every default. Composed as that profile's shipped layers and then
-these rows, which set environment rows only (decision 23). `extends` names a
-shipped profile — one level, never another person's file — and may be left out of
-a file named after the shipped profile it layers over: `tui.yaml` extends `tui`.
+**The file is sparse** (decision 8). It holds only the rows that differ from the
+profile that it extends, and that profile supplies every default. It composes as
+the shipped layers of that profile and then these rows. These rows set
+environment rows only (decision 23). `extends` names a shipped profile. It is
+one level deep, and never names another file that a user wrote. `extends` may be
+left out of a file that is named after the shipped profile that it layers over:
+`tui.yaml` extends `tui`.
 
-**The format before S2** was a bare list of rows under a shipped profile's name.
-Until it is folded it is read as it always was, and `phern doctor` names it;
-`phern profiles fold` rewrites it into this one and keeps its comments, which is
-why the edits here are to text rather than to a parsed tree a dump would flatten.
+**The format before S2** was a bare list of rows under the name of a shipped
+profile. Until such a file is folded, it is read as it always was, and
+`phern doctor` names it. `phern profiles fold` rewrites it into the format above
+and keeps its comments. That is why the edits in this module are edits to text
+and not to a parsed tree, which a dump would flatten.
 
-The format only. Which file a name resolves to, and what composes over what, is
-`ph_app.profiles`'.
+This module holds the format only. `ph_app.profiles` decides which file a name
+resolves to, and what composes over what.
 
 @module ph_app.named_profiles
 """
@@ -50,34 +54,41 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class NamedProfile:
-    """One named profile file, read."""
+    """One named profile file, read. The name that it is run by is the stem of
+    its `path`, for a file under `$PH_HOME/profiles`. A `--profile` path is run
+    by its path and has no name."""
 
-    name: str
-    """The name it is run by — its file's stem — or `""` for a `--profile` path."""
     extends: str
     """The shipped profile whose layers it composes over."""
     rows: JsonValue
     """Its entries in the profile grammar, still raw: `compose_rows` reads them."""
     path: Path
     legacy: bool = False
-    """A bare list — the overlay format before S2 — not yet folded."""
+    """A bare list, the overlay format from before S2, that is not folded yet."""
 
 
 def parse_named_profile(
-    raw: JsonValue, path: Path, name: str, *, shipped: Collection[str]
+    raw: JsonValue, path: Path, name: str | None, *, shipped: Collection[str]
 ) -> NamedProfile:
-    """`raw`, the decoded file at `path`, as the named profile `name` it declares.
+    """`raw`, the decoded file at `path`, as the named profile `name` that it
+    declares. `name` is `None` for a file that is run by its path.
 
-    `shipped` is every profile `extends` may name. A list is the old overlay, so it
-    is only a profile under a shipped profile's own name, which it layers over.
+    `shipped` is every profile that `extends` may name. A list is the old
+    overlay. It is a profile only under the name of a shipped profile, and it
+    layers over that profile.
     """
     if raw is None or isinstance(raw, list):
-        if name not in shipped:
+        if name is None or name not in shipped:
+            missing = (
+                "a file that is run by its path has no name"
+                if name is None
+                else f'there is no shipped "{name}"'
+            )
             raise LoaderError(
                 f"{path}: a list of rows layers over the shipped profile of the same name, "
-                f'and there is no shipped "{name}"; write `extends: <profile>` and `rows:`'
+                f"and {missing}; write `extends: <profile>` and `rows:`"
             )
-        return NamedProfile(name=name, extends=name, rows=raw or [], path=path, legacy=True)
+        return NamedProfile(extends=name, rows=raw or [], path=path, legacy=True)
     if not isinstance(raw, Mapping):
         raise LoaderError(f"{path}: a named profile is `extends: <profile>` and `rows: [...]`")
     unknown = sorted(set(raw) - {"extends", "rows"})
@@ -101,7 +112,7 @@ def parse_named_profile(
     rows = raw.get("rows")
     if rows is not None and not isinstance(rows, list):
         raise LoaderError(f"{path}: `rows` is a list of profile entries")
-    return NamedProfile(name=name, extends=extends, rows=rows or [], path=path)
+    return NamedProfile(extends=extends, rows=rows or [], path=path)
 
 
 def _rows_text(entries: Sequence[JsonObject], *, indent: int) -> str:
@@ -130,13 +141,15 @@ _ITEM = re.compile(r"^(?P<indent>[ \t]*)- ", re.MULTILINE)
 def append_rows(
     text: str, named: NamedProfile, block_comment: str, entries: Sequence[JsonObject]
 ) -> str:
-    """`text` — the file `named` was read from — with `entries` appended to its rows.
+    """`text`, the file that `named` was read from, with `entries` appended to its
+    rows.
 
-    Appended as text, so the person's own comments and layout stay, and every edit
-    is one a later entry for the same row survives: a later entry replaces an
-    earlier one in the same document. A legacy list becomes the mapping by
-    indenting it under `rows:`. This is a best effort over YAML a person wrote —
-    the caller composes the result and puts the file back when it differs.
+    The entries are appended as text, so the comments and the layout of the user
+    stay. An appended entry also takes effect when the file already has an entry
+    for the same row, because a later entry replaces an earlier one in the same
+    document. A legacy list becomes the mapping: it is indented under `rows:`.
+    This is a best effort over YAML that a user wrote. The caller composes the
+    result and puts the file back when the result differs.
 
     :raises LoaderError: for rows written as a flow sequence, which text cannot
         append to without rewriting the line a person wrote.
@@ -146,7 +159,8 @@ def append_rows(
         lines = text.splitlines()
         kept = lines if named.rows else [line for line in lines if line.lstrip().startswith("#")]
         indented = "".join(f"  {line}\n" if line.strip() else "\n" for line in kept)
-        return f"extends: {named.name}\nrows:\n{indented}{block}"
+        # A legacy list extends the shipped profile that it is named after.
+        return f"extends: {named.extends}\nrows:\n{indented}{block}"
     body = text if text.endswith("\n") else text + "\n"
     found = _TOP_LEVEL_ROWS.search(body)
     if found is None:

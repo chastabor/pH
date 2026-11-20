@@ -116,18 +116,21 @@ them (`is_audit_only`)."""
 class SourceRef:
     """Who produced a record's content."""
 
-    kind: str = ""
+    kind: str | None = None
     """`user` | `model` | `plugin` | `tool`, from the source of the message
-    itself, or `harness` for a record that the harness produced."""
-    name: str = ""
-    """The plugin, provider or tool that produced it."""
-    form: str = ""
+    itself, or `harness` for a record that the harness produced. `None` when the
+    message names no source."""
+    name: str | None = None
+    """The plugin, provider or tool that produced it, or `None` when the source
+    names none."""
+    form: str | None = None
     """A `PluginSource.form`, such as `instructions`, `snapshot` or `notice`.
-    "Inspect these records by source" filters on it."""
+    "Inspect these records by source" filters on it. `None` for a source that
+    has no form."""
 
     def label(self) -> str:
-        parts = [part for part in (self.kind, self.name) if part]
-        return f"{':'.join(parts)}{f' ({self.form})' if self.form else ''}"
+        parts = [part for part in (self.kind, self.name) if part is not None]
+        return f"{':'.join(parts)}{f' ({self.form})' if self.form is not None else ''}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +304,7 @@ class _Builder:
         self.add(
             kind="tool",
             source_seq=event.seq,
-            title=f"result {call_id}" if call_id else "result",
+            title=f"result {call_id}" if call_id is not None else "result",
             summary=one_line(text),
             detail=text,
             source=SourceRef(kind="tool", name=call_id),

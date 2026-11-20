@@ -293,9 +293,10 @@ def _walk(value: JsonValue) -> Iterable[str]:
             yield from _walk(item)
 
 
-def browse_of(supervisor: Supervisor, *, cwd: str = "") -> list[SessionSummary]:
+def browse_of(supervisor: Supervisor, *, cwd: str | None = None) -> list[SessionSummary]:
     """Every session that a person could open, stored and live, folded here
-    (P5-14).
+    (P5-14). `cwd` keeps only the sessions of that working directory, and `None`
+    keeps every session.
 
     **One list, from the one process that can see both halves.** The logs are on
     the disk of the daemon, under the `$PH_HOME` of the daemon. Only the
@@ -312,7 +313,8 @@ def browse_of(supervisor: Supervisor, *, cwd: str = "") -> list[SessionSummary]:
     A live root that the disk has not seen yet, because its log is still in a
     write buffer, gets its own row. The row is built from what the supervisor
     knows: the `cwd` of the header, so the repo that the root belongs to is on
-    the row even before the file exists.
+    the row even before the file exists. There is no file to take a time or a
+    size from, so the row carries neither.
     """
     directory = supervisor.sessions_directory()
     stored = session_summaries(directory, cwd=cwd) if directory is not None else []
@@ -327,12 +329,10 @@ def browse_of(supervisor: Supervisor, *, cwd: str = "") -> list[SessionSummary]:
     rows.extend(
         SessionSummary(
             session_id=root.id,
-            modified=0.0,
-            size=0,
-            cwd=root.session.header.cwd or "",
+            cwd=root.session.header.cwd,
             state=root.status,
         )
         for root_id, root in sorted(held.items())
-        if root_id not in known and (not cwd or root.session.header.cwd == cwd)
+        if root_id not in known and (cwd is None or root.session.header.cwd == cwd)
     )
     return list(rows)

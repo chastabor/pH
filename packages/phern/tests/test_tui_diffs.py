@@ -16,7 +16,7 @@ import pytest
 from tui_helpers import revisable, rewritten, stand_in
 
 from ph.json import JsonObject
-from ph.llm.types import ContextForm
+from ph.llm.types import ContextForm, ModelSource, create_user_message
 from ph.session import (
     RevisionRecord,
     RevisionSize,
@@ -30,7 +30,7 @@ from ph.session import (
 )
 from ph.session.known_event_types import declare_log_type, is_known
 from ph.testing import isolated_log_types, log_event, revision_record
-from ph_app.revisions import Revision
+from ph_app.revisions import Revision, read_revision, revision_rows
 from ph_app.tui import diffs
 from ph_app.tui.diffs import DiffEntry, DiffGroup, build_diffs, revisions
 
@@ -273,6 +273,46 @@ def test_one_record_for_several_rewrites_is_shown_on_each_and_sizes_none() -> No
     assert first.recorded is None and second.recorded is None
 
 
+def test_a_change_whose_message_names_no_plugin_has_no_producer() -> None:
+    """The producer of a revision is the plugin that its message names, or `None`.
+
+    A substitution by a plugin names that plugin. A message whose source is a
+    model names a model and no plugin, and a rewritten tool result names no
+    plugin either. The row for training then says `null`. `/diff` names the
+    types of the records beside such a change, and nothing when there are none.
+
+    Sabotage: answer the name for every kind of source in `read_revision`, and
+    the model is reported as the producer.
+    """
+    session, asked, _, result = revisable(OUTPUT)
+    summarized = substitute_text(session, (asked.seq,), "q")
+    clipped = rewritten(session, result, "(cut)")
+    other, asked_again, _, _ = revisable(OUTPUT)
+    by_model = substitute(
+        other,
+        (asked_again.seq,),
+        create_user_message(
+            content=[{"type": "text", "text": "q"}],
+            source=ModelSource(provider="fake", model="fake-1"),
+        ),
+        revision_record("compaction/summarized"),
+    )
+
+    assert read_revision(session, summarized).producer == "probe"
+    assert read_revision(session, clipped).producer is None
+    assert read_revision(other, by_model).producer is None
+    rows = {row["seq"]: row["producer"] for row in revision_rows(session)}
+    assert rows == {summarized.seq: "probe", clipped.seq: None}
+    assert [row["producer"] for row in revision_rows(other)] == [None]
+
+    by_seq = {group.latest.seq: group.latest for group in build_diffs(session)}
+    assert by_seq[clipped.seq].producer == "offload/spilled"
+    assert diffs._beside(()) is None
+    unnamed = DiffEntry(seq=1, title="other", summary="", producer=None, texts=lambda: ("a", "b"))
+    group = DiffGroup(kind="revision", seq=1, reveal=1, entries=(unnamed,), whole=unnamed.texts)
+    assert group.producers == ""
+
+
 # ------------------------------------------------------------------ sources --
 
 
@@ -286,7 +326,7 @@ def test_a_new_kind_is_a_source_function_and_the_groups_merge_by_seq(
         seq=1,
         title="other",
         summary="",
-        producer="",
+        producer=None,
         texts=lambda: ("a", "b"),
     )
 

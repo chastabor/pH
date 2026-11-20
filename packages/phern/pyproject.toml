@@ -25,27 +25,28 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # **This distribution is the deployment, not just the front end.** `phern` is
-    # what a person installs and `phern` is the command they get, so its
-    # dependency list is the answer to "what does pH consist of" — which is why
-    # the six optional bundles are named here rather than left to the installer
+    # **This distribution is the deployment, and not only the front end.**
+    # `phern` is what a user installs, and `phern` is the command that they get.
+    # So its dependency list is the answer to "what does pH consist of". That is
+    # why the six optional bundles are named here and not left for the installer
     # to assemble from eight PyPI names.
     #
-    # **Naming them is not importing them, and the difference is the whole
+    # **To name them is not to import them, and that difference is the
     # architecture.** `ph_app` may not `import ph_rlm`, `ph_stabilize`,
-    # `ph_text_index`, `ph_code_graph`, `ph_utcp` or `ph_clm` — `test_app_layering.py` imports the
-    # app's entry points in a fresh interpreter and fails if one drags a bundle in —
-    # because every one of them reaches the app the same way a *third-party* wheel
+    # `ph_text_index`, `ph_code_graph`, `ph_utcp` or `ph_clm`.
+    # `test_app_layering.py` imports the entry points of the app in a fresh
+    # interpreter, and fails if one of them loads a bundle. The reason is that
+    # every bundle reaches the app in the same way as a *third-party* wheel
     # would: through the `ph.bundles` entry-point group, resolved at `--profile`
-    # time by `available_profiles()`. Depending
-    # on the wheels changes which ones are present by default; it does not give
-    # the app a name it may write down.
+    # time by `available_profiles()`. Depending on the wheels changes which ones
+    # are present by default. It does not give the app a name that it may write
+    # down.
     #
-    # So the gating stays load-bearing after this change, for the case it was
-    # actually drawn for: a bundle nobody here ships. A wheel that registers
-    # `ph.bundles` composes a profile on an install of this package, and one
-    # uninstalled from an install of this package takes its profiles out of
-    # `phern doctor` rather than breaking the seven that remain.
+    # So the gating still matters after this change, for the case that it was
+    # drawn for: a bundle that nobody here ships. A wheel that registers
+    # `ph.bundles` composes a profile on an install of this package. A wheel
+    # that is uninstalled from an install of this package takes its profiles out
+    # of `phern doctor`, and does not break the seven that remain.
     "ph-core==0.12.0",
     "ph-rlm==0.12.0",
     "ph-stabilize==0.12.0",
@@ -53,40 +54,43 @@ dependencies = [
     "ph-code-graph==0.12.0",
     "ph-utcp==0.12.0",
     "ph-clm==0.12.0",
-    # Reached through `ph-rlm` already; pinned here too because `ph_rlm.kernel`
-    # installs it *by name* into `$PH_CACHE/runtime-venv`, so the version this
-    # deployment resolves is the version a cell runs against.
+    # `ph-rlm` already brings this package. It is pinned here too because
+    # `ph_rlm.kernel` installs it *by name* into `$PH_CACHE/runtime-venv`, so the
+    # version that this deployment resolves is the version that a cell runs
+    # against.
     "ph-runtime-guest==0.12.0",
-    # Declared although `ph-core` already requires it: `ph_app.daemon` imports
-    # `anyio` directly at 20-odd sites and `cancelsafe` is keyed to its
-    # internals, so arriving here transitively understated the coupling.
+    # Declared although `ph-core` already requires it. `ph_app.daemon` imports
+    # `anyio` directly at about 20 sites, and `cancelsafe` is keyed to its
+    # internals. So arriving here transitively understated the coupling.
     "anyio>=4.11,<5",
-    # Declared although `ph-core` already requires it, for `anyio`'s reason above:
-    # `ph_app` imports `yaml` directly — `cli.py` to print a composed profile, and
-    # `tui.themes` to write `$PH_HOME/themes/theme-profile.yaml` — so arriving here
-    # transitively understated the coupling. Reading YAML still goes through
-    # ph-core's one safe door (`safe_yaml_load`); this is the writing half.
+    # Declared although `ph-core` already requires it, for the same reason as
+    # `anyio` above. `ph_app` imports `yaml` directly, for example in `cli.py` to
+    # print a composed profile and in `tui.themes` to write
+    # `$PH_HOME/themes/theme-profile.yaml`. So arriving here transitively
+    # understated the coupling. Reading YAML still goes through the one safe
+    # function of ph-core (`safe_yaml_load`). This is the writing half.
     "pyyaml>=6.0",
     "typer>=0.12",
     "rich>=13.0",
     "httpx>=0.27",
-    # Bounded at both ends, and both ends are load-bearing.
+    # The version is bounded at both ends, and both bounds are needed.
     #
-    # The ceiling: `PHTuiApp.add_binding` writes into Textual's
-    # `BindingsMap.key_to_bindings` through the private `app._bindings`, because
-    # the public `bind()` drops the `id` that `apply_keymap` matches on — and
-    # that id is what makes a contributed screen's key rebindable in `tui.json`
-    # like every other (P4-17). A major release that renames it should be a
-    # decision someone makes, not one a resolver makes for them; without a
-    # ceiling the breakage lands as an `AttributeError` at plugin load, and only
-    # for users who have a screen-registering row installed.
+    # The ceiling: `PHTuiApp.add_binding` writes into the
+    # `BindingsMap.key_to_bindings` of Textual through the private `_bindings`
+    # of the chat screen. The public `bind()` drops the `id` that `apply_keymap`
+    # matches on, and that id is what makes the key of a contributed screen
+    # rebindable in `tui.json` like every other key (P4-17). A major release
+    # that renames it should be a decision that someone makes, and not one that
+    # a resolver makes for them. Without a ceiling, the breakage arrives as an
+    # `AttributeError` when the terminal binds the key of a contributed screen.
     #
-    # The floor: what the suite actually passes on, measured rather than
-    # guessed. `>=1.0` was untrue — `MarkdownStream` (the transcript's streaming
-    # append) does not exist before 5 and `Widget.release_anchor` not before 4,
-    # so `ph_app.tui.widgets.transcript` cannot even import there. The committed
-    # SVG snapshots then narrow it further: 8.2.4 fails `test_the_full_app_shell`
-    # and 8.2.5 is the first release every gate passes on.
+    # The floor: what the suite passes on, measured and not guessed. `>=1.0` was
+    # untrue. `MarkdownStream` (the streaming append of the transcript) does not
+    # exist before 5, and `Widget.release_anchor` does not exist before 4, so
+    # `ph_app.tui.widgets.transcript` cannot even import there. The committed
+    # SVG snapshots then narrow it further: 8.2.4 fails
+    # `test_the_full_app_shell`, and 8.2.5 is the first release that every gate
+    # passes on.
     "textual>=8.2.5,<9",
 ]
 
@@ -97,29 +101,33 @@ Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
 Issues = "https://github.com/chastabor/pH/issues"
 
 [project.optional-dependencies]
-# The browser front end (P7-05). An extra rather than a dependency: `phern -p` in a
-# script, `phern daemon` under systemd and `phern --mode tui` all run without a web
-# server, and `textual-serve` brings aiohttp and jinja2 with it. `--mode web`
-# without the extra fails with the install line rather than an ImportError.
+# The browser front end (P7-05). It is an extra and not a dependency: `phern -p`
+# in a script, `phern daemon` under systemd and `phern --mode tui` all run
+# without a web server, and `textual-serve` brings aiohttp and jinja2 with it.
+# `--mode web` without the extra fails with the install line and not with an
+# ImportError.
 web = ["textual-serve>=1.1.3"]
 
 # The local embedding model, passed straight through to the member that owns it.
-# Here as well as there because `phern` is the name a person installs: someone
-# who wants `rlm-indexed` should be able to ask for it without first learning
-# that the embedder lives in a distribution called `ph-text-index`.
+# It is here as well as there because `phern` is the name that a user installs.
+# Someone who wants `rlm-indexed` should be able to ask for this extra without
+# first learning that the embedder lives in a distribution called
+# `ph-text-index`.
 #
-# **It is the one part of this harness that is opt-in by size rather than by
-# design.** Everything else `phern` pulls is a bundle whose cost is measured in
-# megabytes; this is `sentence-transformers` and torch, about 4.2 GB with the
-# default CUDA wheels. Without it `text_index` and `text_search` still register
-# and still search an index you supply vectors for — what refuses to mount is
-# the row that *computes* them, with a message naming this extra.
+# **It is the one part of this harness that is opt-in because of its size and
+# not by design.** Everything else that `phern` pulls in is a bundle whose cost
+# is measured in megabytes. This is `sentence-transformers` and torch, about
+# 4.2 GB with the default CUDA wheels. Without it, `text_index` and
+# `text_search` still register, and they still search an index that you supply
+# vectors for. What refuses to mount is the row that *computes* the vectors,
+# with a message that names this extra.
 local = ["ph-text-index[local]==0.12.0"]
 
-# Exporting the session log to an OTel collector, passed through for the same
-# reason `local` is: `ph-core` owns the row and the refusal message, but `phern`
-# is the name a person installs, so all three of this deployment's extras should
-# be reachable without first learning which member implements which.
+# Exporting the session log to an OTel collector. It is passed through for the
+# same reason as `local`. `ph-core` owns the row and the refusal message, but
+# `phern` is the name that a user installs. So all three extras of this
+# deployment should be reachable without first learning which member implements
+# which.
 otel = ["ph-core[otel]==0.12.0"]
 
 [project.entry-points."ph.plugins"]
@@ -145,6 +153,6 @@ ph-clm = { workspace = true }
 [tool.hatch.build.targets.wheel]
 packages = ["src/ph_app"]
 
-# No force-include: `packages` already ships every file under `src/ph_app`,
-# data files included, and naming the profiles again made the wheel build fail
+# No force-include. `packages` already ships every file under `src/ph_app`,
+# data files included. Naming the profiles again made the wheel build fail
 # outright ("a second file is being added at the same path").

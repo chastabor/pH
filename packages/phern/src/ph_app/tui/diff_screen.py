@@ -273,7 +273,7 @@ def _entry(entry: DiffEntry, size: str) -> Content:
         entry.summary,
         "\n",
     ]
-    if entry.producer:
+    if entry.producer is not None:
         parts += [(f"by {entry.producer}", "$ph-muted"), "\n"]
     for fact in entry.facts:
         parts += [(fact, "$ph-muted"), "\n"]

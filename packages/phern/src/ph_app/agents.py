@@ -1,30 +1,43 @@
-"""`phern agents` — the client side of the daemon (P5-10).
+"""`phern agents`: the client side of the daemon (P5-10).
 
-Seven commands over one socket: list the roots, `attach` to one and follow it,
-`send` it a prompt, `schedule` future work, ask a root's `status`, ask the
-daemon's own `doctor`, and `shutdown`. Every one is a real exchange with a real
-supervisor — no local mode, no in-process shortcut, because what this row
-delivers is precisely that a person can reach a run they are not attached to.
+The bare command and nine subcommands use one socket. `phern agents` with no
+subcommand lists the roots. The subcommands are:
 
-**One spine, seven commands.** `_ask` resolves the socket, connects, runs the
-client's pump and closes behind itself; each command is the body of one exchange
-plus how to print it. That keeps "no daemon is running" one sentence rather than
-seven, and it is where the two failures a person actually meets are told apart: a
-socket that is *absent* means nothing was started, and a socket that is *present
-but refuses* means something crashed and left its path behind.
+- `attach` follows one root.
+- `send` sends a root a prompt.
+- `schedule` lists, creates or cancels the schedules of a root.
+- `status` asks what one root is doing.
+- `doctor` asks the daemon what it is.
+- `owed` lists the stored roots that still owe work.
+- `resume` mounts stored roots that still owe work.
+- `probe` asks the daemon one of the three orchestrator questions.
+- `shutdown` stops the daemon.
 
-**`phern service` shares the spine.** `reach` is `_ask` without the exit — one
-exchange, or `Down` carrying the sentence that tells an absent socket from a dead
-daemon — and `stop_daemon` is `shutdown` without the printing. With the two tables
-(`print_owed`, `print_resume`) they are imported there, so the two clients cannot
-describe one daemon differently.
+Each one is a real exchange with a real supervisor. There is no local mode and
+no in-process shortcut, because the purpose of this row is that a user can
+reach a run that they are not attached to.
 
-**Nothing here re-derives what the daemon knows.** `doctor` reports the socket
-the daemon bound, the policy it was started with, the jobs it is running and
-whether that socket outlives a logout — all read back over the wire, because a
-client printing what *it* would have chosen would agree with a daemon started
-differently and say nothing at all. The one exception is when the connect itself
-fails and there is no daemon to ask (P5-11).
+**One spine serves all of them.** `_ask` resolves the socket, connects, runs the
+pump of the client and closes after itself. Each command is the body of one
+exchange plus the code that prints the result. That keeps "no daemon is running"
+one sentence and not one sentence for each command. It is also where the two
+failures that a user meets are told apart. A socket that is *absent* means that
+nothing was started. A socket that is *present but refuses* means that a daemon
+crashed and left its path behind.
+
+**`phern service` shares the spine.** `reach` is `_ask` without the exit. It
+runs one exchange, or returns a `Down` with the sentence that tells an absent
+socket from a dead daemon. `stop_daemon` is `shutdown` without the printing.
+`phern service` imports both, and the two tables (`print_owed`, `print_resume`),
+so the two clients cannot describe one daemon differently.
+
+**Nothing here derives again what the daemon knows.** `doctor` reports the
+socket that the daemon bound, the policy that it was started with, the jobs that
+it is running and whether that socket outlives a logout. All of it is read back
+over the wire. A client that printed what *it* would have chosen would print the
+same thing for a daemon that was started differently, so it would say nothing
+about that daemon. The one exception is when the connect itself fails and there
+is no daemon to ask (P5-11).
 
 @module ph_app.agents
 """
@@ -53,7 +66,16 @@ from ph.session import now_ms
 from ph.text import duration, one_line
 
 from . import verbs
-from .console import TypeOption, console, detail, fail, roots_or_exit, section, selectors_or_exit
+from .console import (
+    TypeOption,
+    console,
+    detail,
+    fail,
+    nonblank,
+    roots_or_exit,
+    section,
+    selectors_or_exit,
+)
 from .daemon.client import DaemonClient, Exchange, connected
 from .daemon.follow import EventFrame, Followed
 from .params import (
@@ -79,12 +101,16 @@ from .wire import describe, message_of, result_block, text_of_wire
 __all__ = ["Down", "agents_app", "print_owed", "print_resume", "reach", "stop_daemon"]
 
 agents_app = typer.Typer(
-    help="Talk to the supervisor: list, attach, send, schedule, status, doctor, shutdown.",
+    help=(
+        "Talk to the supervisor: list, attach, send, schedule, status, doctor, owed, "
+        "resume, probe, shutdown."
+    ),
     add_completion=False,
 )
-"""`name` and `invoke_without_command` are set where they win — on `add_typer`
-in `cli.py` and on the callback below — and Typer takes those over anything
-passed here, so spelling them twice reads as configuration and is not."""
+"""`name` and `invoke_without_command` are set in the places where they take
+effect: on `add_typer` in `cli.py` and on the callback below. Typer takes those
+over anything that is passed here. A second copy here would look like
+configuration and would have no effect."""
 
 
 SESSION_ARGUMENT = typer.Argument(help="The session id of the root.")
@@ -94,21 +120,22 @@ SESSION_ARGUMENT = typer.Argument(help="The session id of the root.")
 
 
 def _unreachable(path: Path, error: OSError) -> str:
-    """Why the connect failed, in the terms of the fix.
+    """Why the connect failed, stated as what the user does next.
 
-    Three situations arrive as the same class of `OSError`, and they want
-    different next steps. No socket means no daemon was ever started. A socket
-    nothing answers on means one died and left its path behind — which
-    `phern daemon` clears on its way up, so saying so saves the reader from
-    deleting a file by hand.
+    Three situations arrive as the same class of `OSError`, and each needs a
+    different next step. No socket means that no daemon was ever started. A
+    socket that nothing answers on means that a daemon died and left its path
+    behind. `phern daemon` clears that path when it starts, and the message says
+    so, which saves the reader from deleting a file by hand.
 
-    The third is P5-11's, and it hides inside the first: on a host where
-    `$PH_RUNTIME` lives under `$XDG_RUNTIME_DIR` and this user is not lingering,
-    "no daemon socket" is also what a person sees after logging out and back in
-    — with a daemon **still running**, still holding every session lease it took
-    (I-5), and about to refuse the `phern daemon` this message would otherwise tell
-    them to start. Naming it costs one paragraph and one `stat`; not naming it
-    costs an afternoon on `session_already_active`.
+    The third situation is the one from P5-11, and it hides inside the first.
+    Take a host where `$PH_RUNTIME` is under `$XDG_RUNTIME_DIR` and this user is
+    not lingering. There, "no daemon socket" is also what a user sees after they
+    log out and back in, with a daemon **still running**. That daemon still
+    holds every session lease that it took (I-5), and it is about to refuse the
+    `phern daemon` that this message would otherwise tell the user to start. To
+    name this case costs one paragraph and one `stat`. Not to name it costs an
+    afternoon on `session_already_active`.
     """
     if not path.exists():
         return f"[red]no daemon socket at {path}[/red]\n{_missing_socket(path)}"
@@ -119,13 +146,14 @@ def _unreachable(path: Path, error: OSError) -> str:
 
 
 def _missing_socket(path: Path) -> str:
-    """What to do about an absent socket — which depends on whether it was reaped.
+    """What to do about an absent socket. The answer depends on whether the
+    socket was reaped.
 
     The linger state is read on this side because there is nothing on the other
-    side to ask: the daemon that would have answered is precisely the one that
-    cannot be reached. That is the single exception to this module's rule of
-    never re-deriving what the daemon knows, and it is the case the rule was
-    never about.
+    side to ask: the daemon that would have answered is exactly the one that
+    cannot be reached. This is the single exception to the rule of this module
+    that it never derives again what the daemon knows. The rule was never about
+    this case.
     """
     life = lifetime(path)
     if life.survives_logout is not False:
@@ -141,28 +169,31 @@ def _missing_socket(path: Path) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Down:
-    """Nothing answered on the daemon's socket. `why` is the sentence a person reads
-    — an absent socket, a dead daemon's leftover path, or a connection that closed
-    without an answer — and `cause` the error it was read from."""
+    """Nothing answered on the socket of the daemon. `why` is the sentence that a
+    user reads: an absent socket, the leftover path of a dead daemon, or a
+    connection that closed without an answer. `cause` is the error that the
+    sentence was read from."""
 
     why: str
     cause: BaseException
 
 
 async def reach[T](path: Path, work: Exchange[T]) -> T | Down:
-    """Run one exchange against the daemon at `path`, or say that nothing answered.
+    """Run one exchange against the daemon at `path`, or report that nothing
+    answered.
 
-    Down is a value rather than a refusal so each client decides what it means:
-    `phern agents` exits with it (`_ask`), and `phern service` reports it or starts a
-    daemon. A daemon that answered "no" is a refusal either way, with the server's
-    own sentence, because only the server knows why.
+    `Down` is a value and not a refusal, so that each client decides what it
+    means. `phern agents` exits with it (`_ask`). `phern service` reports it or
+    starts a daemon. A daemon that answered "no" is a refusal in both clients,
+    with the sentence of the server, because only the server knows why.
     """
     try:
         return await connected(path, work)
-    # The plain exceptions rather than groups because `connected` unwraps its own —
-    # a `typer.Exit` raised by a command's own exchange would otherwise reach the
-    # shell as an `ExceptionGroup` traceback instead of an exit code. `DaemonGone`
-    # first: it is a `DaemonError`, and nobody refused anything.
+    # These are the plain exceptions and not groups, because `connected` unwraps
+    # its own groups. Otherwise a `typer.Exit` that the exchange of a command
+    # raised would reach the shell as an `ExceptionGroup` traceback and not as an
+    # exit code. `DaemonGone` comes first: it is a `DaemonError`, and nobody
+    # refused anything.
     except DaemonGone as gone:
         return Down(f"[yellow]{detail(gone)}[/yellow]", gone)
     except DaemonError as refused:
@@ -174,10 +205,10 @@ async def reach[T](path: Path, work: Exchange[T]) -> T | Down:
 def _ask[T](work: Exchange[T]) -> T:
     """Run one exchange against the daemon, or exit with a reason.
 
-    Every refusal a person can actually hit is named here rather than reaching
-    them as a traceback: an unusable `$PH_RUNTIME`, a daemon that is not there,
-    and a daemon that answered "no". The last one keeps the server's own
-    sentence, because the server is the only thing that knows why.
+    Every refusal that a user can meet is named here, so that none reaches them
+    as a traceback: an unusable `$PH_RUNTIME`, a daemon that is not there, and a
+    daemon that answered "no". The last one keeps the sentence of the server,
+    because only the server knows why.
     """
     outcome = anyio.run(partial(reach, roots_or_exit().daemon_socket(), work))
     if isinstance(outcome, Down):
@@ -188,9 +219,9 @@ def _ask[T](work: Exchange[T]) -> T:
 # ------------------------------------------------------------------ rendering --
 
 
-def _when(moment: object) -> str:
-    """An epoch-ms instant as local time, or a dash when there is none."""
-    if not isinstance(moment, int) or moment <= 0:
+def _when(moment: int | None) -> str:
+    """An epoch-ms instant as local time, or a dash when `moment` is `None`."""
+    if moment is None:
         return "—"
     return datetime.fromtimestamp(moment / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -200,20 +231,20 @@ def _starts_on(facts: DaemonStatusReply) -> str:
     starts = facts.starts_on
     if starts is None:
         return "none — the profile lists no models"
-    if not starts.key:
+    if starts.key is None:
         return f"{starts.route.label} (not in the profile's list)"
     return f"{starts.key} · {starts.route.label}"
 
 
 def _scheduler(facts: DaemonStatusReply) -> str:
-    """When the scheduler next wakes: it sleeps until then rather than ticking."""
+    """When the scheduler next wakes. It sleeps until then and does not tick."""
     if facts.next_wake is None:
         return "idle — nothing scheduled"
     return f"next wake in {duration(max(0, facts.next_wake - now_ms()))}"
 
 
 def _release(facts: DaemonStatusReply) -> str:
-    """When the next quiet root is released: release sleeps until then, too."""
+    """When the next quiet root is released. Release sleeps until then, too."""
     if facts.passivate_after is None:
         return "off"
     if facts.next_release is None:
@@ -222,19 +253,20 @@ def _release(facts: DaemonStatusReply) -> str:
 
 
 def _summary(kind: str, event: JsonObject) -> str:
-    """One line of what an event says.
+    """One line that says what an event says.
 
-    Deliberately a *follower*, not the transcript: `phern agents attach` shows the
-    log arriving, and the two projections that render a conversation properly
-    (`tui.adapter` and `tui.trajectory`) both fold whole `Session` objects,
-    which a stream of wire frames is not. So the four types that carry a
-    conversation are spelled out, and **everything else falls through to
-    `describe`** rather than to nothing — the auditor's generic reading, shared
-    for its stated reason: a view that silently hid an event it had no phrase
-    for would be the omission A11 forbids. Naming only four types left 57 of the
-    61 known ones as a bare word, including every `supervisor/*` record that
-    says why a root stopped — which is the thing a person follows a remote run
-    to find out.
+    This is deliberately a *follower* and not the transcript. `phern agents
+    attach` shows the log as it arrives. The two projections that render a
+    conversation properly (`tui.adapter` and `tui.trajectory`) both fold whole
+    `Session` objects, and a stream of wire frames is not one. So the four types
+    that carry a conversation are written out here, and **every other type falls
+    through to `describe`** and not to nothing. `describe` is the generic
+    reading of the auditor, and it is shared for the reason that it states: a
+    view that silently hid an event for which it had no phrase would be the
+    omission that A11 forbids. When only four types had a phrase, 57 of the 61
+    known types were shown as a bare word. Those included every `supervisor/*`
+    record that says why a root stopped, and that is what a user follows a
+    remote run to find out.
     """
     data = as_obj(event.get("data"))
     if kind in ("user/message", "assistant/message"):
@@ -247,17 +279,18 @@ def _summary(kind: str, event: JsonObject) -> str:
 
 
 def _reachability(facts: DaemonStatusReply) -> list[tuple[str, str]]:
-    """The row that only exists when the answer is bad (P5-11).
+    """The row that exists only when the answer is bad (P5-11).
 
-    Absent while the daemon can be reached, which is `Diagnostic.read`'s rule
-    and the reason it is worth obeying here: a person who can read this table at
-    all just connected, so a permanent "reachable: yes" row would be a fact
-    proved by its own delivery — and the row that matters would be one more line
-    of a table nobody scans.
+    The row is absent while the daemon can be reached. That is the rule of
+    `Diagnostic.read`, and it is worth following here. A user who can read this
+    table at all has just connected, so a permanent "reachable: yes" row would
+    be a fact that its own delivery proves. The row that matters would then be
+    one more line of a table that nobody scans.
 
-    That it can ever be *seen* is the odd case and the useful one: the socket
-    went away, the daemon noticed, and this connection came in on a client that
-    was already attached — or through a path somebody restored by hand.
+    The case in which the row can be *seen* is the unusual one and the useful
+    one. The socket went away, the daemon noticed, and this connection came in
+    on a client that was already attached, or through a path that somebody
+    restored by hand.
     """
     since = facts.unreachable_since
     if since is None:
@@ -282,30 +315,31 @@ def _line(event: JsonObject) -> str:
 NOISE: frozenset[str] = frozenset(
     {
         # The streamed halves of `assistant/message`, which *is* shown. One line
-        # per delta is a keystroke log, not a follow — and here it is also almost
-        # all of the rendering cost, for output nobody reads.
+        # for each delta is a keystroke log and not a follow. Here it is also
+        # almost all of the rendering cost, for output that nobody reads.
         "assistant/chunk",
-        # The dispatch's opening half; its settled half carries the content.
+        # The opening half of the dispatch. Its settled half carries the content.
         "tool/code-dispatch-start",
         # One event per changed variable per cell.
         "kernel/snapshot",
     }
 )
-"""Types a follow leaves out unless asked. `--all` includes them.
+"""The types that a follow leaves out unless it is asked. `--all` includes them.
 
-Deliberately *not* the trajectory's `RECORDLESS`, which is that view's set for
-that view's reasons and lives under `ph_app.tui`. Small and open on purpose: an
-unclassified type is shown, because a follower that hid something new would be
-the silent omission the fallback in `_summary` exists to prevent.
+This is deliberately *not* the `RECORDLESS` set of the trajectory. That set
+belongs to that view, for the reasons of that view, and it is under
+`ph_app.tui`. This set is small and open on purpose. A type that is not
+classified is shown, because a follower that hid something new would be the
+silent omission that the fallback in `_summary` exists to prevent.
 """
 
 
 def _since_cursor(raw: str, current: Cursor) -> Cursor:
-    """`--since` as a cursor the daemon can check, or exit 2.
+    """`--since` as a cursor that the daemon can check, or exit 2.
 
-    The parse is `ph_app.protocol.parse_cursor`, beside `cursor_of` and
-    `resume_at` which define what a cursor is; what is the CLI's own is the
-    refusal, and its code.
+    The parse is `ph_app.protocol.parse_cursor`. It is beside `cursor_of` and
+    `resume_at`, which define what a cursor is. The part that belongs to the CLI
+    is the refusal and its code.
     """
     cursor = parse_cursor(raw, current.to_wire())
     if cursor is None:
@@ -319,26 +353,28 @@ def _since_cursor(raw: str, current: Cursor) -> Cursor:
 
 @dataclass(slots=True)
 class _Follow:
-    """One attached session as the CLI prints it, over `Followed`.
+    """One attached session as the CLI prints it, built on `Followed`.
 
-    The buffering, the `seq` dedupe and the paging live in `daemon/follow.py`,
-    which the TUI's socket client is built on too; what is here is what is the
-    CLI's own — a console, the `--type` filter, and the `until_idle` stop.
+    The buffering, the `seq` dedupe and the paging are in `daemon/follow.py`,
+    which the socket client of the TUI is built on too. This class holds what
+    belongs to the CLI: a console, the `--type` filter, and the `until_idle`
+    stop.
     """
 
     session_id: str
     until_idle: bool = False
     everything: bool = False
     selectors: Sequence[Selector] = ()
-    """Namespace selectors from `--type`; empty means no filter (P6-33)."""
+    """Namespace selectors from `--type`. Empty means no filter (P6-33)."""
     last_turn: str | None = None
-    """How the turn this stopped on ended, so the exit code can say (P5-04).
+    """How the turn that this follower stopped on ended, so that the exit code
+    can say so (P5-04).
 
-    Kept because the status that *releases* `--until-idle` is the only one that
-    decides the exit code, and it has gone by the time the wait returns. Set in
-    `_status` and nowhere else — including for a root that was already idle when
-    the attach landed, whose only status is the attach reply `Followed.seed`
-    delivers through the same handler.
+    It is kept because the status that *releases* `--until-idle` is the only
+    status that decides the exit code, and that status is gone by the time the
+    wait returns. It is set in `_status` and nowhere else. That includes a root
+    that was already idle when the attach arrived: its only status is the attach
+    reply, which `Followed.seed` delivers through the same handler.
     """
     done: anyio.Event = field(default_factory=anyio.Event)
     feed: Followed = field(init=False)
@@ -349,14 +385,21 @@ class _Follow:
         )
 
     def _events(self, pairs: Sequence[EventFrame], _live: bool) -> None:
-        # The phase is not a distinction a follower draws: it prints records, and
-        # a record read from a page reads the same as one that just arrived.
+        # A follower does not draw the distinction between the phases. It prints
+        # records, and a record that was read from a page reads the same as a
+        # record that just arrived.
         self.write(event for event, _view in pairs)
 
     def _status(self, facts: StatusFacts) -> None:
         status, last = facts.status, facts.last_turn
-        # Named when it is not the ordinary ending: `idle` after an error turn
-        # reads as success, and this line is what `--until-idle` stops on.
+        if status is None:
+            # This frame says nothing about where the root is: only its footer
+            # or its route moved. A follower prints the log and the status
+            # words, so there is no line to print. It used to print a bare `·`.
+            return
+        # The ending is named when it is not the ordinary one. `idle` after an
+        # error turn reads as success, and this line is what `--until-idle` stops
+        # on.
         ended = f" · last turn {last}" if status == "idle" and last and last != "completed" else ""
         console.print(f"[dim]· {status}{ended}[/dim]")
         if self.until_idle and status == "idle":
@@ -366,33 +409,36 @@ class _Follow:
     def write(self, events: Iterable[JsonObject]) -> None:
         """Render a run of events as one write.
 
-        One `console.print` per event costs multiples of the same events joined,
-        which is what makes catching up on a long log bearable — and why this takes
-        a sequence rather than an event.
+        One `console.print` for each event costs several times as much as one
+        print of the same events joined. The single print makes catching up on a
+        long log bearable, and it is why this method takes a sequence and not
+        one event.
         """
         lines = [_line(event) for event in events if self._shows(event)]
         if lines:
-            # A follower's lines are records, and folding one at the terminal
-            # width turns a `grep` into two half-matches — which is why the
+            # The lines of a follower are records. A line folded at the terminal
+            # width turns a `grep` into two half-matches, which is why the
             # console itself is `soft_wrap` (see `ph_app.console`).
             console.print("\n".join(lines))
 
     def _shows(self, event: JsonObject) -> bool:
         """Whether this follower prints one event.
 
-        **A `--type` selector replaces the per-delta hush rather than stacking on
-        it.** `NOISE` exists because a turn is mostly `assistant/chunk`, whose
-        content arrives again in the `assistant/message` that closes it — so the
-        default is to hide it. Naming a namespace is a stronger signal than that
-        default: somebody who typed `--type assistant` asked for the assistant
-        traffic, and hiding most of it would answer a question they did not ask.
-        So `--all` stops being necessary once `--type` is given, rather than
-        being required on top of it.
+        **A `--type` selector replaces the default that hides per-delta events.
+        It is not applied on top of that default.** `NOISE` exists because a
+        turn is mostly `assistant/chunk`, whose content arrives again in the
+        `assistant/message` that closes the turn. So the default is to hide it.
+        A namespace that the user names is a stronger signal than that default.
+        A user who typed `--type assistant` asked for the assistant traffic, and
+        hiding most of it would answer a question that they did not ask. So
+        `--all` is not needed when `--type` is given, and is not required on
+        top of it.
 
-        Said as two branches rather than one disjunction, and the type read once:
-        the earlier form computed `event["type"]` here and again in a second
-        predicate, and recomputed `bool(self.selectors)` — a value fixed at
-        construction — on every frame of a replayed history.
+        This is written as two branches and not as one disjunction, and the type
+        is read one time. The earlier form computed `event["type"]` here and
+        again in a second predicate. It also computed `bool(self.selectors)`
+        again on every frame of a replayed history, although that value is
+        fixed at construction.
         """
         kind = as_str(event.get("type"))
         if self.selectors:
@@ -501,8 +547,8 @@ def attach(
     way of stopping an agent look like a fault.
     """
 
-    # The session-log vocabulary: a bare `workspace` needs no prefix, and
-    # `bus:tools` is refused rather than silently matching nothing (P6-33).
+    # This is the session-log vocabulary. A bare `workspace` needs no prefix, and
+    # `bus:tools` is refused and does not silently match nothing (P6-33).
     selectors = selectors_or_exit(type_, vocabulary="log")
 
     async def work(client: DaemonClient) -> None:
@@ -512,27 +558,30 @@ def attach(
             everything=everything,
             selectors=selectors,
         )
-        # On the peer, which is where the read loop looks.
+        # The callback is set on the peer, which is where the read loop looks.
         client.peer.on_notify = follow.feed
-        # Subscribed *before* the history is read, so nothing that happens in
-        # between is lost; `_Follow` holds those frames until the pages are done.
-        # No cursor: the generation a snapshot cursor needs is what this reply
-        # carries, so `from` is 0 here by construction and catch-up is paged from
-        # `--since` against the generation the daemon just named.
+        # The subscription is made *before* the history is read, so that nothing
+        # that happens in between is lost. The feed of `_Follow` holds those
+        # frames until the pages are done. No cursor is sent. This reply carries
+        # the generation that a snapshot cursor needs, so `from` is 0 here by
+        # construction, and catch-up is paged from `--since` against the
+        # generation that the daemon just named.
         attached = await client.call(verbs.SESSION_ATTACH, SessionParams(session_id=session))
         cursor = _since_cursor(since, attached.cursor)
-        # The reply *is* a status frame, and for a root that was already idle it is
-        # the only one there will ever be — so it goes through the feed rather than
-        # being read here. `_status` is then the single place that decides "idle
-        # means done", and this command has no `--until-idle` branch of its own.
+        # The reply *is* a status frame. For a root that was already idle it is
+        # the only status frame that there will ever be, so it goes through the
+        # feed and is not read here. `_status` is then the single place that
+        # decides "idle means done", and this command has no `--until-idle`
+        # branch of its own.
         follow.feed.seed(attached)
         try:
-            # `seen` is *not* pre-set to `asked - 1`. It used to be, so that live
-            # frames below the cursor would be dropped — but nothing live can
-            # arrive below the head, and the pre-set had a real cost: when the
-            # daemon answered a stale generation by paging from 0, the first
-            # `asked` events of *this* incarnation were discarded as already
-            # seen. Advancing from what arrives shows the fallback instead.
+            # `seen` is *not* set in advance to `asked - 1`. It used to be, so
+            # that live frames below the cursor would be dropped. But nothing
+            # live can arrive below the head, and the advance setting had a real
+            # cost. When the daemon answered a stale generation by paging from
+            # 0, the first `asked` events of *this* incarnation were discarded
+            # as already seen. `seen` now advances from what arrives, and that
+            # shows the fallback.
             started = await follow.feed.catch_up(client, cursor)
             if started < cursor.sequence:
                 console.print(
@@ -543,16 +592,16 @@ def attach(
             follow.feed.live()
             await first_of(follow.done, client.closed)
         finally:
-            # Only while there is somebody to tell. A daemon that shut down under
-            # us has already dropped every subscription, and asking it to would
-            # park on a reply nobody is left to send.
+            # Detach only while there is somebody to tell. A daemon that shut
+            # down during the follow has already dropped every subscription, and
+            # the call would wait for a reply that nobody is left to send.
             if not client.closed.is_set():
                 await client.call(verbs.SESSION_DETACH, SessionParams(session_id=session))
         if client.closed.is_set():
             raise DaemonGone
         if follow.last_turn == "error":
-            # After the detach above, so the refusal does not leave a
-            # subscription behind on a daemon that is still running.
+            # This runs after the detach above, so that the refusal does not
+            # leave a subscription behind on a daemon that is still running.
             fail(f"[red]{session}: the last turn ended in an error[/red]")
 
     _ask(work)
@@ -562,13 +611,22 @@ def attach(
 def schedule(
     session: Annotated[str, SESSION_ARGUMENT],
     prompt: Annotated[
-        str, typer.Option("--prompt", help="What to say to the agent when it fires.")
-    ] = "",
-    at: Annotated[int, typer.Option("--at", help="Fire once, at this epoch-ms instant.")] = 0,
-    every: Annotated[int, typer.Option("--every", help="Fire every N milliseconds.")] = 0,
-    cron: Annotated[str, typer.Option("--cron", help="Fire on this cron expression.")] = "",
-    cancel: Annotated[str, typer.Option("--cancel", help="Cancel this schedule id.")] = "",
-    schedule_id: Annotated[str, typer.Option("--id", help="Name the schedule.")] = "",
+        str | None, typer.Option("--prompt", help="What to say to the agent when it fires.")
+    ] = None,
+    at: Annotated[
+        int | None, typer.Option("--at", help="Fire once, at this epoch-ms instant.")
+    ] = None,
+    every: Annotated[int | None, typer.Option("--every", help="Fire every N milliseconds.")] = None,
+    cron: Annotated[
+        str | None,
+        typer.Option("--cron", help="Fire on this cron expression.", callback=nonblank),
+    ] = None,
+    cancel: Annotated[
+        str | None, typer.Option("--cancel", help="Cancel this schedule id.", callback=nonblank)
+    ] = None,
+    schedule_id: Annotated[
+        str | None, typer.Option("--id", help="Name the schedule.", callback=nonblank)
+    ] = None,
 ) -> None:
     """List, create, or cancel a root's schedules.
 
@@ -578,15 +636,23 @@ def schedule(
     a prompt, because a schedule with nothing to say is claimed, recorded and
     delivers nothing forever.
     """
-    # The chosen timing carried as the pair it becomes, rather than three bools
-    # whose identity has to be reconstructed further down by a ternary chain.
-    # Keyed by the literal, so the comprehension keeps it: a bare tuple of pairs
-    # widens the three to `str`, and `schedule/create` takes the `ScheduleKind`
-    # the seam declares — without the annotation on the *source*, the CLI hands
-    # the typed send a value the daemon's own model would then refuse.
+    # The chosen timing is carried as the pair that it becomes, and not as three
+    # bools whose identity a ternary chain must reconstruct further down. The
+    # dict is keyed by the literal, so the comprehension keeps the literal. A
+    # bare tuple of pairs widens the three to `str`, and `schedule/create` takes
+    # the `ScheduleKind` that the seam declares. Without the annotation on the
+    # *source*, the CLI hands the typed send a value that the model of the
+    # daemon would then refuse.
+    #
+    # A flag that was left out is `None`. A typed `0` is a value, and it goes to
+    # the daemon like any other: the fold of the schedule seam is the one rule
+    # for what can fire, so `--every 0` is refused there and `--at 0` fires at
+    # once. It is never read as a flag that was left out: that reading made
+    # `--every 0 --prompt x` list the schedules and report nothing. An empty
+    # string is refused at parse time (`nonblank`).
     offered: dict[ScheduleKind, int | str | None] = {"once": at, "interval": every, "cron": cron}
-    timings = [(kind, str(value)) for kind, value in offered.items() if value]
-    if cancel:
+    timings = [(kind, str(value)) for kind, value in offered.items() if value is not None]
+    if cancel is not None:
         if timings:
             raise typer.BadParameter("--cancel takes no timing flag")
         outcome = _ask(
@@ -617,7 +683,9 @@ def schedule(
             verbs.SCHEDULE_CREATE,
             CreateScheduleParams(
                 session_id=session,
-                schedule_id=schedule_id or f"sch-{secrets.token_hex(4)}",
+                schedule_id=(
+                    schedule_id if schedule_id is not None else f"sch-{secrets.token_hex(4)}"
+                ),
                 kind=kind,
                 spec=spec,
                 prompt=prompt,
@@ -628,11 +696,13 @@ def schedule(
 
 
 def _print_schedules(session: str, rows: list[dict[str, Any]]) -> None:
-    """The rows themselves, not a reply to index into.
+    """Print the schedules of a root. The argument is the rows themselves, and
+    not a reply to index into.
 
-    It took a whole `schedule/list` envelope and read `["schedules"]` out of it,
-    which worked only because the `session/status` reply happens to use the same
-    key — a printer coupled to two unrelated wire shapes by a string.
+    The function used to take a whole `schedule/list` envelope and read
+    `["schedules"]` out of it. That worked only because the `session/status`
+    reply happens to use the same key. A string coupled the printer to two
+    unrelated wire shapes.
     """
     if not rows:
         console.print(f"[dim]no schedules on {session}[/dim]")
@@ -644,11 +714,15 @@ def _print_schedules(session: str, rows: list[dict[str, Any]]) -> None:
     table.add_column("next")
     table.add_column("prompt")
     for row in rows:
+        # `nextAt` is absent or `None` for a schedule that will not fire again.
+        # The row is unvalidated JSON, so anything that is not an instant is
+        # read as absent too.
+        next_at = row.get("nextAt")
         table.add_row(
             row["id"],
             row["kind"],
             row["spec"],
-            _when(row.get("nextAt")),
+            _when(next_at if isinstance(next_at, int) else None),
             one_line(row["prompt"], 40),
         )
     console.print(table)
@@ -665,8 +739,8 @@ def status(session: Annotated[str, SESSION_ARGUMENT]) -> None:
                 ("status", row.status),
                 ("events", str(row.cursor.sequence)),
                 ("generation", str(row.cursor.generation)),
-                # The two above in the one form `attach --since` can verify, spelled
-                # by the module that defines what a cursor is.
+                # The two values above, in the one form that `attach --since` can
+                # verify. The module that defines what a cursor is formats it.
                 ("resume with", f"--since {cursor_text(row.cursor)}"),
                 ("watchers", str(row.watchers)),
                 ("retry attempts", str(row.attempts)),
@@ -705,14 +779,18 @@ def doctor() -> None:
                 ("release", _release(facts)),
                 ("socket watch", facts.socket_watch),
                 ("invariants", "checked when a root settles" if facts.check_invariants else "off"),
-                ("probes", facts.probe or "socket only (`phern agents probe`)"),
+                (
+                    "probes",
+                    "socket only (`phern agents probe`)" if facts.probe is None else facts.probe,
+                ),
                 ("unwritten", ", ".join(facts.unwritten) or "none"),
                 *_reachability(facts),
             ),
         )
     )
-    # A loop, because the envelope is a list: P5-12 adds the daemon's mounted
-    # diagnostics to it and this side needs no change to render them.
+    # This is a loop because the envelope is a list. P5-12 adds the mounted
+    # diagnostics of the daemon to the list, and this side needs no change to
+    # render them.
     for reported in facts.sections:
         console.print(section(reported.title, [(row.label, row.value) for row in reported.rows]))
 
@@ -760,7 +838,11 @@ def print_owed(listing: OwedListing) -> None:
             if row.damaged:
                 status += f" · damaged ({', '.join(row.damaged)})"
             table.add_row(
-                row.session_id, status, ", ".join(row.holds) or "—", _when(row.updated), row.cwd
+                row.session_id,
+                status,
+                ", ".join(row.holds) or "—",
+                _when(row.updated),
+                row.cwd,
             )
         console.print(table)
         if any(row.damaged for row in listing.sessions):
@@ -825,7 +907,12 @@ def print_resume(report: ResumeReport) -> None:
     table.add_column("status")
     table.add_column("detail")
     for row in report.sessions:
-        table.add_row(row.session_id, row.outcome, row.status or "—", row.detail or "")
+        table.add_row(
+            row.session_id,
+            row.outcome,
+            "—" if row.status is None else row.status,
+            row.detail,
+        )
     console.print(table)
     if not report.trusted:
         console.print("[yellow]the live-roots index could not vouch for itself[/yellow]")
@@ -854,22 +941,22 @@ def shutdown() -> None:
 
 
 async def stop_daemon(client: DaemonClient) -> bool:
-    """Send `shutdown` and wait for the daemon to close the connection: whether it
-    did within `SHUTDOWN_SECONDS`.
+    """Send `shutdown` and wait for the daemon to close the connection. Returns
+    whether the daemon closed it within `SHUTDOWN_SECONDS`.
 
-    `shutdown` is a notification by contract — a request awaiting a reply would
-    be waiting on a frame the daemon is concurrently losing the ability to write
-    — so the confirmation is the connection the daemon closes on its way out.
-    Waiting for it rather than declaring success is the difference between "I
-    asked" and "it stopped", and roots being flushed and leases released is
-    exactly what happens in that window. The daemon removes its socket before its
-    connections close (`serve`'s teardown), so a closed connection is also a door
-    the next daemon finds clear.
+    `shutdown` is a notification by contract. A request that awaited a reply
+    would wait on a frame that the daemon is losing the ability to write at the
+    same time. So the confirmation is the connection that the daemon closes as
+    it exits. To wait for that, and not to declare success at once, is the
+    difference between "I asked" and "it stopped". The daemon flushes its roots
+    and releases its leases in exactly that window. The daemon removes its
+    socket before its connections close (the teardown of `serve`), so a closed
+    connection also means that the next daemon finds the socket path clear.
 
-    The budget is the one teardown itself is bounded by, plus room for the
-    unwinding around it: a daemon still inside its grace period has not failed to
-    stop, it is stopping. Both halves are declared where they are spent, so this
-    cannot drift from what the daemon actually allows.
+    The budget is the bound of the teardown itself, plus room for the unwinding
+    around it. A daemon that is still inside its grace period has not failed to
+    stop. It is stopping. Both halves are declared where they are spent, so
+    this budget cannot drift from what the daemon allows.
     """
     await client.notify(verbs.SHUTDOWN, NoParams())
     with anyio.move_on_after(SHUTDOWN_SECONDS):

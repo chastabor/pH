@@ -1,34 +1,38 @@
-"""`!<command>` and `!!<command>` — a person's own shell, run where the session
+"""`!<command>` and `!!<command>`: the user's own shell, run where the session
 lives (P7-10).
 
-The counterpart to `attach.py`, and here for the same reason that one exists:
-**two front ends run this and there must be one author.** In process the TUI
-holds the session; over a socket a daemon root does. The rule they share — refuse
-if nothing can run it, append what is about to happen, run it, append what did —
-is the whole feature, and a copy per transport is a copy that drifts. The first
+This module is the counterpart to `attach.py`, and it exists for the same
+reason: **the rule must have one author.** It was written when two front ends
+ran the rule. In process the TUI held the session, and over a socket a daemon
+root did. The in-process front end is deleted, and a daemon root is now the one
+caller of `run_shell`. The rule is: refuse if nothing can run the command,
+append what is about to happen, run it, append what happened. That rule is the
+whole feature, and a copy for each transport is a copy that drifts. The first
 draft had one, and it had already diverged inside a single increment.
 
-**Two events, log first** (§5 rule 2). `shell/command` is appended *before* the
-child starts, so a command that hangs — or that takes the daemon down with it —
-still says in the log what was started, which is exactly the command worth
-knowing about. One event on completion would lose it. The pair is an intent
-(`ph.session.kinds.SHELL_COMMAND`, P10-08): `ctx.intents` puts the command on disk
-before the child starts, and repair settles one the daemon died during, so no
-reader is told forever that a command is still running.
+**Two events, and the log comes first** (§5 rule 2). `shell/command` is appended
+*before* the child starts. A command that hangs, or that takes the daemon down
+with it, therefore still shows in the log what was started, and that is exactly
+the command worth knowing about. One event on completion would lose it. The
+pair is an intent (`ph.session.kinds.SHELL_COMMAND`, P10-08). `ctx.intents` puts
+the command on disk before the child starts. Repair settles a command that the
+daemon died during, so no reader is told forever that a command is still
+running.
 
-**Both forms log in full; only `!` is spoken.** Neither event type is
-surface-eligible — see `SURFACE_EVENT_TYPES` in `ph.session.events` — so no
-`shell/*` event can reach the model by having been logged. That is what makes
-`!!` private by construction rather than by a filter anybody has to remember,
-and it is not expressible as one. `!` therefore cannot widen that whitelist to
-say its piece: it appends a *separate* user message, at its own budget
-(`SURFACE_OUTPUT`), which makes the one door visible on the log as a door.
+**Both forms are logged in full, and only `!` reaches the model.** Neither event
+type is surface-eligible (see `SURFACE_EVENT_TYPES` in `ph.session.events`), so
+no `shell/*` event can reach the model because it was logged. That makes `!!`
+private by construction, and not by a filter that somebody has to remember. A
+filter could not express it. `!` therefore cannot widen that whitelist to
+deliver its output. It appends a *separate* user message, at its own budget
+(`SURFACE_OUTPUT`), so the one path to the model is visible on the log as a
+path.
 
 **The event carries facts, not a rendering.** `stdout`, `stderr` and `exitCode`
-stay apart on the log the way `BashValue` keeps them apart for the model, because
-joining them is a presentation choice — a front end that wants stderr in red can
-make it, and one that wants a single column can join. A view rides *beside* an
-event and never inside it; `daemon/cards.py` says the same thing from the other
+stay apart on the log, as `BashValue` keeps them apart for the model. To join
+them is a presentation choice: a front end that wants stderr in red can show it
+so, and one that wants a single column can join them. A view travels *beside* an
+event and never inside it. `daemon/cards.py` says the same thing from the other
 side.
 
 @module ph_app.shell
@@ -62,14 +66,15 @@ __all__ = [
 ]
 
 SURFACE_OUTPUT = 4 * 1024
-"""How much of that a `!` puts in front of the model.
+"""How much of the output of a command a `!` puts in front of the model.
 
-Much smaller than `SHELL_OUTPUT`, because the two bounds protect different
-payers. The log's is a file written once; this one guards a **prompt prefix
-re-sent on every step until compaction**, so a single `!find /` at the log's cap
-would be ~32k tokens paid again each turn — for output the person ran to read
-themselves. The full text is on the log either way: `!` chooses what the model
-reads, never what is kept, and a person who wants the rest can scroll.
+It is much smaller than `SHELL_OUTPUT`, because the two bounds protect different
+costs. The bound of the log guards a file that is written one time. This bound
+guards a **prompt prefix that is sent again on every step until compaction**. A
+single `!find /` at the cap of the log would be ~32k tokens paid again each
+turn, for output that the user ran in order to read it themselves. The full
+text is on the log in both cases: `!` chooses what the model reads, never what
+is kept, and a user who wants the rest can scroll.
 """
 
 
@@ -80,21 +85,23 @@ INTERRUPTED: Mapping[Unsettled, str] = {
     ),
     "not-started": "[ph: not run — the log could not record the command first]",
 }
-"""What a card says for a result nobody saw the command write, by
-`unsettled` reason (`ph.session.unsettled_why`). Said, because a card that settled with no
-output and no exit code reads as a command that printed nothing and succeeded."""
+"""What a card says for a result that nobody saw the command write, keyed by the
+`unsettled` reason (`ph.session.unsettled_why`). The card says it because a card
+that settled with no output and no exit code reads as a command that printed
+nothing and succeeded."""
 
 
 def shell_body(data: JsonObject) -> str:
-    """A `shell/result`'s streams as one column, the way a terminal shows them.
+    """The streams of a `shell/result` as one column, as a terminal shows them.
 
-    **Rendered here, from the event, and not stored on it.** The log keeps the
-    two streams apart so a front end can color them apart; this is the default
-    a front end that wants one column uses, and it is shared so the terminal and
-    the browser cannot disagree. `[stderr]`, `[exit N]`, the timeout line and the
-    truncation sentence all follow `tool-bash`'s renderer, so `!!make` and a
-    model's `bash("make")` read alike in one transcript — the last two by
-    calling the same functions, after P7-13 added them to one side only.
+    **It is rendered here, from the event, and not stored on the event.** The
+    log keeps the two streams apart so that a front end can color them apart.
+    This is the default for a front end that wants one column, and it is shared
+    so that the terminal and the browser cannot disagree. `[stderr]`,
+    `[exit N]`, the timeout line and the truncation sentence all follow the
+    renderer of `tool-bash`, so `!!make` and a `bash("make")` of the model read
+    alike in one transcript. The last two follow it by calling the same
+    functions, after P7-13 added them to one side only.
     """
     parts: list[str] = []
     stdout = as_str(data.get("stdout")).rstrip()
@@ -119,16 +126,17 @@ def shell_body(data: JsonObject) -> str:
 
 
 def shell_message(command: str, data: JsonObject) -> str:
-    """What a `!` says to the model: the command, then what it printed.
+    """What a `!` tells the model: the command, then what it printed.
 
-    Composed here, beside `shell_body` and from the same event, so the splice
-    cannot describe the command differently than the card does. The command line
-    is the half that is not recoverable from the streams — output alone, spliced
-    into a conversation, is text from nowhere.
+    It is composed here, beside `shell_body` and from the same event, so the
+    spliced message cannot describe the command differently from the card. The
+    command line is the half that cannot be recovered from the streams. Output
+    alone, spliced into a conversation, is text with no origin.
 
-    Clipped against `SURFACE_OUTPUT` and *said so*, in `truncation_marker`'s one
-    sentence: a model reading a prefix has to be told it is a prefix or it will
-    reason from a file it thinks it has seen the end of.
+    The body is clipped against `SURFACE_OUTPUT`, and the one sentence of
+    `truncation_marker` *says so*. A model that reads a prefix must be told that
+    it is a prefix, or it will reason from a file whose end it thinks it has
+    seen.
     """
     body = shell_body(data) or NO_OUTPUT
     size = utf8_size(body)
@@ -141,10 +149,10 @@ def shell_message(command: str, data: JsonObject) -> str:
 def shell_of(ctx: Context) -> ShellService:
     """The shell seam, or the refusal for its absence.
 
-    Resolved by the *caller* rather than inside `run_shell`, so a transport that
-    orders validation before an effect can refuse in its validating half: under
-    the daemon the idempotence key is claimed between the two, and a refusal that
-    happened after the claim would burn a retry the client still needs.
+    The *caller* resolves it, and `run_shell` does not. A transport that orders
+    validation before an effect can then refuse in its validating half. Under
+    the daemon the idempotence key is claimed between the two halves, and a
+    refusal after the claim would use up a retry that the client still needs.
     """
     shell = ctx.get(SHELL)
     if shell is None:
@@ -160,28 +168,29 @@ async def run_shell(
     *,
     surface: bool = False,
 ) -> ShellResult:
-    """Run a person's command as a recorded pair (`ShellService.run_recorded`).
+    """Run a command of the user as a recorded pair (`ShellService.run_recorded`).
     Returns what ran, for a caller that must reply.
 
-    **`surface` is the difference between `!` and `!!`.** Both run the person's
-    command in the session's workspace and log it in full; only `!` puts the
-    result into the conversation. It is spliced as a **user message**, which
-    `ph.session.events` prescribes — a `tool/result` with no `tool_use` block to
-    pair with is an orphan several providers reject — and delivered by `inject`,
-    so it waits for the agent's next step rather than starting a turn: a person
-    running a command is telling the model something, not asking it to act.
+    **`surface` is the difference between `!` and `!!`.** Both run the command
+    of the user in the workspace of the session and log it in full. Only `!`
+    puts the result into the conversation. The result is spliced as a **user
+    message**, which `ph.session.events` prescribes: a `tool/result` with no
+    `tool_use` block to pair with is an orphan that several providers reject.
+    `inject` delivers it, so it waits for the next step of the agent and does
+    not start a turn. A user who runs a command is telling the model something,
+    and is not asking it to act.
 
-    An `AgentDriver` rather than the handle, because the splice is composed from
-    the settle `run_recorded` hands back and so cannot disagree with it. The
-    caller holds the driver too, and could do it there — at the price of
-    re-deriving the rendering from `ShellResult`, which is the same second
-    derivation the `cwd` paragraph below refuses for the same reason.
+    The parameter is an `AgentDriver` and not the handle, because the splice is
+    composed from the settle that `run_recorded` returns, and so cannot disagree
+    with it. The caller holds the driver too, and could do the splice there. The
+    price would be to derive the rendering again from `ShellResult`. That is the
+    same second derivation that the `cwd` paragraph below refuses, for the same
+    reason.
 
-    `cwd` comes back *from the seam* rather than being derived here: `run`
-    resolves the working directory from the agent and honors a workspace
-    redirection, so a second derivation could disagree with the fact it claims
-    to record. It is written on the result event, once the child has actually
-    run somewhere.
+    `cwd` comes back *from the seam* and is not derived here. `run` resolves the
+    working directory from the agent and honors a workspace redirection, so a
+    second derivation could disagree with the fact that it claims to record. It
+    is written on the result event, after the child has actually run somewhere.
     """
     result, settled = await shell.run_recorded(
         command, agent=agent, session=session, surface=surface
@@ -190,11 +199,12 @@ async def run_shell(
         agent.inject(
             create_user_message(
                 content=[TextBlock(text=shell_message(command, settled.data))],
-                # `relay`, never an untagged user message: the person typed
-                # `!make`, they did not type 4 KiB of compiler output.
-                # `tool-attach` states the rule, and `ph_app.tui.trajectory` and
-                # `transcript_mode` both route on `source` — untagged, a
-                # machine's stdout is replayed as the person's own words.
+                # `relay`, never an untagged user message. The user typed
+                # `!make`, and did not type 4 KiB of compiler output.
+                # `tool-attach` states the rule. `ph_app.tui.trajectory` and
+                # `transcript_mode` both route on `source`. If the message were
+                # untagged, the stdout of a machine would be replayed as the
+                # user's own words.
                 source=PluginSource(plugin="ph-app.shell", form="relay"),
             )
         )

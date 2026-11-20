@@ -368,6 +368,21 @@ async def test_a_schedule_needs_one_timing_and_something_to_say(
         assert both.exit_code == 2
 
 
+def test_a_dash_is_printed_only_for_an_instant_that_is_absent() -> None:
+    """`None` is "no instant", and it is the only value that prints as a dash.
+
+    Zero is the epoch. It is an instant, and it prints as a date. The schedule
+    listing passes `None` for a schedule that will not fire again.
+
+    Sabotage: make `_when` answer a dash for `moment <= 0` again, and the epoch
+    prints as a dash.
+    """
+    from ph_app.agents import _when
+
+    assert _when(None) == "—"
+    assert _when(0).startswith(("1969-", "1970-")), "the epoch, in local time"
+
+
 async def test_doctor_reports_the_socket_the_daemon_actually_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -971,3 +986,121 @@ async def test_a_traversing_session_id_is_refused_before_any_path_is_built(
     with pytest.raises(ValidationError):
         SessionParams.model_validate({"sessionId": "../../escape"})
     assert SessionParams.model_validate({"sessionId": "20240101T000000-abc123"}).session_id
+
+
+# ----------------------------------------- what is absent, as it is printed --
+# A field that a frame leaves out arrives as `None`. Each printer draws it as it
+# drew the placeholder that used to stand there, and never as the word `None`.
+
+
+def _cells(printed: str, first: str) -> list[str]:
+    """The cells of the table row whose first cell is `first`."""
+    for line in printed.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("│┃").split("│")]
+        if cells and cells[0] == first:
+            return cells
+    raise AssertionError(f"no row for {first} in:\n{printed}")
+
+
+def test_a_followed_frame_that_states_no_status_prints_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A footer frame says nothing about where the root is, so `phern agents
+    attach` prints no line for it, and the wait of `--until-idle` stands.
+
+    The command used to print a bare `·` for each such frame. A footer moves
+    several times in a turn, so a follower showed a column of empty marks
+    between the records.
+
+    A frame that does state a status still prints its word.
+
+    Sabotage: drop the `status is None` return in `_Follow._status`, and the
+    footer frame prints `· None`.
+    """
+    from ph_app.agents import _Follow
+    from ph_app.payloads import StatusFacts
+
+    follow = _Follow(session_id="s", until_idle=True)
+
+    follow._status(StatusFacts(readings=[]))
+
+    assert capsys.readouterr().out == "", "a frame with no status printed a line"
+    assert not follow.done.is_set()
+
+    follow._status(StatusFacts(status="running"))
+
+    assert capsys.readouterr().out.strip() == "· running"
+
+
+def test_the_owed_table_draws_what_an_entry_did_not_say(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An owed root with no time and no directory gets a dash and an empty cell.
+
+    Sabotage: draw `row.cwd` with `str()` in `print_owed`, and the cell reads
+    `None`.
+    """
+    from ph_app.agents import print_owed
+    from ph_app.payloads import OwedListing, OwedRoot
+
+    row = OwedRoot(session_id="root", holds=["turn"], mounted=False, status="stored")
+
+    print_owed(OwedListing(sessions=[row], trusted=True, rebuilt=False))
+
+    assert _cells(capsys.readouterr().out, "root") == ["root", "stored", "turn", "—", ""]
+
+
+def test_the_resume_table_draws_a_root_that_did_not_mount(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A refused root has no status, and a resumed root has no detail.
+
+    Sabotage: draw `row.status` with `str()` in `print_resume`, and the cell of
+    the refused root reads `None`.
+    """
+    from ph_app.agents import print_resume
+    from ph_app.payloads import ResumedRoot, ResumeReport
+
+    rows = [
+        ResumedRoot(session_id="gone", outcome="refused", detail="no log"),
+        ResumedRoot(session_id="back", outcome="resumed", status="idle"),
+    ]
+
+    print_resume(ResumeReport(sessions=rows, trusted=True))
+
+    printed = capsys.readouterr().out
+    assert _cells(printed, "gone") == ["gone", "refused", "—", "no log"]
+    assert _cells(printed, "back") == ["back", "resumed", "idle", ""]
+
+
+def test_the_doctor_says_when_the_starting_route_is_not_listed() -> None:
+    """`phern agents doctor` names the route that a new root starts on.
+
+    A route that the daemon was started on and the profile does not list has no
+    key, and the line says so.
+
+    Sabotage: test `starts.key == ""` in `_starts_on`, and the unlisted route is
+    drawn as `None · fake/fake-9`.
+    """
+    from ph.seams.models import ModelRoute
+    from ph_app.agents import _starts_on
+    from ph_app.payloads import StartingRoute
+
+    def reply(starts_on: StartingRoute | None) -> DaemonStatusReply:
+        return DaemonStatusReply(
+            protocol_version=PROTOCOL_VERSION,
+            pid=1,
+            socket="daemon.sock",
+            uptime_ms=0,
+            roots=0,
+            socket_watch="off",
+            check_invariants=False,
+            starts_on=starts_on,
+        )
+
+    unlisted = StartingRoute(route=ModelRoute(provider="fake", model="fake-9"))
+    listed = StartingRoute(key="main", route=ModelRoute(provider="fake", model="fake-1"))
+
+    assert _starts_on(reply(unlisted)) == "fake/fake-9 (not in the profile's list)"
+    assert _starts_on(reply(listed)) == "main · fake/fake-1"
+    assert _starts_on(reply(None)) == "none — the profile lists no models"

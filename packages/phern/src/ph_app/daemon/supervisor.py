@@ -163,6 +163,7 @@ from ..protocol import Refusal, cursor_of
 from ..runtime import mount_session, open_root, read_start
 from ..sessions import RecordedStart, not_a_root
 from ..shell import run_shell
+from ..wire import stated
 from .cards import CARD_EVENTS, presentation_of
 from .frontend import AskDesk, FrontEnd
 from .planner import Planner
@@ -619,11 +620,11 @@ class Root:
     compared with the version that the root runs on (S6). `None` when it had not
     moved. The root runs on its own version until a version is adopted.
     `describe` reports how many settings differ."""
-    withdrew: str = ""
-    """What the start of this root withdrew, or `""`. It is an adopted version that
-    the loader refused, in the words of `withdrawn_note`
-    (`StartingProfile.withdrawn`). The command that asked for the start reports
-    it (`_Connection._after_command`)."""
+    withdrew: str | None = None
+    """What the start of this root withdrew, or `None` when it withdrew nothing.
+    It is an adopted version that the loader refused, in the words of
+    `withdrawn_note` (`StartingProfile.withdrawn`). The command that asked for
+    the start reports it (`_Connection._after_command`)."""
     restart_wanted: bool = False
     """Set by a command that moved the environment of this root to where a live
     mount cannot follow: `/profile use`, or a `/profile clear` of an override
@@ -955,18 +956,21 @@ class Root:
             # a footer now. "no model" over a socket, where the in-process
             # front end said `fake-1`, was the complete content of a snapshot
             # diff that nobody could read.
-            provider=options.provider or "",
-            model=options.model or "",
-            model_key=options.model_key,
-            profile=self.ctx.require(MOUNT).profile.name,
+            #
+            # The options of the agent and the profile spell "none" as `""`.
+            # `stated` turns each into `None` for the wire.
+            provider=stated(options.provider),
+            model=stated(options.model),
+            model_key=stated(options.model_key),
+            profile=stated(self.ctx.require(MOUNT).profile.name),
             profile_changes=len(self.change.differences) if self.change is not None else 0,
-            # Empty while the root is held: the question that its modal asks is
-            # the account, and the "runs on the version it started on" of the
-            # note is not yet true of either version.
+            # `None` while the root is held: the question that its modal asks
+            # is the account, and the "runs on the version it started on" of
+            # the note is not yet true of either version.
             profile_note=(
                 kept_note(self.change, self.id, door="session")
                 if self.change is not None and not self.held_on_profile
-                else ""
+                else None
             ),
             # The share at which this root compacts on its own, as its seam
             # answers it. A front end draws its context gauge in the warning
@@ -1372,7 +1376,7 @@ class Supervisor:
         *,
         cwd: str | None = None,
         choice: ModelChoice = ModelChoice(),
-        profile: str = "",
+        profile: str | None = None,
         asks: bool = False,
     ) -> Root:
         """Return this root, and mount it if it is not mounted. For `None`, return a
@@ -1419,7 +1423,7 @@ class Supervisor:
         that is already mounted keeps its route here, and `set_model` is the
         way to move it. `profile` is the named profile that a *new* session is
         created on (S5), and the `--profile` of the daemon applies when it is
-        empty. A session with a log runs on what its log records, whatever is
+        `None`. A session with a log runs on what its log records, whatever is
         asked here. `asks` says that a front end that can answer for a person
         asked for this start (S6). If the user's own named profile moved since
         the root began, the root is then held for the user to decide. A root
@@ -1475,7 +1479,7 @@ class Supervisor:
         root_id: str | None,
         cwd: str | None,
         choice: ModelChoice,
-        profile: str,
+        profile: str | None,
         asks: bool,
         pending: _Mounting,
     ) -> None:
@@ -1518,7 +1522,7 @@ class Supervisor:
         *,
         cwd: str | None,
         choice: ModelChoice,
-        profile: str = "",
+        profile: str | None = None,
         asks: bool = False,
     ) -> Root:
         """Mount a profile, create its agent, and give it its own task.
@@ -1560,7 +1564,7 @@ class Supervisor:
             if root_id is not None and start.owner is not None:
                 # This check runs before the mount and the claim, so the refusal
                 # leaves the file of the child exactly as its root left it.
-                raise NotARoot(not_a_root(root_id, start.owner))
+                raise NotARoot(not_a_root(root_id, start.owner.root))
             where = cwd or start.cwd
             ctx, starting = await mount_session(
                 exits,
@@ -2016,22 +2020,28 @@ class Supervisor:
         await self._check_credential(root)
         if root.subscribers:
             root.publish(
+                # The three fields are one fact (`StatusFacts`), and `model`
+                # says that this frame states the route. `move_to` names every
+                # route that it moves to. The seam spells an unlisted route as
+                # a key of `""`, which must not reach the wire as a name.
                 SessionStatusNotice(
                     session_id=root.id,
                     provider=entry.route.provider,
                     model=entry.route.model,
-                    model_key=entry.key,
+                    model_key=stated(entry.key),
                 )
             )
 
-    def _requested(self, name: str) -> Profile:
+    def _requested(self, name: str | None) -> Profile:
         """The profile that a new root starts on: `name`, or the profile of the
-        daemon when `name` is empty. It is composed with the start options of
+        daemon when `name` is `None`. It is composed with the start options of
         the daemon, so a `--patch` given to `phern daemon` reaches every root,
         whatever profile the root was asked for. A root with a log mounts the
         environment of that log over this profile (`session_profile`)."""
+        if name is None:
+            return self.profile
         try:
-            return composed_like(name, self.profile) if name else self.profile
+            return composed_like(name, self.profile)
         except (LoaderError, OSError, ValueError) as error:
             raise Refusal(f'profile "{name}" does not compose: {error}') from error
 
@@ -2289,7 +2299,7 @@ class Supervisor:
         record the result in its log."""
         options = root.agent.options
         await hold_for_credential(
-            root.ctx, root.session, SESSION_HOLDER, options.provider or "", options.model or ""
+            root.ctx, root.session, SESSION_HOLDER, options.provider, options.model
         )
 
     async def credential_supplied(self, root: Root) -> None:
@@ -2393,7 +2403,7 @@ class Supervisor:
                     return
                 root.retry(reason=error_message(error))
                 workspace, tree = self._restore_point(root)
-                if workspace is not None and tree:
+                if workspace is not None and tree is not None:
                     # The durable opening of the restore writes this log, and
                     # the retry record with it, before the tree is touched.
                     await self._restore(root, workspace, tree)
@@ -3286,9 +3296,9 @@ class Supervisor:
             )
         self.unwritten[session_id] = root.id
 
-    def _restore_point(self, root: Root) -> tuple[Workspace | None, str]:
+    def _restore_point(self, root: Root) -> tuple[Workspace | None, str | None]:
         """The workspace of the root, and the tree that a retry starts from. The
-        tree is `""` when the root has none.
+        tree is `None` when the root has none.
 
         A retry against a tree that was partly changed would be a different
         turn from the turn that failed. The model would see edits from an
@@ -3306,8 +3316,9 @@ class Supervisor:
         # the rest of the tree uses.
         workspace = workspace_of(root.ctx, root.agent)
         if workspace is None:
-            return None, ""
-        return workspace, latest_checkpoint(root.session, root.agent.id)
+            return None, None
+        # The seam answers `""` for an agent that took no restore point.
+        return workspace, stated(latest_checkpoint(root.session, root.agent.id))
 
     async def _restore(self, root: Root, workspace: Workspace, tree: str) -> None:
         """Put the tree of the root back to `tree`, through the seam that records

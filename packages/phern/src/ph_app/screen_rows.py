@@ -1,20 +1,22 @@
-"""The rows that contribute pH's screens: what a front end is told, and no terminal UI.
+"""The rows that contribute the screens of pH: what a front end is told, with no
+terminal UI.
 
 A presentation row is layered into every named profile, headless included
-(decision 24 of `plans/Session_Profiles_Plan.md`), so whatever it imports is paid
-by every mount — `phern -p`, `--mode rpc`, and each root a daemon holds. The
-screen itself is a Textual `Screen`, and importing it here cost a headless mount
-the whole terminal UI: 166 ms became 320 ms.
+(decision 24 of `plans/Session_Profiles_Plan.md`). So every mount pays for
+whatever the row imports: `phern -p`, `--mode rpc`, and each root that a daemon
+holds. The screen itself is a Textual `Screen`. When this module imported it, a
+headless mount paid for the whole terminal UI: 166 ms became 320 ms.
 
-So the row and the screen are two modules. What the daemon needs is what a client
-is told over `screens/list` — the id, the label, the order and the key — and what
-the client draws is built by its own copy of the definition
+So the row and the screen are two modules. The daemon needs what a client is
+told over `screens/list`: the id, the label, the order and the key. The client
+builds what it draws from its own copy of the definition
 (`ph_app.tui.trajectory_screen.CLIENT_SIDE`), because `build` is the one field
-that cannot travel. Outside `ph_app.tui` on purpose: that package's `__init__`
-imports the app.
+that cannot travel. This module is outside `ph_app.tui` on purpose: the
+`__init__` of that package imports the app.
 
-Two rows, one per screen, so each screen's verb and key go away with its own row:
-the trajectory (`/trajectory`) and the diff (`/diff`, `ph_app.tui.diff_screen`).
+There are two rows, one for each screen, so the verb and the key of each screen
+go away with its own row: the trajectory (`/trajectory`) and the diff (`/diff`,
+`ph_app.tui.diff_screen`).
 
 @module ph_app.screen_rows
 """
@@ -30,23 +32,24 @@ from ph.seams.tui_screens import ScreenDefinition
 __all__ = ["DIFF_KEY", "DIFF_SCREEN_ID", "SCREEN_ID", "TRAJECTORY_KEY", "diff", "trajectory"]
 
 SCREEN_ID = "trajectory"
-"""The trajectory's id in `ctx.tui_screens`, and so `/trajectory` and the binding id."""
+"""The id of the trajectory in `ctx.tui_screens`. It is therefore also `/trajectory`
+and the binding id."""
 
 TRAJECTORY_KEY = "f2"
-"""Its default key. A default, not a rule: the id above is the binding id, so
-`tui.json` rebinds it like any built-in (see `TuiKeybindings.extra`)."""
+"""Its default key. This is a default and not a rule: the id above is the binding
+id, so `tui.json` rebinds it like any built-in key (see `TuiKeybindings.extra`)."""
 
 
 DIFF_SCREEN_ID = "diff"
-"""The diff screen's id, and so `/diff` and its binding id."""
+"""The id of the diff screen. It is therefore also `/diff` and its binding id."""
 
 DIFF_KEY = "f3"
-"""Its default key, rebindable by id like the trajectory's."""
+"""Its default key. It is rebindable by id, like the key of the trajectory."""
 
 
 def _built_by_the_front_end(session: object) -> NoReturn:
-    """The daemon's `build`, which nothing calls: a client builds from its own copy,
-    the screen module's `CLIENT_SIDE`."""
+    """The `build` of the daemon, which nothing calls. A client builds from its
+    own copy, the `CLIENT_SIDE` of the screen module."""
     raise RuntimeError(
         "this screen is built by the front end that draws it (its module's CLIENT_SIDE), "
         "not by the daemon"
@@ -57,8 +60,8 @@ def _built_by_the_front_end(session: object) -> NoReturn:
 async def trajectory(ctx: Context, config: None) -> None:
     """Contribute the trajectory to whatever front end is drawing.
 
-    `scope=ctx` is this row's activation scope, and it is what makes the
-    registration an effect of *this row* — unloading it takes the screen, its
+    `scope=ctx` is the activation scope of this row. It makes the registration
+    an effect of *this row*: unloading the row takes the screen, its
     `/trajectory` command and its key with it (I2).
     """
     ctx.require(TUI_SCREENS).register(
@@ -75,10 +78,11 @@ async def trajectory(ctx: Context, config: None) -> None:
 
 @plugin("tui-screen-diff", affects="presentation", inject=[TUI_SCREENS])
 async def diff(ctx: Context, config: None) -> None:
-    """Contribute the diff screen: every change the log records, before and after.
+    """Contribute the diff screen: every change that the log records, before and
+    after.
 
-    The same shape as `trajectory` above, for the same reason: its verb and its key
-    are effects of this row, gone when it unloads (I2).
+    This has the same shape as `trajectory` above, for the same reason: its verb
+    and its key are effects of this row, and they are gone when it unloads (I2).
     """
     ctx.require(TUI_SCREENS).register(
         ScreenDefinition(

@@ -1,7 +1,7 @@
 # A profile for DeepSeek over the OpenAI-compatible wire.
 #
-# `${env:...}` is the only interpolation the loader performs, and the API key is
-# never interpolated here: the adapter takes the *name* of an environment
+# `${env:...}` is the only interpolation that the loader performs, and the API
+# key is never interpolated here. The adapter takes the *name* of an environment
 # variable and resolves it at the request edge, so the value never enters a row,
 # an event, or a child process (I-3).
 - insert:
@@ -15,7 +15,8 @@
             contextWindow: 128000
             defaultMaxTokens: 8192
 
-# What this profile runs on, by key; `main` unless a person picks another.
+# The models that this profile runs on, by key. The key is `main` unless the
+# user picks another.
 - id: models
   config:
     default: main

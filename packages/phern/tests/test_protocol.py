@@ -97,6 +97,32 @@ def test_result_of_raises_the_named_refusal() -> None:
     assert raised.value.reason == "why"
 
 
+async def test_a_refusal_that_names_no_kind_arrives_with_no_reason() -> None:
+    """A refusal with no name is `None` at both ends, and never an empty string.
+
+    The base `Refusal` names no kind, so its frame carries no `data`. The client
+    rebuilds it with a `reason` of `None`. A frame from a server that sent an
+    empty reason reads the same way, so a client tests `reason` against `None`
+    and against the names, and has no third spelling to remember.
+
+    Sabotage: read a missing reason as `""` in `DaemonError.of`, and the last
+    three assertions fail.
+    """
+
+    async def dispatch(method: str, params: dict[str, Any]) -> Any:  # noqa: ANN401
+        raise Refusal("just no")
+
+    assert Refusal.code is None
+    refused = await respond({"id": 1, "method": "anything"}, dispatch)
+    assert refused == {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "just no"}}
+    with pytest.raises(DaemonError) as unnamed:
+        result_of(dict(refused))
+    assert unnamed.value.reason is None
+    assert DaemonError("gone").reason is None
+    empty = {"code": -32000, "message": "no", "data": {"reason": ""}}
+    assert DaemonError.of(empty).reason is None
+
+
 class _Params(WireModel):
     session_id: str
     count: int = 0

@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 import typer
 import yaml
+from daemon_helpers import private_runtime
 from typer.testing import CliRunner
 
 import ph_app
@@ -1180,6 +1181,70 @@ def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
     assert "--no-spawn" not in plain, "spawning is the default; refusing is the flag"
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["-p", "hi", "--session", ""],
+        ["--mode", "tui", "--resume", ""],
+        ["agents", "schedule", "s", "--cron", "", "--prompt", "x"],
+        ["agents", "schedule", "s", "--cancel", ""],
+        ["agents", "schedule", "s", "--every", "60000", "--prompt", "x", "--id", ""],
+        ["workspaces", "gc", "--session", ""],
+        ["profiles", "diff", "headless", "--session", ""],
+        ["profiles", "adopt", "headless", "--session", "", "--yes"],
+    ],
+    ids=lambda argv: " ".join(arg or '""' for arg in argv),
+)
+def test_an_empty_value_is_refused_where_an_option_may_be_left_out(
+    argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flag that was left out is `None`, and a typed `""` names nothing.
+
+    Each of these options once read an empty value as the flag left out. An
+    unset shell variable then widened `workspaces gc --remove --session ""` and
+    `profiles adopt --session "" --yes` to every session, and `--cancel ""` went
+    on to create a schedule. One callback on each option (`nonblank`) refuses
+    the value at parse time, so exit 2 also shows that no work began: an absent
+    daemon would be exit 1.
+
+    Sabotage: drop `callback=nonblank` from any one of these options, and its
+    case runs and exits with another code.
+    """
+    private_runtime(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, argv, env={"COLUMNS": "220", "NO_COLOR": "1", "TERM": "dumb"})
+
+    assert result.exit_code == 2, result.output
+    assert "must not be empty" in result.output
+
+
+def test_a_typed_keep_alive_reaches_the_tabs_of_a_web_launch() -> None:
+    """`phern --mode web --keep-alive 5m` used to drop the flag.
+
+    The web process starts no daemon. One of its tabs does. `tab_command` did
+    not carry `--keep-alive`, so the daemon that a tab started left when the
+    browser closed, whatever window the user had typed.
+
+    A window that nobody typed is not written into the argv. Each tab then reads
+    `tui.json` itself, as a terminal does.
+
+    Sabotage: drop `keep_alive` from `tab_command`, and the first assertion
+    finds no `--keep-alive` in the argv.
+    """
+    from ph_app.cli import spawn_command, tab_command
+
+    timed = tab_command(session="s", profile="tui", keep_alive=300.0)
+    plain = tab_command(session="s", profile="tui")
+
+    assert timed[timed.index("--keep-alive") + 1] == "300", "in seconds, as the daemon reads it"
+    assert "--keep-alive" not in plain
+
+    # The daemon end spells the same number, and omits a window of zero.
+    daemon = spawn_command(profile="tui", keep_alive=300.0)
+    assert daemon[daemon.index("--keep-alive") + 1] == "300"
+    assert "--keep-alive" not in spawn_command(profile="tui")
+
+
 def test_one_parser_reads_both_duration_flags() -> None:
     """`--keep-alive` and `--passivate-after` are the same question asked twice.
 
@@ -1321,8 +1386,8 @@ def test_asking_a_daemon_to_stay_and_to_go_is_refused_not_warned() -> None:
     with pytest.raises(typer.BadParameter):
         _spawned_keep_alive("5m", keep=True)
 
-    assert _spawned_keep_alive("0", keep=True) == "0", "not a contradiction, so not refused"
-    assert _spawned_keep_alive(None, keep=True) == "0", "a service daemon has no window"
+    assert _spawned_keep_alive("0", keep=True) == 0.0, "not a contradiction, so not refused"
+    assert _spawned_keep_alive(None, keep=True) == 0.0, "a service daemon has no window"
 
 
 def test_a_mistyped_keep_alive_is_refused_where_it_was_typed() -> None:
@@ -1342,8 +1407,8 @@ def test_a_mistyped_keep_alive_is_refused_where_it_was_typed() -> None:
     with pytest.raises(typer.BadParameter):
         _spawned_keep_alive("5min", keep=False)
 
-    assert _spawned_keep_alive("5m", keep=False) == "300", "seconds, unambiguously"
-    assert _spawned_keep_alive("0", keep=False) == "0"
+    assert _spawned_keep_alive("5m", keep=False) == 300.0, "seconds, unambiguously"
+    assert _spawned_keep_alive("0", keep=False) == 0.0
 
 
 def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
@@ -1380,7 +1445,7 @@ def test_drop_ins_compose_after_the_overlay(roots: Path) -> None:
     written = profiles_dir / "ad-hoc.yaml"
     written.write_text("[]", encoding="utf-8")
     assert profile_file(str(written)) == written
-    assert profile_name(str(written)) == ""
+    assert profile_name(str(written)) is None
     assert profile_file("some/missing.yaml") is None
     assert profile_name("some/missing.yaml") == "some/missing.yaml"
 

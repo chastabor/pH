@@ -385,7 +385,7 @@ async def test_a_yes_to_a_version_that_will_not_start_keeps_the_session_s_own(
         assert logged_environment(back.session).adopted is None
         # One sentence, from the daemon, for the terminal that attaches; the command
         # line's names its own commands.
-        note = back.describe().profile_note
+        note = not_none(back.describe().profile_note)
         assert note.startswith("work did not start (a row of work would not apply)")
         assert note.endswith("/profile diff lists what it changes.")
         cli = kept_note(not_none(back.change), "asked")

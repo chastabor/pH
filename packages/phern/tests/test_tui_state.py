@@ -45,10 +45,13 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 import ph_app.sessions as S
 from ph.persistence.jsonl import session_path
+from ph.seams.models import ModelEntry, ModelRoute
 from ph.session import SessionHeader
-from ph.testing import write_reference_fork
+from ph.testing import write_reference_fork, write_stored_log
 from ph_app.sessions import SessionSummary, session_summaries
 from ph_app.tui.autocomplete import (
     PathCompleter,
@@ -62,7 +65,7 @@ from ph_app.tui.config import (
     tui_settings_from_json,
 )
 from ph_app.tui.modals.login import credential_choices
-from ph_app.tui.modals.pickers import session_choices
+from ph_app.tui.modals.pickers import model_choices, session_choices
 from ph_app.tui.state import ChatItem, PromptRecord, TuiState
 
 # ------------------------------------------------------------------- settings --
@@ -209,7 +212,9 @@ def test_browse_filtered_by_cwd_finds_a_session_older_than_the_limit(tmp_path: P
     assert "wanted" not in {summary.session_id for summary in session_summaries(tmp_path)}
 
 
-def test_a_filtered_listing_opens_no_other_directorys_logs(tmp_path: Path) -> None:
+def test_a_filtered_listing_opens_no_other_directorys_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The purpose of the tag on the lineage directory (format 1).
 
     Before the tag, the answer to "which sessions belong to this repo" needed
@@ -228,15 +233,14 @@ def test_a_filtered_listing_opens_no_other_directorys_logs(tmp_path: Path) -> No
     opened: list[str] = []
     real = S._summarize
 
-    def counting(path: Path, modified: float, size: int, *, cwd: str = "") -> SessionSummary | None:
+    def counting(
+        path: Path, modified: float | None, size: int | None, *, cwd: str | None = None
+    ) -> SessionSummary | None:
         opened.append(path.stem)
         return real(path, modified, size, cwd=cwd)
 
-    S._summarize = counting
-    try:
-        found = session_summaries(tmp_path, cwd="/work")
-    finally:
-        S._summarize = real
+    monkeypatch.setattr(S, "_summarize", counting)
+    found = session_summaries(tmp_path, cwd="/work")
 
     assert [summary.session_id for summary in found] == ["ours"]
     assert opened == ["ours"], "no other directory's log was opened"
@@ -254,14 +258,30 @@ def test_a_session_with_no_cwd_belongs_to_no_directory(tmp_path: Path) -> None:
 
 
 def test_an_unfiltered_browse_is_unchanged(tmp_path: Path) -> None:
-    """`cwd=""` is every session, which is what `/sessions` asks for."""
+    """`cwd=None` is every session, which is what `/sessions` asks for."""
     _write_session(tmp_path, "here", "one", cwd="/work")
     _write_session(tmp_path, "there", "two", cwd="/elsewhere")
     assert {summary.session_id for summary in session_summaries(tmp_path)} == {"here", "there"}
-    assert {summary.session_id for summary in session_summaries(tmp_path, cwd="")} == {
+    assert {summary.session_id for summary in session_summaries(tmp_path, cwd=None)} == {
         "here",
         "there",
     }
+
+
+def test_an_empty_cwd_is_a_filter_and_not_the_absence_of_one(tmp_path: Path) -> None:
+    """`None` is "no filter". An empty string is a directory like any other.
+
+    No session recorded an empty working directory, so the filter finds nothing.
+    The daemon turns the `""` of the wire into `None` before it asks
+    (`_sessions_browse`), so a client that sends `""` still gets every session.
+
+    Sabotage: add `cwd = cwd or None` as the first line of `session_summaries`,
+    and the empty string lists both sessions.
+    """
+    _write_session(tmp_path, "here", "one", cwd="/work")
+    _write_session(tmp_path, "rootless", "no cwd", cwd=None)
+
+    assert session_summaries(tmp_path, cwd="") == []
 
 
 def test_the_limit_counts_matching_sessions(tmp_path: Path) -> None:
@@ -302,6 +322,34 @@ def test_a_reference_forked_child_takes_its_title_from_the_lineage(tmp_path: Pat
     assert titles == {"root": "the original", "branch": "the original"}
 
 
+def test_an_ancestor_is_read_for_its_title_and_is_given_no_row(tmp_path: Path) -> None:
+    """The walk reads the top of an ancestor and states no file facts for it.
+
+    A row carries the time and the size of its file, and the walk takes no
+    `stat`. An ancestor was once read with a time of `0.0` and a size of `0`,
+    which a real file can have. Now its time and size are `None`, and the walk
+    answers `None` when no ancestor has a title.
+
+    Sabotage: read the ancestor with `_summarize(path, 0.0, 0)` in
+    `_inherited_title`, and `known` holds a time that no `stat` backs.
+    """
+    # No cwd, so the family of the root is its bare id, which is where the fork
+    # helper writes the branch.
+    _write_session(tmp_path, "root", "the original", cwd=None)
+    write_reference_fork(tmp_path, "branch", "root", boundary=4)
+    rows = {summary.session_id: summary for summary in session_summaries(tmp_path)}
+    branch = rows["branch"]
+
+    known: dict[str, SessionSummary] = {}
+    assert S._inherited_title(tmp_path, branch, known) == "the original"
+    above = known["root"]
+    assert (above.modified, above.size) == (None, None), "no stat backs an ancestor"
+    assert (above.title, above.parent, above.cwd) == ("the original", None, None)
+
+    orphan = branch.model_copy(update={"parent": "deleted"})
+    assert S._inherited_title(tmp_path, orphan, {}) is None
+
+
 def test_a_child_whose_ancestor_is_gone_still_gets_a_row(tmp_path: Path) -> None:
     """The reader refuses a broken chain, and the picker must not.
 
@@ -313,7 +361,7 @@ def test_a_child_whose_ancestor_is_gone_still_gets_a_row(tmp_path: Path) -> None
 
     [summary] = session_summaries(tmp_path)
     assert summary.session_id == "orphan"
-    assert summary.title == ""
+    assert summary.title is None
     assert summary.parent == "deleted", "and it still says what it is missing"
 
 
@@ -471,3 +519,73 @@ def test_a_row_with_no_log_position_is_not_in_the_prompt_history() -> None:
     state.add(ChatItem(key="u2", role="user", text="not in the log", turn=2))
 
     assert state.prompt_history() == [PromptRecord(text="first", seq=3, turn=1)]
+
+
+# ------------------------------------------- what is absent, in the pickers --
+
+
+def test_a_stored_root_with_nothing_typed_states_no_title_and_no_kind(tmp_path: Path) -> None:
+    """A root whose log holds only its header has no title, and a root has no
+    kind.
+
+    The row leaves both out of its frame. A picker then draws the session id
+    for the title by a test for `None`.
+
+    Sabotage: pass `title or ""` in `_summarize`, and the row carries a title
+    of `""`.
+    """
+    header = SessionHeader(id="bare", created_at=0, cwd="/work")
+    write_stored_log(tmp_path, header, [])
+    family = header.family
+
+    [summary] = session_summaries(tmp_path)
+
+    assert (summary.title, summary.kind, summary.parent) == (None, None, None)
+    wire = summary.to_wire()
+    assert "title" not in wire and "kind" not in wire
+    assert (wire["cwd"], wire["family"]) == ("/work", family)
+    [row] = session_choices([summary])
+    assert row.label == "bare"
+
+
+def test_a_live_row_with_no_file_shows_its_state() -> None:
+    """A live root that the disk has not seen has no time and no size to show.
+
+    Its row shows where the root is, which is what a person chooses on. The row
+    used to show the day in 1970 and the size of zero that stood in for the
+    file.
+
+    Sabotage: test only `summary.state == "running"` in `_session_row`, and the
+    row is built from a time and a size that are not there.
+    """
+    live = SessionSummary(session_id="live", state="idle", cwd="/repos/thing")
+
+    [row] = session_choices([live])
+
+    assert (row.label, row.detail) == ("live", "idle · /repos/thing")
+    assert live.when is None
+
+
+def test_a_route_with_no_listed_name_gets_a_row_of_its_own() -> None:
+    """The model picker marks the route in force.
+
+    A route that the profile does not list has no key, so no listed row can be
+    marked for it. It gets a row of its own at the top. A listed route does not,
+    and neither does a session with no route.
+
+    Sabotage: drop the `active_key is None` test from `model_choices`, and a
+    listed route in force is listed twice.
+    """
+    listed = [ModelEntry(key="main", route=ModelRoute(provider="fake", model="fake-1"))]
+
+    unlisted = model_choices(listed, None, "fake/fake-9")
+    assert [(row.value, row.marked) for row in unlisted] == [
+        ("fake/fake-9", True),
+        ("main", False),
+    ]
+    assert [(row.value, row.marked) for row in model_choices(listed, "main", "fake/fake-1")] == [
+        ("main", True)
+    ]
+    assert [(row.value, row.marked) for row in model_choices(listed, None, None)] == [
+        ("main", False)
+    ]

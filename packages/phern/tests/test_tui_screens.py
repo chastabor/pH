@@ -580,7 +580,7 @@ def test_edits_past_the_drawn_budget_are_counted_not_rendered() -> None:
             rendered.append(seq)
             return "\n".join(f"line {index}" for index in range(DIFF_LINES)), ""
 
-        return DiffEntry(seq=seq, title="rewrite", summary="", producer="", texts=texts)
+        return DiffEntry(seq=seq, title="rewrite", summary="", producer=None, texts=texts)
 
     group = DiffGroup(
         kind="revision",

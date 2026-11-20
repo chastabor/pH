@@ -1,29 +1,32 @@
 # ph-tui: the interactive posture.
 #
-# Two rows differ from `headless`, and both are about a person being present.
-# What a person *sees* is not here: screens ship in every profile
-# (`presentation.yaml`), and hiding one is the TUI's own `tui.json`.
+# Two rows differ from `headless`, and both are about a user being present. What
+# a user *sees* is not here: screens ship in every profile
+# (`presentation.yaml`), and the `tui.json` of the TUI hides one.
 #
-# The first is attendance. `read-only` is right for an unattended run: no one
-# is there to answer an approval prompt, so nothing should be writable without
-# one. In the TUI a person is present — the status bar names the posture, one
-# key changes it, and every write outside the workspace still asks. So the
+# The first row is about attendance. `read-only` is right for an unattended run:
+# nobody is there to answer an approval prompt, so nothing should be writable
+# without one. In the TUI a user is present. The status bar names the posture,
+# one key changes it, and every write outside the workspace still asks. So the
 # workspace is writable and the boundary stands.
 #
-# Addressed by id, so this replaces the sandbox row's whole config. A deployment
-# that disagrees overrides the same id in the rows of `$PH_HOME/profiles/tui.yaml`.
+# The row is addressed by id, so this replaces the whole config of the sandbox
+# row. A deployment that disagrees overrides the same id in the rows of
+# `$PH_HOME/profiles/tui.yaml`.
 - id: sandbox
   config:
     defaultMode: workspace-write
 
-# The second is the other direction of the same fact: somebody is there to *ask*.
-# `tool-ask-user` ships disabled in `ph-base` because a question with nobody to
-# answer it is a turn spent on nothing, and this is the profile that has a modal
-# to put it in. Armed here rather than in the core bundle so that a deployment
-# which layers `ph-base` for a headless run never sees the tool in its prompt.
+# The second row is the other direction of the same fact: somebody is there to
+# *ask*. `tool-ask-user` ships disabled in `ph-base`, because a question with
+# nobody to answer it is a turn spent on nothing. This is the profile that has a
+# modal to put the question in. The row is armed here and not in the core
+# bundle, so that a deployment that layers `ph-base` for a headless run never
+# sees the tool in its prompt.
 #
-# The row still declines to log a question nobody is attending — a `/autonomous`
-# run inside this profile is sandboxed and alone — so arming it is a statement
-# about the *posture*, not a promise that someone is looking right now.
+# The row still declines to log a question that nobody is attending: a
+# `/autonomous` run inside this profile is sandboxed and alone. So arming the
+# row is a statement about the *posture*. It is not a promise that someone is
+# looking right now.
 - id: tool-ask-user
   disabled: false

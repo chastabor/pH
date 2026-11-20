@@ -21,6 +21,8 @@ import pytest
 from pydantic import ValidationError
 
 from ph.seams.approval import ApprovalRequest
+from ph.seams.live_index import LiveEntry
+from ph.seams.models import ModelEntry, ModelRoute
 from ph.seams.subagents import ADMITTED, STATUS, child_state
 from ph.seams.tui_status import StatusReading
 from ph.session import Session, SessionHeader
@@ -34,12 +36,16 @@ from ph_app.payloads import (
     AttachReply,
     ChildRow,
     DaemonLifetime,
+    DaemonNotice,
     MutationRepeated,
+    OwedRoot,
     QuestionAsk,
+    ResumedRoot,
     RootDescription,
     SessionNotice,
     SessionStatusNotice,
     SnapshotPage,
+    StartingRoute,
     notice_of,
 )
 from ph_app.protocol import Cursor, InvalidParams
@@ -322,3 +328,161 @@ async def test_a_well_formed_ask_reaches_the_body_as_its_model() -> None:
 
     assert seen and seen[0].ask_id == "a1" and seen[0].request.tool_name == "bash"
     assert isinstance(reply, ApprovalAskReply), "a model, not a dict — respond dumps it"
+
+
+# ------------------------------------------- what is absent is left out --
+# A model spells "there is none" as `None`, and `to_wire` leaves a `None` out of
+# the frame. Each test here holds one field to that, at the place where a
+# placeholder used to stand in for the missing value.
+
+
+def test_a_description_states_no_route_and_no_profile_that_it_does_not_have() -> None:
+    """A root with no route and no named profile says nothing about either.
+
+    A reader of the frame then gets `None`, and cannot take a placeholder for a
+    value. The status half of the description does not state the route, so a
+    front end keeps the route that it had.
+
+    Sabotage: give `RootDescription.profile_note` a default of `""`, and the
+    frame carries a note that nobody wrote.
+    """
+    described = RootDescription(session_id="s", status="idle", watchers=0, cursor=CURSOR)
+
+    assert described.to_wire() == {
+        "sessionId": "s",
+        "status": "idle",
+        "watchers": 0,
+        "cursor": CURSOR.to_wire(),
+        "profileChanges": 0,
+        "compaction": {},
+    }
+    facts = described.facts()
+    assert (facts.provider, facts.model, facts.model_key) == (None, None, None)
+
+
+def test_a_frame_that_carries_only_the_footer_states_no_status() -> None:
+    """The footer can move while the agent does nothing (`_refresh_readings`).
+
+    The frame for that says where the readings are and nothing about where the
+    root is. A reader keeps the status that it had. It can do that only when the
+    frame has no `status` at all.
+
+    Sabotage: give `StatusFacts.status` a default of `""`, and the frame states
+    an empty status.
+    """
+    footer = SessionStatusNotice(session_id="s", readings=[])
+
+    assert footer.status is None
+    assert footer.to_wire() == {"sessionId": "s", "readings": []}
+
+
+def test_a_starting_route_that_the_profile_does_not_list_has_no_key() -> None:
+    """`daemon/status` says what a new root starts on.
+
+    The models seam spells a route that the profile does not list as a key of
+    `""`. `StartingRoute.of` is the one place that turns that into no key, so
+    `phern agents doctor` tests for `None` and not for an empty name.
+
+    Sabotage: pass `entry.key` unconverted in `StartingRoute.of`, and the reply
+    carries a key of `""`.
+    """
+    route = ModelRoute(provider="fake", model="fake-9")
+
+    unlisted = StartingRoute.of(ModelEntry(key="", route=route))
+    assert unlisted.key is None
+    assert unlisted.to_wire() == {"route": route.to_wire(), "default": False}
+
+    listed = StartingRoute.of(ModelEntry(key="main", route=route, default=True))
+    assert listed.to_wire() == {"key": "main", "route": route.to_wire(), "default": True}
+
+
+def test_an_owed_row_leaves_out_what_its_index_entry_did_not_say() -> None:
+    """An index entry can carry no time, no directory and no profile.
+
+    A rebuild of the index from a log names no profile, and an entry that was
+    read from a damaged file has a time of zero. The row leaves each of them
+    out, so a table draws a dash and not a day in 1970.
+
+    Sabotage: pass `entry.updated` unconverted in `OwedRoot.of`, and the row
+    carries a time of zero.
+    """
+    row = OwedRoot.of(LiveEntry("root", ("turn",), updated=0), mounted=False, status="stored")
+
+    assert (row.updated, row.cwd, row.profile) == (None, None, None)
+    assert row.to_wire() == {
+        "sessionId": "root",
+        "holds": ["turn"],
+        "mounted": False,
+        "status": "stored",
+        "failed": False,
+        "held": False,
+        "damaged": [],
+    }
+
+
+def test_a_resume_row_states_only_what_became_of_its_root() -> None:
+    """A root that did not mount has no status, and a root that resumed has no
+    detail.
+
+    Sabotage: give `ResumedRoot.status` a default of `""`, and a refused root
+    states an empty status.
+    """
+    refused = ResumedRoot(session_id="s", outcome="refused", detail="held elsewhere")
+    assert refused.to_wire() == {"sessionId": "s", "outcome": "refused", "detail": "held elsewhere"}
+
+    resumed = ResumedRoot(session_id="s", outcome="resumed", status="idle")
+    assert resumed.to_wire() == {"sessionId": "s", "outcome": "resumed", "status": "idle"}
+
+
+def test_a_child_with_no_name_and_no_model_states_neither() -> None:
+    """The admission of a child may record no name and no model.
+
+    The seam spells each as `""`. `ChildRow.of` is the one place that turns
+    them into `None`, so the panel can draw the run id for a child with no name
+    by a test for `None`.
+
+    Sabotage: return the validated row unconverted from `ChildRow.of`, and the
+    row carries a name of `""`.
+    """
+    child = Session(
+        "lead-r1",
+        header=SessionHeader(id="lead-r1", created_at=1, parent_session="lead", origin="subagent"),
+    )
+    log_event(child, ADMITTED, {"runId": "r1"})
+
+    row = ChildRow.of(child_state(child))
+
+    assert (row.name, row.model) == (None, None)
+    assert row.to_wire() == {
+        "runId": "r1",
+        "sessionId": "lead-r1",
+        "parentId": "lead",
+        "grantedAccess": "read",
+        "status": "queued",
+        "deleted": False,
+        "tokens": 0,
+    }
+
+
+def test_a_snapshot_page_must_say_where_it_began() -> None:
+    """Zero is a real index: the start of the log. So `from` has no default.
+
+    Sabotage: give `SnapshotPage.started_at` a default of `0`, and a page that
+    does not say where it began reads as a page from the start.
+    """
+    with pytest.raises(ValidationError, match="from"):
+        SnapshotPage.model_validate({"sessionId": "s", "cursor": CURSOR.to_wire()})
+
+
+def test_the_base_of_the_process_frames_names_no_method() -> None:
+    """Every process-level frame travels under a name, so the base has none to
+    offer.
+
+    A subclass that forgot its `METHOD` would otherwise be announced under the
+    placeholder of the base.
+
+    Sabotage: give `DaemonNotice.METHOD` a value of `""`, and the base answers
+    with a name that no frame travels under.
+    """
+    assert not hasattr(DaemonNotice, "METHOD")
+    assert DaemonLifetime.METHOD == "daemon.lifetime"

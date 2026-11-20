@@ -530,3 +530,17 @@ def test_a_shortened_path_keeps_its_end_whole() -> None:
         short = shorten_path(path, width)
         assert short.startswith("…") and len(short) <= width
         assert path.endswith(short[1:]) and not unicodedata.combining(short[1])
+
+
+def test_a_child_with_no_name_and_no_model_is_drawn_by_its_run_id() -> None:
+    """A queued child shows the model that it waits to run on, and a child goes
+    by its name.
+
+    A row with neither is drawn by its run id, with no model after it.
+
+    Sabotage: format `child.model` into the line without the `None` test in
+    `render_subagents`, and the row reads `○ r1 None`.
+    """
+    bare = ChildRow(run_id="r1", session_id="lead-r1", parent_id="lead")
+
+    assert render_subagents(_drawn(bare)) == "○ r1"

@@ -57,7 +57,7 @@ from ph_app.tui.trajectory import (
     _on_harness_event,
     build_trajectory,
 )
-from ph_app.wire import describe
+from ph_app.wire import describe, source_of
 from ph_clm.kinds import DECLINED, REVISED
 
 pytestmark = pytest.mark.anyio
@@ -320,6 +320,31 @@ def test_a_plugin_message_is_context_attributed_to_its_producer() -> None:
     assert record.source.name == "rlm-context-loader"
     assert record.source.form == "snapshot"
     assert "rlm-context-loader" in record.title
+
+
+def test_a_source_part_that_a_message_does_not_name_is_none() -> None:
+    """`source_of` answers `None` for each part that is absent, and never `""`.
+
+    A user message has a kind and no name. A message with no source has no part
+    at all. A reader then tells "no name" from a name with one test against
+    `None`, and the record of the auditor carries the same three values.
+
+    Sabotage: answer `as_str(...)` for the name in `source_of`, and the name of
+    a user message is `""`.
+    """
+    plugin = PluginSource(plugin="rlm-context-loader", form="snapshot", sections=[]).to_wire()
+
+    assert source_of({"source": plugin}) == ("plugin", "rlm-context-loader", "snapshot")
+    assert source_of({"source": {"kind": "user"}}) == ("user", None, None)
+    assert source_of({"source": {"kind": "tool", "callId": "c1"}}) == ("tool", "c1", None)
+    assert source_of({}) == (None, None, None)
+    assert source_of({"source": {"kind": "", "plugin": "", "form": 3}}) == (None, None, None)
+
+    session = Session("sources")
+    log_event(session, "user/message", user_payload("hello"), SurfaceIntent("append"))
+    (record,) = build_trajectory(session)
+    assert (record.source.kind, record.source.name, record.source.form) == ("user", None, None)
+    assert record.source.label() == "user"
 
 
 def test_a_compaction_is_its_own_kind() -> None:

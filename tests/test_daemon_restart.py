@@ -242,9 +242,10 @@ async def test_the_probes_tell_each_state_over_tcp_after_a_kill(
         tmp_path, monkeypatch, profile=PROFILE, probe="127.0.0.1:0", resume_owed=True
     ) as daemon:
         server = daemon.running
+        address = not_none(server.probe_address)
 
         async def probe(name: str) -> tuple[int, list[str]]:
-            code, body = await http(server.probe_address, f"GET /{name} HTTP/1.1\r\n\r\n")
+            code, body = await http(address, f"GET /{name} HTTP/1.1\r\n\r\n")
             return code, [str(reason) for reason in body.get("reasons", [])]
 
         assert await probe("startup") == (200, [])
@@ -268,7 +269,7 @@ async def test_the_probes_tell_each_state_over_tcp_after_a_kill(
         )
         code, reasons = await probe("ready")
         assert code == 503 and any(ROOT in reason for reason in reasons), reasons
-        _code, status = await http(server.probe_address, "GET /status HTTP/1.1\r\n\r\n")
+        _code, status = await http(address, "GET /status HTTP/1.1\r\n\r\n")
         assert status["unwritten"] == [ROOT]
         log.chmod(0o644)
         await client.call(

@@ -38,7 +38,7 @@ from ph.seams.schedule import Schedule, ScheduleService, scheduled_source
 from ph.seams.subagents import ChildNotice, SubagentService, record_ended
 from ph.session import Session
 from ph.session.kinds import SHELL_COMMAND
-from ph.testing import admitted_child, log_event, raising, stored_types
+from ph.testing import admitted_child, log_event, not_none, raising, stored_types
 from ph_app.daemon.recovery import ROOT_RESUME_LIMIT, interrupted_resumes
 from ph_app.daemon.supervisor import Root
 from ph_app.wire import source_of
@@ -238,7 +238,8 @@ async def test_resume_owed_mounts_what_is_owed_and_says_what_became_of_each(
         assert set(rows) == {"owed", "family", "quiet", child_id}
         assert rows["owed"].outcome == rows["family"].outcome == "resumed"
         assert rows["quiet"].outcome == "resumed" and rows["quiet"].status == "idle"
-        assert rows[child_id].outcome == "refused" and "root" in rows[child_id].detail
+        assert rows[child_id].outcome == "refused"
+        assert "root" in not_none(rows[child_id].detail)
         assert set(second.roots) == {"owed", "family", "quiet"}
         await until(lambda: answered(second.roots["owed"]), what="the owed turn")
         again = await second.resume_owed(all_owed=True)
@@ -403,7 +404,7 @@ async def test_a_damaged_child_log_lists_its_root_damaged_and_a_pass_leaves_it_t
         passed = await second.resume_owed(all_owed=True)
         [outcome] = passed.sessions
         assert outcome.outcome == "damaged"
-        assert "phern doctor sessions --repair" in outcome.detail
+        assert "phern doctor sessions --repair" in not_none(outcome.detail)
         assert not second.roots, "nothing to resume, so nothing mounted"
         [named] = (await second.resume_owed(["family"])).sessions
         assert named.outcome == "resumed"

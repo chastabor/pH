@@ -1,31 +1,32 @@
 # ph-rlm-stable: the whole harness, with the gates on.
 #
-# `rlm` is the RLM bundle over the interactive posture. This adds `stabilize`
-# and then turns on the two rows those bundles deliberately ship *off* — because
-# a bundle that armed them on layering would make "I want offload" mean "and
-# also a tool, and also a corpus". Each row says in its own comment that a
-# profile flips it, and this is that profile.
+# `rlm` is the RLM bundle over the interactive posture. This profile adds
+# `stabilize`, and then turns on the two rows that those bundles deliberately
+# ship *off*. A bundle that armed them when it was layered would make "I want
+# offload" mean "and also a tool, and also a corpus". Each row says in its own
+# comment that a profile turns it on, and this is that profile.
 #
-# The containment posture is **not** restated here: the `rlm` bundle already
-# sets `advisory` for the person and `worktree` for their children, and a second
-# writer of one posture is how a profile that only meant to inherit it comes to
-# pin a rung the bundle has since moved off.
+# The containment posture is **not** restated here. The `rlm` bundle already
+# sets `advisory` for the user and `worktree` for the children. With a second
+# writer of one posture, a profile that only meant to inherit the posture comes
+# to hold a rung that the bundle has since moved off.
 
-# Planning (G1). `write_todos` and the prompt section that renders the list;
-# the TUI's sidebar folds the same `todo/write` events without importing the
-# row that writes them.
+# Planning (G1): `write_todos`, and the prompt section that renders the list.
+# The sidebar of the TUI folds the same `todo/write` events without importing
+# the row that writes them.
 - id: tool-todo
   disabled: false
 
 # "Prompt-as-a-variable" (P3-17, Q4). Below 200 000 characters the row stands
-# down entirely and the corpus behaves conventionally — the threshold Q4
-# settled on, so a small `context/` directory costs nothing and a large one
-# becomes a thing the model queries rather than a thing it is handed.
+# down entirely and the corpus behaves conventionally. That is the threshold
+# that Q4 settled on. So a small `context/` directory costs nothing, and a large
+# one becomes something that the model queries and not something that the model
+# is handed.
 #
-# No `sources` are named here, and a row with none stands down, so as shipped
+# No `sources` are named here, and a row with none stands down. So as shipped,
 # this switches the row on and loads nothing. A deployment names its corpus in
-# its own profile, restating `minChars` beside it: an entry's `config` replaces
-# the row's whole config.
+# its own profile and restates `minChars` beside it, because the `config` of an
+# entry replaces the whole config of the row.
 - id: rlm-context-loader
   disabled: false
   config:
@@ -33,12 +34,12 @@
 
 # A person between the model and what it cannot take back (G6).
 #
-# `preset: destructive` is the set `ph-stabilize` ships, tested there — the
-# things that cannot be undone by throwing a worktree away (N3). Naming it
-# rather than retyping it is the difference between one security judgement and
-# two that disagree: the first draft of this file retyped a subset and had
-# already widened `git push` from force-only to every push, against a shipped
-# test that pins an ordinary push as ordinary.
+# `preset: destructive` is the set that `ph-stabilize` ships and tests: the
+# things that cannot be undone by throwing a worktree away (N3). To name the set
+# and not retype it keeps one security judgment where there would be two that
+# disagree. The first draft of this file retyped a subset. It had already
+# widened `git push` from force-only to every push, against a shipped test that
+# holds an ordinary push to be ordinary.
 #
 # `when` adds only what is specific to *this* deployment, beside the set.
 - id: hitl
@@ -54,12 +55,14 @@
         description: >-
           This command changes something a worktree cannot undo — it deletes
           recursively, publishes, or runs as another user.
-      # Code Mode's transport reaches the same places by another road (C3).
-      # Keyed by the *reserved* name: the registry renames the transport to
-      # whatever the presentation calls it (`ipython`, here), and `hitl` resolves
-      # that. Naming `ipython` instead would not turn the gate off — the tool
-      # declares `is_irreversible`, so `declared` still catches it — but the
-      # additions below are keyed by name and would stop applying (P6-16).
+      # The transport of Code Mode reaches the same places by another road (C3).
+      # The rule is keyed by the *reserved* name. The registry renames the
+      # transport to the name that the presentation gives it (`python`, here),
+      # and `hitl` resolves that. A rule keyed `python` would apply only while
+      # the presentation keeps that name. After a rename the gate would not
+      # turn off: the tool declares `is_irreversible`, so `declared` still
+      # catches it. But the additions below are keyed by name, and they would
+      # stop applying (P6-16).
       run_code:
         preset: destructive
         when:
@@ -67,6 +70,6 @@
         description: >-
           This program leaves the sandbox's own surface — it spawns a process or
           deletes from the filesystem directly.
-        # No `edit`: a program is not something to hand-patch in a modal, and a
-        # half-edited one is worse than either answer.
+        # There is no `edit`. A program is not something to patch by hand in a
+        # modal, and a half-edited program is worse than either answer.
         allowedDecisions: [approve, reject]

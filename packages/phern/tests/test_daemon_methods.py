@@ -18,13 +18,17 @@ a root is mounted for it.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from daemon_helpers import running
+from pydantic import BaseModel
 
+import ph_app.params
 from ph_app import verbs
 from ph_app.daemon import server
 from ph_app.daemon.server import METHODS, MUTATIONS, Announced, Method
+from ph_app.daemon.supervisor import Supervisor
 from ph_app.params import (
     BrowseParams,
     MutationParams,
@@ -358,6 +362,34 @@ async def test_a_mutation_is_keyed_by_the_client_without_the_caller_saying_so(
         assert again["repeated"] is True, "the stamp `mutate` applied is the one that guards"
 
 
+async def test_a_call_with_no_command_id_has_no_key_and_is_never_a_repeat(
+    tmp_path: Path,
+) -> None:
+    """A client that offers no command id wants no deduplication.
+
+    "No key" is `None`, and the act then always runs. A client id alone names no
+    command, so it makes no key either. Two unkeyed prompts with the same text
+    are two prompts.
+
+    Sabotage: join the pair in `_command_key` whether or not there is a command
+    id, and the second prompt is answered as a repeat of the first.
+    """
+    assert server._command_key(PromptParams(session_id="s", prompt="x")) is None
+    assert server._command_key(MutationParams(session_id="s", client_id="c")) is None
+    assert server._command_key(MutationParams(session_id="s", client_id="c", command_id="1")) == (
+        "c:1"
+    )
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        await client.call(verbs.SESSION_NEW, NewSessionParams(session_id="unkeyed"))
+
+        first = await client.call("session/prompt", sessionId="unkeyed", prompt="once")
+        again = await client.call("session/prompt", sessionId="unkeyed", prompt="once")
+
+        assert first.get("repeated") is not True
+        assert again.get("repeated") is not True, "an unkeyed call was deduplicated"
+
+
 # ------------------------------------------------------- browse, by directory --
 
 
@@ -413,3 +445,144 @@ def test_the_daemon_says_it_can_filter_a_browse() -> None:
     from ph_app.daemon.server import CAPABILITIES
 
     assert "browse-cwd" in CAPABILITIES
+
+
+# ------------------------------------------- what is absent is left out --
+
+
+def test_a_param_that_a_client_does_not_have_is_left_out_of_its_frame() -> None:
+    """An unkeyed mutation sends no key, and a `session/new` with no answer about
+    trust sends no `trust`.
+
+    The daemon reads each absent field as `None`. So "no key" and "nobody was
+    asked" are not values that a client can also send by accident.
+
+    Sabotage: give `MutationParams.command_id` a default of `""`, and an unkeyed
+    call sends an empty key.
+    """
+    unkeyed = PromptParams(session_id="s", prompt="x").to_wire()
+    assert not {"clientId", "commandId"} & unkeyed.keys(), "an unkeyed call sent a key"
+    fresh = NewSessionParams().to_wire()
+    assert not {"sessionId", "trust", "profile", "cwd"} & fresh.keys()
+    assert BrowseParams().to_wire() == {}
+
+
+def test_every_optional_text_param_is_stated() -> None:
+    """A text param that a client may leave out is `Stated | None`, so an empty
+    string is refused and never read as "absent".
+
+    The rule is a type (`ph_app.protocol.Stated`), and this gate holds every
+    params model of `ph_app` to it, so a new optional text field cannot bring
+    the empty string back by its default declaration.
+
+    Sabotage: declare `BrowseParams.cwd` as `str | None`, and this names it.
+    """
+    loose = [
+        f"{model.__name__}.{name}"
+        for model in vars(ph_app.params).values()
+        if isinstance(model, type)
+        and issubclass(model, BaseModel)
+        and model.__module__.startswith("ph_app")
+        for name, info in model.model_fields.items()
+        if set(get_args(info.annotation)) == {str, type(None)}
+    ]
+    assert loose == [], f"these accept an empty string as a value: {loose}"
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "field"),
+    [
+        ("session/new", {"sessionId": "empty", "trust": ""}, "trust"),
+        ("session/new", {"sessionId": "empty", "profile": ""}, "profile"),
+        ("session/new", {"sessionId": "empty", "cwd": ""}, "cwd"),
+        ("sessions/browse", {"cwd": ""}, "cwd"),
+        ("attachment/put", {"sessionId": "empty", "contentB64": "", "name": ""}, "name"),
+        ("schedule/cancel", {"sessionId": "empty", "scheduleId": ""}, "scheduleId"),
+        ("session/prompt", {"sessionId": "empty", "prompt": "x", "commandId": ""}, "commandId"),
+        (
+            "session/prompt",
+            {"sessionId": "empty", "prompt": "x", "clientId": "", "commandId": "1"},
+            "clientId",
+        ),
+    ],
+    ids=[
+        "trust",
+        "profile",
+        "new-cwd",
+        "browse-cwd",
+        "attachment-name",
+        "schedule-id",
+        "command-id",
+        "client-id",
+    ],
+)
+async def test_an_empty_string_is_refused_where_a_param_may_be_absent(
+    tmp_path: Path, method: str, params: dict[str, str], field: str
+) -> None:
+    """An empty string used to mean "there is none" in each of these params.
+
+    It is now refused by name, and nothing is mounted for the call. A client
+    that still sends it is told. An empty `commandId` that was served would be
+    one key for every such call, and each call after the first would be
+    answered as a repeat.
+
+    Sabotage: declare `MutationParams.command_id` as `str | None` and not as
+    `Stated | None`, and the `command-id` case is served.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        with pytest.raises(DaemonError) as refused:
+            await client.call(method, **params)
+        assert refused.value.reason == "invalid_params"
+        assert field in str(refused.value), "the refusal names the field"
+        assert not daemon.running.supervisor.roots, "and nothing was mounted for it"
+
+
+async def test_a_root_on_a_profile_file_names_no_profile(tmp_path: Path) -> None:
+    """A profile that was composed from files has no name.
+
+    The description of a root on it has no `profile` and no `profileNote`. The
+    route is a fact that the root does have, and all three of its fields are
+    there.
+
+    Sabotage: drop the `stated` around `profile.name` in `Root.describe`, and
+    the reply carries a profile of `""`.
+    """
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+
+        created = await client.call("session/new", sessionId="filed")
+
+        assert "profile" not in created and "profileNote" not in created
+        assert (created["provider"], created["model"], created["modelKey"]) == (
+            "fake",
+            "fake-1",
+            "main",
+        )
+        [listed] = (await client.call("sessions/list"))["sessions"]
+        assert "profile" not in listed and "profileNote" not in listed
+
+
+async def test_a_live_root_that_the_disk_has_not_seen_has_no_file_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row for a root that has no log file carries no time, no size and no
+    title.
+
+    That is every root of a store that keeps no files, which answers
+    `sessions_directory` with `None`. The row used to carry a time and a size of
+    zero, and a picker drew them as a day in 1970 and an empty file.
+
+    Sabotage: pass `modified=0.0, size=0` for the live row in `browse_of`, and
+    the row states a file that does not exist.
+    """
+    monkeypatch.setattr(Supervisor, "sessions_directory", lambda self: None)
+    async with running(tmp_path) as daemon:
+        client = await daemon.client()
+        here = str(tmp_path / "here")
+        Path(here).mkdir()
+        await client.call("session/new", sessionId="unwritten", cwd=here, trust="once")
+
+        browsed = await client.call("sessions/browse")
+
+        assert browsed["sessions"] == [{"sessionId": "unwritten", "cwd": here, "state": "idle"}]

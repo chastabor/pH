@@ -1,8 +1,9 @@
-"""`python -m ph_app` — the CLI, reachable without a console script.
+"""`python -m ph_app`: the CLI, reachable without a console script.
 
-Exists for the daemon a UI starts on a person's behalf: `spawn_command` in
-`ph_app.cli` says why it must be *this* interpreter rather than whatever `phern`
-is on `PATH`.
+It exists for a process that pH starts for itself, such as the daemon that a UI
+starts for the user. `phern_argv` in `ph_app.daemon.launch` builds that command
+line. It says why the process must run on *this* interpreter and not on whatever
+`phern` is on `PATH`.
 
 @module ph_app.__main__
 """

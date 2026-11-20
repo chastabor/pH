@@ -1,35 +1,42 @@
-"""`llm-google` — the Gemini `generateContent` wire, and the Files API video needs.
+"""`llm-google`: the Gemini `generateContent` wire, and the Files API that video needs.
 
-The third adapter, and it exists because of P7-03 rather than alongside it. That
-row's gate is *a video reaches a route that accepts one*, and its own notes said
-what stood in the way: **neither provider pH had an adapter for accepts video**,
-so a route declaring it would have been a fiction and the transport was proven
-against a shape that does not exist. This is the provider that takes one.
+This is the third adapter. It exists because of P7-03, and not merely alongside
+it. The gate of that row is *a video reaches a route that accepts one*. The notes
+of the row said what stood in the way: **neither provider that pH had an adapter
+for accepts video**. A route that declared video would have been a fiction, and
+the transport was proven against a shape that does not exist. This is the
+provider that takes a video.
 
-A separate adapter rather than a flag, for the reason `anthropic.py` gives about
-itself and more so — almost nothing here has the same name as anywhere else.
-Messages are `contents` and content is `parts`; the system prompt is
-`systemInstruction`; tools are `functionDeclarations`; a tool result is a
-`functionResponse` part addressed **by name** rather than by id; and usage is
-`usageMetadata` with the thinking tokens counted *outside* the answer's.
+It is a separate adapter and not a flag, for the reason that `anthropic.py` gives
+about itself. The reason is stronger here, because almost nothing on this wire
+has the same name as anywhere else:
 
-Three mappings worth naming, because each is a place where a reasonable guess is
+* Messages are `contents`, and content is `parts`.
+* The system prompt is `systemInstruction`.
+* Tools are `functionDeclarations`.
+* A tool result is a `functionResponse` part that is addressed **by name** and
+  not by id.
+* Usage is `usageMetadata`, and the thinking tokens are counted *outside* the
+  tokens of the answer.
+
+Three mappings are worth naming, because in each of them a reasonable guess is
 wrong:
 
-* **`thoughtsTokenCount` is not inside `candidatesTokenCount`.** pH's
-  `reasoning_tokens` is documented as a *subset* of `output_tokens` — `total`
-  leaves it out for exactly that reason — so this adapter adds it in. Mapping it
-  across directly would under-report every thinking turn's output.
-* **A function call has no id on this wire.** pH's `ToolCallBlock` needs one and
-  the pairing every consumer relies on is by id, so the call goes up with an
-  empty id and `BlockAssembler` mints one — the same minter the other two wires
-  fall back to when a provider omits an id (G10), seeded from the conversation
-  so it cannot repeat. What stays here is the reverse map, rebuilt when a result
-  goes back out as a `functionResponse`, which carries the *name* rather than
-  the id.
-* **A thought does not go back.** There is no input shape for one, and rendering
-  it as a text part would put the model's private reasoning into the conversation
-  as something it said. The log still holds it; the request does not.
+* **`thoughtsTokenCount` is not inside `candidatesTokenCount`.** The
+  `reasoning_tokens` of pH is documented as a *subset* of `output_tokens`, and
+  `total` leaves it out for that reason. So this adapter adds it in. A direct
+  mapping would under-report the output of every thinking turn.
+* **A function call has no id on this wire.** The `ToolCallBlock` of pH needs
+  one, and every consumer pairs by id. So the call goes up with an empty id, and
+  `named_call` (`ph.llm.assembler`) gives it one. The other two wires rely on
+  the same function when a provider omits an id (G10). The id is built from the
+  turn, the step, the attempt and the block index, so it cannot repeat. What
+  stays here is the reverse map. It is rebuilt when a result goes back out as a
+  `functionResponse`, which carries the *name* and not the id.
+* **A thought does not go back.** There is no input shape for one. To render it
+  as a text part would put the private reasoning of the model into the
+  conversation as something that the model said. The log still holds the
+  thought, and the request does not.
 
 @module ph_app.adapters.google
 """
@@ -93,8 +100,9 @@ SAMPLING_WIRE: dict[SamplingSetting, str] = {
     "presencePenalty": "presencePenalty",
     "frequencyPenalty": "frequencyPenalty",
 }
-"""Each sampling setting this API takes, and its `generationConfig` field (A1): all but
-`minP`, which is dropped with a warning (`ResolvedModel.sampling`)."""
+"""Each sampling setting that this API takes, and its `generationConfig` field (A1).
+That is every setting except `minP`, which is dropped with a warning
+(`ResolvedModel.sampling`)."""
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -115,11 +123,11 @@ ACCEPTED_MEDIA: tuple[str, ...] = (
     "video/quicktime",
     "application/pdf",
 )
-"""The default for `Config.accepts` — what this provider's own models take.
+"""The default for `Config.accepts`: what the models of this provider take.
 
-The widest of the three, and video is the entry that matters: it is the format
-that made upload-and-reference a row rather than an optimization, and until this
-adapter existed no route pH shipped could declare it honestly."""
+This is the widest list of the three, and video is the entry that matters. Video
+is the format that made upload-and-reference a row and not an optimization. Until
+this adapter existed, no route that pH shipped could declare video truthfully."""
 
 UPLOADED_MEDIA: tuple[str, ...] = (
     "video/mp4",
@@ -127,110 +135,150 @@ UPLOADED_MEDIA: tuple[str, ...] = (
     "video/webm",
     "video/quicktime",
 )
-"""The default for `Config.uploads` — video, by reference, always.
+"""The default for `Config.uploads`: video, always by reference.
 
-**Non-empty where both sibling rows default to nothing, and the difference is
-about the provider rather than about confidence.** Anthropic's Files API is
-behind a beta an account may not have; an OpenAI-compatible route may be a
-gateway that never implemented `/files`. Neither caveat applies to this
-provider's own service, where the Files API is the documented path and a request
-carrying a video inline is bounded by a 20 MB total request size that most videos
-are not under.
+**This default is non-empty, and both sibling rows default to nothing. The
+difference is about the provider and not about confidence.** The Files API of
+Anthropic is behind a beta that an account may not have. An OpenAI-compatible
+route may be a gateway that never implemented `/files`. Neither caveat applies to
+the service of this provider itself. There the Files API is the documented path,
+and a request that carries a video inline is bounded by a total request size of
+20 MB, which most videos exceed.
 
-A gateway pretending to be Gemini sets `uploads: []` and gets inline bytes, which
-is the same escape hatch the other two rows have in the other direction."""
+A gateway that pretends to be Gemini sets `uploads: []` and gets inline bytes.
+The other two rows have the same override in the other direction."""
 
 MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
-"""The inline ceiling: this provider bounds the whole *request* at 20 MB.
+"""The inline ceiling: this provider limits the whole *request* to 20 MB.
 
-Which is the argument for the Files API rather than a limit on what it will
-accept — a 300 MB video is fine by reference and impossible inline, so this
-number is what a block must fit under to go as `inlineData`."""
+That limit is the argument for the Files API. It is not a limit on what the
+provider accepts: a 300 MB video is fine by reference and impossible inline. So
+this number is what a block must fit under to go as `inlineData`."""
 
 UPLOAD_POLL_MS = 500
 UPLOAD_READY_MS = 120_000
 """How long one attempt waits for an uploaded file to become usable.
 
-Video is **processed** after it is stored, and a `fileUri` referenced before its
-file reaches `ACTIVE` is refused — so this is the one uploader of the three that
-is not done when the bytes have landed. Two minutes because that is the scale of
-a few minutes of video being transcoded at the far end, and because running out
-is not a failure: `load_handles` swallows it and the block goes inline, which for
-a video over the inline cap becomes an honest pointer.
+Video is **processed** after it is stored, and a `fileUri` that is referenced
+before its file reaches `ACTIVE` is refused. So this is the one uploader of the
+three that is not done when the bytes have arrived. The value is two minutes
+because that is the scale of a few minutes of video being transcoded at the far
+end. Running out of time is also not a failure: `load_handles` catches the error
+and the block goes inline, and a video over the inline cap becomes a pointer.
 
-**Running out no longer discards the transfer.** It used to: nothing reached
-`_store`, so the next step of the same loop re-read the blob, re-sent every byte
-and waited the budget again — a 300 MB clip re-transferred per step, each attempt
-leaving another copy against the account's Files quota. `_pending` now remembers
-the `files/<name>`, so the next attempt polls the file this one stored. What the
-memo cannot save is the local read, because `handle_for` loads the blob before
-calling an uploader at all; what it saves is sending it.
+**Running out of time no longer discards the transfer.** It did before. Nothing
+reached `_store`, so the next step of the same loop read the blob again, sent
+every byte again, and waited the budget again. A 300 MB clip was transferred
+again on each step, and each attempt left another copy against the Files quota of
+the account. `_pending` now remembers the `files/<name>`, so the next attempt
+polls the file that this attempt stored. The memo cannot save the local read,
+because `handle_for` loads the blob before it calls an uploader at all. It saves
+the sending.
 
-So this number is a **per-attempt** patience, not a total: a file that needs ten
-minutes of processing is reached by whichever step comes after it is ready, and
-the steps in between degrade to a pointer and say so."""
+So this number is the patience of **one attempt**, not a total. A file that needs
+ten minutes of processing is reached by whichever step comes after the file is
+ready. The steps in between degrade to a pointer and say so."""
 
 
 MAX_TRANSFERS = 3
-"""How many times one attachment's bytes are sent before this route stops trying.
+"""How many times the bytes of one attachment are sent before this route stops trying.
 
-**Nothing above this bounds an upload.** `load_handles` catches every failure and
-sends the block inline, so an upload never reaches `llm-retry` and its
-`max_attempts` — which governs the model *request*, not this. What is left is one
-attempt per model step, for as long as the attachment is in the conversation, and
-for a hard failure that is a full re-transfer each time: a 300 MB clip a route
-refuses would be sent on every step of a fifty-step session.
+**Nothing above this number limits an upload.** `load_handles` catches every
+failure and sends the block inline, so an upload never reaches `llm-retry` and
+its `max_attempts`. That setting governs the model *request* and not the upload.
+What remains is one attempt for each model step, for as long as the attachment is
+in the conversation. For a hard failure, each attempt is a full transfer: a
+300 MB clip that a route refuses would be sent on every step of a fifty-step
+session.
 
-It counts **transfers, not attempts**, and that distinction is the whole design.
-A run that timed out with a resumable file remembered costs one `GET` on the next
-step and gets cheaper by waiting — capping that would abandon a legitimately slow
-transcode, which is exactly what `_pending` exists to survive. What is capped is
-paying for the bytes again, which is the cost that does not improve by repeating.
+The number counts **transfers, not attempts**, and the design depends on that
+distinction. A run that timed out with a resumable file remembered costs one
+`GET` on the next step, and waiting makes it cheaper. A cap on that would abandon
+a legitimately slow transcode, which is the case that `_pending` exists to
+survive. The cap is on paying for the bytes again, which is the cost that does
+not improve with repetition.
 
-Three because the failures worth retrying at all are transient ones — a 5xx, a
-dropped connection — and a fault that survives three sends is a fact about the
-file or the account. After that the block degrades to a pointer, which is the
-same answer a route with no file API gives and one the model can read.
+The value is three because the failures that are worth a retry are transient
+ones: a 5xx, or a dropped connection. A fault that survives three sends is a fact
+about the file or the account. After that the block degrades to a pointer. A
+route with no file API gives the same answer, and the model can read it.
 
-Per process, and deliberately not persisted: a restart is a new judgement, for
-the reason `_pending`'s own note gives."""
+The count is kept for each process, and deliberately not persisted. A restart is
+a new judgement, for the reason that the note on `_pending` gives."""
 
 
 class Config(WireModel):
     """Row config for the Google route."""
 
     provider: str = "google"
+    """The name that this route registers under. A request that names this
+    provider goes to this adapter. The file handles of the route are kept under
+    the same name."""
     base_url: str = BASE_URL
+    """The root address of the API that this route calls. The adapter appends
+    `/models/<model>:streamGenerateContent` for a model request. For an upload
+    it replaces `/v1beta` in this address with `/upload/v1beta`."""
     api_key_env: str = "GEMINI_API_KEY"
+    """The name of the environment variable that holds the API key. It is a
+    name and never the key itself. The adapter resolves the name when it builds
+    a request and sends the value in the `x-goog-api-key` header. A request
+    fails with `MISSING_CREDENTIAL` when the variable is not set."""
     context_window: int | None = 1_048_576
+    """The window that pH budgets and compacts against, in tokens. `None` means
+    that the route declares no window, and then nothing budgets or compacts
+    against one."""
     default_max_tokens: int | None = None
+    """The `maxOutputTokens` that a request carries when the request itself
+    states none. `None`, the default, means that such a request carries no
+    `maxOutputTokens`. The route also reports this value to the layers above
+    (`ResolvedModel.default_max_tokens`)."""
     accepts: tuple[str, ...] = ACCEPTED_MEDIA
-    """MIME types this route takes as message content (P7-01)."""
+    """The MIME types that this route takes as message content (P7-01)."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
+    """The largest attachment that this route sends, in bytes. The
+    `media-degrade` row replaces a larger attachment with a text pointer before
+    the request reaches this adapter. The default is 20 MiB, because this
+    provider limits a whole request to 20 MB."""
     uploads: tuple[str, ...] = UPLOADED_MEDIA
-    """MIME types to send by reference through the Files API (P7-03)."""
+    """The MIME types that this route sends by reference through the Files API (P7-03)."""
     upload_ready_ms: int = UPLOAD_READY_MS
+    """How long one upload attempt waits for a stored file to become usable, in
+    milliseconds. The provider processes a video after it stores it, and the
+    adapter polls until the file is no longer `PROCESSING`. When the time runs
+    out, the attachment goes inline on that step. The next attempt polls the
+    file that this attempt stored and does not send the bytes again. The
+    default is two minutes."""
     max_image_edge: int | None = None
-    usable_image_edge: int | None = None
-    """Pixel limits, when a deployment knows them.
+    """The longest edge of an image that this route accepts, in pixels, when a
+    deployment knows it. The `media-degrade` row replaces a larger image with a
+    text pointer before the request reaches this adapter.
 
-    `None` like the OpenAI row's rather than Anthropic's stated numbers: this
-    provider tiles large images rather than publishing one edge it scales to, so a
-    number invented here would warn a person about an overpayment that is not
-    happening."""
+    The default is `None`, like that of the OpenAI row and unlike the stated
+    number of the Anthropic row. `None` means that no image is refused for its
+    pixel size."""
+    usable_image_edge: int | None = None
+    """The longest edge of an image that this route uses, in pixels, when a
+    deployment knows it. A larger image is still sent whole, and the
+    `media-degrade` row warns that the extra pixels are uploaded and discarded.
+
+    The default is `None`, like that of the OpenAI row and unlike the stated
+    number of the Anthropic row. This provider tiles large images and does not
+    publish one edge that it scales to. A number invented here would warn the
+    user about an overpayment that is not happening. `None` means that no such
+    warning is given."""
 
 
 _MISSING_FILE_PHRASES = ("is not in an active state", "was not found", "not found", "permission")
-"""How this provider says a referenced file is gone or unusable.
+"""How this provider says that a referenced file is gone or unusable.
 
-Its own tuple, like each sibling's, because this is a fact about one provider's
-prose — and this one differs in kind: a file here can be *present and not ready*,
-which reads as a different sentence and needs the same remedy, since the handle
-that was cached is one this request cannot use.
+The tuple is separate, like the tuple of each sibling, because this is a fact
+about the prose of one provider. This one also differs in kind. A file here can
+be *present and not ready*. That reads as a different sentence and needs the same
+remedy, because the cached handle is one that this request cannot use.
 
-`permission` is in the list because a file deleted from another session answers
-`PERMISSION_DENIED` rather than a not-found — matched, as everywhere, alongside
-the check that the message names an id this request actually sent."""
+`permission` is in the list because a file that was deleted from another session
+answers `PERMISSION_DENIED` and not a not-found. As everywhere, the match is used
+together with the check that the message names an id that this request sent."""
 
 
 def _is_missing_file(message: str) -> bool:
@@ -244,13 +292,13 @@ def _is_overflow(body: str) -> bool:
 
 
 _FINISH_KINDS: dict[str, FinishKind] = {"MAX_TOKENS": "max-tokens", "STOP": "stop"}
-"""This wire's finish reasons, and what pH calls them.
+"""The finish reasons of this wire, and what pH calls them.
 
-Everything not named here — `SAFETY`, `RECITATION`, `OTHER` — falls to `stop`,
-which is the honest mapping rather than a lazy one: the model stopped, the
-transcript holds what it produced, and pH's kinds carry no member meaning
-"refused". Inventing `error` for a completed response would make the retry policy
-re-run a request the provider will answer the same way."""
+Everything that is not named here (`SAFETY`, `RECITATION`, `OTHER`) maps to
+`stop`. That is the correct mapping and not a lazy one: the model stopped, the
+transcript holds what it produced, and the kinds of pH have no member that means
+"refused". To invent `error` for a completed response would make the retry policy
+run again a request that the provider will answer in the same way."""
 
 
 @dataclass(slots=True)
@@ -261,21 +309,20 @@ class GoogleAdapter:
     config: Config
     http: HttpClient = field(default_factory=HttpClient)
     _pending: dict[str, str] = field(default_factory=dict)
+    """Maps `attachment_id → files/<name>` for a transfer that finished and whose
+    file is not usable yet. See `_resume`.
+
+    It limits itself and has no cap. An entry is written when the bytes are
+    stored. It is removed when the file is usable or turns out to be gone. So it
+    holds what this process is still waiting on and nothing else. A restart loses
+    it and pays for the transfer again, which is the behavior that this replaced."""
     _spent: dict[str, int] = field(default_factory=dict)
     """How many transfers each attachment has cost without producing a handle.
 
-    Cleared the moment one succeeds, so it counts *consecutive* failures rather
-    than a lifetime total — an attachment that worked, expired and is uploaded
-    again starts over, which is the ordinary path and not a fault. See
-    `MAX_TRANSFERS`."""
-    """`attachment_id → files/<name>` for a transfer that finished and whose file
-    was not ready in time. See `_resume`.
-
-    Self-limiting rather than capped: an entry is written only when the readiness
-    budget runs out, and removed the moment the file is usable or turns out to be
-    gone — so it holds what this process is still waiting on and nothing else. A
-    restart loses it and pays the transfer again, which is exactly the behavior
-    this replaced."""
+    The count is cleared when a transfer succeeds, so it counts *consecutive*
+    failures and not a lifetime total. An attachment that worked, expired and is
+    uploaded again starts from zero. That is the ordinary path and not a fault.
+    See `MAX_TRANSFERS`."""
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -290,31 +337,33 @@ class GoogleAdapter:
     async def upload(self, ref: AttachmentRef, content: bytes) -> FileHandle:
         """Store the bytes through the Files API and wait until they are usable.
 
-        **The only uploader of the three that is not finished when the bytes have
-        landed.** A video is processed after it is stored and a `fileUri`
-        referenced before its file reaches `ACTIVE` is refused, so an uploader
-        that returned at the end of the transfer would hand back a handle whose
-        first use fails — and be indistinguishable, from the cache's point of
-        view, from a provider that expired it.
+        **This is the only uploader of the three that is not finished when the
+        bytes have arrived.** A video is processed after it is stored, and a
+        `fileUri` that is referenced before its file reaches `ACTIVE` is refused.
+        An uploader that returned at the end of the transfer would return a
+        handle whose first use fails. To the cache, that handle would look the
+        same as one that the provider expired.
 
-        The transfer itself is this provider's resumable protocol, whose two steps
-        are why `post_raw` exists: the first is a JSON body answered with an empty
-        one and a destination in `X-Goog-Upload-URL`, the second is the file's
-        bytes with no form encoding at all.
+        The transfer itself is the resumable protocol of this provider. Its two
+        steps are the reason why `post_raw` exists. The first step is a JSON body
+        that is answered with an empty body and a destination in
+        `X-Goog-Upload-URL`. The second step is the bytes of the file with no
+        form encoding at all.
 
-        **A transfer that already happened is not paid for twice**, which is what
-        `_pending` is for: running the readiness budget out used to throw the
-        stored file away with it, so the next step re-sent every byte and waited
-        again. Now the name is remembered and the next attempt polls it.
+        **A transfer that already happened is not paid for twice.** That is the
+        purpose of `_pending`. Before it, running out of the readiness budget
+        discarded the stored file too, so the next step sent every byte again
+        and waited again. Now the name is remembered and the next attempt polls
+        it.
 
-        Failure of any kind here is caught by `load_handles` and the attachment
-        goes inline — so the worst outcome of a slow provider is the behavior
+        `load_handles` catches a failure of any kind here, and the attachment
+        goes inline. So the worst outcome of a slow provider is the behavior that
         every route had before the row.
         """
         spent = self._spent.get(ref.attachment_id, 0)
         if spent >= MAX_TRANSFERS:
-            # Refused before the bytes move, so a route that cannot take this file
-            # costs one dictionary lookup per step rather than a transfer.
+            # Refused before the bytes move. A route that cannot take this file
+            # then costs one dictionary lookup for each step and not a transfer.
             raise LlmError(
                 f"{ref.name or ref.attachment_id} failed to upload {spent} times; "
                 "sending it inline instead",
@@ -326,23 +375,23 @@ class GoogleAdapter:
             uri = as_str(record.get("uri"))
             if not uri:
                 raise LlmError("the files API returned no uri", "REQUEST_FAILED")
-            # Remembered the moment the bytes are stored, not when the wait for
-            # them runs out: a turn stopped while the provider processes the file
-            # — an interrupt, a release — otherwise forgot a transfer that had
-            # happened, and the next step sent every byte again.
+            # The name is remembered when the bytes are stored, not when the wait
+            # for them runs out. Otherwise a turn that stopped while the provider
+            # processed the file (an interrupt, a release) forgot a transfer that
+            # had happened, and the next step sent every byte again.
             if name := as_str(record.get("name")):
                 self._pending[ref.attachment_id] = name
             record = await self._ready(record, ref.attachment_id)
         except Exception:
-            # Counted only when this attempt has nothing to resume from. A
-            # timeout that left a remembered file did *not* pay for the bytes and
-            # the next step will not either, so charging it here would abandon a
-            # slow transcode for being slow.
+            # A failure is counted only when this attempt has nothing to resume
+            # from. A timeout that left a remembered file did *not* pay for the
+            # bytes, and the next step will not pay either. To count it here
+            # would abandon a slow transcode because it is slow.
             if ref.attachment_id not in self._pending:
                 self._spent[ref.attachment_id] = spent + 1
             raise
-        # Ready, and about to be cached by the seam, so neither record has
-        # anything left to say about this attachment.
+        # The file is ready, and the seam is about to cache it. Neither record
+        # has anything more to say about this attachment.
         self._pending.pop(ref.attachment_id, None)
         self._spent.pop(ref.attachment_id, None)
         return FileHandle(
@@ -354,26 +403,28 @@ class GoogleAdapter:
         )
 
     async def _resume(self, ref: AttachmentRef) -> dict[str, Any] | None:
-        """The file a previous attempt already stored for these bytes, or `None`.
+        """The file that a previous attempt already stored for these bytes, or `None`.
 
-        **The whole point of remembering, and the reason the memo is here rather
-        than in `ctx.uploads`.** That seam caches a `FileHandle`, which is a
-        *usable* id — a file still `PROCESSING` is precisely not one, so storing
-        it would hand the next request a reference the provider refuses and turn
-        a re-upload into a retry loop. What is safe to keep is the weaker fact
-        that a transfer happened, and it never has to cross the seam: `upload`
-        owns the whole transfer-and-wait, and the row registers one long-lived
-        adapter, so this side of the boundary is the one that can hold it.
+        **This is the purpose of the memo, and the reason why the memo is here
+        and not in `ctx.uploads`.** That seam caches a `FileHandle`, which is a
+        *usable* id. A file that is still `PROCESSING` is not usable. To store it
+        would give the next request a reference that the provider refuses, and
+        would turn a repeated upload into a retry loop. What is safe to keep is
+        the weaker fact that a transfer happened. That fact never has to cross
+        the seam: `upload` owns the whole transfer and wait, and the row
+        registers one long-lived adapter, so this side of the boundary can hold
+        it.
 
         Anything other than a readable record drops the entry and returns `None`,
-        which pays the transfer again. That covers a file deleted from elsewhere,
-        an expiry, a revoked key — all of which answer here rather than mid-turn,
-        because this is the request that asks about it first.
+        which pays for the transfer again. That covers a file that was deleted
+        from elsewhere, an expiry, and a revoked key. All of them answer here and
+        not in the middle of a turn, because this is the first request that asks
+        about the file.
 
-        What it does **not** save is the local read: `handle_for` loads the blob
-        before calling an uploader at all, so the bytes are in memory either way.
-        What it saves is sending them, which for the format this exists to serve
-        is the cost that matters.
+        The memo does **not** save the local read. `handle_for` loads the blob
+        before it calls an uploader at all, so the bytes are in memory in both
+        cases. It saves the sending, which is the cost that matters for the
+        format that this exists to serve.
         """
         name = self._pending.get(ref.attachment_id)
         if name is None:
@@ -387,7 +438,7 @@ class GoogleAdapter:
         return record
 
     async def _transfer(self, ref: AttachmentRef, content: bytes) -> dict[str, Any]:
-        """The resumable protocol's two steps: start, then the bytes."""
+        """The two steps of the resumable protocol: start, then the bytes."""
         base = self.config.base_url.rstrip("/")
         upload_base = base.replace("/v1beta", "/upload/v1beta")
         _body, headers = await self.http.post_raw(
@@ -428,12 +479,12 @@ class GoogleAdapter:
     async def _ready(self, record: dict[str, Any], attachment_id: str) -> dict[str, Any]:
         """Poll until the file is `ACTIVE`, or give up inside the budget.
 
-        Giving up leaves the file **remembered**, as `upload` recorded it once it was
-        stored, so the next attempt resumes against it rather than re-sending it;
-        `_resume` is the other half. `FAILED` forgets it, and the asymmetry is the
-        point: the provider has said this file will never work, so the useful thing
-        is to fall back to the bytes, where a slow one is worth waiting for on the
-        next step.
+        Giving up leaves the file **remembered**, as `upload` recorded it when it
+        was stored. The next attempt then resumes against it and does not send it
+        again. `_resume` is the other half. `FAILED` forgets the file, and the
+        difference is deliberate. The provider has said that this file will never
+        work, so the useful action is to fall back to the bytes. A slow file is
+        worth waiting for on the next step.
         """
         name = as_str(record.get("name"))
         waited = 0
@@ -451,7 +502,8 @@ class GoogleAdapter:
     # ----------------------------------------------------------- streaming --
 
     async def _body(self, options: GenerateOptions) -> tuple[dict[str, Any], dict[str, str]]:
-        """The request, and the provider file ids it was built from — see `anthropic`."""
+        """The request, and the provider file ids it was built from. See `_body` in
+        `anthropic`."""
         handles = await load_handles(
             self.ctx.get(UPLOADS),
             options.messages,
@@ -490,13 +542,14 @@ class GoogleAdapter:
         if options.stop:
             generation["stopSequences"] = list(options.stop)
         if options.response_schema is not None:
-            # **The mime type and not the schema**, which is a decision rather
-            # than an omission. This provider's `responseSchema` is an OpenAPI
-            # subset that rejects keywords ordinary JSON Schema carries, so
-            # forwarding pH's schema would fail requests for a capability
-            # `resolve_model` says below it does not have. Asking for JSON is the
-            # half that is true, and the caller validates either way — which is
-            # exactly what `structured_output: False` exists to tell it.
+            # **The mime type is sent and the schema is not.** That is a decision
+            # and not an omission. The `responseSchema` of this provider is an
+            # OpenAPI subset that rejects keywords that ordinary JSON Schema
+            # carries. To forward the schema of pH would fail requests for a
+            # capability that `resolve_model`, below, says this route does not
+            # have. Asking for JSON is the half that is true. The caller
+            # validates in both cases, and `structured_output: False` exists to
+            # tell it so.
             generation["responseMimeType"] = "application/json"
         if generation:
             body["generationConfig"] = generation
@@ -519,9 +572,9 @@ class GoogleAdapter:
                 for chunk in state.consume(payload):
                     yield chunk
                     if is_error_finish(chunk):
-                        # See the same return in the other two adapters: the
-                        # wire has said the request failed, and `finish()` would
-                        # follow that with a second `Finish` reading "stop".
+                        # See the same return in the other two adapters. The wire
+                        # has said that the request failed, and `finish()` would
+                        # follow that with a second `Finish` that reads "stop".
                         return
         except LlmError as error:
             raise forget_named_handle(
@@ -531,9 +584,9 @@ class GoogleAdapter:
             yield chunk
 
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
-        # See `_body`: this route is asked for JSON and not held to a schema, so
-        # it does not enforce one. Claiming otherwise would make a caller skip the
-        # validation that is actually doing the work.
+        # See `_body`. This route is asked for JSON and is not held to a schema,
+        # so it does not enforce one. To claim otherwise would make a caller skip
+        # the validation that does the actual work.
         return resolved(
             self.config,
             structured_output=False,
@@ -544,12 +597,12 @@ class GoogleAdapter:
 
 
 def _file_record(payload: dict[str, Any]) -> dict[str, Any]:
-    """The file's own fields, whether or not they arrived inside a `file` envelope.
+    """The fields of the file itself, with or without a `file` envelope around them.
 
-    Both spellings are in the wild — the resumable finalize answers `{"file":
-    {...}}` and a `GET` on the file answers the record itself — and a caller that
-    guessed wrong would read every field as absent, which for `state` means
-    "already ACTIVE" and hands back a handle whose first use fails.
+    Both spellings occur. The resumable finalize answers `{"file": {...}}`, and a
+    `GET` on the file answers the record itself. A caller that guessed wrong
+    would read every field as absent. For `state`, absent means "already ACTIVE",
+    and the caller would return a handle whose first use fails.
     """
     inner = payload.get("file")
     return inner if isinstance(inner, dict) else payload
@@ -558,10 +611,10 @@ def _file_record(payload: dict[str, Any]) -> dict[str, Any]:
 def _expiry(stated: object) -> int | None:
     """`expirationTime` as epoch milliseconds, or `None` if it was not stated.
 
-    RFC 3339 with a `Z`, which `fromisoformat` learned to read in 3.11 — and an
-    unparseable stamp answers `None` rather than raising, because "no expiry
-    announced" is a state `FileHandle` already has a meaning for and a failed turn
-    over a date string is not.
+    The stamp is RFC 3339 with a `Z`, which `fromisoformat` learned to read in
+    3.11. A stamp that cannot be parsed answers `None` and does not raise.
+    `FileHandle` already has a meaning for "no expiry announced", and a date
+    string is not a reason to fail a turn.
     """
     if not isinstance(stated, str) or not stated:
         return None
@@ -572,20 +625,22 @@ def _expiry(stated: object) -> int | None:
 
 
 def _remember_calls(message: Message, names: dict[str, str]) -> None:
-    """Record this message's calls, so a later result resolves to the nearest one.
+    """Record the calls of this message, so a later result resolves to the nearest one.
 
-    A `functionResponse` carries the function's **name**; pH's `ToolResultBlock`
-    carries the call's **id**, because that is what every other wire pairs on.
+    A `functionResponse` carries the **name** of the function. The
+    `ToolResultBlock` of pH carries the **id** of the call, because every other
+    wire pairs on the id.
 
-    **Walked with the conversation rather than folded over it first** (G1). A
-    flat map built in one pass keeps the *last* binding for each id, so a
-    session carrying the duplicate ids this wire used to mint resolved every
-    earlier result to the newest call's name — silently, and in the direction
-    that tells the model a result came from a tool it did not call. Updating as
-    each message is converted means a result sees the calls that precede it,
-    which is the pairing the transcript actually describes. `highest_minted_id`
-    stops new duplicates; this is what makes the ones already in stored sessions
-    resolve correctly.
+    **The map is updated along the conversation and is not built over it first**
+    (G1). A flat map that is built in one pass keeps the *last* binding for each
+    id. A session that carried the duplicate ids that this wire used to mint
+    then resolved every earlier result to the name of the newest call. It did so
+    silently, and in the direction that tells the model that a result came from a
+    tool that it did not call. When the map is updated as each message is
+    converted, a result sees the calls that precede it, which is the pairing that
+    the transcript describes. `named_call` (`ph.llm.assembler`) stops new
+    duplicates. This function makes the duplicates that are already in stored
+    sessions resolve correctly.
     """
     for block in message.content:
         if isinstance(block, ToolCallBlock):
@@ -600,9 +655,9 @@ def _to_google(
 ) -> dict[str, Any] | None:
     """One pH message as one `contents` entry, or `None` if it says nothing here.
 
-    `None` rather than an empty entry: a message whose only content was a
-    reasoning block has nothing this wire can carry, and an entry with no parts is
-    a request error rather than a no-op.
+    The answer is `None` and not an empty entry. A message whose only content was
+    a reasoning block has nothing that this wire can carry, and an entry with no
+    parts is a request error and not a no-op.
     """
     parts: list[dict[str, Any]] = []
     for block in message.content:
@@ -625,9 +680,9 @@ def _to_google(
                     }
                 )
             case ReasoningBlock():
-                # Dropped deliberately — see the module docstring. There is no
-                # input shape for a thought here, and rendering one as text would
-                # make the transcript claim the model said what it was only
+                # Dropped deliberately. See the module docstring. There is no
+                # input shape for a thought here, and to render one as text would
+                # make the transcript claim that the model said what it was only
                 # considering.
                 pass
             case MediaBlock():
@@ -644,10 +699,10 @@ def _media_part(
 ) -> dict[str, Any]:
     """One attachment as `fileData` or `inlineData`, or a pointer if neither.
 
-    Total over its own vocabulary like every sibling renderer — but this wire's
-    vocabulary is unusually total already: `inlineData` takes any MIME the route
-    accepts, so the only way here is a blob that could not be read, which is the
-    race `media_pointer` exists for.
+    The function is total over its own vocabulary, like every sibling renderer.
+    The vocabulary of this wire is already unusually complete: `inlineData` takes
+    any MIME that the route accepts. So the only way to the pointer is a blob
+    that could not be read, which is the race that `media_pointer` exists for.
     """
     handle = handles.get(attachment.attachment_id)
     if handle is not None:
@@ -660,16 +715,16 @@ def _media_part(
 
 @dataclass(frozen=True, slots=True)
 class _Call:
-    """One function call this wire streamed.
+    """One function call that this wire streamed.
 
-    Named fields rather than a 3-tuple because `finish` unpacks it a screen away
-    from where it is built. A dataclass rather than a `NamedTuple` because
-    `index` is exactly the field name a tuple already uses for a method.
+    It has named fields and is not a 3-tuple, because `finish` unpacks it a
+    screen away from where it is built. It is a dataclass and not a `NamedTuple`,
+    because `index` is a field name that a tuple already uses for a method.
 
-    No `id`: this wire does not issue one and this adapter no longer invents one
-    (G10). The block goes up with an empty id and `BlockAssembler` fills it from
-    a counter seeded off the whole conversation, which is where the other two
-    wires' absent ids are filled in too.
+    It has no `id`. This wire does not issue one, and this adapter no longer
+    invents one (G10). The block goes up with an empty id, and `named_call`
+    (`ph.llm.assembler`) fills it from the turn, the step, the attempt and the
+    block index. The absent ids of the other two wires are filled in there too.
     """
 
     index: int
@@ -679,12 +734,12 @@ class _Call:
 
 @dataclass(slots=True)
 class _StreamState:
-    """Turns this wire's chunks into pH chunks, tracking block indexes.
+    """Turns the chunks of this wire into pH chunks, and tracks block indexes.
 
-    Text arrives as whole parts rather than as deltas here, which is not a reason
-    to emit whole blocks: `assistant/chunk` promises token-level replay, so each
-    part is emitted as a delta on the block it continues — the same fidelity the
-    other two adapters keep, arriving in bigger pieces.
+    Text arrives here as whole parts and not as deltas. That is not a reason to
+    emit whole blocks, because `assistant/chunk` promises token-level replay. So
+    each part is emitted as a delta on the block that it continues. That is the
+    same fidelity that the other two adapters keep, in bigger pieces.
     """
 
     text_index: int | None = None
@@ -705,18 +760,18 @@ class _StreamState:
         error = payload.get("error")
         if isinstance(error, dict):
             # **A failed request inside a 200** (L2). This wire reports one as a
-            # top-level `error` object mid-stream, exactly as the other two do,
-            # and reading only `usageMetadata`/`candidates` dropped it — so
-            # `finish()` went on to emit `Finish(stop)` and the turn recorded a
-            # clean end for a request that failed. The third shipped wire was
-            # the one this fix never reached. It takes both halves — this
-            # branch and `stream`'s return — because `finish()` is
-            # unconditional, so a caller that kept reading got the `stop`
-            # anyway.
+            # top-level `error` object mid-stream, exactly as the other two do.
+            # Reading only `usageMetadata`/`candidates` dropped it. `finish()`
+            # then emitted `Finish(stop)`, and the turn recorded a clean end for
+            # a request that failed. This was the third shipped wire, and the
+            # fix had never reached it. The fix has two halves here: this branch
+            # and the return in `stream`. Both are needed because `finish()` is
+            # unconditional, so a caller that kept reading got the `stop` in any
+            # case.
             #
-            # `status` rather than `type` is this wire's spelling of the same
-            # field (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`), so the shared map
-            # gets what it needs to say whether a retry could help.
+            # This wire spells the same field `status` and not `type`
+            # (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`). With it, the shared map has
+            # what it needs to say whether a retry could help.
             return [
                 wire_error_finish(
                     error,
@@ -742,11 +797,12 @@ class _StreamState:
         out: list[StreamChunk] = []
         call = part.get("functionCall")
         if isinstance(call, dict):
-            # The id is left empty for `BlockAssembler` to mint (G10). This
-            # wire issues none, and a counter kept here could only ever span one
-            # request — which is exactly the collision G1 was filed for. The
-            # assembler is seeded from the conversation and is the one place all
-            # three wires' unnamed calls get a name.
+            # The id is left empty for `named_call` (`ph.llm.assembler`) to fill
+            # (G10). This wire issues none, and a counter kept here could only
+            # span one request, which is the collision that G1 was filed for.
+            # `named_call` builds the id from the turn, the step, the attempt and
+            # the block index. It is the one place where the unnamed calls of all
+            # three wires get a name.
             streamed = _Call(
                 index=self._claim(),
                 name=as_str(call.get("name")),
@@ -803,22 +859,23 @@ class _StreamState:
         if self.usage is not None:
             out.append(UsageChunk(usage=self.usage))
         # A tool call is `STOP` on this wire, so the finish kind comes from what
-        # was streamed rather than from what the provider called it — the same
-        # fact `_finish_kind` reads off `finish_reason` elsewhere, derived here
-        # because this provider does not report it.
+        # was streamed and not from what the provider called it. Elsewhere
+        # `_finish_kind` reads the same fact from `finish_reason`. It is derived
+        # here because this provider does not report it.
         out.append(Finish(reason=FinishReason(kind=self._kind())))
         return out
 
 
 def _to_usage(raw: dict[str, Any]) -> TokenUsage:
-    """`usageMetadata` as pH's disjoint counts (D15).
+    """`usageMetadata` as the disjoint counts of pH (D15).
 
-    Two corrections, and both are the kind that report a smaller bill than the
-    real one. Cached input is *inside* `promptTokenCount` here, so it is
-    subtracted out the way DeepSeek's is. And `thoughtsTokenCount` is *outside*
-    `candidatesTokenCount`, where pH's `reasoning_tokens` is documented as a
-    subset of `output_tokens` — so it is added in, or every thinking turn's output
-    is under-reported by the part that did the work.
+    There are two corrections, and both are of the kind that reports a smaller
+    bill than the real one. Cached input is *inside* `promptTokenCount` here, so
+    it is subtracted, in the way that the cached input of DeepSeek is.
+    `thoughtsTokenCount` is *outside* `candidatesTokenCount`, and the
+    `reasoning_tokens` of pH is documented as a subset of `output_tokens`. So it
+    is added in. Otherwise the output of every thinking turn is under-reported by
+    the part that did the work.
     """
     prompt = as_int(raw.get("promptTokenCount"))
     cached = as_int(raw.get("cachedContentTokenCount"))

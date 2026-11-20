@@ -139,10 +139,11 @@ def history_choices(history: Sequence[PromptRecord]) -> list[Choice]:
 
 
 def model_choices(
-    entries: Sequence[ModelEntry], active_key: str, active_route: str
+    entries: Sequence[ModelEntry], active_key: str | None, active_route: str | None
 ) -> list[Choice]:
     """The models that the profile of this session lists, by key, with the one in
-    force marked.
+    force marked. `active_key` is `None` when the route in force has no listed
+    name, and `active_route` is `None` when no route is in force.
 
     pH still keeps no catalog. The list belongs to the profile, which the user
     writes, so nothing here goes stale by itself. A key is the value because
@@ -163,7 +164,7 @@ def model_choices(
         )
         for entry in entries
     ]
-    if active_route and not active_key:
+    if active_route is not None and active_key is None:
         rows.insert(
             0, Choice(value=active_route, label=active_route, detail="in force", marked=True)
         )
@@ -181,7 +182,7 @@ offers what was *typed*, and an empty value cannot be typed.
 
 
 def session_choices(
-    sessions: Sequence[SessionSummary], *, current: str = "", offer_new: bool = False
+    sessions: Sequence[SessionSummary], *, current: str | None = None, offer_new: bool = False
 ) -> list[Choice]:
     """Stored sessions, newest first, with **branches** indented under their parent.
 
@@ -306,15 +307,19 @@ def _session_row(summary: SessionSummary, depth: int, *, marked: bool) -> Choice
     indent = f"{'  ' * depth}{('⤷ ' if child else '↳ ') if depth else ''}"
     # The size and mtime of a running session are whatever the last flush left,
     # so they would describe the file and not the conversation. The state is
-    # what a user chooses on.
-    detail = (
-        "running" if summary.state == "running" else f"{summary.when} · {decimal(summary.size)}"
-    )
-    if summary.cwd:
+    # what a user chooses on. A live root that the disk has not seen has no
+    # file to describe at all, so its row also shows its state.
+    when, size = summary.when, summary.size
+    if summary.state == "running" or when is None or size is None:
+        detail = summary.state
+    else:
+        detail = f"{when} · {decimal(size)}"
+    if summary.cwd is not None:
         detail = f"{detail} · {summary.cwd}"
+    title = summary.session_id if summary.title is None else summary.title
     return Choice(
         value=summary.session_id,
-        label=f"{indent}{summary.title or summary.session_id}",
+        label=f"{indent}{title}",
         detail=f"sub-agent · {detail}" if child else detail,
         marked=marked,
         # Shown, not offered. Attaching a child is refused (`NotARoot`), and a

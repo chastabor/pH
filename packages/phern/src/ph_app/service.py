@@ -1,29 +1,33 @@
-"""`phern service` — the thin client an orchestrator drives (P13-13).
+"""`phern service`: the thin client that an orchestrator drives (P13-13).
 
-**phern never restarts itself.** An init system that already exists — systemd,
-launchd, Kubernetes — owns the process, its environment and its backoff, and
-`contrib/` has a unit and a manifest for each. This is the client for the host with
-none of them: a shell, a cron slot, a container entrypoint, a person who wants one
-word for "bring it up and resume what it owes". Six commands over one socket and
-one spawner, and every one answers in the orchestrator's vocabulary: exit 0 when the
-daemon is ready, 1 when it is down, 2 when it is degraded — a root held on a person,
-one whose ladder is spent, one that owes work and is not mounted, or one the daemon
-could not write.
+**phern never restarts itself.** An init system that already exists (systemd,
+launchd, Kubernetes) owns the process, its environment and its backoff.
+`contrib/` has systemd units and a Kubernetes manifest. This module is the
+client for a host that has no init system: a shell, a cron slot, a container
+entrypoint, a person who wants one word for "bring it up and resume what it
+owes". It has six commands over one socket and one spawner. Every command
+answers in the vocabulary of the orchestrator: exit 0 when the daemon is ready,
+1 when it is down, and 2 when it is degraded. A degraded daemon has one of
+these: a root that is held on a person, a root whose ladder is spent, a root
+with a log that does not read, a root that owes work and is not mounted, or a
+root that the daemon could not write.
 
-`start` spawns `phern daemon --resume-owed` with whatever follows it on the command
-line, waits for readiness — which covers the daemon's own resume pass — then runs
-the pass from here as well and prints it, which for a daemon already listening is
-the pass. `stop` sends `shutdown` and waits for the daemon to go. `restart` is the
-two. `status` is one look: the readiness answer and the owed table. `resume` is the
-pass alone. `watch` is the loop — start when down, resume what is owed when ready,
-report when degraded — with the scheduler's own retry ladder between failing passes.
+`start` spawns `phern daemon --resume-owed` with whatever follows it on the
+command line, and waits for readiness. Readiness covers the resume pass of the
+daemon itself. `start` then also runs the pass from here and prints it. For a
+daemon that was already listening, this is the pass. `stop` sends `shutdown` and
+waits for the daemon to go. `restart` is `stop`, then `start`. `status` is one
+look: the readiness answer and the owed table. `resume` is the pass alone.
+`watch` is the loop: start when down, resume what is owed when ready, report
+when degraded. Between failing passes it waits on the retry ladder of the
+scheduler.
 
-**It passes no environment and reads no files.** The daemon it starts composes its
-own configuration from `$PH_HOME`, `$PH_RUNTIME` and the options it was handed; a
-unit's `EnvironmentFile` owns those, and a credential reaches the daemon the same
-way and is never written down. What this module knows is where the socket is, which
-it resolves exactly as `phern agents` does, and it reaches the daemon through the
-same spine (`agents.reach`).
+**It passes no environment and reads no files.** The daemon that it starts
+composes its own configuration from `$PH_HOME`, `$PH_RUNTIME` and the options
+that it was given. The `EnvironmentFile` of a unit owns those. A credential
+reaches the daemon in the same way and is never written down. This module knows
+where the socket is. It resolves the socket exactly as `phern agents` does, and
+it reaches the daemon through the same function (`agents.reach`).
 
 @module ph_app.service
 """
@@ -62,15 +66,16 @@ service_app = typer.Typer(
 )
 
 Verdict: TypeAlias = Literal["ready", "degraded", "down"]
-"""What one look at the daemon concluded, in the three words an orchestrator reads."""
+"""What one look at the daemon concluded, in the three words that an orchestrator reads."""
 
 EXIT: Mapping[Verdict, int] = {"ready": 0, "down": 1, "degraded": 2}
 """The exit status for each verdict: what a unit, a cron slot or a script branches on."""
 
 PASS_THROUGH: Mapping[str, bool] = {"allow_extra_args": True, "ignore_unknown_options": True}
-"""Typer settings for the commands that start a daemon: everything after the
-command name that is not the command's own option goes to `phern daemon` as typed,
-so the daemon's options are spelled once, by the daemon."""
+"""Typer settings for the commands that start a daemon. Everything after the
+command name that is not an option of the command itself goes to `phern daemon`
+as typed. The options of the daemon are therefore spelled one time, by the
+daemon."""
 
 
 # ------------------------------------------------------------------ the look --
@@ -78,24 +83,25 @@ so the daemon's options are spelled once, by the daemon."""
 
 @dataclass(frozen=True, slots=True)
 class Observed:
-    """What one look at a running daemon found, folded once into the reasons an
-    operator reads and the roots a resume pass is for."""
+    """What one look at a running daemon found. It is folded one time into the
+    reasons that an operator reads and the roots that a resume pass is for."""
 
     pid: int
     uptime_ms: int
     owed: OwedListing
     unmounted: tuple[str, ...]
-    """Roots that owe work and are not mounted — what a resume pass is for. A root
-    whose ladder is spent is left out: it is a reason of its own, and a pass without
-    `force` would leave it where it is."""
+    """Roots that owe work and are not mounted. A resume pass is for these. A root
+    whose ladder is spent is left out. It is a reason of its own, and a pass
+    without `force` would leave it where it is."""
     degraded: tuple[str, ...]
-    """Why this daemon is not simply ready, one sentence each; empty when it is."""
+    """Why this daemon is not ready, one sentence for each reason. Empty when it is ready."""
 
     @classmethod
     def of(cls, *, pid: int, uptime_ms: int, ready: ProbeReply, owed: OwedListing) -> Observed:
-        """The readiness probe's own reasons, then what the owed listing adds: a
-        root whose ladder is spent, one held on a person, one with a log that will
-        not read, one nobody has mounted."""
+        """Take the reasons of the readiness probe itself, then add what the owed
+        listing shows: a root whose ladder is spent, a root that is held on a
+        person, a root with a log that does not read, a root that nobody has
+        mounted."""
         rows = owed.sessions
         unmounted = tuple(
             row.session_id for row in rows if not row.mounted and row.left_by_a_pass() is None
@@ -133,7 +139,7 @@ async def _probe_ready(client: DaemonClient) -> ProbeReply:
 
 
 async def _look(client: DaemonClient) -> Observed:
-    """The three questions, on one connection."""
+    """Ask the three questions on one connection."""
     status = await client.call(verbs.DAEMON_STATUS, NoParams())
     ready = await _probe_ready(client)
     owed = await client.call(verbs.SESSIONS_OWED, OwedParams(rebuild=False))
@@ -146,13 +152,13 @@ def _bullets(printer: Console, reasons: Iterable[str]) -> None:
 
 
 def _down(down: Down) -> Verdict:
-    """Say why nothing answered, and conclude so."""
+    """Say why nothing answered, and return the verdict `"down"`."""
     err.print(down.why)
     return "down"
 
 
 def _say(observed: Observed, *, table: bool) -> None:
-    """The verdict line, its reasons, and with `table` the owed table under it."""
+    """Print the verdict line and its reasons. With `table`, print the owed table too."""
     verdict = observed.verdict
     color = "green" if verdict == "ready" else "yellow"
     console.print(
@@ -169,9 +175,11 @@ def _say(observed: Observed, *, table: bool) -> None:
 
 
 async def _await_ready(path: Path) -> ProbeReply | Down:
-    """The readiness answer once it is yes, or the last no at `SPAWN_TIMEOUT` — the
-    spawn's own patience, for the spawn's own reason: a wait that fires early tells
-    a person their daemon failed while it is still starting."""
+    """Return the readiness answer when it is yes, or the last no at `SPAWN_TIMEOUT`.
+
+    The wait is as long as the wait of the spawn, for the same reason: a wait
+    that ends early tells a user that their daemon failed while it is still
+    starting."""
     deadline = anyio.current_time() + SPAWN_TIMEOUT
     while True:
         reply = await reach(path, _probe_ready)
@@ -181,12 +189,14 @@ async def _await_ready(path: Path) -> ProbeReply | Down:
 
 
 async def _start(roots: PathRoots, options: Sequence[str]) -> Verdict:
-    """Spawn, wait for ready, resume, and look. Idempotent: a daemon already
-    listening is not started again, and is still asked to resume what it owes.
+    """Spawn, wait for ready, resume, and look. The function is idempotent: a
+    daemon that already listens is not started again, and is still asked to
+    resume what it owes.
 
-    A daemon this starts runs its own resume pass (`--resume-owed`), so readiness
-    — what a probe port reports while this waits — means its roots are mounted,
-    not merely its socket bound; the pass from here then reports them."""
+    A daemon that this function starts runs its own resume pass
+    (`--resume-owed`). Readiness is what a probe port reports while this function
+    waits. It therefore means that the roots of the daemon are mounted, and not
+    only that its socket is bound. The pass from here then reports the roots."""
     path = roots.daemon_socket()
     try:
         started = await ensure_daemon(
@@ -208,7 +218,7 @@ async def _start(roots: PathRoots, options: Sequence[str]) -> Verdict:
 
 
 async def _resume(path: Path, *, force: bool) -> Verdict:
-    """The pass over every owed root, printed, and the look after it."""
+    """Run the pass over every owed root, print it, and look at the daemon after it."""
     report = await reach(
         path,
         lambda client: client.call(
@@ -226,10 +236,11 @@ async def _resume(path: Path, *, force: bool) -> Verdict:
 
 
 async def _stop(path: Path) -> bool:
-    """`shutdown`, and whether the door is now clear: the daemon gone, or none there.
+    """Send `shutdown`. Return whether the socket is now clear: the daemon is gone,
+    or there was none.
 
-    A closed connection is a socket already removed (`agents.stop_daemon`), so the
-    next `start` finds nothing to clear."""
+    A closed connection means that the socket is already removed
+    (`agents.stop_daemon`), so the next `start` finds nothing to clear."""
     stopped = await reach(path, stop_daemon)
     if isinstance(stopped, Down):
         console.print(f"[dim]nothing to stop: no daemon answers at {path}[/dim]")
@@ -248,16 +259,17 @@ async def _stop(path: Path) -> bool:
 
 
 Said: TypeAlias = tuple[Verdict, tuple[str, ...]]
-"""What a watcher last reported, so a daemon that stays ready for a week is one
-line in the journal rather than one per pass."""
+"""What a watcher last reported. With it, a daemon that stays ready for a week is
+one line in the journal and not one line for each pass."""
 
 
 async def _pass(
     roots: PathRoots, options: Sequence[str], said: Said | None
 ) -> tuple[Verdict, Said | None]:
-    """One pass: start when down, resume when something is owed, report the rest
-    when it differs from what was `said` last. Returns the verdict and what is now
-    said; an action is said in full, so the next look is reported afresh."""
+    """Run one pass: start when down, resume when something is owed, and report
+    the rest when it differs from what was `said` last. Return the verdict and
+    what is now said. An action is reported in full and clears what was said, so
+    the next look is always reported."""
     path = roots.daemon_socket()
     observed = await reach(path, _look)
     if isinstance(observed, Down):
@@ -273,12 +285,15 @@ async def _pass(
 
 
 def _delay(verdict: Verdict, rung: int) -> tuple[float, int]:
-    """How long to wait after a pass that ended `verdict`, from `rung` of the
-    scheduler's retry ladder (`WAKE_RETRY_DELAYS`), and the rung the next pass
-    starts on: the first rung while the daemon is ready, one up per pass that found
-    it otherwise, the last repeated. The scheduler's ladder because it is the same
-    shape of wait — a thing that was tried, failed, and will not be different next
-    second."""
+    """Return how long to wait after a pass that ended `verdict`, and the rung
+    that the next pass starts on.
+
+    The wait comes from `rung` of the retry ladder of the scheduler
+    (`WAKE_RETRY_DELAYS`). The rung is the first one while the daemon is ready.
+    It goes one up for each pass that found the daemon not ready, and the last
+    rung repeats. The ladder of the scheduler is used because the wait has the
+    same shape: a thing that was tried, that failed, and that will not be
+    different in the next second."""
     if verdict == "ready":
         return WAKE_RETRY_DELAYS[0], 0
     return WAKE_RETRY_DELAYS[rung], min(rung + 1, len(WAKE_RETRY_DELAYS) - 1)

@@ -108,11 +108,10 @@ ALLOWED: frozenset[tuple[str, str]] = frozenset(
         # A `sqlite3.Row`, not a payload: the column is whatever SQLite stored.
         ("ph_code_graph/_store.py", 'str(row["value"])'),
         ("ph_code_graph/_store.py", 'int(row["value"])'),
-        # Truthiness, and that is the question being asked. `as_bool`'s own
-        # docstring keeps these three: a Python `dict[str, bool]` with a missing
-        # key, "is anything queued" over two lists, and "is this environment
-        # variable set and non-empty" — none is reading a JSON boolean.
-        ("ph_app/tui/remote.py", "bool(self.held.get(name))"),
+        # Truthiness, and that is the question being asked. These two are "is
+        # anything queued" over two lists, and "is this environment variable set
+        # and non-empty". Neither reads a JSON boolean. A third, a Python
+        # `dict[str, bool]` with a missing key, left with the code that held it.
         ("ph/agent/inbox.py", 'bool(self._state["next-turn"] or self._state["next-step"])'),
         ("ph/cordis/loader.py", "bool(source.get(target))"),
         # Not JSON either: a typed stats mapping, and the file descriptor and

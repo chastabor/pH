@@ -219,21 +219,21 @@ class FrontSession(Protocol):
         ...
 
     @property
-    def arrival(self) -> str:
+    def arrival(self) -> str | None:
         """What the user should know about this session as they arrive, told one
         time: a named profile that moved past the version that the session runs
-        on (S6). `""` when there is nothing to tell."""
+        on (S6). `None` when there is nothing to tell."""
         ...
 
     async def choose_model(self, choice: ModelChoice) -> RootDescription:
         """Run this session on `choice` from its next request, or raise the refusal."""
         ...
 
-    async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:
+    async def browse_sessions(self, *, cwd: str | None = None) -> list[SessionSummary]:
         """Every session that a user could open here, stored and live, in one list.
 
         `cwd` narrows the list to the sessions whose header recorded that
-        directory. `""` means everything, which is what `/sessions` asks for.
+        directory. `None` means everything, which is what `/sessions` asks for.
         The filter runs on the harness, before its own row limit, so a
         directory that was worked in long ago is still found on a machine with
         newer work elsewhere.

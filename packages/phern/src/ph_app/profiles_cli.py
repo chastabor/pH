@@ -1,18 +1,21 @@
-"""`phern profiles` — what a named profile sets, and folding the old layers into it (S2).
+"""`phern profiles`: what a named profile sets, and the fold of the old layers into it (S2).
 
-`show` answers "what does this profile say" two ways (decision 16): what the
-person's file sets — sparse, the rows that differ — and, with `--full`, every
-setting a session on it runs with, defaults included. The second is for debugging
-and for a first session, deciding what to change.
+`show` answers "what does this profile say" in two ways (decision 16). The first
+is what the file of the user sets: it is sparse, the rows that differ. The
+second, with `--full`, is every setting that a session on the profile runs with,
+defaults included. The second is for debugging, and for a first session, to
+decide what to change.
 
-`diff` and `adopt` are S6's: a named profile that moved since a session started is
-kept by that session until a person takes the new version on purpose — ahead of
-its next start, for one session or every one on the profile (decisions 10, 18).
+`diff` and `adopt` belong to S6. When a named profile moved after a session
+started, that session keeps its version until a user takes the new version on
+purpose. The user takes it ahead of the next start of the session, for one
+session or for every session on the profile (decisions 10, 18).
 
-`fold` is item 0 of `plans/Session_Profiles_Plan.md`, run on purpose: a profile's
-drop-ins, and a file still in the list format before S2, become the one named
-profile file. It composes the profile before and after and keeps the change only
-when the two agree, so a session that starts on it next notices nothing.
+`fold` is item 0 of `plans/Session_Profiles_Plan.md`, run on purpose. The
+drop-ins of a profile, and a file that is still in the list format from before
+S2, become the one named profile file. The command composes the profile before
+and after, and keeps the change only when the two agree. A session that starts
+on the profile next therefore notices nothing.
 
 @module ph_app.profiles_cli
 """
@@ -54,7 +57,7 @@ from ph.text import count_of
 from ph.wire import validation_errors
 
 from . import verbs
-from .console import detail, emit, fail
+from .console import detail, emit, fail, nonblank
 from .daemon.client import DaemonClient, connected
 from .named_profiles import append_rows, render_named_profile
 from .params import AdoptParams
@@ -79,9 +82,14 @@ profiles_app = typer.Typer(
 
 ProfileName = Annotated[str, typer.Argument(help="A profile name, or a path to a .yaml.")]
 SessionChoice = Annotated[
-    str,
-    typer.Option("--session", help="One stored session; every one on the profile when left out."),
+    str | None,
+    typer.Option(
+        "--session",
+        help="One stored session; every one on the profile when left out.",
+        callback=nonblank,
+    ),
 ]
+"""`--session` for `diff` and `adopt`. `None` is every session on the profile."""
 
 
 @profiles_app.command()
@@ -181,7 +189,7 @@ def session(
 
 
 @profiles_app.command()
-def diff(name: ProfileName, session: SessionChoice = "") -> None:
+def diff(name: ProfileName, session: SessionChoice = None) -> None:
     """List what taking a named profile's current version would change (S6).
 
     For each stored session on `name` — or the one `--session` names — every
@@ -196,7 +204,7 @@ def diff(name: ProfileName, session: SessionChoice = "") -> None:
 @profiles_app.command()
 def adopt(
     name: ProfileName,
-    session: SessionChoice = "",
+    session: SessionChoice = None,
     yes: Annotated[bool, typer.Option("--yes", help="Adopt without asking.")] = False,
 ) -> None:
     """Take a named profile's current version for its sessions' next start (S6).
@@ -223,14 +231,15 @@ def adopt(
 
 
 def _version_or_exit(name: str) -> ProfileBase:
-    """`name` as a session's base would record it now, or exit 2 saying why not."""
+    """Return `name` as the base of a session would record it now, or exit 2 with the reason."""
     return _resolved_or_exit(profile_or_exit(name), base_of)
 
 
 def _resolved_or_exit[S, T](composed: S, resolve: Callable[[S], T]) -> T:
-    """Every row of `composed` through its model, or exit 2 naming what refused —
-    `show --full`'s listing, `session --full`'s and `diff`'s version all resolve,
-    and all refuse alike."""
+    """Return every row of `composed` through its model, or exit 2 and name what
+    refused. The listing of `show --full`, the listing of `session --full`, and
+    the version that `diff` and `adopt` read all resolve here, and all refuse in
+    the same way."""
     try:
         return resolve(composed)
     except ValidationError as error:
@@ -239,11 +248,14 @@ def _resolved_or_exit[S, T](composed: S, resolve: Callable[[S], T]) -> T:
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
 
-def _changes(name: str, session: str, now: ProfileBase) -> list[tuple[str, ProfileChange | None]]:
-    """Each session on `name`, or the one named, with how `now` differs from it."""
+def _changes(
+    name: str, session: str | None, now: ProfileBase
+) -> list[tuple[str, ProfileChange | None]]:
+    """Return each session on `name` with how `now` differs from it. `session`
+    narrows the answer to one session. `None` is every session on `name`."""
     sessions_dir = resolve_roots().sessions_dir()
     targets: list[tuple[str, LoggedEnvironment]]
-    if session:
+    if session is not None:
         env = recorded_environment(sessions_dir, session)
         if env.base is None:
             fail(f"[red]{session} has no recorded base under {sessions_dir}[/red]", code=2)
@@ -257,7 +269,7 @@ def _changes(name: str, session: str, now: ProfileBase) -> list[tuple[str, Profi
 
 
 def _report(name: str, changes: Sequence[tuple[str, ProfileChange | None]]) -> list[str]:
-    """The accounts, one per distinct change, each under the sessions it is theirs."""
+    """Return one account for each distinct change, under the sessions that it applies to."""
     if not changes:
         return [f"no stored session runs on {name}"]
     grouped: dict[tuple[str, ...], list[str]] = {}
@@ -279,12 +291,13 @@ def _report(name: str, changes: Sequence[tuple[str, ProfileChange | None]]) -> l
 async def adopt_version(
     name: str, session_ids: Sequence[str], version: ProfileBase
 ) -> tuple[list[str], bool]:
-    """Record `version` in each session for its next start. `(lines, any missed)`.
+    """Record `version` in each session for its next start. Return `(lines, any missed)`.
 
-    Each under its own lease, on a mount of the host's rows alone — the store and
-    nothing that runs (`log_host`) — so nothing is started to write it, and the
-    lease is given back before the next. One another process holds is asked of the
-    daemon, which holds it if anything does.
+    Each session is written under its own lease, on a mount of the rows of the
+    host alone: the store and nothing that runs (`log_host`). Nothing is started
+    to write it, and the lease is given back before the next session. A session
+    that another process holds is asked of the daemon, which holds it if anything
+    does.
     """
     host = log_host(name)
     lines: list[str] = []
@@ -373,12 +386,18 @@ class FoldRefused(RuntimeError):
 
 
 def fold_profile(name: str, *, today: date | None = None) -> str:
-    """Fold `name`'s drop-ins and old-format file into one named profile, or refuse.
+    """Fold the drop-ins and the old-format file of `name` into one named profile, or refuse.
 
-    Item 0's steps: compose as it composes now; write the file — appended as text
-    when there is one, so the person's comments stay, and created sparse when there
-    is not; move the drop-ins aside; compose again. A difference, or a file that no
-    longer reads, puts all of it back and says which rows moved.
+    The steps of item 0:
+
+    1. Compose the profile as it composes now.
+    2. Write the file. When a file exists, the rows are appended as text, so the
+       comments of the user stay. When none exists, a sparse file is created.
+    3. Move the drop-ins aside.
+    4. Compose again.
+
+    A difference, or a file that no longer reads, puts all of it back and says
+    which rows moved.
     """
     roots = resolve_roots()
     overlay = roots.profile_overlay(name)
@@ -394,8 +413,9 @@ def fold_profile(name: str, *, today: date | None = None) -> str:
         for entry in as_seq(decode_document(path))
         if isinstance(entry, dict)
     ]
-    # Each drop-in's own header comes with its rows: `/sandbox`'s says the host list
-    # it pins will not follow pH's defaults, which stays true once folded.
+    # The header of each drop-in comes with its rows. The header of the
+    # `/sandbox` drop-in says that the host list that it pins will not follow
+    # the defaults of pH. That stays true after the fold.
     headers = [
         line.lstrip("#").strip()
         for path in dropins
@@ -426,17 +446,17 @@ def fold_profile(name: str, *, today: date | None = None) -> str:
     try:
         after = compose_profile(name)
         moved = [as_str(entry.get("id")) for entry in sparse_entries(before.rows, after.rows)]
-        failure = ""
+        failure: str | None = None
     except (LoaderError, OSError, ValueError) as error:
         moved, failure = [], detail(error)
-    if failure or moved:
+    if failure is not None or moved:
         if aside is not None:
             aside.rename(roots.profile_dropins(name))
         if original is None:
             overlay.unlink()
         else:
             write_atomic(overlay, original)
-        why = failure or f"it would change {', '.join(moved)}"
+        why = failure if failure is not None else f"it would change {', '.join(moved)}"
         raise FoldRefused(
             f"{name}: not folded — {why}. {overlay} is as it was; fold it by hand, "
             "or remove what it cannot read."
@@ -448,5 +468,5 @@ def fold_profile(name: str, *, today: date | None = None) -> str:
 
 
 def _aside(directory: Path, when: str) -> Path:
-    """Where a folded drop-in directory goes: dated, and never over an earlier one."""
+    """Return where a folded drop-in directory goes: dated, and never over an earlier one."""
     return free_sibling(directory, f".folded-{when}")

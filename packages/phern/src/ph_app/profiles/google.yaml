@@ -1,13 +1,13 @@
-# A profile for Google's Gemini API.
+# A profile for the Gemini API of Google.
 #
-# The one shipped route that declares video, which is what P7-03's gate needs a
-# provider for: `uploads` defaults to the video family here rather than to
-# nothing, because this provider's Files API is the documented path for one and
-# a 300 MB clip cannot ride inline under a 20 MB request cap.
+# This is the one shipped route that declares video, and the gate of P7-03 needs
+# a provider for that. Here `uploads` defaults to the video family and not to
+# nothing, because the Files API of this provider is the documented path for a
+# video, and a 300 MB clip cannot go inline under a request cap of 20 MB.
 #
-# `apiKeyEnv` is a *name*, never an interpolation: the adapter resolves it at the
-# request edge, so the value never enters a row, an event, or a child process
-# (I-3).
+# `apiKeyEnv` is a *name* and never an interpolation. The adapter resolves it at
+# the request edge, so the value never enters a row, an event, or a child
+# process (I-3).
 - insert:
     - id: llm-google
       name: llm-google
@@ -17,8 +17,8 @@
         apiKeyEnv: GEMINI_API_KEY
         contextWindow: 1048576
 
-# What this profile runs on, by key; `main` unless a person picks another.
-# `GEMINI_MODEL` names another without an overlay.
+# The models that this profile runs on, by key. The key is `main` unless the
+# user picks another. `GEMINI_MODEL` names another model without an overlay.
 - id: models
   config:
     default: main

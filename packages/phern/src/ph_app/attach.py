@@ -1,16 +1,16 @@
-"""Files a person named, turned into a message the model can see (P7-01).
+"""Files that a user named, turned into a message that the model can see (P7-01).
 
-The **human door** of the split I-9 draws. A person may attach anything they can
-already open, so this reads paths directly, with the harness's own permissions
-and no policy check. That is deliberately not available to the model: a tool that
-could reach it would be an exfiltration primitive — attach a private key as a
-"document" and let the provider OCR it — so a model-initiated attach reads
-through `ctx.fs`, where `permissions-fs` and the workspace tier bound it like
-every other read.
+This is the **human door** of the split that I-9 draws. A user may attach
+anything that they can already open. So this module reads paths directly, with
+the permissions of the harness itself and no policy check. That is deliberately
+not available to the model. A tool that could reach it would be an exfiltration
+primitive: attach a private key as a "document" and let the provider OCR it. So
+an attach that the model starts reads through `ctx.fs`, where `permissions-fs`
+and the workspace tier bound it like every other read.
 
-Front-end code rather than a seam method, because *which* files were named is a
-question only a front end is asked. The store below it takes bytes and stays out
-of the question entirely.
+This is front-end code and not a seam method, because *which* files were named
+is a question that only a front end is asked. The store below it takes bytes and
+has no part in that question.
 
 @module ph_app.attach
 """
@@ -47,17 +47,17 @@ __all__ = ["AttachmentUnavailable", "Tray", "ingest", "prompt_message", "stage_b
 class AttachmentUnavailable(RuntimeError):
     """Files were attached to a profile that mounts no attachment store.
 
-    Loud rather than quiet: a person who passed `--attach` and got a plain text
-    turn would have no way to tell their diagram was never sent, and the whole
-    point of this row is that such a thing is never silent.
+    This is loud and not quiet. A user who passed `--attach` and got a plain
+    text turn could not tell that their diagram was never sent. The purpose of
+    this row is that such a thing is never silent.
     """
 
 
 async def ingest(ctx: Context, paths: Sequence[Path | str]) -> tuple[AttachmentRef, ...]:
-    """Store each named file and return the references a message will carry.
+    """Store each named file and return the references that a message will carry.
 
-    Order is the order the person gave, because that is the order they will
-    describe them in.
+    The order is the order that the user gave, because that is the order in
+    which they will describe the files.
     """
     if not paths:
         return ()
@@ -71,18 +71,20 @@ async def ingest(ctx: Context, paths: Sequence[Path | str]) -> tuple[AttachmentR
 
 @dataclass(slots=True)
 class Tray:
-    """Attachments waiting for the next prompt — the composer's tray.
+    """Attachments that wait for the next prompt: the tray of the composer.
 
-    **Keyed by digest, so staging one file twice is one chip.** That is what
-    makes `session/stage` safe to retry without an idempotence key: a client that
-    reconnects and re-sends cannot double a file, for the same reason `attachment/
-    put` cannot double a blob — the identity is the content.
+    **It is keyed by digest, so one file that is staged twice is one chip.**
+    That makes `session/stage` safe to retry without an idempotence key. A
+    client that reconnects and sends again cannot double a file, for the same
+    reason that `attachment/put` cannot double a blob: the identity is the
+    content.
 
-    One class for the two places a tray lives — a daemon root, shared by every
-    attached front end, and the in-process session that increment 2c deletes —
-    so the stage/drain rule has one author. `take` drains: a staged attachment
-    rides *one* prompt, and leaving it would silently re-attach the same file to
-    every later turn.
+    One class serves the two places where a tray lives, so the stage and drain
+    rule has one author. The first place is a daemon root, whose tray every
+    attached front end shares. The second is `DaemonSession` in
+    `ph_app.tui.remote`, which keeps a mirror of that tray. `take` drains: a
+    staged attachment goes with *one* prompt, and to leave it would silently
+    attach the same file again to every later turn.
     """
 
     _refs: dict[str, AttachmentRef] = field(default_factory=dict)
@@ -110,15 +112,17 @@ class Tray:
 def prompt_message(
     text: str, attachments: Sequence[AttachmentRef] = (), *, source: PluginSource | None = None
 ) -> Message:
-    """One `user/message` carrying what the person typed and what they attached.
+    """One `user/message` that carries what the user typed and what they attached.
 
-    The text first, then the media, which is the order a person writes in — "look
-    at this" before the thing being looked at. Identical to what `agent.prompt`
-    builds when nothing is attached, so a front end can use this uniformly rather
-    than branching on whether the person passed a file.
+    The text comes first, then the media. That is the order in which a person
+    writes: "look at this" before the thing to look at. With nothing attached,
+    the message is identical to what `agent.prompt` builds. A front end can
+    therefore use this for every prompt, and need not branch on whether the user
+    passed a file.
 
-    `source` is for a prompt a person did not just send — a schedule's
-    (`scheduled_source`), whose words are the person's and whose moment is not.
+    `source` is for a prompt that the user did not just send, such as the prompt
+    of a schedule (`scheduled_source`). Its words are the user's, and its moment
+    is not.
     """
     content: list[ContentBlock] = [TextBlock(text=text)] if text else []
     content.extend(MediaBlock(attachment=one) for one in attachments)
@@ -130,27 +134,28 @@ def prompt_message(
 async def stage_bytes(
     client: DaemonClient, session_id: str, name: str, mime: str, content: bytes | bytearray
 ) -> AttachmentRef:
-    """Store these bytes on the daemon and put them on the session's tray.
+    """Store these bytes on the daemon and put them on the tray of the session.
 
-    Two frames, and the pair belongs together: `attachment/put` is not a
-    `MUTATIONS` row — it is content-addressed, so a retry is already a no-op and
-    its reply *is* the reference — while `session/stage` is keyed, because a tray
-    is state. Neither half is useful alone, and both front ends that stage a file
-    send them back to back.
+    This is two frames, and the pair belongs together. `attachment/put` is not a
+    `MUTATIONS` row: it is content-addressed, so a retry is already a no-op and
+    its reply *is* the reference. `session/stage` is keyed, because a tray is
+    state. Neither half is useful alone, and both front ends that stage a file
+    send the two frames back to back.
 
-    Here rather than on `DaemonClient`, whose docstring is that every method
-    there is one frame; and here rather than as a third daemon method, which
-    would have to collapse two verbs the protocol keeps apart for the reasons
-    above and would move a file's *name* and *type* — the human door's half of
-    the decision (I-9) — onto the daemon.
+    It is here and not on `DaemonClient`, because the docstring of
+    `daemon/client.py` says that every method there is one frame. It is also not
+    a third daemon method. Such a method would have to collapse two verbs that
+    the protocol keeps apart for the reasons above. It would also move the
+    *name* and the *type* of a file onto the daemon, and those are the half of
+    the decision that belongs to the human door (I-9).
 
-    Returns the reference the daemon minted — the same object every other pH
-    client reads, rather than the one field a particular caller happened to want,
-    so a browser and the log describe one blob the same way. The tray it landed
-    on reaches every front end as `session.staged`.
+    Returns the reference that the daemon minted. That is the same object that
+    every other pH client reads, and not the one field that a particular caller
+    happened to want, so a browser and the log describe one blob in the same
+    way. The tray that it landed on reaches every front end as `session.staged`.
 
-    `bytearray` is accepted because a streaming reader builds one, and copying it
-    to `bytes` for a call that only base64-encodes it is a second 5 MiB nobody
+    `bytearray` is accepted because a streaming reader builds one. To copy it to
+    `bytes` for a call that only base64-encodes it is a second 5 MiB that nobody
     asked for.
     """
     put = await client.call(

@@ -1,4 +1,4 @@
-# A profile for Anthropic's messages API.
+# A profile for the messages API of Anthropic.
 - insert:
     - id: llm-anthropic
       name: llm-anthropic
@@ -8,8 +8,9 @@
         contextWindow: 200000
         defaultMaxTokens: 8192
 
-# What this profile runs on, by key; `main` unless a person picks another
-# (`--model fast`, `/model fast`). A person's overlay replaces the whole list.
+# The models that this profile runs on, by key. The key is `main` unless the
+# user picks another (`--model fast`, `/model fast`). An overlay of the user
+# replaces the whole list.
 - id: models
   config:
     default: main

@@ -1046,3 +1046,94 @@ async def test_a_re_sent_command_whose_outcome_is_unknown_says_so(
     )
     shown = await maybe_await(command.run("", cast(CommandContext, None)))
     assert shown == (UNKNOWN_REPEAT if said else None)
+
+
+# ----------------------------------------- the route of a root is one fact --
+
+
+async def test_a_frame_that_does_not_state_the_route_leaves_the_route_alone() -> None:
+    """Most status frames say where the root is and nothing about its route.
+
+    A frame states the route when it carries `model` (`StatusFacts`). A frame
+    without it must leave all three fields of the route as the client had them.
+
+    Sabotage: assign the three route fields outside the `facts.model` test in
+    `_status`, and a `running` frame blanks the footer.
+    """
+    front = _detached("s")
+    front._status(StatusFacts(status="idle", provider="fake", model="fake-1", model_key="main"))
+
+    front._status(StatusFacts(status="running"))
+    front._status(StatusFacts(readings=[]))
+
+    state = front.state
+    assert (state.provider, state.model, state.model_key) == ("fake", "fake-1", "main")
+    assert state.route == "fake/fake-1"
+
+
+async def test_a_route_with_no_listed_name_clears_the_name() -> None:
+    """A frame that states a route with no `model_key` gives an answer: the
+    profile lists no name for that route.
+
+    The name of the route before it must not survive. The model picker would
+    otherwise mark a listed model as in force when none is.
+
+    Sabotage: keep the old `model_key` in `_status` when the frame has none, and
+    the unlisted route goes by the name of the route before it.
+    """
+    front = _detached("s")
+    front._status(StatusFacts(provider="fake", model="fake-1", model_key="main"))
+
+    front._status(StatusFacts(provider="fake", model="fake-9"))
+
+    state = front.state
+    assert (state.provider, state.model, state.model_key) == ("fake", "fake-9", None)
+
+
+async def test_a_name_with_no_model_is_not_a_statement_of_the_route() -> None:
+    """The three fields of the route are read together, and `model` is what says
+    that a frame states them.
+
+    A `model_key` alone is therefore not applied. Applied on its own, it would
+    give the route in force the name of another route.
+
+    Sabotage: read `facts.model_key` under its own `is not None` test in
+    `_status`, and the name moves without the route.
+    """
+    front = _detached("s")
+    front._status(StatusFacts(provider="fake", model="fake-1", model_key="main"))
+
+    front._status(StatusFacts(model_key="other"))
+
+    state = front.state
+    assert (state.provider, state.model, state.model_key) == ("fake", "fake-1", "main")
+
+
+async def test_a_frame_that_states_no_status_leaves_the_status_alone() -> None:
+    """A footer frame arrives while a turn runs, and the spinner must keep
+    turning.
+
+    Sabotage: assign `facts.status` in `_status` without the `is not None` test,
+    and a footer frame ends the spinner.
+    """
+    front = _detached("s")
+    front._status(StatusFacts(status="running"))
+
+    front._status(StatusFacts(readings=[]))
+
+    assert front.state.status == "running" and front.state.busy
+
+
+async def test_a_front_end_with_nothing_to_tell_has_no_arrival(tmp_path: Path) -> None:
+    """The attach reply of a root whose profile has not moved carries no note.
+
+    The app shows the note as a toast when there is one. A note of `""` would be
+    an empty toast at every attach.
+
+    Sabotage: describe a root whose profile has not moved with a `profile_note`
+    of `""` in `Root.describe`, and the front end has an arrival to show.
+    """
+    async with running(tmp_path) as daemon:
+        front, _ = await _front(daemon)
+
+        assert front.arrival is None

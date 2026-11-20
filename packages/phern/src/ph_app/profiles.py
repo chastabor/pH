@@ -1,23 +1,25 @@
 """Profile resolution: which bundle documents compose a run.
 
-A profile is an ordered list of YAML documents. The shipped ones live in
-`ph.bundles` and this package; a person's named profile is a file under
-`$PH_HOME/profiles/<name>.yaml` that `extends` one of them and holds only the rows
-that differ (`ph_app.named_profiles`), so a deployment changes a row by id without
-forking a bundle.
+A profile is an ordered list of YAML documents. The shipped documents are in
+`ph.bundles` and in this package. A named profile of the user is a file at
+`$PH_HOME/profiles/<name>.yaml`. It `extends` one shipped profile and holds only
+the rows that differ (`ph_app.named_profiles`). A deployment can therefore
+change a row by id and does not have to fork a bundle.
 
-**Three owners, one kind each** (decision 23). Every row declares what its
-settings shape (`Affects`), and each layer a person writes may set one kind:
+**There are three owners, and each one sets one kind of row** (decision 23).
+Every row declares what its settings shape (`Affects`). Each layer that a user
+writes may set one kind:
 
 | layer | sets |
 |---|---|
-| pH's shipped documents, `presentation.yaml` included | any |
-| `$PH_HOME/daemon.yaml`'s `rows:`, and the daemon's own flags | `deployment` |
-| `$PH_HOME/profiles/<name>.yaml`'s rows, its drop-ins, `--patch` | `environment` |
+| The shipped documents of pH, `presentation.yaml` included | any |
+| The `rows:` of `$PH_HOME/daemon.yaml`, and the flags of the daemon | `deployment` |
+| The rows of `$PH_HOME/profiles/<name>.yaml`, its drop-ins, `--patch` | `environment` |
 
-Presentation has no layer a person writes here: those rows ship in every
-profile, and hiding a screen is the TUI's `tui.json`. A row set in the wrong
-layer is refused by `compose_rows`, naming the configuration it belongs in.
+The user has no layer here that sets presentation rows. Those rows ship in
+every profile, and the user hides a screen in the `tui.json` of the TUI.
+`compose_rows` refuses a row that is set in the wrong layer, and the refusal
+names the configuration that the row belongs in.
 
 @module ph_app.profiles
 """
@@ -73,6 +75,7 @@ __all__ = [
     "ModelOption",
     "NamedProfileStore",
     "NoteDoor",
+    "PatchOption",
     "ProfileOption",
     "ProfilePlan",
     "ProviderOption",
@@ -94,7 +97,6 @@ __all__ = [
     "profile_plan",
     "read_named_profile",
     "resolve_profile",
-    "save_named_profile",
     "save_session",
     "session_profile",
     "sparse_text",
@@ -105,153 +107,165 @@ __all__ = [
 PROFILE_DIR = Path(__file__).parent / "profiles"
 
 PRESENTATION = PROFILE_DIR / "presentation.yaml"
-"""The presentation rows this package ships, layered into every named profile.
+"""The presentation rows that this package ships. They are layered into every
+named profile.
 
-Outside the `PROFILES` table on purpose: a screen is not part of the environment
-a profile names, so no entry there says whether it has one. Every named profile
-mounts them, because the daemon that holds a headless run is also what a TUI
-attaches to, and a screen nothing draws costs nothing (`base.yaml` says the same
-of `tui-screens`)."""
+They are outside the `PROFILES` table on purpose. A screen is not part of the
+environment that a profile names, so no entry in that table says whether the
+profile has a screen. Every named profile mounts these rows, because the daemon
+that holds a headless run is also the daemon that a TUI attaches to, and a
+screen that nothing draws costs nothing. `base.yaml` gives the same reason for
+`tui-screens`."""
 
 
 @dataclass(frozen=True, slots=True)
 class Bundle:
-    """A layer another distribution provides, resolved late.
+    """A layer that another distribution provides. It is resolved late.
 
-    A profile is an ordered list of layers; the only thing P3-20 added is that
-    one *kind* of layer is not a path this package can name. It is discovered
-    through the `ph.bundles` entry-point group — `ph_app` must not *import*
-    `ph_rlm`, the same rule that lets the app read `subagent/*` events without
-    importing the row that emits them.
+    A profile is an ordered list of layers. P3-20 added one thing: one *kind* of
+    layer is not a path that this package can name. A layer of that kind is
+    found through the `ph.bundles` entry-point group, because `ph_app` must not
+    *import* `ph_rlm`. The same rule lets the app read `subagent/*` events
+    without importing the row that emits them.
 
-    **The `phern` distribution depends on those wheels; this module still may
-    not name them.** Shipping them together decides what is present by default
-    and nothing more: every bundle reaches this dataclass the way a third-party
-    wheel would, which is what keeps that path real rather than theoretical.
+    **The `phern` distribution depends on those wheels, and this module still
+    may not name them.** Shipping them together decides what is present by
+    default, and nothing more. Every bundle reaches this dataclass in the way
+    that a third-party wheel would. So the third-party path is in real use, and
+    is not only possible in theory.
     """
 
     name: str
     required: bool = True
-    """Whether a profile naming this bundle is refused without it, or composes
-    without it.
+    """Whether a profile that names this bundle is refused when the bundle is
+    missing, or composes without it.
 
-    **Required is the old behavior and stays the default**: `rlm` without the
-    RLM bundle is not a degraded `rlm`, it is a profile whose documents patch
-    rows that do not exist, so it is better not offered. `rlm-stable.yaml` makes
-    the point in one line — it arms `tool-todo`, which only the stabilize bundle
-    mounts.
+    **Required is the old behavior and stays the default.** `rlm` without the
+    RLM bundle is not a degraded `rlm`. It is a profile whose documents patch
+    rows that do not exist, so it is better not to offer it. `rlm-stable.yaml`
+    shows this in one line: it arms `tool-todo`, which only the stabilize
+    bundle mounts.
 
-    Optional is for a layer that is *additive* and that every posture wants:
-    nothing outside the stabilize bundle addresses a stabilize row, so a profile
-    without it composes and simply never compacts. That is the difference this
-    flag names — not "how much do we want it", but "does anything else here
-    refer to it".
+    Optional is for a layer that is *additive* and that every posture wants.
+    Nothing outside the stabilize bundle addresses a stabilize row, so a profile
+    without the bundle composes and never compacts. The flag does not say how
+    much the bundle is wanted. It says whether anything else in the profile
+    refers to the bundle.
     """
 
 
 Layer: TypeAlias = "Path | Bundle"
 
 STABILIZE: Bundle = Bundle("stabilize", required=False)
-"""Context management, layered into every shipped profile.
+"""Context management. It is layered into every shipped profile.
 
-**A session that silently grows past its window is a defect in any posture**,
-not a feature of an interactive one — so this is not a thing a profile opts
-into. `ph-base` mounts the compaction *seam* with no engine and says a
-deployment wanting the plain harness should get it; that remains true of the
-bundle documents, and what changed is that every profile this package *offers*
-now layers the engine over them.
+**A session that silently grows past its window is a defect in any posture.**
+It is not a feature of an interactive posture, so a profile does not opt into
+this layer. `ph-base` mounts the compaction *seam* with no engine, and says that
+a deployment that wants the plain harness should get it. That is still true of
+the bundle documents. What changed is that every profile that this package
+*offers* now layers the engine over them.
 
-**Optional rather than required, and it stays that way although `phern` now
-depends on the wheel.** `available_profiles` gates on bundles *resolving*, not
-on what the manifest asked for, so the question this flag answers is "what
-happens to `--profile tui` when the bundle is not there" — and the answer has to
-stay "it still composes, without compaction" for the two cases that outlive any
-dependency list: somebody who uninstalled `ph-stabilize` from a `phern`
-environment, and anybody building on `ph-core` with a front end of their own. A
-*required* layer here would take a working profile away to add a feature, which
-is precisely the trade `rlm-indexed`'s comment refuses further down.
+**The layer is optional and not required, and it stays optional although
+`phern` now depends on the wheel.** `available_profiles` checks whether bundles
+*resolve*, and not what the manifest asked for. So the question that this flag
+answers is "what happens to `--profile tui` when the bundle is not there". The
+answer must stay "it still composes, without compaction", for the two cases
+that outlive any dependency list:
 
-The cost is that a profile's behavior now depends on what is installed, which
-until now it never did. That is why it is one named layer rather than a habit:
-`phern doctor` reports what actually activated, and there is exactly one bundle
-this is true of."""
+- Somebody uninstalled `ph-stabilize` from a `phern` environment.
+- Somebody builds on `ph-core` with a front end of their own.
+
+A *required* layer here would take a working profile away to add a feature. The
+comment on `rlm-indexed` below refuses exactly that trade.
+
+The cost is that the behavior of a profile now depends on what is installed,
+which it never did before. For that reason this is one named layer and not a
+habit. `phern doctor` reports what activated, and this is true of exactly one
+bundle."""
 
 TUI_LAYERS: tuple[Layer, ...] = (BASE, HEADLESS, STABILIZE, PROFILE_DIR / "tui.yaml")
-"""The interactive posture: `headless` plus one row. A person is present to
-answer the seams, so the workspace is writable (see tui.yaml).
+"""The interactive posture: `headless` plus one document, `tui.yaml`, which
+changes two rows. A user is present to answer the seams, so the workspace is
+writable (see `tui.yaml`).
 
-`STABILIZE` before the profile's own document, so `tui.yaml` — and any layer
-after it — can address a stabilize row by id. A bundle layered after the
-document that patches it is a bundle whose patches are silently undone."""
+`STABILIZE` comes before the document of the profile, so that `tui.yaml` and any
+layer after it can address a stabilize row by id. When a bundle is layered after
+the document that patches it, its patches are silently undone."""
 
 RLM_LAYERS: tuple[Layer, ...] = (*TUI_LAYERS, Bundle("rlm"))
-"""The interactive posture plus the RLM bundle, because a person is present for
-the approvals Code Mode's dispatches raise (P3-20).
+"""The interactive posture plus the RLM bundle, because a user is present for
+the approvals that the dispatches of Code Mode raise (P3-20).
 
-Named for `TUI_LAYERS`' reason four lines up: `rlm-stable` *is* "rlm plus
-stabilize", and re-listing the layers would let the two drift while a comment
-went on claiming they could not."""
+The tuple has a name for the same reason as `TUI_LAYERS` above. `rlm-stable`
+*is* "rlm plus stabilize". A second list of the same layers would let the two
+drift apart while a comment still claimed that they could not."""
 
 RLM_STABLE_LAYERS: tuple[Layer, ...] = (
     *RLM_LAYERS,
     Bundle("stabilize"),
     PROFILE_DIR / "rlm-stable.yaml",
 )
-"""Everything, with the gates on — and named for the reason the two above are.
+"""Everything, with the gates on. The tuple has a name for the same reason as
+the two above.
 
-`rlm-indexed` *is* "rlm-stable plus the indexing bundles", and the first draft
-of it re-listed these three by hand, which is exactly the drift `RLM_LAYERS`
-was introduced to stop: a row added to `rlm-stable` would silently have stopped
-reaching a profile whose comment claimed to be built from it."""
+`rlm-indexed` *is* "rlm-stable plus the indexing bundles". The first draft of
+`rlm-indexed` listed these three layers again by hand. That is exactly the drift
+that `RLM_LAYERS` was introduced to stop: a row added to `rlm-stable` would
+silently have stopped reaching a profile whose comment claimed to be built from
+it."""
 
 
 PROFILES: dict[str, tuple[Layer, ...]] = {
     # Every entry carries `STABILIZE`, `base` included. The bundle *documents*
-    # still ship the plain harness — `ph-base` mounts the compaction seam with
-    # no engine — and what this table says is that no profile pH offers by name
-    # is one whose conversation grows until the provider refuses it.
+    # still ship the plain harness: `ph-base` mounts the compaction seam with no
+    # engine. This table says that no profile that pH offers by name has a
+    # conversation that grows until the provider refuses it.
     "base": (BASE, STABILIZE),
     "headless": (BASE, HEADLESS, STABILIZE),
     "tui": TUI_LAYERS,
-    # Real providers layer onto base; the fake adapter is deliberately absent so
-    # a misconfigured key fails loudly instead of silently answering "ok".
+    # Real providers layer onto base. The fake adapter is deliberately absent, so
+    # that a misconfigured key fails loudly and does not silently answer "ok".
     "deepseek": (BASE, STABILIZE, PROFILE_DIR / "deepseek.yaml"),
-    # A server on localhost rather than a service, and the differences are in the
-    # document: one slot's window rather than the whole server's, and none of the
-    # media the hosted default claims.
+    # A server on localhost and not a hosted service. The differences are in the
+    # document: the window is the window of one slot and not of the whole server,
+    # and the profile claims none of the media that the hosted default claims.
     "llama": (BASE, STABILIZE, PROFILE_DIR / "llama.yaml"),
     "anthropic": (BASE, STABILIZE, PROFILE_DIR / "anthropic.yaml"),
     "google": (BASE, STABILIZE, PROFILE_DIR / "google.yaml"),
     "rlm": RLM_LAYERS,
-    # Everything, with the gates on (P4-15). `rlm` plus `stabilize`, plus the
-    # profile that turns on the two rows those bundles ship disabled — a bundle
-    # that armed them on layering would make "I want offload" mean "and also a
-    # tool, and also a corpus".
+    # Everything, with the gates on (P4-15). This is `rlm` plus `stabilize`, plus
+    # the profile that turns on the two rows that those bundles ship disabled. A
+    # bundle that armed them when it was layered would make "I want offload" mean
+    # "and also a tool, and also a corpus".
     "rlm-stable": RLM_STABLE_LAYERS,
-    # `rlm-stable` plus the two indexing bundles: the RLM asks a codebase and a
-    # document corpus about themselves instead of reading them (`code_graph`,
-    # `text_search`). Under Code Mode both arrive as `await tools.<name>(...)`
-    # with no work from either package — every registered tool is in the SDK
-    # listing, which is what C1 means.
+    # `rlm-stable` plus the two indexing bundles. The RLM asks a codebase and a
+    # document corpus about themselves and does not read them (`code_graph`,
+    # `text_search`). Under Code Mode both tools arrive as
+    # `await tools.<name>(...)` with no work from either package. Every
+    # registered tool is in the SDK listing, which is what C1 means.
     #
-    # **Its own profile rather than rows added to `rlm-stable`**, because
-    # composability is decided by whether a profile's *bundles* resolve: adding
-    # them there would make `rlm-stable` unavailable on an install without both
-    # distributions, taking a working profile away to add an optional feature.
-    # Here, an install missing one is simply not offered this profile, and
-    # `resolve_profile` names the package to install.
+    # **This is its own profile, and not rows added to `rlm-stable`.** Whether a
+    # profile can be composed is decided by whether its *bundles* resolve. If
+    # these bundles were added to `rlm-stable`, that profile would be unavailable
+    # on an install that lacks one of their distributions. That would take a
+    # working profile away to add an optional feature. Here, an install that
+    # lacks one of them is not offered this profile, and `resolve_profile` names
+    # the package to install.
     #
-    # `utcp` first: the `code-graph` row registers its package's manual with it, so
-    # the row it waits on is in the profile that asks for the tools.
+    # `utcp` comes first. The `code-graph` row registers the manual of its
+    # package with `utcp`, so the row that it waits on is in the profile that
+    # asks for the tools.
     "rlm-indexed": (
         *RLM_STABLE_LAYERS,
         Bundle("utcp"),
         Bundle("code-graph"),
         Bundle("text-index"),
     ),
-    # `rlm` plus the model editing its own context (ph-clm): the context tools, and
-    # the context as a file a cell can edit. On `rlm` rather than `rlm-stable`, so
-    # what is measured is the editing, with compaction still the backstop.
+    # `rlm` plus a model that edits its own context (ph-clm): the context tools,
+    # and the context as a file that a cell can edit. It is built on `rlm` and not
+    # on `rlm-stable`, so that what is measured is the editing, with compaction
+    # still the backstop.
     "rlm-clm": (*RLM_LAYERS, Bundle("clm")),
 }
 
@@ -262,19 +276,20 @@ def _resolve_layer(layer: Layer) -> Path | None:
 
 
 def _composed(layers: Sequence[Layer]) -> list[Layer]:
-    """The layers as they will actually be composed: one entry per bundle.
+    """The layers as they will be composed: one entry for each bundle.
 
-    **A bundle named twice is one layer, required if either naming was.**
-    `rlm-stable` is the case: it declares stabilize *required* — its document
-    arms `tool-todo`, so composing without the bundle would patch a row that is
-    not there — while inheriting the optional one every profile carries. Merging
-    keeps the requirement and the first position, where "first occurrence wins"
-    alone would have split one bundle's position from its requiredness.
+    **A bundle that is named twice is one layer, and it is required if either
+    naming was required.** `rlm-stable` is the case. It declares stabilize
+    *required*, because its document arms `tool-todo`, and composing without the
+    bundle would patch a row that is not there. It also inherits the optional
+    stabilize layer that every profile carries. The merge keeps the requirement
+    and the first position. "First occurrence wins" alone would have separated
+    the position of the bundle from whether it is required.
 
-    `Path` layers are left exactly as written. An earlier form deduplicated
-    those too, which silently dropped a document a profile had deliberately
-    layered twice — a bundle is a named thing that can be asked for twice by
-    accident, and a path is not.
+    `Path` layers are left exactly as written. An earlier form removed duplicate
+    paths too, and that silently dropped a document that a profile had
+    deliberately layered twice. A bundle is a named thing that can be asked for
+    twice by accident, and a path is not.
     """
     required: dict[str, bool] = {}
     for layer in layers:
@@ -291,38 +306,43 @@ def _composed(layers: Sequence[Layer]) -> list[Layer]:
     return composed
 
 
-def _missing_required(layers: Sequence[Layer]) -> str:
-    """The first required bundle this install cannot provide, or `""`.
+def _missing_required(layers: Sequence[Layer]) -> str | None:
+    """The first required bundle that this install cannot provide, or `None` when
+    it provides every one.
 
-    **The one predicate**, for the reason `profile_file` states about itself:
-    `available_profiles` and `resolve_profile` were asking the same question two
-    ways, and the second spelling was an inverted double negative. Two
+    **This is the one predicate**, for the reason that `profile_file` gives for
+    itself. `available_profiles` and `resolve_profile` asked the same question
+    in two ways, and the second form was an inverted double negative. Two
     predicates for one question is how a `--help` line and a command line come
     to disagree.
     """
     for layer in _composed(layers):
         if isinstance(layer, Bundle) and layer.required and _resolve_layer(layer) is None:
             return layer.name
-    return ""
+    return None
 
 
 def available_profiles() -> list[str]:
-    """Every profile this install can actually compose: the shipped ones, and the
-    person's named profiles over them.
+    """Every profile that this install can compose: the shipped profiles, and the
+    named profiles of the user over them.
 
-    Answered by the same resolution `resolve_profile` performs, so a profile is
-    never offered and then refused: two predicates for one question is how a
-    `--help` line and a command line come to disagree. A person's file that does
-    not read is not offered either; naming it gets the sentence for why.
+    The answer comes from the same resolution that `resolve_profile` performs,
+    so a profile is never offered and then refused. Two predicates for one
+    question is how a `--help` line and a command line come to disagree. A file
+    of the user that cannot be read is not offered either. When the user names
+    it, the refusal says why.
     """
-    shipped = {name for name, layers in PROFILES.items() if not _missing_required(layers)}
-    return sorted(shipped | {one.name for one in person_profiles() if one.extends in shipped})
+    shipped = {name for name, layers in PROFILES.items() if _missing_required(layers) is None}
+    named = {one.path.stem for one in person_profiles() if one.extends in shipped}
+    return sorted(shipped | named)
 
 
 def person_profiles() -> list[NamedProfile]:
-    """Every named profile a person wrote under `$PH_HOME/profiles/` that reads.
+    """Every named profile that the user wrote under `$PH_HOME/profiles/` and that
+    can be read.
 
-    A file that does not is skipped here, and refused by name when it is asked for.
+    A file that cannot be read is skipped here. It is refused by name when the
+    user asks for it.
     """
     found: list[NamedProfile] = []
     directory = resolve_roots().profiles_dir()
@@ -340,42 +360,48 @@ def read_named_profile(path: Path, name: str) -> NamedProfile:
 
 
 def unfolded_profiles() -> list[str]:
-    """Profiles with a layer `phern profiles fold` has not folded yet (item 0).
+    """Profiles with a layer that `phern profiles fold` has not folded yet (item 0).
 
-    A `<name>.d/` of drop-ins, or a file still in the list format before S2. Both
-    are read until then, so nothing is dropped, and `phern doctor` names them so
-    nothing is read silently either.
+    Such a layer is a `<name>.d/` directory of drop-ins, or a file that is still
+    in the list format from before S2. Both are read until they are folded, so
+    nothing is dropped. `phern doctor` names them, so nothing is read silently
+    either.
     """
     roots = resolve_roots()
     directory = roots.profiles_dir()
     if not directory.is_dir():
         return []
     names = {path.name.removesuffix(".d") for path in directory.glob("*.d") if path.is_dir()}
-    names |= {one.name for one in person_profiles() if one.legacy}
+    names |= {one.path.stem for one in person_profiles() if one.legacy}
     return sorted(names)
 
 
 def profile_file(name: str) -> Path | None:
-    """The `.yaml` this `--profile` value names, or `None` when it names a profile.
+    """The `.yaml` file that this `--profile` value names, or `None` when the value
+    names a profile.
 
-    **The one predicate**, because there were two and they disagreed: this module's
-    own `available_profiles` states the rule — "two predicates for one question is
-    how a `--help` line and a command line come to disagree" — and `profile_name`
-    had re-derived it without the `.exists()` half, so a mistyped path resolved as a
-    file here and as a named profile there.
+    **This is the one predicate**, because there were two and they disagreed.
+    `available_profiles` in this module states the rule: "two predicates for one
+    question is how a `--help` line and a command line come to disagree".
+    `profile_name` had derived the answer again without the `.exists()` half. A
+    mistyped path was therefore a file for one of them and a named profile for
+    the other.
     """
     candidate = Path(name)
     return candidate if candidate.suffix in (".yaml", ".yml") and candidate.exists() else None
 
 
 def resolve_profile(name: str) -> list[Path]:
-    """The documents for `name`, built-in layers first then the person's.
+    """The documents for `name`: the built-in layers first, then the layers of the
+    user.
 
-    A name that is a path is used directly, which is what makes a scenario test
-    or a one-off deployment a single file rather than an install step.
+    A name that is a path is used directly. That makes a scenario test or a
+    one-off deployment a single file and not an install step.
 
-    Paths only, so what each layer may set is not here: `profile_documents` is the
-    door that reads them with it.
+    This returns paths only, so it does not say what each layer may set.
+    `profile_documents` is the function that reads the layers with that. Nothing
+    in `ph_app` calls this function. The test suites of the workspace do: it is
+    how a test mounts a shipped profile from its documents.
     """
     plan = _plan(name, resolve_roots())
     return [*plan.shipped, *([plan.named.path] if plan.named else []), *plan.dropins]
@@ -383,40 +409,43 @@ def resolve_profile(name: str) -> list[Path]:
 
 @dataclass(frozen=True, slots=True)
 class ProfilePlan:
-    """What composes a name: pH's layers, the person's file over them, and drop-ins."""
+    """What composes a name: the layers of pH, the file of the user over them, and
+    the drop-ins."""
 
     shipped: list[Path]
     named: NamedProfile | None = None
     dropins: list[Path] = field(default_factory=list)
     whole: ProfileDocument | None = None
-    """A `--profile` path in the list format, already read: it is the whole composition,
-    and `shipped` names it only so `resolve_profile` can list it."""
+    """A `--profile` path in the list format, already read. It is the whole
+    composition. `shipped` names it only so that `resolve_profile` can list it."""
 
 
 def profile_plan(name: str) -> ProfilePlan:
-    """The layers `name` composes from — the one answer to "file or named", and to
-    which of them is the person's."""
+    """The layers that `name` composes from. This is the one answer to "file or
+    named profile", and to which of the layers belongs to the user."""
     return _plan(name, resolve_roots())
 
 
 def _plan(name: str, roots: PathRoots) -> ProfilePlan:
-    """The layers for `name` — file or named, decided once.
+    """The layers for `name`. Whether it is a file or a named profile is decided
+    one time, here.
 
-    A path whose file is a list is a whole composition, deployment rows and all,
-    which is the point of it: one file is the scenario. So it is one layer of pH's
-    kind, with nothing over it — `presentation.yaml` included: a file that wants
-    the trajectory screen inserts it. A path whose file is `extends:` and `rows:`
-    is a named profile that lives somewhere else, and composes as one.
+    A path whose file is a list is a whole composition, deployment rows
+    included. That is its purpose: one file is the scenario. So it is one layer
+    of the kind that pH ships, with nothing over it. `presentation.yaml` is not
+    over it either: a file that wants the trajectory screen inserts it. A path
+    whose file has `extends:` and `rows:` is a named profile that is stored
+    somewhere else, and it composes as a named profile.
 
-    A name is a shipped profile, the person's named profile over one, or both — a
-    person's `tui.yaml` over the shipped `tui`.
+    A name is a shipped profile, a named profile of the user over one, or both:
+    the `tui.yaml` of the user over the shipped `tui`.
     """
     candidate = profile_file(name)
     if candidate is not None:
         raw = decode_document(candidate)
         if not isinstance(raw, Mapping):
             return ProfilePlan(shipped=[candidate], whole=ProfileDocument(str(candidate), raw))
-        elsewhere = parse_named_profile(raw, candidate, "", shipped=PROFILES)
+        elsewhere = parse_named_profile(raw, candidate, None, shipped=PROFILES)
         return ProfilePlan(shipped=_shipped_layers(elsewhere.extends), named=elsewhere)
     overlay = roots.profile_overlay(name)
     named = read_named_profile(overlay, name) if overlay.is_file() else None
@@ -425,7 +454,7 @@ def _plan(name: str, roots: PathRoots) -> ProfilePlan:
 
 
 def _shipped_layers(name: str) -> list[Path]:
-    """The layers pH provides for the named profile `name`."""
+    """The layers that pH provides for the named profile `name`."""
     declared = PROFILES.get(name)
     if declared is None:
         raise ValueError(
@@ -433,8 +462,8 @@ def _shipped_layers(name: str) -> list[Path]:
             f"{', '.join(available_profiles())}, or pass a path to a .yaml"
         )
     missing = _missing_required(declared)
-    if missing:
-        # Naming the package is the person's next step.
+    if missing is not None:
+        # The name of the package is the next step for the user.
         raise ValueError(
             f'profile "{name}" needs the "{missing}" bundle, which no installed '
             f"distribution provides; install ph-{missing} and try again"
@@ -443,11 +472,12 @@ def _shipped_layers(name: str) -> list[Path]:
     for layer in _composed(declared):
         resolved = _resolve_layer(layer)
         if resolved is None:
-            # An optional bundle this install does not have — `_missing_required`
-            # already refused every required one. Silent here and visible in
-            # `phern doctor`, which reports what activated: a warning on every
-            # command would be a warning nobody reads, about a profile that
-            # composed exactly as this table says it should.
+            # An optional bundle that this install does not have.
+            # `_missing_required` already refused every required one. This is
+            # silent here and visible in `phern doctor`, which reports what
+            # activated. A warning on every command would be a warning that
+            # nobody reads, about a profile that composed exactly as this table
+            # says it should.
             continue
         layers.append(resolved)
     layers.append(PRESENTATION)
@@ -455,10 +485,12 @@ def _shipped_layers(name: str) -> list[Path]:
 
 
 def _dropins(name: str, roots: PathRoots) -> list[Path]:
-    """The drop-ins `/sandbox` wrote over `name` before S4 made its changes overrides.
+    """The drop-ins that `/sandbox` wrote over `name` before S4 made its changes
+    overrides.
 
-    In name order, after the person's file, as they always composed; read until
-    `phern profiles fold` folds them into that file. Nothing writes one now.
+    They are returned in name order and compose after the file of the user, as
+    they always did. They are read until `phern profiles fold` folds them into
+    that file. Nothing writes a drop-in now.
     """
     directory = roots.profile_dropins(name)
     if not directory.is_dir():
@@ -468,14 +500,29 @@ def _dropins(name: str, roots: PathRoots) -> list[Path]:
     )
 
 
-def profile_name(profile: str) -> str:
-    """The name a `--profile` value names, or `""` for a path to a `.yaml`.
+def profile_name(profile: str) -> str | None:
+    """The name that a `--profile` value names, or `None` for a path to a `.yaml`.
 
-    What `Profile.name` records, so a caller writing under a profile's name knows where to —
-    and knows *not to* for a file profile, whose one document is the person's own.
-    Asked through `profile_file`, so it cannot disagree with what actually resolved.
+    This is what `Profile.name` records (`_composed_as`). A caller that writes
+    under the name of a profile then knows where to write. It also knows *not*
+    to write for a file profile, whose one document belongs to the user. The
+    answer comes from `profile_file`, so it cannot disagree with what was
+    resolved.
     """
-    return "" if profile_file(profile) is not None else profile
+    return None if profile_file(profile) is not None else profile
+
+
+def _composed_as(documents: Sequence[ProfileDocument], profile: str) -> Profile:
+    """`documents` composed as the profile that the `--profile` value `profile`
+    names.
+
+    This is the one place where `profile_name` meets `Profile.name`. The loader
+    spells "no name" as a name that is left out, so a path composes with none.
+    """
+    name = profile_name(profile)
+    if name is None:
+        return Profile.from_documents(documents)
+    return Profile.from_documents(documents, name=name)
 
 
 DEFAULT_PROFILE = "headless"
@@ -483,14 +530,16 @@ DEFAULT_PROFILE = "headless"
 ProfileOption: TypeAlias = Annotated[
     str, typer.Option("--profile", help="Profile name or path to a .yaml.")
 ]
-"""Declared once, so two commands cannot come to disagree about what `--profile`
-means — or, as nearly happened here, about what an unknown one costs.
+"""Declared one time, so that two commands cannot come to disagree about what
+`--profile` means, or about what an unknown profile costs. The second nearly
+happened here.
 
-**Here rather than in `cli.py`**, which is where it started: `cli.py` imports the
-sub-apps, so a sub-app that wanted the alias had to import back into it — and
-`phern workspaces gc` did exactly that, reaching for a private `_documents` across
-the cycle. This module already owns what a profile *is*; the flag that names one
-belongs beside it. `console.py` was carved out for the same reason and states it.
+**It is here and not in `cli.py`**, where it started. `cli.py` imports the
+sub-apps, so a sub-app that wanted the alias had to import back into `cli.py`.
+`phern workspaces gc` did exactly that: it reached for a private `_documents`
+across the cycle. This module already owns what a profile *is*, and the flag
+that names a profile belongs beside it. `console.py` was separated for the same
+reason, and its docstring says so.
 """
 
 PatchOption: TypeAlias = Annotated[
@@ -502,11 +551,12 @@ PatchOption: TypeAlias = Annotated[
         "`{insert: [...]}`. Repeatable; applied last, as the `cli` layer.",
     ),
 ]
-"""dsh's third layer — bundle, profile, *patch from the command line* — which pH
-had only as a file under `$PH_HOME/profiles/`. Same grammar as a profile
-document, deliberately: a second spelling for "change this row" is how the two
-come to accept different things. Parsed by `safe_yaml_load`, so the code-tag
-refusal that guards a file guards the flag."""
+"""The third layer of dsh: bundle, profile, then a *patch from the command
+line*. pH had that layer only as a file under `$PH_HOME/profiles/`. The grammar
+is deliberately the grammar of a profile document, because a second spelling for
+"change this row" is how the two come to accept different things.
+`safe_yaml_load` parses the value, so the code-tag refusal that guards a file
+also guards the flag."""
 
 
 ProviderOption: TypeAlias = Annotated[
@@ -516,9 +566,10 @@ ProviderOption: TypeAlias = Annotated[
         help="With --model, run on this exact route instead of one the profile lists.",
     ),
 ]
-"""`--provider`, declared once for `phern` and `phern daemon`, `ProfileOption`'s
-reason: two copies of one flag are how two commands come to mean different
-things by it. Read with `--model` by `ModelChoice.from_flags`."""
+"""`--provider`, declared one time for `phern` and `phern daemon`. The reason is
+the reason of `ProfileOption`: with two copies of one flag, two commands come to
+mean different things by it. `ModelChoice.from_flags` reads it together with
+`--model`."""
 
 ModelOption: TypeAlias = Annotated[
     str | None,
@@ -527,23 +578,25 @@ ModelOption: TypeAlias = Annotated[
         help="A model the profile lists, by key (`fast`); with --provider, a model name.",
     ),
 ]
-"""`--model`, declared once beside `--provider` for the same reason."""
+"""`--model`, declared one time beside `--provider` for the same reason."""
 
 
 CLI_LAYER = "cli"
-"""The layer a `--patch` composes under — what `--dump-config` and `phern doctor`'s
-topology print as its provenance."""
+"""The layer that a `--patch` composes under. `--dump-config` and the topology of
+`phern doctor` print it as the provenance of the patch."""
 
 
 def profile_documents(name: str) -> list[ProfileDocument]:
-    """The profile's layers as documents, each saying what it may set — the door
-    every command composes through, raising as its parts raise.
+    """The layers of the profile as documents, each of which says what it may set.
+    Every command composes through this function, and it raises what its parts
+    raise.
 
-    The stage a caller wants when it has a layer of its own to add before
-    composing — the benchmark's `bench` document, a fixture's overlay. The kinds
-    are the module docstring's table, and `daemon.yaml`'s rows sit between pH's
-    layers and the person's: after what they patch, and apart from the environment
-    a session profile names.
+    A caller uses this stage when it has a layer of its own to add before it
+    composes: the `bench` document of the benchmark, or the overlay of a
+    fixture. The kinds are in the table of the module docstring. The rows of
+    `daemon.yaml` sit between the layers of pH and the layers of the user. They
+    come after what they patch, and they are apart from the environment that a
+    session profile names.
     """
     roots = resolve_roots()
     plan = _plan(name, roots)
@@ -562,7 +615,8 @@ def profile_documents(name: str) -> list[ProfileDocument]:
 
 
 def _host_documents(roots: PathRoots) -> list[ProfileDocument]:
-    """`daemon.yaml`'s rows, as the deployment layer every composition carries."""
+    """The rows of `daemon.yaml`, as the deployment layer that every composition
+    carries."""
     host = load_host_config(roots.home)
     if host.rows is None:
         return []
@@ -570,25 +624,14 @@ def _host_documents(roots: PathRoots) -> list[ProfileDocument]:
 
 
 def base_documents(extends: str) -> list[ProfileDocument]:
-    """What a named profile over the shipped `extends` composes over.
+    """What a named profile over the shipped profile `extends` composes over.
 
-    pH's layers and the host's rows, and none of the person's: a saved profile is
-    the difference from exactly this, so the host's rows — in both — cancel, and
-    what is left is the environment the person chose.
+    These are the layers of pH and the rows of the host, and none of the layers
+    of the user. A saved profile is the difference from exactly this. The rows
+    of the host are in both, so they cancel. What is left is the environment
+    that the user chose.
     """
     return [*load_profile_documents(_shipped_layers(extends)), *_host_documents(resolve_roots())]
-
-
-def save_named_profile(name: str, profile: Profile, *, extends: str, comment: str) -> Path:
-    """Write `profile` as the sparse named profile `name` over `extends` (S2).
-
-    Only the rows that differ (`sparse_entries`), so composing `name` gives back
-    `profile`'s rows — the round trip decision 8 rests on. Written whole and
-    atomically; the comment says who wrote it, since a person will read it.
-    """
-    path = resolve_roots().profile_overlay(name)
-    write_atomic(path, sparse_text(profile, extends=extends, comment=comment))
-    return path
 
 
 class SaveRefused(RuntimeError):
@@ -596,23 +639,28 @@ class SaveRefused(RuntimeError):
 
 
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-"""What a saved profile may be called: a file name under `$PH_HOME/profiles`, and a
-word `--profile` takes — no separator, so it cannot name a file anywhere else."""
+"""What a saved profile may be called. The name is a file name under
+`$PH_HOME/profiles` and a word that `--profile` takes. It has no separator, so
+it cannot name a file anywhere else."""
 
 
 def save_session(
     name: str, env: LoggedEnvironment, *, comment: str, replace: bool = False
 ) -> tuple[Path, list[JsonObject]]:
-    """A session's environment as the sparse named profile `name` (S7, decision 5).
+    """Write the environment of a session as the sparse named profile `name` (S7,
+    decision 5).
 
-    **The base merged with the overrides**, as documents: the person's own layers its
-    base was composed from, as recorded then, and every override after them, over the
-    shipped profile that base extends. Composed rather than resolved, so what the
-    person wrote — an `${env:...}` setting, a sparse config — is written as they wrote
-    it, and pH's own defaults are left to pH. Then only the rows that differ
-    (`sparse_entries`), and the file composed again: kept only when it gives the
-    environment the documents do, and taken back otherwise, as `phern profiles fold`
-    does. Returns the file and the entries written.
+    **The base is merged with the overrides**, as documents. The first documents
+    are the shipped profile that the base extends. The layers of the user that
+    the base was composed from come next, as they were recorded at that time.
+    Every override comes after them. The documents are composed and not
+    resolved. So what the user wrote, such as an `${env:...}` setting or a
+    sparse config, is written as the user wrote it, and the defaults of pH are
+    left to pH. Only the rows that differ are then written (`sparse_entries`),
+    and the file is composed again. The file is kept only when it gives the
+    environment that the documents give. Otherwise it is taken back, as
+    `phern profiles fold` does. Returns the file and the entries that were
+    written.
 
     :raises SaveRefused: for a name that is not a file name, a file that exists
         without `replace`, a base with no named profile to extend, or a round trip
@@ -648,10 +696,10 @@ def save_session(
         agrees = compose_profile(name).resolved({"environment"}) == composed.resolved(
             {"environment"}
         )
-        failure = "" if agrees else "composed again, it gives a different environment"
+        failure = None if agrees else "composed again, it gives a different environment"
     except (LoaderError, OSError, ValueError, ValidationError) as error:
         failure = detail(error)
-    if failure:
+    if failure is not None:
         if original is None:
             path.unlink()
         else:
@@ -668,15 +716,17 @@ def sparse_text(profile: Profile, *, extends: str, comment: str) -> str:
 
 
 def start_documents(profile: Profile) -> list[ProfileDocument]:
-    """The command-line start options `profile` was composed with — `--patch`, and the
-    daemon's own flags — which a session's rebuilt profile takes last too."""
+    """The start options from the command line that `profile` was composed with:
+    `--patch`, and the flags of the daemon. The rebuilt profile of a session
+    takes them last too."""
     return [document for document in profile.documents if document.override]
 
 
 def composed_like(name: str, profile: Profile) -> Profile:
-    """The named profile `name` with `profile`'s start options after it — `profile`
-    itself when it is that one. Raising, not exiting, for a caller that answers with
-    a refusal of its own (the daemon's `session/new`)."""
+    """The named profile `name` with the start options of `profile` after it, or
+    `profile` itself when it is that profile. This raises and does not exit, for
+    a caller that answers with a refusal of its own (the `session/new` of the
+    daemon)."""
     if name == profile.name:
         return profile
     return compose_profile(name, then=start_documents(profile))
@@ -688,33 +738,39 @@ class StartingProfile:
 
     profile: Profile
     change: ProfileChange | None = None
-    """The named profile as it composes now, against the version the session starts
-    on — `None` when it has not moved, or when there is nothing to compare: a new
-    session, a `--profile` path, a named profile that no longer composes."""
+    """The named profile as it composes now, compared with the version that the
+    session starts on. It is `None` when the profile has not moved, or when
+    there is nothing to compare: a new session, a `--profile` path, or a named
+    profile that no longer composes."""
     adopting: ProfileBase | None = None
-    """The version this start applies, adopted since the base (S6) — what a start the
-    loader refuses takes back (`runtime.mount_session`)."""
-    withdrawn: str = ""
-    """What this start took back, as `withdrawn_note` says it, when the loader refused
-    the version it was to apply; `""` otherwise."""
+    """The version that this start applies, adopted since the base (S6). A start
+    that the loader refuses takes this version back (`runtime.mount_session`)."""
+    withdrawn: str | None = None
+    """What this start took back, in the words of `withdrawn_note`, when the
+    loader refused the version that the start was to apply. Otherwise `None`."""
 
 
 def session_profile(requested: Profile, environment: LoggedEnvironment) -> StartingProfile:
-    """The profile a session mounts in (S5): its own log's environment when it has one.
+    """The profile that a session mounts in (S5): the environment of its own log,
+    when the log has one.
 
-    A session whose log records a base is mounted from it — that base, or a version
-    adopted since (S6), then its overrides in order, then `requested`'s start options
-    — over the deployment and presentation rows of the profile it was recorded on,
-    composed as it is now. That is what makes a session's profile its own: a daemon
-    whose default moved, or a root that went idle and came back, still runs it where
-    it was. The profile the base names is composed for its host rows, and to say how
-    it has moved (`change`); when it no longer composes — renamed, removed —
-    `requested`'s rows serve instead: the environment is the log's either way.
+    A session whose log records a base is mounted from that log. Its profile is
+    that base, or a version adopted since (S6), then its overrides in order,
+    then the start options of `requested`. These go over the deployment and
+    presentation rows of the profile that the base was recorded on, as that
+    profile composes now. This is what makes the profile of a session its own.
+    A daemon whose default moved, or a root that went idle and came back, still
+    runs the session where it was. The profile that the base names is composed
+    for its host rows, and to say how it has moved (`change`). When that
+    profile no longer composes, because it was renamed or removed, the rows of
+    `requested` serve in its place. The environment comes from the log in both
+    cases.
 
-    `environment` is what the session's log says (`RecordedStart.environment`), and
-    empty for a new session or one whose store its host cannot read before mounting:
-    a session with no base — new, or from before S3 — mounts `requested`, and records
-    its base from it as it opens.
+    `environment` is what the log of the session says
+    (`RecordedStart.environment`). It is empty for a new session, and for a
+    session whose store its host cannot read before the mount. A session with
+    no base, which is a new session or one from before S3, mounts `requested`
+    and records its base from `requested` as it opens.
     """
     starts_on = environment.starts_on
     if environment.base is None or starts_on is None:
@@ -726,9 +782,10 @@ def session_profile(requested: Profile, environment: LoggedEnvironment) -> Start
         except (LoaderError, OSError, ValueError):
             named = None
     start = start_documents(requested)
-    # An adoption that clears the overrides (`/profile use --clear`) mounts without
-    # them: the start that applies it logs the clears, and a mount composed with them
-    # would run with settings the log is about to say it dropped.
+    # An adoption that clears the overrides (`/profile use --clear`) mounts
+    # without them. The start that applies the adoption logs the clears. A mount
+    # that was composed with the overrides would run with settings that the log
+    # is about to record as dropped.
     kept = () if environment.adopted_clears else environment.overrides
     profile = rebuilt(starts_on, named or requested, kept, then=start)
     change = profile_change(environment, base_of(named)) if named is not None else None
@@ -736,15 +793,16 @@ def session_profile(requested: Profile, environment: LoggedEnvironment) -> Start
 
 
 NoteDoor: TypeAlias = Literal["cli", "session"]
-"""Where a person reading `kept_note` acts on it: the command line, or inside the
-session (`/profile`) — which commands the note names."""
+"""Where a user who reads `kept_note` acts on it: on the command line, or inside
+the session (`/profile`). It decides which commands the note names."""
 
 
 def kept_note(change: ProfileChange, session_id: str, *, door: NoteDoor = "cli") -> str:
-    """One line for a session kept on its version of a named profile that moved (S6),
-    or on the one it had when a start took the new one back — the one wording, for
-    the one-shot path and the daemon's log (`cli`) and for a terminal attaching to the
-    session (`session`, sent as `RootDescription.profile_note`)."""
+    """One line for a session that is kept on its version of a named profile that
+    moved (S6), or on the version that it had when a start took the new version
+    back. This is the one wording. `cli` is for the one-shot path and the log of
+    the daemon. `session` is for a terminal that attaches to the session, and
+    the line is sent as `RootDescription.profile_note`."""
     name, count, yours = change.now.name, len(change.differences), change.yours
     if door == "cli":
         who, diff, take = (
@@ -755,8 +813,9 @@ def kept_note(change: ProfileChange, session_id: str, *, door: NoteDoor = "cli")
     else:
         who, diff, take = "this session", "/profile diff", f"/profile use {name}"
     if change.withdrawn:
-        # Adopted, and taken back at the start that applied it: taking it again
-        # would only fail on it again, so what changed is what is worth offering.
+        # The version was adopted, and taken back at the start that applied it.
+        # Taking it again would only fail on it again, so the note offers what
+        # changed.
         return f"{withdrawn_note(name, change.withdrawn)} {diff} lists what it changes."
     if yours == count:
         whose = "yours"
@@ -776,25 +835,29 @@ def named_version(name: str) -> ProfileBase:
 
 
 def log_host(name: str) -> Profile:
-    """Only the host's rows of `name`'s composition — what opening a stored log needs.
+    """Only the host rows of the composition of `name`: what opening a stored log
+    needs.
 
-    The deployment rows (`affects`): the session store, where it keeps its logs,
-    and the rest of the host, with no tool, workspace or model mounted — so a log
-    can be written to (`phern profiles adopt`) without starting what runs in it.
+    These are the deployment rows (`affects`): the session store, where the
+    store keeps its logs, and the rest of the host. No tool, workspace or model
+    is mounted. So a log can be written to (`phern profiles adopt`) without
+    starting what runs in it.
     """
     return host_rows(compose_profile(name))
 
 
 def host_rows(profile: Profile) -> Profile:
-    """`profile`'s deployment rows alone: the session store and the rest of the host,
-    with nothing that runs — enough to write to a log without starting it."""
+    """The deployment rows of `profile` alone: the session store and the rest of
+    the host, with nothing that runs. That is enough to write to a log without
+    starting it."""
     rows = [row.to_entry() for row in profile.rows_of({"deployment"})]
     return Profile.from_documents([ProfileDocument("host", rows)], name=profile.name)
 
 
 class NamedProfileStore:
-    """`ctx.named_profiles` — the named profiles this host composes (S7b): a profile a
-    parent assigns its child is read from here as the narrowing it is."""
+    """`ctx.named_profiles`: the named profiles that this host composes (S7b). A
+    profile that a parent assigns to its child is read from here as the
+    narrowing that it is."""
 
     def compose(self, name: str) -> Profile:
         return compose_profile(name)
@@ -805,36 +868,41 @@ NAMED = NamedProfileStore()
 
 
 def compose_profile(name: str, *, then: Sequence[ProfileDocument] = ()) -> Profile:
-    """A shipped profile, composed and ready to mount — for a test or a bench — with
-    `then`, start options, after it.
+    """The profile that `name` names, composed and ready to mount, with `then`
+    (start options) after it.
 
-    A command goes through `profile_or_exit`, which is this plus the exit code.
+    A test or a bench calls this, and so does a caller that answers a bad
+    profile with a refusal of its own. A command that exits on a bad profile
+    goes through `profile_or_exit`, which is this plus the exit code.
     """
-    return Profile.from_documents([*profile_documents(name), *then], name=profile_name(name))
+    return _composed_as([*profile_documents(name), *then], name)
 
 
 def profile_or_exit(
     profile: str, patches: Sequence[str] = (), *, deployment: Sequence[str] = ()
 ) -> Profile:
-    """The profile composed, `--patch` entries included — or exit 2 saying why not.
+    """The composed profile, `--patch` entries included, or exit 2 with the reason.
 
-    `patches` is a person's `--patch`, which sets environment rows as a session
-    profile does. `deployment` is a host flag written as the patch it is —
-    `phern daemon --max-concurrent-children` — and sets deployment rows as
-    `daemon.yaml` does, after it. Both carry `cli` as their provenance.
+    `patches` is the `--patch` of the user, which sets environment rows as a
+    session profile does. `deployment` is a host flag written as the patch that
+    it is, such as `phern daemon --max-concurrent-children`. It sets deployment
+    rows as `daemon.yaml` does, and it comes after `daemon.yaml`. Both carry
+    `cli` as their provenance.
 
-    The refusal is the command's, not the resolver's: `resolve_profile` raises a
-    `ValueError` that already names the available profiles, and every caller
-    wants that sentence on stderr under the same exit code.
+    The refusal belongs to the command and not to the resolver.
+    `profile_documents` raises a `ValueError` that already names the available
+    profiles, and every caller wants that sentence on stderr under the same exit
+    code.
 
-    **Everything about the profile is refused here, once, and nothing composes
-    twice.** A command past this line holds a `Profile`; every mode mounts that
-    rather than re-reading or re-composing, so "no such profile", "not YAML" and
-    a row id that does not exist are one refusal under one exit code wherever
-    they are met — a bad row used to be exit 2 from `phern -p` and "profile does not
-    mount" under exit 1 from `phern doctor`. What stays with the mount is the
-    mount's: a plugin that cannot be imported, an `isolate:` copy that never
-    activates, a row refusing the deployment.
+    **Everything about the profile is refused here, one time, and nothing
+    composes twice.** A command past this line holds a `Profile`. Every mode
+    mounts that `Profile` and does not read or compose it again. So "no such
+    profile", "not YAML" and a row id that does not exist are one refusal under
+    one exit code wherever they are met. A bad row used to be exit 2 from
+    `phern -p`, and "profile does not mount" under exit 1 from `phern doctor`.
+    What stays with the mount belongs to the mount: a plugin that cannot be
+    imported, an `isolate:` copy that never activates, a row that refuses the
+    deployment.
     """
     try:
         documents = profile_documents(profile)
@@ -849,7 +917,7 @@ def profile_or_exit(
             entries = [entry for text in texts for entry in _patch_entries(text)]
             documents.append(ProfileDocument(CLI_LAYER, entries, sets=sets, override=True))
     try:
-        return Profile.from_documents(documents, name=profile_name(profile))
+        return _composed_as(documents, profile)
     except LoaderError as error:
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
@@ -857,13 +925,14 @@ def profile_or_exit(
 def _patch_entries(text: str) -> list[Any]:
     """One `--patch` value as the entries of a profile document.
 
-    A mapping is one entry; a list is spliced in as several. No shape check
-    beyond that, deliberately: `compose_rows` already decides row-versus-patch
-    per entry and refuses every malformed one, and a second checker here is the
-    grammar written twice. A first draft inferred `insert:` around a list whose
-    entries all carried `name` — a rule the loader already applies to a bare
-    row in any document — and returned the un-inferred case as a nested list,
-    which the loader could only refuse.
+    A mapping is one entry. A list is spliced in as several entries. There is
+    deliberately no other shape check. `compose_rows` already decides between
+    row and patch for each entry and refuses every malformed one, so a second
+    checker here would be the grammar written twice. A first draft inferred
+    `insert:` around a list whose entries all carried `name`. The loader
+    already applies that rule to a bare row in any document. The draft returned
+    the case that it did not infer as a nested list, which the loader could
+    only refuse.
     """
     try:
         entry = safe_yaml_load(text, origin="--patch")

@@ -362,4 +362,4 @@ async def test_a_terminal_arriving_at_a_kept_version_is_told(tmp_path: Path) -> 
         # the note would claim a version the person has not chosen yet.
         held = daemon.held("kept")
         held.held_on_profile = True
-        assert held.describe().profile_note == ""
+        assert held.describe().profile_note is None

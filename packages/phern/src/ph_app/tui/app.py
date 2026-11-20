@@ -44,7 +44,7 @@ import shlex
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, ClassVar, ParamSpec, cast
+from typing import Any, ClassVar, ParamSpec
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -206,7 +206,7 @@ class PHTuiApp(App[str | None]):
         spawn: bool = True,
         offer_sessions: bool = True,
         model_choice: ModelChoice = ModelChoice(),
-        profile: str = "",
+        profile: str | None = None,
     ) -> None:
         super().__init__()
         self.chat = ChatScreen()
@@ -214,7 +214,7 @@ class PHTuiApp(App[str | None]):
         contributed screen is bound on it (`add_binding`)."""
         self.profile = profile
         """The profile on which a session that this terminal *creates* runs (S5).
-        Empty means the profile of the daemon. A session that this terminal
+        `None` means the profile of the daemon. A session that this terminal
         resumes runs on the profile that the log of that session records."""
         self.model_choice = model_choice
         """`--provider` and `--model`. `session/new` carries them for the session
@@ -411,7 +411,8 @@ class PHTuiApp(App[str | None]):
         self.state_changed()
         self._prompt.area.focus()
         if self.trust.trusted(self.project):
-            self.run_worker(self._open(""), group="open")
+            # The store already vouches for this directory, so nobody is asked.
+            self.run_worker(self._open(None), group="open")
             return
         # The question comes before the mount, because the mount is what reads
         # the `AGENTS.md` of the project, its hooks and its configured plugins.
@@ -426,14 +427,16 @@ class PHTuiApp(App[str | None]):
         side that mounts. `ph_app.trust` says why.
         """
         if answer in ("always", "once"):
-            # The check above narrows the value. The callback of `push_screen` is
-            # typed by the result of the modal, which is any of its action names.
-            self.run_worker(self._open(cast("TrustAnswer", answer)), group="open")
+            # The callback of `push_screen` is typed by the result of the modal,
+            # which is any of its action names. The check above narrows the
+            # value to the two that are answers.
+            self.run_worker(self._open(answer), group="open")
             return
         self.exit()
 
-    async def _open(self, trust: TrustAnswer) -> None:
+    async def _open(self, trust: TrustAnswer | None) -> None:
         """Get a daemon, attach to a session on it, and read it. Runs in a worker.
+        `trust` is what the user answered, or `None` when nobody was asked.
 
         The harness is in the daemon now (P5-14), so this connects and does not
         mount. It starts a daemon first if nothing is listening. If a user had
@@ -476,7 +479,7 @@ class PHTuiApp(App[str | None]):
         # screens that remain (`DaemonSession._wire_screens`).
         self._command_disposers = self.front.attach_surfaces(self)
         self.state_changed()
-        if self.front.arrival:
+        if self.front.arrival is not None:
             self.notify(self.front.arrival, title="profile", markup=False)
 
     async def _offer_sessions(self, client: DaemonClient) -> str | None:
@@ -524,7 +527,7 @@ class PHTuiApp(App[str | None]):
         # answer, because both mean "not one of these".
         return None if chosen == NEW_SESSION else chosen
 
-    async def _could_not_start(self, reason: str, trust: TrustAnswer) -> None:
+    async def _could_not_start(self, reason: str, trust: TrustAnswer | None) -> None:
         """Report that there is no session, and why. The reason stays on screen,
         and the user can answer it (H3).
 
@@ -1086,8 +1089,9 @@ class PHTuiApp(App[str | None]):
             self.notify(str(error), title="model", severity="error", markup=False)
             return
         state = front.state
-        named = f"{state.model_key} · " if state.model_key else ""
-        self.notify(f"{named}{state.route}", title="model", markup=False)
+        named = "" if state.model_key is None else f"{state.model_key} · "
+        route = "" if state.route is None else state.route
+        self.notify(f"{named}{route}", title="model", markup=False)
         self.state_changed()
 
     @verb_work("sessions")
@@ -1385,7 +1389,7 @@ async def run_tui(
     spawn: bool = True,
     offer_sessions: bool = True,
     model_choice: ModelChoice = ModelChoice(),
-    profile: str = "",
+    profile: str | None = None,
 ) -> int:
     """Entry point for `--mode tui`. Returns the exit code, which is `0` when
     clean (M4).

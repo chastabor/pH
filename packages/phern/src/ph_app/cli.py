@@ -1,23 +1,29 @@
-"""`phern` — the command line.
+"""`phern`: the command line.
 
-Four output modes and three diagnostics.
+Seven output modes and five diagnostics.
 
 `--mode` decides what reaches stdout, and the choice matters more than a flag
-usually does: `json` and `rpc` emit the session log's **own** envelopes rather
-than a per-mode rendering (I-7), so a wrapper streaming from a pipe and a tool
-reading the stored JSONL parse one format — and dsh's tooling reads both (Q2).
-`text` and `transcript` are for people, and `tui` is the interactive one — the
-only mode that takes no `--print`, because the prompt is the interface.
+usually does. `json` and `rpc` emit the envelopes of the session log **itself**
+and not a rendering for each mode (I-7). A wrapper that streams from a pipe and
+a tool that reads the stored JSONL therefore parse one format, and the tooling
+of dsh reads both (Q2). `text` and `transcript` are for people. `tui` is the
+interactive mode. It takes no `--print`, because the prompt is the interface.
+`web` serves that terminal to browser tabs. `trajectory` shows a stored log and
+mounts nothing.
 
-`--dump-config` prints the composed rows before anything runs, `phern doctor` the
-three resolved path roots, and `phern events` the producer/consumer matrix
-generated from the declaration registry rather than hand-maintained.
+`--dump-config` prints the composed rows before anything runs. `phern doctor`
+prints the three resolved path roots, then mounts the profile and prints what
+its rows report. `phern events` prints the producer/consumer matrix, which is
+generated from the declaration registry and is not maintained by hand.
+`phern config` prints what each row accepts as configuration. `phern revisions`
+prints every revision to what the model saw, from a stored log.
 
-`phern daemon` runs the supervisor and `phern agents` is the client that talks to it —
-the two halves of Phase 5, and the only pair here where the thing you are
-addressing is a process rather than this one. `phern service` is the client an
-orchestrator, a cron slot or a person with no init system uses to start, stop,
-resume and watch it (P13-13).
+`phern daemon` runs the supervisor, and `phern agents` is the client that talks
+to it. They are the two halves of Phase 5. With this pair, the thing that the
+user addresses is another process and not this one. The `tui` mode is also a
+client of that daemon. `phern service` is the client that an orchestrator, a
+cron slot or a person with no init system uses to start, stop, resume and watch
+the daemon (P13-13).
 
 @module ph_app.cli
 """
@@ -54,7 +60,8 @@ from ph.resources import run_until_signaled
 from ph.seams.diagnostics import DiagnosticsRegistry
 from ph.seams.models import ModelChoice, ModelChoiceError, ModelList
 from ph.selectors import matches_any, unknown_namespaces
-from ph.session import new_session_id
+from ph.session import SessionForkError, new_session_id
+from ph.session_profile import OverrideNotRecorded
 from ph.wire import validation_summary
 
 from .agents import agents_app
@@ -68,6 +75,7 @@ from .console import (
     err,
     fail,
     fail_unmounted,
+    nonblank,
     roots_or_exit,
     section,
     selectors_or_exit,
@@ -102,35 +110,36 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
-# The client half of the daemon, as its own group (P5-10). A sub-app rather
-# than seven top-level commands, because every one of them means the same thing
-# — "ask the supervisor" — and a person who has not started one should find that
+# The client half of the daemon, as its own group (P5-10). It is a sub-app and
+# not nine top-level commands, because every one of them means the same thing:
+# "ask the supervisor". A user who has not started a supervisor should find that
 # out from one place.
 app.add_typer(agents_app, name="agents")
-# The cross-session half of `/workspaces` (P6-28). A group of its own rather than
-# a verb on the slash command, because the question it answers spans every
-# session on disk while `/workspaces` answers for the one a person is in — and
-# because collecting checkouts is not something a model should be able to ask
-# for by emitting text.
+# The half of `/workspaces` that spans sessions (P6-28). It is a group of its own
+# and not a verb on the slash command, for two reasons. The question that it
+# answers spans every session on disk, while `/workspaces` answers for the one
+# session that the user is in. Also, a model should not be able to ask for the
+# collection of checkouts by emitting text.
 app.add_typer(workspaces_app, name="workspaces")
-# The other cross-session accounting command (P7-01). Its own group beside
-# `workspaces` rather than a verb there, because the two sweep different things
-# under different rules — a retained tree is evidence somebody may want, an
-# attachment is content a session cannot open without — and a person reading
-# `--help` should not have to infer which rule applies from a shared verb.
+# The other accounting command that spans sessions (P7-01). It is its own group
+# beside `workspaces` and not a verb there, because the two sweep different
+# things under different rules. A retained tree is evidence that somebody may
+# want. An attachment is content that a session cannot open without. A user who
+# reads `--help` should not have to infer from a shared verb which rule applies.
 app.add_typer(attachments_app, name="attachments")
-# What a named profile sets, and folding the older layers into it (session
-# profiles, S2). A group because a profile is a thing on disk a person manages
-# between sessions, not a question about the session they are in.
+# What a named profile sets, and the fold of the older layers into it (session
+# profiles, S2). It is a group because a profile is a thing on disk that the user
+# manages between sessions. It is not a question about the session they are in.
 app.add_typer(profiles_app, name="profiles")
 app.add_typer(service_app, name="service")
 
 OutputMode = Literal["text", "json", "transcript", "rpc", "tui", "web", "trajectory"]
 
 ModeRunner: TypeAlias = Callable[..., Awaitable[Any]]
-"""Each mode returns its own result type — `json` reports a count, `text` and
-`transcript` report text — so the table is typed by what they have in common:
-they are awaited, and the caller branches on the mode it asked for."""
+"""Each mode returns its own result type: `json` reports a count, and `text` and
+`transcript` report text. The table is therefore typed by what the modes have in
+common: they are awaited, and the caller branches on the mode that it asked
+for."""
 
 _MODES: dict[str, ModeRunner] = {
     "text": run_print,
@@ -151,7 +160,9 @@ def default(
     session_id: Annotated[
         str | None,
         typer.Option(
-            "--session", help="Session id to create or resume, or to read under --mode trajectory."
+            "--session",
+            help="Session id to create or resume, or to read under --mode trajectory.",
+            callback=nonblank,
         ),
     ] = None,
     mode: Annotated[
@@ -169,7 +180,8 @@ def default(
         ),
     ] = None,
     resume: Annotated[
-        str | None, typer.Option("--resume", help="Session id to reopen (tui and web).")
+        str | None,
+        typer.Option("--resume", help="Session id to reopen (tui and web).", callback=nonblank),
     ] = None,
     keep_alive: Annotated[
         str | None,
@@ -223,9 +235,10 @@ def default(
         return
 
     if mode == "trajectory":
-        # The auditor's view. Deliberately *before* any profile work — it does
-        # not read one: it mounts nothing — no agent, no provider, no answerers —
-        # because the logs worth auditing are the ones nobody can reopen (P3-25).
+        # The view of the auditor. This branch is deliberately *before* any
+        # profile work, because it does not read a profile. It mounts nothing:
+        # no agent, no provider, no answerers. The logs most worth auditing are
+        # the ones that nobody can reopen (P3-25).
         if session_id is None:
             fail("[red]--mode trajectory needs --session <id|path>[/red]", code=2)
         # A late load: a command pays only for what it runs (`test_app_layering.py`).
@@ -236,72 +249,76 @@ def default(
         except (OSError, ValueError) as error:
             fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
         if code:
-            # The viewer's own code, silent for `--mode tui`'s reason above.
+            # The exit code of the viewer itself. It is silent for the reason
+            # that the `--mode tui` branch gives below.
             raise typer.Exit(code)
         return
 
-    # `--resume <id>` is `--session <id>`: the daemon resumes an existing id
-    # through the same call that creates a new one, so the two spellings are one
-    # answer and both interactive modes read it here.
-    wanted = session_id or resume
+    # `--resume <id>` is `--session <id>`. The daemon resumes an existing id
+    # through the same call that creates a new one. The two spellings therefore
+    # have one answer, and both interactive modes read it here.
+    wanted = session_id if session_id is not None else resume
     choice = _choice_or_exit(provider, model)
 
     if mode == "tui":
-        # **Before any profile work**, like the trajectory branch above and for
-        # the same reason: the terminal does not mount one. The daemon composes
-        # the profile, and `spawn_command` is the command line that says which —
-        # so composing one here was a full plugin import per TUI start, thrown
-        # away.
+        # This branch is **before any profile work**, like the trajectory branch
+        # above and for the same reason: the terminal does not mount a profile.
+        # The daemon composes the profile, and the terminal only names it. The
+        # name goes into `spawn_command` for a daemon that this terminal starts,
+        # and into `profile=` for the sessions that it creates (S5). Composing a
+        # profile here cost a full plugin import for each TUI start, and the
+        # result was discarded.
         #
-        # Imported here because the TUI pulls in Textual, and `phern -p` in a
-        # script should not pay for a terminal UI it will never draw.
+        # The import is here because the TUI loads Textual, and `phern -p` in a
+        # script should not pay for a terminal UI that it never draws.
         from .tui.app import run_tui  # noqa: PLC0415
 
         code = anyio.run(
             partial(
                 run_tui,
-                # The *name*, not the composed profile: the daemon composes it,
-                # and this is the command line that tells it which.
+                # The *name* and not the composed profile: the daemon composes
+                # it. This command line gives a spawned daemon the name.
                 daemon_argv=spawn_command(
                     profile=profile,
                     patch=patch,
                     keep=keep_daemon,
                     keep_alive=_spawned_keep_alive(keep_alive, keep=keep_daemon),
                 ),
-                # The route is this terminal's session's, not the daemon's: it
-                # rides `session/new`, so a daemon already serving other sessions
-                # keeps them on their own.
+                # The route belongs to the session of this terminal and not to
+                # the daemon. It is sent in `session/new`, so a daemon that
+                # already serves other sessions keeps them on their own routes.
                 model_choice=choice,
-                # And the profile a session it creates runs on: the spawned daemon's
-                # default is this too, and a daemon already running with another
-                # default creates this terminal's sessions on it all the same (S5).
+                # The profile that a session of this terminal runs on. A spawned
+                # daemon also has it as its default. A daemon that already runs
+                # with another default still creates the sessions of this
+                # terminal on this profile (S5).
                 profile=profile,
                 session_id=wanted,
                 spawn=not no_spawn,
-                # `--session`/`--resume` already name one, so they skip the offer
-                # by having an answer; `--new` is for the person who never wants
-                # to be asked.
+                # `--session` and `--resume` already name a session, so they skip
+                # the offer because they have an answer. `--new` is for the user
+                # who never wants to be asked.
                 offer_sessions=not new,
             )
         )
         if code:
             # **Silent, and not `console.fail`** (M4). Every other refusal here
-            # goes through `fail`, which prints a sentence — but the terminal
-            # has already rendered its own crash, and a second line under it
-            # would be pH explaining an error the person just watched happen.
-            # What `run_tui` returning the code buys is that the exiting lives
-            # here rather than inside a library function.
+            # goes through `fail`, which prints a sentence. The terminal has
+            # already rendered its own crash. A second line under it would be pH
+            # explaining an error that the user just watched happen. `run_tui`
+            # returns the code so that the exit is here and not inside a library
+            # function.
             raise typer.Exit(code)
         return
 
     if mode == "web":
-        # Before the profile work, like `tui` above and for the same reason: the
-        # terminal each tab runs is the thing that talks to a daemon, and this
-        # process only serves them.
+        # This branch is before the profile work, like `tui` above and for the
+        # same reason. The terminal that each tab runs is the thing that talks
+        # to a daemon, and this process only serves those terminals.
         #
-        # Imported here because `textual-serve` is an extra: `phern -p` in a script
-        # must not require aiohttp, and a person who asked for `--mode web`
-        # without it gets the install line rather than a traceback.
+        # The import is here because `textual-serve` is an extra. `phern -p` in a
+        # script must not require aiohttp. A user who asked for `--mode web`
+        # without the extra gets the install line and not a traceback.
         try:
             from .web.serve import WebServer, run_web  # noqa: PLC0415
         except ImportError as error:
@@ -309,10 +326,10 @@ def default(
                 "[red]--mode web needs the web extra:[/red] pip install 'phern\\[web]'",
                 cause=error,
             )
-        # **One session for every tab of this launch**, minted here when the
-        # person did not name one — `serve.py`'s module docstring says why a tab
-        # cannot have one of its own.
-        shared = wanted or new_session_id()
+        # **One session for every tab of this launch.** The id is minted here
+        # when the user did not name one. The module docstring of `serve.py`
+        # says why a tab cannot have a session of its own.
+        shared = wanted if wanted is not None else new_session_id()
         tab = tab_command(
             session=shared,
             profile=profile,
@@ -321,9 +338,15 @@ def default(
             patch=patch,
             spawn=not no_spawn,
             keep=keep_daemon,
+            # Only a value that the user typed is forwarded. With none, each
+            # tab reads `tui.json` itself, as a terminal does.
+            keep_alive=(
+                None if keep_alive is None else _spawned_keep_alive(keep_alive, keep=keep_daemon)
+            ),
         )
         server = WebServer(command=shlex.join(tab), session=shared, host=host, port=port)
-        # Before the bind, and printed here because `notices()` owns the words.
+        # The notices are printed before the bind. The print is here because
+        # `notices()` owns the words.
         for notice in server.notices():
             err.print(notice)
         anyio.run(partial(run_web, server, open_browser=open_browser))
@@ -336,10 +359,11 @@ def default(
         return
 
     if mode == "rpc":
-        # No prompt: the peer drives the session over stdio. A signal stops it the
-        # way it stops the daemon, and a peer closing it by `SIGTERM` is the common
-        # case (`run_until_signaled`). That stop leaves through the signal before the
-        # mounts' records are read; the last write's own warning names each log.
+        # There is no prompt: the peer drives the session over stdio. A signal
+        # stops this mode in the way that it stops the daemon, and a peer that
+        # closes it with `SIGTERM` is the common case (`run_until_signaled`).
+        # That stop leaves through the signal before the records of the mounts
+        # are read. The warning of the last write itself names each log.
         try:
             unwritten = run_until_signaled(
                 partial(run_rpc, composed, choice=choice), on_stop=_say_stopped
@@ -361,20 +385,14 @@ def default(
         session_id=session_id,
         attachments=attach or [],
     )
-    # Here rather than at the top: `phern --help` must not pay for the persistence
-    # layer, and `route` is about to import it anyway.
-    from ph.persistence import SessionBusy  # noqa: PLC0415
-    from ph.session import SessionForkError  # noqa: PLC0415
-    from ph.session_profile import OverrideNotRecorded  # noqa: PLC0415
-
     try:
         outcome = run_until_signaled(route, on_stop=_say_stopped)
     except MountRefusal as error:
-        # A row that *declined* — `containment.strict` with no backend (E8) — is
-        # the sentence doctor prints, with doctor's exit code, and not the
-        # traceback a bug in an `apply` still gets. Before this the run path had
-        # no name for the difference and printed 191 lines for the one case a
-        # person most needs to read (P4-12).
+        # A row that *declined* gets the sentence that doctor prints, with the
+        # exit code of doctor. `containment.strict` with no backend is such a
+        # row (E8). A bug in an `apply` still gets a traceback. Before this, the
+        # run path had no name for the difference. It printed 191 lines for the
+        # one case that a user most needs to read (P4-12).
         fail_unmounted(profile, error)
     except (
         AttachmentUnavailable,
@@ -385,15 +403,17 @@ def default(
         SessionBusy,
         SessionForkError,
     ) as error:
-        # A file that cannot be read fails the *command*: `prompted` ingests
+        # A file that cannot be read fails the *command*. `prompted` ingests
         # before the agent exists, so nothing was logged and there is no partial
-        # turn to explain. A row whose plugin will not import is the same kind of
-        # failure one step earlier — the loader's one refusal left at mount time,
-        # now that `profile_or_exit` composes. A session another process holds is
-        # the same shape again (I-5): refused before a byte is written, as the
-        # one sentence the daemon would have sent, not a traceback — and so is a
-        # sub-agent's log, which only its root's mount writes (P11-08), and a start
-        # option the log could not record, which is not run on.
+        # turn to explain. A row whose plugin does not import is the same kind
+        # of failure one step earlier. It is the one refusal of the loader that
+        # is left at mount time, now that `profile_or_exit` composes. A session
+        # that another process holds has the same shape (I-5). It is refused
+        # before a byte is written, with the one sentence that the daemon would
+        # have sent and not a traceback. The same applies to the log of a
+        # sub-agent, which only the mount of its root writes (P11-08). It also
+        # applies to a start option that the log could not record: the run does
+        # not use an option that is not recorded.
         fail(f"[red]{detail(error)}[/red]", code=2, cause=error)
 
     # `json` has written its output already, event by event, as each committed.
@@ -407,23 +427,24 @@ def default(
         )
         failed = outcome.ended == "error"
     if failed:
-        # Whatever arrived before the failure is still printed above — it is in
-        # the log either way, and a truncated answer is worth seeing. What must
-        # not happen is exiting 0: a `-p` run is something scripts call, and a
-        # provider outage that reports success is indistinguishable from an
-        # answer. Only `error`: `blocked` and `max-tokens` are turns that ended
-        # the way they were asked to.
+        # Whatever arrived before the failure is still printed above. It is in
+        # the log in both cases, and a truncated answer is worth seeing. The run
+        # must not exit 0. Scripts call a `-p` run, and a provider outage that
+        # reports success cannot be told from an answer. Only `error` fails the
+        # run: `blocked` and `max-tokens` are turns that ended the way they were
+        # asked to end.
         err.print(f"[red]the turn failed:[/red] {detail(outcome.failure)}")
-    # Both are said, and a log left short is the graver exit of the two.
+    # Both are reported. A log that is left short is the more serious exit of
+    # the two.
     _exit_if_unwritten(outcome.unwritten)
     if failed:
         raise typer.Exit(code=1)
 
 
 def _exit_if_unwritten(unwritten: Mapping[str, str]) -> None:
-    """Exit 3 when the mount's last write could not write a log, as `phern daemon`
-    does (P13-08): what the run printed stands, and the next run resumes a log that
-    is missing its tail."""
+    """Exit 3 when the last write of the mount could not write a log, as
+    `phern daemon` does (P13-08). What the run printed stands, and the next run
+    resumes a log that is missing its tail."""
     if unwritten:
         fail(
             "\n".join(
@@ -435,7 +456,7 @@ def _exit_if_unwritten(unwritten: Mapping[str, str]) -> None:
 
 
 def _say_stopped(signum: int) -> None:
-    """A one-shot run a signal stopped, said on stderr once its unwind is over."""
+    """Report on stderr a one-shot run that a signal stopped, after its unwind is over."""
     err.print(f"[yellow]stopped on {signal.Signals(signum).name}[/yellow]")
 
 
@@ -443,34 +464,35 @@ NO_DIAGNOSTICS_ROW = "none — this profile mounts no `diagnostics` row, so no r
 
 
 async def _note_consumers(profile: Profile) -> None:
-    """Mount, and let every row's `ctx.on` register itself into the registry.
+    """Mount, and let the `ctx.on` of every row register itself into the registry.
 
-    Nothing is read back here: `note_consumer` writes into the process-wide
-    `EventRegistry` as a side effect of listening, so the mount *is* the query
-    and the registry outlives the scope that filled it. Nothing is created
-    beyond the mount — no session, no agent, no provider call — for `_report`'s
-    reason.
+    Nothing is read back here. `note_consumer` writes into the process-wide
+    `EventRegistry` as a side effect of listening. The mount therefore *is* the
+    query, and the registry outlives the scope that filled it. Nothing is created
+    beyond the mount (no session, no agent, no provider call), for the reason
+    that `_report` gives.
     """
     async with mounted(profile):
         return
 
 
 async def _report(profile: Profile) -> list[tuple[str, list[tuple[str, str]]]]:
-    """Compose the profile and ask every row what it has to say (P4-12).
+    """Mount the profile and ask every row what it reports (P4-12).
 
-    Mounting is the point. Doctor answered from `resolve_roots()` alone until
-    now, which meant it could report where the log *would* go and nothing about
-    what the process would actually be — and every question this row was written
-    for (which rung is in force, what the file rules reach, what runs model code)
-    is answered by a row, not by a path. Nothing is created here beyond the
-    mount: no session, no agent, no provider call. Topology is a row
+    The mount is the purpose. Before this, doctor answered from `resolve_roots()`
+    alone. It could report where the log *would* go, and nothing about what the
+    process would actually be. Every question that this row was written for is
+    answered by a row and not by a path: which rung is in force, what the file
+    rules reach, what runs model code. Nothing is created here beyond the mount:
+    no session, no agent, no provider call. Topology is a row
     (`ph.seams.topology`), so the registry is the only source.
     """
     async with mounted(profile) as ctx:
         registry: DiagnosticsRegistry | None = ctx.get(DIAGNOSTICS)
         if registry is None:
-            # Rule 6, in the seam's place: with no `diagnostics` row nothing can
-            # report, and an empty report reads as "nothing wrong".
+            # Rule 6, applied here on behalf of the seam. With no `diagnostics`
+            # row nothing can report, and an empty report reads as "nothing
+            # wrong".
             return [("Diagnostics", [("sections", NO_DIAGNOSTICS_ROW)])]
         return registry.report()
 
@@ -502,48 +524,51 @@ def doctor(
         table.add_row(name, value)
     console.print(table)
     console.print(f"[dim]platform: {sys.platform} · python {sys.version.split()[0]}[/dim]")
-    # The same subject as the roots table, one question further on: that table
-    # says where `$PH_RUNTIME` resolved, and this says whether what a daemon puts
-    # there is still there tomorrow (I-6, P5-11).
+    # This has the same subject as the roots table and asks one further
+    # question. The table says where `$PH_RUNTIME` resolved. This says whether
+    # what a daemon puts there is still there tomorrow (I-6, P5-11).
     #
-    # **Not a `ctx.diagnostics` section**, which makes this command's one place
-    # with two mechanisms — deliberately. A contributed section is lost exactly
-    # when `doctor` bails with "profile does not mount", the case a person most
-    # wants it, and this probe needs no profile to answer. What the seam is still
-    # owed is the *shape*: a section is a title and a list of pairs, both halves
-    # produce `list[tuple[str, str]]`, and both render through `console.section`
-    # — so the next profile-free probe is an entry in this list rather than one
-    # more `console.print` in a command body.
+    # **It is not a `ctx.diagnostics` section.** This is the one place in this
+    # command that has two mechanisms, and that is deliberate. A contributed
+    # section is lost exactly when `doctor` stops with "profile does not mount",
+    # which is the case where a user most wants it. This probe needs no profile
+    # to answer. It still follows the *shape* of the seam. A section is a title
+    # and a list of pairs, both halves produce `list[tuple[str, str]]`, and both
+    # render through `console.section`. The next probe that needs no profile is
+    # therefore an entry in this list, and not one more `console.print` in a
+    # command body.
     #
-    # Listed even when the answer is "yes": rule 6 says to state what is not
-    # enforced next to where it would be assumed, and the assumption — that
-    # `phern daemon` means "until I stop it" — is made by every reader who never
-    # sees a warning.
+    # The entry is listed even when the answer is "yes". Rule 6 says to state
+    # what is not enforced next to where it would be assumed. Every reader who
+    # never sees a warning assumes that `phern daemon` means "until I stop it".
     #
-    # `roots=` so this and the table above describe one resolution rather than
-    # two independent ones.
-    # Imported here rather than at module scope: `ph_app.daemon.supervisor`
-    # pulls in the agent, the persistence layer and `filelock`, and `phern --print`
-    # has no daemon in it. `daemon()` below reaches for `serve` the same way.
+    # `roots=` is passed so that this entry and the table above describe one
+    # resolution and not two independent ones.
+    #
+    # The import is here and not at module scope, because `phern --print` has no
+    # daemon in it and should not load `ph_app.daemon.supervisor`. `daemon()`
+    # below imports `serve` in the same way.
     from .daemon.supervisor import NON_GUARANTEES  # noqa: PLC0415
 
     before_mount = [
         ("daemon socket lifetime", lifetime(roots=roots).describe()),
-        # The lease is a kernel `flock`, or nothing (P13-11): a filesystem that
-        # cannot hold one would hand the next daemon every lease this one died with.
-        # Probed for real, in the lease directory, since only the filesystem knows.
+        # The lease is a kernel `flock` or nothing (P13-11). A filesystem that
+        # cannot hold one would give the next daemon every lease that this one
+        # held when it died. The probe takes a real lock in the lease directory,
+        # because only the filesystem knows the answer.
         ("session lease", describe_lock(lease_directory(roots.sessions_dir()))),
-        # N5, and the gate's "doctor prints the worker model". Here and not only
-        # in `phern agents doctor` because the two answer different questions: that
-        # one describes a daemon somebody already started, and this one is read
-        # by the person deciding whether to run six agents under one (I-2).
+        # N5, and "doctor prints the worker model" from the gate. The entry is
+        # here and not only in `phern agents doctor`, because the two answer
+        # different questions. That command describes a daemon that somebody
+        # already started. This entry is read by the user who decides whether to
+        # run six agents under one daemon (I-2).
         ("daemon isolation", list(NON_GUARANTEES)),
     ]
-    # What this install can actually compose — a bundle profile whose
-    # distribution is missing is not offered (P3-20).
+    # What this install can actually compose. A bundle profile whose distribution
+    # is missing is not offered (P3-20).
     console.print(f"[dim]profiles: {', '.join(available_profiles())}[/dim]")
-    # Read until folded, so nothing is dropped; named here, so nothing is read
-    # silently either (session profiles, item 0).
+    # These layers are read until they are folded, so nothing is dropped. They
+    # are named here, so nothing is read silently (session profiles, item 0).
     unfolded = unfolded_profiles()
     if unfolded:
         console.print(
@@ -551,9 +576,10 @@ def doctor(
             "`phern profiles fold` makes each one file[/yellow]"
         )
 
-    # Resolved *outside* the catch below, and it matters: `typer.Exit` subclasses
-    # `RuntimeError`, so an unknown profile raised inside it would be caught,
-    # reported as "does not mount", and re-raised with the wrong exit code.
+    # The profile is resolved *outside* the catch below, and that matters.
+    # `typer.Exit` subclasses `RuntimeError`. A broad catch around the resolution
+    # would catch an unknown profile, report it as "does not mount", and raise it
+    # again with the wrong exit code.
     composed = profile_or_exit(profile, patch)
     try:
         sections = anyio.run(partial(_report, composed))
@@ -561,10 +587,10 @@ def doctor(
         raise
     except Exception as error:
         # Broad on purpose, and only here. A profile that refuses to start is
-        # the most important thing doctor can report — `containment.strict` on a
-        # host with no sandbox backend is exactly that (E8) — and a person who
-        # ran the command *because* the process will not start is owed the
-        # sentence rather than a traceback. The exit code says it failed.
+        # the most important thing that doctor can report. `containment.strict`
+        # on a host with no sandbox backend is exactly that case (E8). A user who
+        # ran the command *because* the process does not start must get the
+        # sentence and not a traceback. The exit code says that it failed.
         fail_unmounted(profile, error)
 
     console.print(f"\n[bold]profile:[/bold] {profile}")
@@ -640,41 +666,44 @@ app.add_typer(doctor_app, name="doctor")
 
 
 _DEFAULT_PASSIVATION = f"{PASSIVATE_AFTER / 60:g}"
-"""The flag's default, derived from the constant that justifies the number.
+"""The default of the flag, derived from the constant that justifies the number.
 
-It was spelled `"90"` here while `PASSIVATE_AFTER` said ninety minutes in
-seconds a module away — two literals in two units for one policy, where editing
-the documented one changed nothing for anyone running `phern daemon`, since the CLI
-always passes its own value.
+The default was spelled `"90"` here while `PASSIVATE_AFTER` said ninety minutes
+in seconds one module away. That was two literals in two units for one policy.
+An edit to the documented literal changed nothing for anyone who ran
+`phern daemon`, because the CLI always passes its own value.
 """
 
 
-def _spawned_keep_alive(value: str | None, *, keep: bool) -> str:
-    """The `--keep-alive` a spawned daemon is given, in seconds, refused here on a typo.
+def _spawned_keep_alive(value: str | None, *, keep: bool) -> float:
+    """Return the `--keep-alive` for a spawned daemon, in seconds. Refuse a typo here.
 
-    **Parsed at this end, not forwarded as typed.** `phern --keep-alive` does not run
-    a daemon, it composes the argv for one — so a string handed straight through
-    would be refused by a process whose output goes to the null device, and the
-    person would see a UI that could not reach a daemon and no reason why. Same
-    parser, same message, whichever end they typed it at; what crosses is a bare
-    number of seconds, which `keep_alive_seconds` reads back unambiguously.
+    **The value is parsed at this end and not forwarded as typed.**
+    `phern --keep-alive` does not run a daemon. It composes the argv for one. A
+    string forwarded as typed would be refused by the spawned daemon. The user
+    would then see a daemon that exited before it listened (`_await_socket` in
+    `ph_app.daemon.launch`), and not a usage error for the flag that they typed.
+    The parser and the message are the same at whichever end the user typed the
+    value. What crosses is a bare number of seconds, which `keep_alive_seconds`
+    reads back without ambiguity.
 
-    CLI first, then `tui.json`, then zero: a person who sets it once should not
-    have to type it, and a person who typed it means this run. The file is read
-    only when they did not, which is also why it is not hoisted — settings are
-    deliberately re-read for each `PHTuiApp`, so that a `/theme` written during
-    a session is picked up when the picker reopens one.
+    The order is CLI first, then `tui.json`, then zero. A user who sets the value
+    one time should not have to type it, and a user who typed it means this run.
+    The file is read only when the user did not type a value. That is also why
+    the read is not hoisted. Settings are deliberately read again for each
+    `PHTuiApp`, so that a `/theme` written during a session is picked up when the
+    picker reopens a session.
 
     **`--keep-daemon` and a typed `--keep-alive` are refused together**, because
-    they ask for opposite things: one says the daemon stays, the other says how
-    long it waits before going. A warning would have been the wrong answer to a
-    person who has said two things and meant one of them. A *configured*
-    keep-alive is not a contradiction — nobody typed it for this run — so
-    `--keep-daemon` simply overrides it, and a service daemon has no window.
+    they ask for opposite things. One says that the daemon stays. The other says
+    how long it waits before it leaves. A warning would be the wrong answer to a
+    user who has said two things and meant one of them. A *configured*
+    keep-alive is not a contradiction, because nobody typed it for this run.
+    `--keep-daemon` overrides it, and a service daemon has no window.
 
-    `ph_app.tui.config` is imported inside the function for `run_tui`'s reason:
-    it is a front-end module and `phern -p` should not load one to print an
-    answer.
+    `ph_app.tui.config` is imported inside the function for the same reason as
+    `run_tui`: it is a front-end module, and `phern -p` should not load one to
+    print an answer.
     """
     if keep:
         if value is not None and keep_alive_seconds(value) > 0:
@@ -682,88 +711,92 @@ def _spawned_keep_alive(value: str | None, *, keep: bool) -> str:
                 "--keep-alive and --keep-daemon ask for opposite things: one says when "
                 "the daemon leaves, the other says it stays"
             )
-        return "0"
+        return 0.0
     if value is None:
         # A late load: a command pays only for what it runs (`test_app_layering.py`).
         from .tui.config import load_tui_settings  # noqa: PLC0415
 
         value = load_tui_settings(resolve_roots().home).daemon_keep_alive
-    return f"{keep_alive_seconds(value):g}"
+    return keep_alive_seconds(value)
 
 
 UNITS: Mapping[str, float] = {"s": 1.0, "m": 60.0, "h": 3600.0}
-"""The suffixes a duration option accepts, as seconds each."""
+"""The suffixes that a duration option accepts, each with its length in seconds."""
 
 
-def _duration_seconds(value: str, *, unit: float) -> float:
-    """A duration a person typed, as seconds. Negative for "not one".
+def _duration_seconds(value: str, *, unit: float) -> float | None:
+    """Return a duration that a user typed, as seconds, or `None` when the text is
+    not a duration. A negative number is not a duration.
 
-    One parser for `--keep-alive` and `--passivate-after`, which are the same
-    question asked twice and were two parsers with two refusal shapes. `unit` is
-    what a *bare* number means — seconds for a keep-alive, minutes for a passivation
-    window, which is what each flag's own history established — and a suffix
-    overrides it, so `--passivate-after 30s` now means what it reads like
-    instead of half an hour.
+    This is one parser for `--keep-alive` and `--passivate-after`. The two flags
+    ask the same question, and they had two parsers with two refusal shapes.
+    `unit` is what a *bare* number means: seconds for a keep-alive, and minutes
+    for a passivation window. The history of each flag established its unit. A
+    suffix overrides the unit, so `--passivate-after 30s` now means what it reads
+    like and not half an hour.
 
-    Negative rather than raising, because the two callers refuse differently:
-    one of them has an `"off"` spelling to check first, and a parser that raised
-    would have to know about it.
+    The function returns `None` and does not raise, because the two callers
+    refuse differently. One of them has an `"off"` spelling to check first, and
+    a parser that raised would have to know about it.
     """
     text = value.strip().lower()
     if not text:
-        return -1.0
+        return None
     scale = UNITS.get(text[-1])
     number = text[:-1] if scale is not None else text
     try:
         seconds = float(number) * (scale if scale is not None else unit)
     except ValueError:
-        return -1.0
-    return seconds if seconds >= 0 else -1.0
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def keep_alive_seconds(value: str) -> float:
-    """`"30s"`, `"5m"`, `"1h"` or a bare number of seconds, as seconds.
+    """Return `"30s"`, `"5m"`, `"1h"` or a bare number of seconds, as seconds.
 
-    Refused rather than defaulted on a typo, for `_passivation`'s reason: a
-    mistyped duration here is a daemon that leaves immediately or never, and
-    either is a surprise a person attributes to something else a week later.
+    A typo is refused and not defaulted, for the same reason as in
+    `_passivation`. A mistyped duration here gives a daemon that leaves
+    immediately or never. Either is a surprise that a user attributes to
+    something else a week later.
 
-    **Public, because both ends of the flag have to agree.** `phern daemon
-    --keep-alive` parses it here, and `phern --keep-alive` — which does not run the
-    daemon, it *spawns* one — parses it here too rather than forwarding the
-    string into an argv where a typo would surface as a daemon that refused to
-    start and a UI that said nothing. Same refusal, same message, at whichever
-    end the person typed it.
+    **The function is public, because both ends of the flag must agree.**
+    `phern daemon --keep-alive` parses the value here. `phern --keep-alive` does
+    not run the daemon, it *spawns* one, and it also parses the value here. If it
+    forwarded the string into an argv, a typo would show as a daemon that refused
+    to start. The refusal and the message are the same at whichever end the user
+    typed the value.
 
-    **A duration and nothing else.** Whether the daemon is ephemeral is the
-    caller's question, not this one's: `phern daemon` and `phern` express that
-    in opposite directions — one opts into leaving, the other opts into staying
-    — so a parser that also decided it would have to know which command it was
-    serving.
+    **A duration and nothing else.** Whether the daemon is ephemeral is a
+    question for the caller and not for this function. `phern daemon` and `phern`
+    express that in opposite directions: one opts into leaving, and the other
+    opts into staying. A parser that also decided it would have to know which
+    command it served.
     """
     if not value.strip() or value.strip() == "0":
         return 0.0
     seconds = _duration_seconds(value, unit=1.0)
-    if seconds < 0:
-        # `typer.BadParameter` like `_passivation` and `_children_cap` beside it,
-        # rather than a hand-built refusal: typer already writes the usage line
-        # and the exit code, and three value parsers on one command refusing in
-        # two different shapes is how one of them comes to say something else.
+    if seconds is None:
+        # `typer.BadParameter`, like `_passivation` and `_children_cap` beside
+        # this function, and not a hand-built refusal. Typer already writes the
+        # usage line and the exit code. When three value parsers on one command
+        # refuse in two different shapes, one of them comes to say something
+        # else.
         raise typer.BadParameter(f'wants a duration like "30s", "5m" or "90", not "{value}"')
     return seconds
 
 
 def _passivation(value: str) -> float | None:
-    """`"off"`, a number of minutes, or a suffixed duration, as seconds (P5-05).
+    """Parse `"off"`, a number of minutes, or a suffixed duration, as seconds (P5-05).
 
-    Refused rather than defaulted when it is none of those: a typo in a duration
-    is a deployment that silently keeps every root it ever started, and the
-    daemon is the one process where that goes unnoticed for a week.
+    `"off"` returns `None`. A value that is none of those is refused and not
+    defaulted. A typo in a duration gives a deployment that silently keeps every
+    root that it ever started, and the daemon is the one process where that goes
+    unnoticed for a week.
     """
     if value.strip().lower() == "off":
         return None
     seconds = _duration_seconds(value, unit=60.0)
-    if seconds <= 0:
+    if seconds is None or seconds <= 0:
         # One message for one mistake: "not a number" and "not a positive
         # number" are the same correction to the same flag.
         raise typer.BadParameter(f'wants positive minutes or "off", not "{value}"')
@@ -771,7 +804,7 @@ def _passivation(value: str) -> float | None:
 
 
 def _choice_or_exit(provider: str | None, model: str | None) -> ModelChoice:
-    """`--provider`/`--model` as the choice they spell, or exit 2 saying why not."""
+    """Return the choice that `--provider` and `--model` spell, or exit 2 with the reason."""
     try:
         return ModelChoice.from_flags(provider, model)
     except ModelChoiceError as error:
@@ -779,26 +812,27 @@ def _choice_or_exit(provider: str | None, model: str | None) -> ModelChoice:
 
 
 def _children_cap(value: int | None) -> list[str]:
-    """The `--max-concurrent-children` override, as the patch it really is.
+    """Return the `--max-concurrent-children` override as the patch that it is.
 
-    The cap *is* row config, so overriding it from the command line is a patch
-    and not a second channel: `--dump-config` and `phern doctor` then show the
-    number actually in force with `cli` as its provenance, which a field threaded
-    past the profile could not do. A *deployment* patch, not a `--patch`: `jobs`
-    is the host's row, which a person's `--patch` may not set (`profile_or_exit`).
+    The cap *is* row config, so an override from the command line is a patch and
+    not a second channel. `--dump-config` and `phern doctor` then show the number
+    that is actually in force, with `cli` as its provenance. A field passed
+    around the profile could not do that. It is a *deployment* patch and not a
+    `--patch`: `jobs` is a row of the host, which the `--patch` of a user may not
+    set (`profile_or_exit`).
 
-    **Unset patches nothing**, which is what lets the flag carry no default of
-    its own: whatever the composed profile says stands, so the number lives once,
-    in the bundle that ships a subagent provider at all. It also keeps a plain
-    `phern daemon` working on a profile with no `jobs` row — a patch names a row by
-    id and the loader refuses one that is not there, so a default that always
-    patched would have made every such run exit 2 over a cap nobody asked for.
-    Name a number *there* and the refusal is earned, and says which row is
-    missing.
+    **An unset flag patches nothing.** The flag therefore needs no default of its
+    own. Whatever the composed profile says stands, so the number is written one
+    time, in the bundle that ships a subagent provider. It also keeps a plain
+    `phern daemon` working on a profile with no `jobs` row. A patch names a row by
+    id, and the loader refuses a patch for a row that is not there. A default
+    that always patched would have made every such run exit 2 over a cap that
+    nobody asked for. When the user names a number on such a profile, the
+    refusal is deserved, and it says which row is missing.
 
-    The kind comes from `ph.seams.jobs`, imported where the daemon's other
-    imports are: this module is read by every `phern` invocation, and the seam is
-    not otherwise on that path.
+    The kind comes from `ph.seams.jobs`. It is imported late, as the other
+    imports of the daemon are, because every `phern` invocation reads this module
+    and the seam is not otherwise on that path.
     """
     if value is None:
         return []
@@ -884,14 +918,15 @@ def daemon(
     # A late load: a command pays only for what it runs (`test_app_layering.py`).
     from .daemon.server import DaemonUnavailable, serve  # noqa: PLC0415
 
-    # Parsed before anything is composed or bound, so a mistyped duration is a
-    # usage error rather than a daemon that got as far as printing a socket path.
+    # The duration is parsed before anything is composed or bound. A mistyped
+    # duration is then a usage error, and not a daemon that got as far as
+    # printing a socket path.
     window = keep_alive_seconds(keep_alive)
     composed = profile_or_exit(profile, patch, deployment=_children_cap(max_concurrent_children))
-    # Refused before the socket is bound: a `--model` the profile does not list
-    # would otherwise be every root's refusal, one `session/new` at a time. What
-    # only a mount knows — whether an adapter serves the provider — is each
-    # root's to refuse (`Supervisor.model_for`).
+    # The choice is refused before the socket is bound. Otherwise every root
+    # would refuse a `--model` that the profile does not list, one `session/new`
+    # at a time. Only a mount knows whether an adapter serves the provider, so
+    # each root refuses that case (`model_for` in `ph_app.daemon.supervisor`).
     choice = _choice_or_exit(provider, model)
     try:
         ModelList.of(composed).resolve(choice)
@@ -903,47 +938,52 @@ def daemon(
     roots = roots_or_exit(create=True)
     socket_path = roots.daemon_socket()
     err.print(f"[dim]listening on {socket_path}[/dim]")
-    # "names `enable-linger` when a daemon is configured without it" — the row's
-    # own wording, and this is the moment it is being configured. Said here as
-    # well as in `phern doctor` because the two have different readers: doctor is
-    # run by somebody already debugging, and this line is read by somebody who
-    # is not, ten seconds before closing the terminal it is printed in.
+    # "names `enable-linger` when a daemon is configured without it" is the
+    # wording of the row itself, and this is the moment when the daemon is
+    # configured. The warning is printed here as well as in `phern doctor`,
+    # because the two have different readers. Somebody who is already debugging
+    # runs doctor. Somebody who is not debugging reads this line, ten seconds
+    # before they close the terminal that it is printed in.
     life = lifetime(socket_path, roots=roots)
     if life.survives_logout is not True:
         err.print(f"[yellow]this socket does not survive logout:[/yellow] {life.verdict()}")
         err.print(f"[yellow]  {life.advice}[/yellow]")
-    # Before `serve` can log: detached, this process's stderr is a file the launcher
-    # reads only until the socket answers, and this one is where its warnings go
-    # (`ph_app.daemon.logs`). Right above the `try` whose `finally` releases it, so
-    # nothing between can skip that.
+    # Logging is configured before `serve` can log. When this process is
+    # detached, its stderr is a file that the launcher reads only until the
+    # socket answers, and this log is where its warnings go
+    # (`ph_app.daemon.logs`). The call is directly above the `try` whose
+    # `finally` releases the logging, so nothing between them can skip the
+    # release.
     from .daemon.logs import configure_daemon_logging, release_daemon_logging  # noqa: PLC0415
 
     log_path = roots.daemon_log()
     configure_daemon_logging(log_path, to_stderr=DETACHED not in os.environ)
     err.print(f"[dim]logging to {log_path}[/dim]")
     try:
-        # The path that was printed, not a second resolution of it: a message
-        # naming one socket while the bind takes another is the kind of thing
-        # someone debugs for an hour.
+        # This is the path that was printed and not a second resolution of it.
+        # A message that names one socket while the bind takes another costs
+        # somebody an hour of debugging.
         unwritten = anyio.run(
             partial(
                 serve,
                 composed,
                 choice=choice,
                 passivate_after=_passivation(passivate_after),
-                # Off here, on in `spawn_command`: `DaemonServer.ephemeral` says
-                # why the lifetime is decided by who started it (P7-08).
+                # Off here, and on in `spawn_command`. `DaemonServer.ephemeral`
+                # says why whoever started the daemon decides its lifetime
+                # (P7-08).
                 #
                 # **A keep-alive implies it.** "Stay up five minutes after the
-                # last client leaves" is a statement about *leaving*, so a person
-                # who typed one has said which lifetime they want; the two flags
-                # were one concept split across two spellings, and the split is
-                # what made `--keep-alive` alone mean nothing and need a warning.
+                # last client leaves" is a statement about *leaving*, so a user
+                # who typed one has said which lifetime they want. The two flags
+                # were one concept split across two spellings. The split made
+                # `--keep-alive` alone mean nothing and need a warning.
                 ephemeral=ephemeral or window > 0,
                 keep_alive=window,
                 path=socket_path,
-                # `kill`, `systemctl stop` and Ctrl-C end this process the way
-                # `phern agents shutdown` does, instead of the way `kill -9` does.
+                # `kill`, `systemctl stop` and Ctrl-C end this process in the way
+                # that `phern agents shutdown` does, and not in the way that
+                # `kill -9` does.
                 signals=True,
                 probe=probe_bind,
                 resume_owed=resume_owed,
@@ -951,23 +991,23 @@ def daemon(
             )
         )
         if unwritten:
-            # A stop that lost a log's tail is not a clean stop (P13-08): the unit
-            # shows failed, and the next daemon's resume repairs what this one
-            # could not write.
+            # A stop that lost the tail of a log is not a clean stop (P13-08).
+            # The unit shows failed, and the resume of the next daemon repairs
+            # what this one could not write.
             fail(
                 f"[red]stopped with {unwritten} session log(s) that could not be "
                 "written; see the daemon log[/red]",
                 code=3,
             )
     except DaemonUnavailable as error:
-        # One named type rather than `(RuntimeError, OSError)`, which is two
-        # builtins wide enough to swallow a `typer.Exit` — it subclasses
-        # `RuntimeError`, and the comment in `doctor` above records this file
-        # having been bitten by that already.
+        # One named type and not `(RuntimeError, OSError)`. Those two builtins
+        # are wide enough to catch a `typer.Exit`, which subclasses
+        # `RuntimeError`. The comment in `doctor` above records that this file
+        # already had that bug.
         fail(f"[red]{detail(error)}[/red]", cause=error)
     finally:
-        # A host running this command in-process (a test runner) gets its
-        # logging back the way it was; the real daemon is exiting anyway.
+        # A host that runs this command in-process (a test runner) gets its
+        # logging back the way it was. The real daemon is exiting anyway.
         release_daemon_logging(log_path)
 
 
@@ -978,21 +1018,22 @@ def reinvoke(
     model: str | None = None,
     patch: Sequence[str] = (),
 ) -> list[str]:
-    """How pH starts pH: the argv for another process of this one.
+    """Return the argv with which pH starts another process of itself.
 
-    Two callers ask it — the daemon a UI spawns when no socket answers, and the
-    terminal a browser tab runs — and they differ only in their leading verb. The
-    tail is the same composition every time, so it is written once: an option
-    added here reaches both, where two spellings would silently reach one. The
-    interpreter and module in front of it are the launcher's (`phern_argv`), which
-    `phern service start` uses with the caller's own daemon options behind it.
+    Two callers use it: the daemon that a UI spawns when no socket answers, and
+    the terminal that a browser tab runs. They differ only in their leading
+    words. The tail is the same composition every time, so it is written one
+    time. An option added here reaches both callers, where two spellings would
+    silently reach one. The interpreter and the module in front of the tail come
+    from the launcher (`phern_argv`). `phern service start` uses `phern_argv`
+    directly, with the daemon options of its caller behind it.
 
-    `--patch` travels because the *other* process is the one that composes: a
-    patch accepted here and dropped would silently ignore `phern --mode tui --patch
-    '{id: tool-ask-user, disabled: false}'`, which is the documented way to arm a
-    row anywhere. The route travels only when one was typed: unset is the
-    profile's default, and a default spelled into the argv would be a choice
-    nobody made.
+    `--patch` is forwarded because the *other* process is the one that composes.
+    A patch that was accepted here and dropped would silently ignore
+    `phern --mode tui --patch '{id: tool-ask-user, disabled: false}'`, which is
+    the documented way to arm a row anywhere. The route is forwarded only when
+    the user typed one. An unset route is the default of the profile, and a
+    default written into the argv would be a choice that nobody made.
     """
     argv = phern_argv(*args, "--profile", profile)
     if provider is not None:
@@ -1013,20 +1054,26 @@ def tab_command(
     patch: Sequence[str] = (),
     spawn: bool = True,
     keep: bool = False,
+    keep_alive: float | None = None,
 ) -> list[str]:
-    """The argv for the terminal a browser tab runs (P7-05).
+    """Return the argv for the terminal that a browser tab runs (P7-05).
 
-    A declaration beside `spawn_command`, rather than an argv assembled inline in
-    the `--mode web` branch, because the two are the same kind of thing: the two
-    ways pH re-invokes itself. Built inline it had no name to test — the argv
-    gate pinned a composition *it* wrote, which omitted `--session` and
-    `--keep-daemon` because no caller was there to disagree with it — and a
-    launch-level flag that must reach a tab had to be remembered in a branch.
+    This is a declaration beside `spawn_command`, and not an argv assembled
+    inline in the `--mode web` branch, because the two are the same kind of
+    thing: the two ways in which pH invokes itself again. Built inline, the argv
+    had no name to test. The argv test checked a composition that the test
+    *itself* wrote. That composition omitted `--session` and `--keep-daemon`,
+    because no caller was there to disagree with it. Also, a launch-level flag
+    that must reach a tab had to be remembered in a branch.
 
-    `--session` is on every tab, which is the whole of P7-06's routing: upstream
-    fixes the command at construction, so a session id here is necessarily every
-    tab's, and a tab that minted its own would leave an upload with nothing to
-    stage into.
+    `--session` is on every tab, and that is all of the routing of P7-06.
+    Upstream fixes the command at construction, so a session id here necessarily
+    belongs to every tab. A tab that minted its own id would leave an upload
+    with no session to stage into.
+
+    `keep_alive` is the `--keep-alive` that the user typed, in seconds, or
+    `None` when they typed none. `--mode web` used to drop the flag, so the
+    daemon that a tab started left at once, whatever the user had asked for.
     """
     return reinvoke(
         "--mode",
@@ -1035,6 +1082,7 @@ def tab_command(
         session,
         *(() if spawn else ("--no-spawn",)),
         *(("--keep-daemon",) if keep else ()),
+        *(() if keep_alive is None else _keep_alive_argv(keep_alive)),
         profile=profile,
         provider=provider,
         model=model,
@@ -1042,35 +1090,43 @@ def tab_command(
     )
 
 
+def _keep_alive_argv(seconds: float) -> tuple[str, str]:
+    """`--keep-alive` as a command line that pH composes spells it: a bare number
+    of seconds, which `keep_alive_seconds` reads back with no unit to guess."""
+    return ("--keep-alive", f"{seconds:g}")
+
+
 def spawn_command(
     *,
     profile: str,
     patch: Sequence[str] = (),
     keep: bool = False,
-    keep_alive: str = "0",
+    keep_alive: float = 0.0,
 ) -> list[str]:
-    """The argv for a daemon a UI starts on its own behalf (P7-08).
+    """Return the argv for a daemon that a UI starts for itself (P7-08).
 
-    Beside the `daemon` command whose options it spells, so renaming one is one
-    edit. `--ephemeral` because this daemon was nobody's decision, so it leaves
-    when nobody needs it.
+    The function is beside the `daemon` command whose options it spells, so that
+    a rename is one edit. It passes `--ephemeral` because nobody decided to run
+    this daemon, so the daemon leaves when nobody needs it.
 
-    `keep` is `--keep-daemon`, the other half of the rule that **who started it
-    decides**: a person who means the daemon to stay says so, and gets exactly
-    what `phern daemon` would have given them, without typing two commands. It is
-    the mirror of `phern daemon --ephemeral`, and both exist because the lifetime is
-    a decision rather than a property of the process that happened to spawn it.
+    `keep` is `--keep-daemon`. It is the other half of the rule that **whoever
+    started the daemon decides**. A user who means the daemon to stay says so,
+    and gets exactly what `phern daemon` would have given them, without typing
+    two commands. It mirrors `phern daemon --ephemeral`. Both exist because the
+    lifetime is a decision, and not a property of the process that happened to
+    spawn the daemon.
 
-    **No route.** The terminal names its own in `session/new`, so the model it was
-    started with is its session's and not every session's on a daemon that may
-    outlive it.
+    **No route.** The terminal names its own route in `session/new`. The model
+    that the terminal was started with therefore belongs to its session, and not
+    to every session on a daemon that may outlive the terminal.
     """
     ephemeral = () if keep else ("--ephemeral",)
-    # **The only route a client's preference has to the daemon.** A daemon may not
-    # read a front end's `tui.json` — after P5-14 it may not share a filesystem
-    # with it — so the terminal spells its own keep-alive into the command line it
-    # composes. Omitted when zero, which is the default on both sides.
-    window = ("--keep-alive", keep_alive) if keep_alive not in ("", "0") else ()
+    # **This is the only way that a preference of a client reaches the daemon.**
+    # A daemon may not read the `tui.json` of a front end, and after P5-14 it may
+    # not share a filesystem with one. The terminal therefore writes its own
+    # keep-alive into the command line that it composes. The option is omitted
+    # when it is zero, which is the default on both sides.
+    window = _keep_alive_argv(keep_alive) if keep_alive > 0 else ()
     return reinvoke(
         "daemon",
         *ephemeral,
@@ -1107,11 +1163,11 @@ def events(
     who is running this.
     """
     import_plugin_modules()
-    # Resolved *outside* the guard below: `profile_or_exit` reports an unknown
-    # profile by raising `typer.Exit`, which is an `Exception`, so catching
-    # broadly around it turned "no such profile" into a full matrix and exit 0 —
-    # the answer that looks most like success for the input most likely to be a
-    # typo.
+    # The profile is resolved *outside* the guard below. `profile_or_exit`
+    # reports an unknown profile by raising `typer.Exit`, which is an
+    # `Exception`. A broad catch around it turned "no such profile" into a full
+    # matrix and exit 0. That is the answer that looks most like success, for
+    # the input that is most likely to be a typo.
     composed = profile_or_exit(profile, patch)
     try:
         anyio.run(partial(_note_consumers, composed))
@@ -1120,15 +1176,15 @@ def events(
             f"[yellow]profile {profile!r} does not mount, so no consumers are listed:[/yellow] "
             f"{detail(error)}"
         )
-    # The bus vocabulary, so a bare `tools` needs no prefix — and `log:workspace`
-    # is refused rather than answered emptily, because this registry holds no
-    # session-log types and the two share six roots (P6-33).
+    # The bus vocabulary, so a bare `tools` needs no prefix. `log:workspace` is
+    # refused and not answered with an empty table, because this registry holds
+    # no session-log types and the two vocabularies share six roots (P6-33).
     selectors = selectors_or_exit(type_, vocabulary="bus")
     matrix = [row for row in event_registry.matrix() if matches_any(row["name"], selectors)]
     if selectors and not matrix:
-        # A namespace nothing occupies is a typo far more often than it is an
-        # empty one, and this registry knows every name it holds — so it can say
-        # which it was rather than printing an empty table.
+        # A namespace that nothing occupies is a typo far more often than it is
+        # an empty one. This registry knows every name that it holds, so it can
+        # say which namespace it was and not print an empty table.
         unknown = unknown_namespaces(selectors, event_registry.names())
         # The names came off a command line, so they go through `detail` too.
         unmatched = f": {detail(', '.join(unknown))}" if unknown else ""
@@ -1141,11 +1197,11 @@ def events(
     table.add_column("mode")
     table.add_column("payload")
     table.add_column("producer")
-    # The consumers are half of what a producer/consumer matrix is *for*, and
-    # the rendered table shipped without them for a round — `matrix()` had
-    # carried them all along, so the JSON was complete and only the half a
-    # person reads was missing. An event with no listener is a real finding
-    # (a declared extension point nobody uses), so an empty cell says so.
+    # The consumers are half of the purpose of a producer/consumer matrix, and
+    # the rendered table shipped without them for one round. `matrix()` had
+    # carried them all along. The JSON was complete, and only the half that a
+    # person reads was missing. An event with no listener is a real finding (a
+    # declared extension point that nobody uses), so an empty cell says so.
     table.add_column("consumers")
     table.add_column("what it is")
     for row in matrix:
@@ -1216,26 +1272,28 @@ def config(
         missing = sorted(wanted - {entry["name"] for entry in catalog})
         if missing:
             # A name that resolves to nothing is a typo far more often than it
-            # is an unregistered row, and this catalog knows every name it
-            # holds — so it says which, rather than printing an empty table.
+            # is an unregistered row. This catalog knows every name that it
+            # holds, so it says which name it was and does not print an empty
+            # table.
             fail(f"[red]no registered row named: {', '.join(missing)}[/red]", code=2)
     if as_json:
         emit(json.dumps(catalog, indent=2))
         return
     # **After the JSON return, and after `--row`.** The profile column is a thing
-    # the *table* prints, so composing above this made `--json` pay ~6 ms to
-    # build a map it never reads — and, worse, gave a dump that depends on no
-    # profile a way to exit 2 over one.
+    # that the *table* prints. When the profile was composed above this point,
+    # `--json` paid about 6 ms to build a map that it never reads. Worse, a dump
+    # that depends on no profile could exit 2 because of one.
     #
-    # `enabled_rows`, not `dump()`: a dump keeps a row a profile switched off,
-    # flagged, so reading it as mounted told a person `disabled: true` was
-    # "mounted, the default stands" — which is the third state this command
-    # promises to tell apart, got wrong. `enabled_rows` is the predicate
-    # `Profile.mount` itself uses.
-    # `as_obj` is load-bearing: a mounted row that configures nothing has
-    # `config is None`, which is a *different* answer from "not in this profile"
-    # and must not share its sentinel — absence is what carries that one. It also
-    # settles the shape here, so the renderer below reads presence alone.
+    # `enabled_rows`, and not `dump()`. A dump keeps a row that a profile
+    # switched off, with a flag. Reading the dump as mounted told a user that
+    # `disabled: true` was "mounted, the default stands". This command promises
+    # to tell that third state apart, and it got that state wrong.
+    # `enabled_rows` is the predicate that `Profile.mount` itself uses.
+    # `as_obj` is necessary. A mounted row that configures nothing has
+    # `config is None`. That is a *different* answer from "not in this profile",
+    # and the two must not share a sentinel: absence carries "not in this
+    # profile". `as_obj` also settles the shape here, so the renderer below
+    # reads presence alone.
     composed = {
         row.name: as_obj(row.config) for row in profile_or_exit(profile, patch).enabled_rows()
     }
@@ -1258,8 +1316,9 @@ def config(
         if not entry["config"]:
             table.add_row(entry["name"], entry["affects"], "[dim]none[/dim]", "", "", "", "")
             continue
-        # `None`, not `{}`: a row this profile never mounts is a different answer
-        # from one it mounts and says nothing about, and one lookup carries both.
+        # `None`, and not `{}`. A row that this profile never mounts is a
+        # different answer from a row that it mounts and says nothing about,
+        # and one lookup carries both.
         set_here = composed.get(entry["name"])
         for index, field in enumerate(entry["config"]):
             first = index == 0
@@ -1268,8 +1327,8 @@ def config(
                 entry["affects"] if first else "",
                 field["name"],
                 field["type"],
-                # Required has no default, and printing one would invent a
-                # value a profile must actually supply.
+                # A required option has no default. Printing one would invent a
+                # value that a profile must actually supply.
                 "[bold]required[/bold]" if field["required"] else (field["default"] or ""),
                 _in_profile(field["name"], set_here, first=first),
                 field["doc"],
@@ -1278,15 +1337,19 @@ def config(
 
 
 def _in_profile(name: str, set_here: JsonObject | None, *, first: bool) -> str:
-    """What the composed profile says about one option.
+    """Return what the composed profile says about one option.
 
-    Three answers, and they are genuinely different: the row is not in this
-    profile at all, so nothing here applies; the row is mounted and says nothing
-    about this option, so the default stands; or the profile set it, and that is
-    what a run uses. `None` carries the first of those, so the caller keeps one
-    lookup rather than two facts to hold in step. Blank for that case past its
-    first line, because it is the *row's* answer and repeating it once per option
-    is noise.
+    There are three answers, and they are different:
+
+    - The row is not in this profile at all, so nothing here applies.
+    - The row is mounted and says nothing about this option, so the default
+      stands.
+    - The profile set the option, and that value is what a run uses.
+
+    `None` carries the first answer, so the caller keeps one lookup and not two
+    facts to hold in step. After the first line of a row the first answer is
+    blank, because it is the answer of the *row*, and repeating it for each
+    option is noise.
     """
     if set_here is None:
         return "[dim]row not mounted[/dim]" if first else ""

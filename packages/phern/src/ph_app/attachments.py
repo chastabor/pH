@@ -1,33 +1,33 @@
-"""`phern attachments gc` — the only thing allowed to delete conversation (P7-01).
+"""`phern attachments gc`: the only thing that may delete conversation (P7-01).
 
-The attachment store never collects on its own, and that is a decision rather than
-an omission. A digest is addressed globally with no owner directory, so two
-sessions attaching one photo share a file and a fork references exactly its
-parent's digests — which is what stops deleting a parent from breaking its
-children, and which makes "is anyone still using this" a question only a fold over
-*every* stored session can answer. F7's spill sweep can run at session open
-because a spilled result has an owner; this cannot, and it is a command for the
-same reason `phern workspaces gc` is.
+The attachment store never collects on its own. That is a decision and not an
+omission. A digest is addressed globally with no owner directory. Two sessions
+that attach one photo therefore share a file, and a fork references exactly the
+digests of its parent. That is what stops the deletion of a parent from breaking
+its children. It also makes "is anyone still using this" a question that only a
+fold over *every* stored session can answer. The spill sweep of F7 can run at
+session open because a spilled result has an owner. This sweep cannot, and it is
+a command for the same reason that `phern workspaces gc` is one.
 
-**The rule the fold obeys, written down in the plan before any of this existed: a
-blob any stored log still references must not be collected, however old it is.**
-Age is the obvious predicate and it is the wrong one. What makes it wrong is what
-`ctx.uploads` changed: after P7-03 the local blob is the last copy — the
-provider's is behind a handle that expires — so collecting a referenced
-attachment does not degrade a session, it ends it. `media-degrade` will report
-"the stored bytes are gone" for ever, and the thing that made *re-running the same
-conversation against a different model* possible goes with it, since a second
-route is a cache miss that re-uploads from disk.
+**The fold obeys one rule, which the plan wrote down before any of this
+existed: a blob that any stored log still references must not be collected,
+however old it is.** Age is the obvious predicate, and it is the wrong one.
+`ctx.uploads` is what made it wrong. After P7-03 the local blob is the last
+copy, because the copy of the provider is behind a handle that expires.
+Collecting a referenced attachment therefore does not degrade a session. It ends
+the session. `media-degrade` will report "the stored bytes are gone" forever.
+*Running the same conversation again against a different model* also stops being
+possible, because a second route is a cache miss that uploads again from disk.
 
-So age appears here only in the direction that is safe: `--min-age` **refuses** to
-collect something new, because a file a person dropped on the composer sits on
-disk with nothing referencing it until they send the prompt.
+Age therefore appears here only in the direction that is safe. `--min-age`
+**refuses** to collect something new, because a file that a user dropped on the
+composer sits on disk with nothing referencing it until they send the prompt.
 
-**Two stores, and they must not be confused while doing this.**
-`$PH_HOME/attachments` is content and is not safe to delete; `$PH_CACHE/uploads`
-is a cache and is safe to delete wholesale. Both are swept here off one reference
-set, which is what `ctx.uploads` said this command should do — but only the first
-needs the survey to be complete, and the report says so.
+**There are two stores, and this command must not confuse them.**
+`$PH_HOME/attachments` is content and is not safe to delete. `$PH_CACHE/uploads`
+is a cache and is safe to delete wholesale. Both are swept here from one
+reference set, which is what `ctx.uploads` said this command should do. Only the
+first store needs the survey to be complete, and the report says so.
 
 @module ph_app.attachments
 """
@@ -57,34 +57,35 @@ attachments_app = typer.Typer(
 )
 
 DEFAULT_MIN_AGE_DAYS = MIN_AGE / 86_400.0
-"""Days, from the seam's own constant rather than a second number here.
+"""The default in days, from the constant of the seam itself and not from a
+second number here.
 
-A default written twice is a default that disagrees with itself after the first
-edit, and this one is load-bearing: it is the window in which a staged file has
-no log referencing it."""
+A default that is written twice disagrees with itself after the first edit. This
+default matters: it is the window in which a staged file has no log that
+references it."""
 
 LISTED = 20
 """How many collectable blobs are listed before the report stops naming them.
 
-A digest and a size do not help a person decide much past the first screenful —
-what decides `--remove` is the total and whether the survey was complete — and a
-store with four thousand dead blobs would otherwise print four thousand lines of
+A digest and a size do not help a user decide much after the first screen. The
+total, and whether the survey was complete, decide `--remove`. Without this
+limit, a store with four thousand dead blobs would print four thousand lines of
 hex."""
 
 
 def _report(survey: AttachmentSurvey, *, removed: tuple[int, int] | None) -> str:
-    """The whole answer as one block: what is there, then what happened to it.
+    """Return the whole answer as one block: what is there, then what happened to it.
 
-    Built as a list with the summary always present, because the alternative —
-    returning early on the happy counts — is how the refusal came to be shadowed:
-    a store with a torn log and nothing collectable answered "nothing to collect"
-    and never mentioned the log.
+    The block is built as a list in which the summary is always present. The
+    alternative is an early return on the good counts, and that is how the
+    refusal came to be hidden: a store with a torn log and nothing collectable
+    answered "nothing to collect" and never mentioned the log.
     """
     listed = [
-        # `rich.filesize.decimal`, which the session picker already renders sizes
-        # with: a local formatter here did 1024-based maths under `KB`/`MB`
-        # labels, so the same file measured differently depending on which
-        # surface a person happened to be reading.
+        # `rich.filesize.decimal`, which the session picker already renders
+        # sizes with. A local formatter here did 1024-based math under `KB` and
+        # `MB` labels, so the same file measured differently on each surface
+        # that a user read.
         f"  {blob.digest[:19]}…  {decimal(blob.bytes):>9}  {blob.age / 86400:>5.1f}d"
         for blob in survey.collect[:LISTED]
     ]
@@ -98,8 +99,8 @@ def _report(survey: AttachmentSurvey, *, removed: tuple[int, int] | None) -> str
         f"{len(survey.uploads)} stale upload handle(s)",
     ]
     if not survey.safe:
-        # The refusal, and *why*: a person who reads only "nothing collected"
-        # would reasonably try `--remove` again.
+        # The refusal, and the *reason* for it. A user who reads only "nothing
+        # collected" would reasonably try `--remove` again.
         reason = (
             f"{len(survey.unreadable)} session(s) would not read"
             if survey.unreadable
@@ -120,9 +121,9 @@ def _report(survey: AttachmentSurvey, *, removed: tuple[int, int] | None) -> str
 async def _collect(profile: Profile, *, min_age: float, remove: bool) -> str:
     """Mount, fold every stored session, and either report or collect.
 
-    Mounting is what supplies both roots — a store can be pointed anywhere by row
-    config, and a collector that resolved `$PH_HOME/attachments` itself would
-    sweep the default directory of a deployment that does not use it.
+    The mount supplies both roots. Row config can point a store anywhere. A
+    collector that resolved `$PH_HOME/attachments` itself would sweep the default
+    directory of a deployment that does not use it.
     """
     async with mounted(profile) as ctx:
         store = ctx.get(ATTACHMENTS)
@@ -133,10 +134,10 @@ async def _collect(profile: Profile, *, min_age: float, remove: bool) -> str:
         uploads = ctx.get(UPLOADS)
         survey = survey_attachments(store, persistence, uploads=uploads, min_age=min_age)
         # **One summary sentence, always.** An early "nothing to collect" return
-        # here read the counts and not `safe`, so a store with a torn log and
-        # nothing collectable answered "nothing to collect" and never mentioned
-        # the log — the refusal `_report` exists to print, shadowed by the
-        # happier of the two sentences.
+        # here read the counts and not `safe`. A store with a torn log and
+        # nothing collectable therefore answered "nothing to collect" and never
+        # mentioned the log. The refusal that `_report` exists to print was
+        # hidden by the better-sounding of the two sentences.
         return _report(survey, removed=collect_attachments(survey, uploads) if remove else None)
 
 
@@ -166,11 +167,12 @@ def gc(
     which is exactly the one whose pictures are worth keeping. If the store is too
     large to survey, or any log will not parse, this collects nothing and says so.
     """
-    # `--patch` like every other command that composes a profile: both stores
-    # this folds are row config, so a deployment that put them on another volume
-    # can only be swept by a command that can say so — otherwise the answer is
-    # "nothing to collect" against the default directory, which is the confident
-    # wrong answer. `phern workspaces gc` takes it for the same reason.
+    # `--patch`, like every other command that composes a profile. Both stores
+    # that this command folds are row config. Only a command that takes a patch
+    # can sweep a deployment that put the stores on another volume. Otherwise
+    # the answer is "nothing to collect" against the default directory, which
+    # is a confident wrong answer. `phern workspaces gc` takes `--patch` for the
+    # same reason.
     composed = profile_or_exit(profile, patch)
     try:
         report = anyio.run(partial(_collect, composed, min_age=min_age * 86_400.0, remove=remove))

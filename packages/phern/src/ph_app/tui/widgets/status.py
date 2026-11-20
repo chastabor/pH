@@ -152,14 +152,20 @@ def render_subagents(state: TuiState) -> str:
     lines: list[str] = []
     for row in state.subagents.values():
         child = row.child
-        detail = (
-            f"needs {child.awaiting}"
-            if child.awaiting
-            else child.cause or (child.model if child.status == "queued" else child.status)
-        )
+        if child.awaiting:
+            detail = f"needs {child.awaiting}"
+        elif child.cause:
+            detail = child.cause
+        elif child.status != "queued":
+            detail = child.status
+        else:
+            # A queued child shows the model that it waits to run on, when its
+            # admission recorded one.
+            detail = "" if child.model is None else child.model
         tokens = f" {thousands(child.tokens)}" if child.tokens >= 1000 else ""
         indent = "  " * row.depth
-        lines.append(f"{indent}{row.glyph} {child.name or child.run_id} {detail}{tokens}".rstrip())
+        name = child.run_id if child.name is None else child.name
+        lines.append(f"{indent}{row.glyph} {name} {detail}{tokens}".rstrip())
     return "\n".join(lines)
 
 
@@ -268,7 +274,8 @@ class StatusBar(Horizontal):
         line = self._part("line")
         if line is None:
             return
-        model = [Content(state.model or "no model"), *map(_piece, in_slot(readings, "model"))]
+        named = "no model" if state.model is None else state.model
+        model = [Content(named), *map(_piece, in_slot(readings, "model"))]
         segments = [Content(QUALIFIER).join(model)]
         if state.turn:
             segments.append(Content(f"turn {state.turn}"))

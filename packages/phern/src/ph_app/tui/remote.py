@@ -89,7 +89,6 @@ from ..params import (
     PresetParams,
     ShellParams,
     StoreCredentialParams,
-    TrustAnswer,
 )
 from ..payloads import (
     FED,
@@ -116,6 +115,7 @@ from ..payloads import (
 )
 from ..protocol import DaemonGone, NoParams, SessionParams, Verb
 from ..sessions import SessionSummary
+from ..trust import TrustAnswer
 from ..wire import view_of
 from .adapter import Frame, TuiEventAdapter
 from .commands import action_command
@@ -185,10 +185,10 @@ class DaemonSession:
 
     It is `None` only where no daemon said otherwise: a headless test that
     drives this class directly gets a session with a header of its own."""
-    arrival: str = ""
+    arrival: str | None = None
     """`FrontSession.arrival`: the `profile_note` of the attach reply. It is the
     sentence of the daemon about a session that is kept on a version which its
-    named profile has moved past."""
+    named profile has moved past. `None` when the daemon has nothing to tell."""
     session: Session = field(init=False)
     """The mirror that this client keeps of the log of the daemon. **It is a
     `Session`, and it is kept incrementally.**
@@ -333,13 +333,17 @@ class DaemonSession:
         does not say", so each field is kept and not cleared. The four
         `params.get(...) or self.state.<x>` reads that this replaced wrote the
         same rule by hand.
+
+        The route is the exception, because it is one fact in three fields. A
+        frame states it when its `model` is present, and the three are then
+        taken together.
         """
-        self.state.provider = facts.provider or self.state.provider
-        self.state.model = facts.model or self.state.model
-        if facts.model_key is not None:
-            # `""` is an answer here: it means an unlisted route. So the old
-            # value is kept only when the frame does not say, and not whenever
-            # the new value is falsy.
+        if facts.model is not None:
+            # This frame states the route. Its `model_key` of `None` is an
+            # answer: the profile lists no name for this route. The name of the
+            # route before it must therefore not survive.
+            self.state.provider = facts.provider
+            self.state.model = facts.model
             self.state.model_key = facts.model_key
         if facts.readings is not None:
             self._readings = list(facts.readings)
@@ -347,7 +351,7 @@ class DaemonSession:
             # `None` inside the facts is an answer: nothing compacts on
             # pressure, and the gauge then has no share to warn at.
             self.state.compacts_at = facts.compaction.trigger_fraction
-        if facts.status:
+        if facts.status is not None:
             self.state.status = facts.status
             self._moved.set()
             self._moved = anyio.Event()
@@ -453,7 +457,7 @@ class DaemonSession:
         self._status(reply.facts())
         return reply
 
-    async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:
+    async def browse_sessions(self, *, cwd: str | None = None) -> list[SessionSummary]:
         """The list from the daemon: stored logs and its live roots, already merged."""
         return await browse_on(self.client, cwd=cwd)
 
@@ -686,8 +690,9 @@ class DaemonSession:
             await self.client.call(verbs.SESSION_DETACH, SessionParams(session_id=self.session_id))
 
 
-async def browse_on(client: DaemonClient, *, cwd: str = "") -> list[SessionSummary]:
-    """The sessions that this daemon can offer, optionally narrowed to one directory.
+async def browse_on(client: DaemonClient, *, cwd: str | None = None) -> list[SessionSummary]:
+    """The sessions that this daemon can offer. `cwd` narrows them to one
+    directory, and `None` keeps every session.
 
     This is a function on a bare client, beside `attach_session`, for the same
     reason. The startup picker asks this *before* there is a session to ask. A
@@ -706,10 +711,10 @@ async def attach_session(
     *,
     host: ModalHost,
     cwd: Path | None = None,
-    trust: TrustAnswer = "",
+    trust: TrustAnswer | None = None,
     hidden_screens: Collection[str] = (),
     choice: ModelChoice = ModelChoice(),
-    profile: str = "",
+    profile: str | None = None,
 ) -> DaemonSession:
     """Start or resume a session on the daemon, and catch this client up on it.
 
@@ -744,9 +749,9 @@ async def attach_session(
     # `asks` is declared **before** the attach. The desk joins a front end as it
     # attaches, and a client that declared nothing is never asked.
     await client.initialize("asks")
-    # `trust` is the answer of the user. This client asked for it and the daemon
-    # enforces it: the daemon refuses a `cwd` that nobody has vouched for
-    # (P5-14).
+    # `trust` is the answer of the user, or `None` when this client did not ask.
+    # The daemon enforces it: the daemon refuses a `cwd` that nobody has vouched
+    # for (P5-14).
     # The reply carries the header of this root, and the mirror below is built
     # on it. The header is read and not discarded. Because it is taken now, the
     # mirror can be built whole and need not be re-keyed afterwards.
@@ -956,7 +961,7 @@ def _asking_approval(host: ModalHost) -> Callable[[ApprovalAsk], Awaitable[Appro
         # `Responded` are frozen dataclasses, and an unencoded one in a frame
         # is a `TypeError` inside the task group that answers the ask. The desk
         # reads that as "this front end cannot answer" and drops the front end.
-        return ApprovalAskReply(answer=answer_to_wire(outcome), reason=reason or "")
+        return ApprovalAskReply(answer=answer_to_wire(outcome), reason=reason)
 
     return ask
 

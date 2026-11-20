@@ -22,12 +22,15 @@ from ph.json import JsonValue
 from ph.keys import NAMED_PROFILES
 from ph.paths import resolve_roots
 from ph.testing import write_host_config, write_profile
+from ph_app import profiles
 from ph_app.cli import app
 from ph_app.profiles import (
+    PROFILES,
     available_profiles,
     compose_profile,
+    profile_name,
     profile_or_exit,
-    save_named_profile,
+    sparse_text,
     unfolded_profiles,
 )
 from ph_app.profiles_cli import FoldRefused, fold_profile
@@ -112,6 +115,50 @@ def test_a_profile_file_in_the_named_format_extends_too(tmp_path: Path) -> None:
     assert rows["tool-bash"].disabled and "session-persistence" in rows
 
 
+def test_a_profile_run_by_its_path_has_no_name(tmp_path: Path) -> None:
+    """A path names a file and not a profile, so its name is `None`.
+
+    A caller that writes under the name of a profile reads this to learn that
+    there is nowhere to write. The same file under `$PH_HOME/profiles` has the
+    name of its stem. The composed `Profile` belongs to the loader, which spells
+    a profile with no name as `""`.
+
+    Sabotage: return the stem of the path from `profile_name` for a path, and a
+    file outside the profile directory answers to a name that nothing resolves.
+    """
+    text = "extends: headless\nrows:\n  - id: tool-bash\n    disabled: true\n"
+    path = tmp_path / "elsewhere.yaml"
+    path.write_text(text)
+    write_profile("work", text)
+
+    assert profile_name(str(path)) is None
+    assert profile_name("work") == "work"
+    assert compose_profile(str(path)).name == ""
+    assert compose_profile("work").name == "work"
+
+
+def test_a_profile_with_every_required_bundle_is_missing_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ "No bundle is missing" is `None`, and a missing bundle is its name.
+
+    `stabilize` is optional in `headless`, so an install with no bundle at all
+    still composes it. `rlm` requires its bundle, so the same install is told
+    which one to add.
+
+    Sabotage: answer `""` for "none missing" in `_missing_required`, and the
+    first assertion fails.
+    """
+    assert profiles._missing_required(PROFILES["rlm"]) is None
+    monkeypatch.setattr(profiles, "resolve_bundle", lambda name: None)
+
+    assert profiles._missing_required(PROFILES["headless"]) is None
+    assert profiles._missing_required(PROFILES["rlm"]) == "rlm"
+    assert "rlm" not in available_profiles() and "headless" in available_profiles()
+    with pytest.raises(ValueError, match='needs the "rlm" bundle'):
+        compose_profile("rlm")
+
+
 # --------------------------------------------------------- the round trip --
 
 
@@ -128,7 +175,7 @@ def test_a_saved_profile_composes_back_into_the_rows_it_was_saved_from() -> None
         ],
     )
 
-    path = save_named_profile("saved", composed, extends="tui", comment="Saved by a test.")
+    path = write_profile("saved", sparse_text(composed, extends="tui", comment="Saved by a test."))
     reloaded = compose_profile("saved")
 
     assert _entries(reloaded.rows) == _entries(composed.rows)
@@ -145,7 +192,7 @@ def test_a_host_row_is_in_neither_side_of_a_saved_profile() -> None:
     write_host_config("rows:\n  - id: jobs\n    config: {concurrency: {subagent: 2}}\n")
     composed = profile_or_exit("headless", ["{id: tool-bash, disabled: true}"])
 
-    path = save_named_profile("saved", composed, extends="headless", comment="")
+    path = write_profile("saved", sparse_text(composed, extends="headless", comment=""))
 
     assert [entry["id"] for entry in yaml.safe_load(path.read_text())["rows"]] == ["tool-bash"]
     assert _entries(compose_profile("saved").rows) == _entries(composed.rows)

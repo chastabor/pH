@@ -39,7 +39,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import anyio
 from anyio.abc import (
@@ -91,7 +91,6 @@ from ..params import (
     SnapshotParams,
     StageParams,
     StoreCredentialParams,
-    TrustAnswer,
 )
 from ..payloads import (
     AttachmentStored,
@@ -124,6 +123,7 @@ from ..payloads import (
     SessionStatusNotice,
     ShellReply,
     SnapshotPage,
+    StartingRoute,
 )
 from ..protocol import (
     PROTOCOL_VERSION,
@@ -144,7 +144,7 @@ from ..protocol import (
     served,
 )
 from ..shell import shell_of
-from ..trust import TrustStore, trust_path
+from ..trust import TrustAnswer, TrustStore, trust_path
 from .cards import CARD_EVENTS, presentation_of
 from .duplex import Peer
 from .framing import MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_SIZE
@@ -285,6 +285,12 @@ types exist to remove.
 """
 
 
+Unreachable: TypeAlias = Literal["removed", "replaced"]
+"""How the socket at the path of a daemon stopped being the socket of that
+daemon (`DaemonServer.check_reachable`). `removed`: the path is gone. `replaced`:
+another socket is bound there."""
+
+
 def _repeat_outcome(prior: Prior) -> RepeatOutcome:
     """`settled` only for a verb whose act was seen to finish. A verb that is still
     acting in this process is `unknown`, and so is a verb that repair or a
@@ -292,13 +298,18 @@ def _repeat_outcome(prior: Prior) -> RepeatOutcome:
     return "settled" if prior.outcome == "done" else "unknown"
 
 
-def _command_key(params: MutationParams) -> str:
+def _command_key(params: MutationParams) -> str | None:
     """The idempotence key of a client, joined at the wire edge and only here.
+    `None` when the client offered no command id, and so wants no deduplication.
+    A command id with no client id is a key with an empty client part.
 
     Every method in `MUTATIONS` takes one. Earlier the f-string was written in
     two handlers, `session/prompt` and `session/command`, although a comment
     three lines above one of them claimed that this was not the case."""
-    return f"{params.client_id}:{params.command_id}" if params.command_id else ""
+    if params.command_id is None:
+        return None
+    client = "" if params.client_id is None else params.client_id
+    return f"{client}:{params.command_id}"
 
 
 CAPABILITIES = (
@@ -551,7 +562,7 @@ class _Connection:
         """Run the act under its idempotence key, and put it on disk before any
         client is told."""
         key = _command_key(parsed)
-        if not key:
+        if key is None:
             # The client offered no identity, so it wants no deduplication.
             # The act always runs.
             reply = await mutation.act(self, root, parsed, plan)
@@ -626,9 +637,8 @@ class _Connection:
         # `cwd` belongs to the client, and the daemon is what mounts. The client
         # therefore states it here. The daemon does not assume it from its own
         # process, which runs in a place where neither the user nor the files of
-        # the user are. `or None` is used because a client that has no directory
-        # to name sends `""` or omits the field, and both mean the same thing.
-        cwd = params.cwd or None
+        # the user are. A client that has no directory to name omits the field.
+        cwd = params.cwd
         # The daemon mounts, so the daemon enforces trust. `ph_app.trust` gives
         # the reason. The check runs on every `session/new`: when a session is
         # named by id, one that the daemon would create and one that it would
@@ -675,7 +685,8 @@ class _Connection:
     async def _sessions_browse(self, params: BrowseParams) -> SessionBrowse:
         # This is daemon-level and not a `_projection` row, because it is not
         # about one root. The supervisor names the directory of the store
-        # (`sessions_directory`), and it knows which roots are held.
+        # (`sessions_directory`), and it knows which roots are held. A client
+        # with no directory to filter on omits `cwd`, which means every session.
         return SessionBrowse(sessions=browse_of(self.server.supervisor, cwd=params.cwd))
 
     async def _credentials_held(self, params: SessionParams) -> CredentialsHeldReply:
@@ -779,15 +790,14 @@ class _Connection:
             content = b64decode(encoded, validate=True)
         except BinasciiError as error:
             raise Refusal(f"contentB64 is not valid base64: {error}") from error
-        name = params.name or None
         ref = await store.save_bytes(
             content=content,
             # A client that sent no `mime` still sent a name, and `mime_for` is
             # the one rule that both routes use. With an octet-stream default
             # here, a `.png` was a document, while `--attach` called it an
-            # image.
-            mime=mime_for(params.mime or "", name or ""),
-            name=name,
+            # image. `mime_for` still spells "none" as `""`.
+            mime=mime_for(params.mime or "", params.name or ""),
+            name=params.name,
         )
         return AttachmentStored(session_id=root.id, attachment=ref)
 
@@ -868,7 +878,7 @@ class _Connection:
             return None
         root.restart_wanted = False
         back = await self.server.supervisor.restart(root)
-        if reply is None or back is None or not back.withdrew:
+        if reply is None or back is None or back.withdrew is None:
             return None
         said = f"{reply.shown}\n" if reply.shown else ""
         return reply.model_copy(update={"shown": f"{said}{back.withdrew}"})
@@ -987,11 +997,12 @@ class _Connection:
             raise AttachmentUnknown(f"no attachment {ref.attachment_id} is stored here")
         return ref
 
-    def _check_trust(self, cwd: str | None, answer: TrustAnswer) -> None:
+    def _check_trust(self, cwd: str | None, answer: TrustAnswer | None) -> None:
         """Refuse a `cwd` that nobody has vouched for. `ph_app.trust` gives the reason.
 
         `"once"` mounts and records nothing. For `"always"`, the caller records
-        the answer after the mount has succeeded.
+        the answer after the mount has succeeded. `None` means that nobody was
+        asked, and the store then decides.
         """
         if cwd is None or answer == "once":
             return
@@ -1163,7 +1174,7 @@ def _refresh_readings(root: Root) -> None:
     client redrew from the list that it held and painted the posture that it
     already had.
 
-    The status is left empty on purpose. `StatusFacts` is "as much of it as
+    The status is left out on purpose. `StatusFacts` is "as much of it as
     changed", and a reader keeps every field that a frame does not state. This
     frame therefore says that the readings moved, and claims nothing about
     where the agent is.
@@ -1469,8 +1480,8 @@ class DaemonServer:
     heartbeat_at: int = field(default_factory=now_ms)
     """When the event loop last stamped the clock (`keep_heartbeat`), in epoch ms.
     `live` measures a stuck loop by it."""
-    probe_address: str = ""
-    """`host:port` the probes answer on, or `""` when not bound (`--probe-bind`)."""
+    probe_address: str | None = None
+    """`host:port` the probes answer on, or `None` when not bound (`--probe-bind`)."""
     _leases: Path | None = field(default=None, init=False)
     """The lease directory. The first `ready` probe resolves and makes it, so each
     later probe asks the kernel one question and does not resolve the roots
@@ -1548,6 +1559,7 @@ class DaemonServer:
         started differently, and would tell the user nothing.
         """
         supervisor = self.supervisor
+        entry = supervisor.starts_on()
         return DaemonStatusReply(
             protocol_version=PROTOCOL_VERSION,
             capabilities=served(*CAPABILITIES),
@@ -1555,7 +1567,7 @@ class DaemonServer:
             socket=str(self.path),
             uptime_ms=now_ms() - self.started,
             roots=len(supervisor.roots),
-            starts_on=supervisor.starts_on(),
+            starts_on=StartingRoute.of(entry) if entry is not None else None,
             passivate_after=supervisor.passivate_after,
             next_wake=supervisor.scheduler.planned,
             next_release=supervisor.releaser.planned,
@@ -1609,7 +1621,7 @@ class DaemonServer:
             if unwritten:
                 reasons.append(f"root(s) could not be written: {', '.join(unwritten)}")
             leases = self._leases_writable()
-            if leases:
+            if leases is not None:
                 reasons.append(leases)
             if not self.resumed:
                 reasons.append("the first resume pass has not finished")
@@ -1624,12 +1636,12 @@ class DaemonServer:
                 reasons.append(f"the scheduler is {(now - planned) // 1000} s past its plan")
         return ProbeReply(name=name, ok=not reasons, reasons=reasons, checked_at=now)
 
-    def _leases_writable(self) -> str:
-        """`""` when this daemon can take a lease, else why not."""
+    def _leases_writable(self) -> str | None:
+        """`None` when this daemon can take a lease, else why not."""
         if self._leases is None:
             directory = self.supervisor.sessions_directory()
             if directory is None:
-                return ""
+                return None
             leases = lease_directory(directory)
             try:
                 make_directories(leases)
@@ -1638,7 +1650,7 @@ class DaemonServer:
             self._leases = leases
         if not os.access(self._leases, os.W_OK):
             return f"the lease directory {self._leases} is not writable"
-        return ""
+        return None
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
         """The diagnostic sections of the daemon itself, in the shape of `report()`.
@@ -1695,10 +1707,10 @@ class DaemonServer:
         """
         return lifetime(self.path)
 
-    async def check_reachable(self) -> str:
+    async def check_reachable(self) -> Unreachable | None:
         """Is the socket at our path still ours? (P5-11)
 
-        Returns `""` when it is. There are two kinds of no. They need the same
+        Returns `None` when it is. There are two kinds of no. They need the same
         record and not the same sentence. `removed` is a logout that removes
         `$XDG_RUNTIME_DIR` from under a daemon that keeps running. `replaced` is
         what happens next: the user logs back in, `phern daemon` binds a *new*
@@ -1716,11 +1728,11 @@ class DaemonServer:
         if self.identity is None or self.unreachable_since is not None:
             # Nothing to compare against (a caller that built this by hand), or
             # already latched. Either way there is no transition to find.
-            return ""
+            return None
         current = socket_identity(self.path)
         if current == self.identity:
-            return ""
-        reason = "removed" if current is None else "replaced"
+            return None
+        reason: Unreachable = "removed" if current is None else "replaced"
         life = self.socket_lifetime()
         self.unreachable_since = now_ms()
         note = {
@@ -1783,7 +1795,7 @@ class DaemonServer:
         pass that fails. If the failure were raised, it would end the task group
         and every root with it."""
         try:
-            return bool(await self.check_reachable())
+            return await self.check_reachable() is not None
         except Exception:
             log.exception("ph_app.daemon: the socket check failed")
             return False
@@ -2188,7 +2200,7 @@ async def serve(
                 ephemeral=ephemeral,
                 keep_alive=keep_alive,
                 identity=identity,
-                probe_address=_bound_address(probes) if probes is not None else "",
+                probe_address=_bound_address(probes) if probes is not None else None,
                 resumed=not resume_owed,
             )
             # The jobs that end on a clock. Each is its own task, and it sleeps

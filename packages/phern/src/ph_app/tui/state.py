@@ -246,17 +246,21 @@ class TuiState:
     `None` when nothing compacts on pressure. The daemon states it in the status
     of the root (`CompactionFacts`), from the compaction seam of the root. It is
     not in the log, so `reset` leaves it as it is."""
-    model: str = ""
-    provider: str = ""
-    model_key: str = ""
-    """The name that the profile gives the route in force, or `""` when it lists no
-    match."""
+    model: str | None = None
+    provider: str | None = None
+    """The route in force, or `None` before attach and for a root that has no
+    route. The two move together (`StatusFacts`)."""
+    model_key: str | None = None
+    """The name that the profile gives the route in force, or `None` when it lists
+    no match."""
 
     @property
-    def route(self) -> str:
+    def route(self) -> str | None:
         """The `provider/model` in force, in the spelling that `/model` accepts. It
-        is `""` before attach."""
-        return f"{self.provider}/{self.model}" if self.provider else ""
+        is `None` before attach."""
+        if self.provider is None or self.model is None:
+            return None
+        return f"{self.provider}/{self.model}"
 
     lifetime: DaemonLifetime | None = None
     """Why the daemon behind this session is still running, or `None`.

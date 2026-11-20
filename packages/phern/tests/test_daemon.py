@@ -1209,7 +1209,30 @@ async def test_a_root_with_no_workspace_restores_nothing_and_says_so(
     """
     async with supervised(tmp_path, monkeypatch) as supervisor:
         root = await supervisor.start("advisory")
-        assert supervisor._restore_point(root) == (None, "")
+        assert supervisor._restore_point(root) == (None, None)
+
+
+async def test_a_root_that_took_no_restore_point_has_no_tree_to_go_back_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root can have a workspace and no `workspace/checkpoint` yet.
+
+    The ladder then has no tree to put back, and it must not open a restore.
+    The seam answers `""` for such an agent. `_restore_point` turns that into
+    `None`, which is what the ladder tests before it restores.
+
+    Sabotage: drop the `stated` around `latest_checkpoint` in `_restore_point`,
+    and the ladder is handed a tree named `""` to restore.
+    """
+    async with supervised(tmp_path, monkeypatch) as supervisor:
+        root = await supervisor.start("unmarked")
+        seam = root.ctx.require(WORKSPACE)
+        monkeypatch.setattr(type(seam), "of", lambda self, agent_id: object())
+
+        workspace, tree = supervisor._restore_point(root)
+
+        assert workspace is not None
+        assert tree is None
 
 
 async def test_a_retry_is_on_disk_before_its_restore_runs(
@@ -2148,7 +2171,7 @@ async def test_a_second_daemons_socket_is_not_mistaken_for_a_recovery(
     socket = reaped_host() / "daemon.sock"
     async with running(tmp_path, path=socket) as daemon:
         await daemon.running.supervisor.start("held")
-        assert await daemon.running.check_reachable() == "", "its own socket, unchanged"
+        assert await daemon.running.check_reachable() is None, "its own socket, unchanged"
 
         socket.unlink()
         socket.touch()  # logind remade the directory; somebody remade the socket
@@ -2233,7 +2256,7 @@ async def test_a_hand_built_server_with_no_bound_socket_watches_nothing(
             path=tmp_path / "nowhere.sock",
         )
         assert built.identity is None
-        assert await built.check_reachable() == ""
+        assert await built.check_reachable() is None
         assert built.status().unreachable_since is None
         tasks.cancel_scope.cancel()
 

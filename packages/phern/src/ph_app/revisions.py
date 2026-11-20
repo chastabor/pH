@@ -1,18 +1,26 @@
-"""A log's revisions, read with nothing mounted: one reading of each, for `/diff` and for
-training rows (`phern revisions`).
+"""The revisions of a log, read with nothing mounted: one reading of each, for `/diff`
+and for training rows (`phern revisions`).
 
-`/diff` (`ph_app.tui.diffs`) shows each revision to a person; the export writes the
-same revisions as JSON lines, one per change, for diagnosis and training data. Both read
-a revision here (`read_revision`), so a row and a screen agree about what a change was.
+`/diff` (`ph_app.tui.diffs`) shows each revision to the user. The export writes
+the same revisions as JSON lines, one line for each change, for diagnosis and
+training data. Both read a revision here (`read_revision`), so a row and a
+screen agree about what a change was.
 
-**A row is one change, whoever made it**, read through core alone, since the app may
-not import a bundle to learn its types (`test_app_layering.py`): what it replaced and
-what it is now, as `render_messages` renders both; the records its producer wrote
-through the revision door (`Session.records_of`), whole; the size the door wrote; and
-the tool calls those records name by `callId`. For a model's own context edit that is
-the call that asked for it; for the overflow clip, the call whose result was clipped.
+**A row is one change, whoever made it.** It is read through core alone, because
+the app may not import a bundle to learn its types (`test_app_layering.py`). A
+row holds:
 
-Textual-free, like `ph_app.stored`, so exporting a log does not load a terminal UI.
+- what the change replaced and what it is now, as `render_messages` renders
+  both;
+- the records that its producer wrote through the revision door
+  (`Session.records_of`), whole;
+- the size that the door wrote;
+- the tool calls that those records name by `callId`. For a context edit by the
+  model itself, that is the call that asked for the edit. For the overflow clip,
+  it is the call whose result was clipped.
+
+This module does not import Textual, like `ph_app.stored`, so an export of a log
+does not load a terminal UI.
 
 @module ph_app.revisions
 """
@@ -51,8 +59,8 @@ class Revision:
     event: SessionEvent
     shape: RevisionShape
     replaced: tuple[int, ...]
-    producer: str
-    """The plugin its message names as its author, `""` when it names none."""
+    producer: str | None
+    """The plugin that its message names as its author, `None` when it names none."""
     records: tuple[SessionEvent, ...]
     size: RevisionSize | None
 
@@ -65,7 +73,7 @@ class Revision:
 
 
 def read_revision(session: Session, event: SessionEvent) -> Revision:
-    """The replacement `event`, read once for every reader."""
+    """The replacement `event`, read one time for every reader."""
     kind, plugin, _ = source_of(event.data)
     records = session.records_of(event.seq)
     return Revision(
@@ -73,16 +81,18 @@ def read_revision(session: Session, event: SessionEvent) -> Revision:
         event=event,
         shape=shape_of(event),
         replaced=shadowed_by(event),
-        producer=plugin if kind == "plugin" else "",
+        producer=plugin if kind == "plugin" else None,
         records=records,
         size=recorded_size(records),
     )
 
 
 def recorded_size(records: Sequence[SessionEvent]) -> RevisionSize | None:
-    """The size a record of this change alone gave, as the door wrote it. One across
-    them: two would be two claims about one change, and choosing between them is
-    interpreting a producer. A record of several changes sizes none."""
+    """The size that a record of this change alone gave, as the door wrote it.
+
+    Exactly one such size across the records is accepted. Two would be two
+    claims about one change, and to choose between them is to interpret a
+    producer. A record of several changes gives no size."""
     sizes = [
         size
         for record in records
@@ -92,7 +102,7 @@ def recorded_size(records: Sequence[SessionEvent]) -> RevisionSize | None:
 
 
 def revision_rows(session: Session) -> Iterator[JsonObject]:
-    """One row per revision in the log, in log order."""
+    """One row for each revision in the log, in log order."""
     revisions = [
         read_revision(session, event)
         for event in session.events
@@ -115,7 +125,7 @@ def revision_rows(session: Session) -> Iterator[JsonObject]:
             "time": event.time,
             "shape": revision.shape,
             "replaces": list(revision.replaced),
-            "producer": revision.producer or None,
+            "producer": revision.producer,
             "before": before,
             "after": after,
             "records": [
@@ -132,8 +142,9 @@ def revision_rows(session: Session) -> Iterator[JsonObject]:
 
 
 def _calls(session: Session, named: set[str]) -> dict[str, ToolCallBlock]:
-    """The tool calls `named`, by id, as first written: read off the model's replies
-    only while some are still to find, and not at all when none is named."""
+    """The tool calls `named`, by id, as first written. They are read off the
+    replies of the model only while some are still to find, and not at all when
+    none is named."""
     found: dict[str, ToolCallBlock] = {}
     for event in session.events if named else ():
         if event.type != "assistant/message" or is_replacement_surface_event(event):

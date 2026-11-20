@@ -37,7 +37,7 @@ from ph.paths import resolve_roots
 from ph.persistence import JsonlSessionStore
 from ph.seams.live_index import LiveEntry, LiveIndex
 from ph.session import now_ms
-from ph.testing import log_event, raising, stored_types
+from ph.testing import log_event, not_none, raising, stored_types
 from ph_app.daemon.notify import notify, watchdog_interval
 from ph_app.daemon.probes import parse_bind
 from ph_app.daemon.server import DaemonUnavailable, serve
@@ -361,7 +361,7 @@ async def test_the_probes_answer_over_tcp_with_the_code_an_orchestrator_reads(
     tmp_path: Path,
 ) -> None:
     async with running(tmp_path, probe="127.0.0.1:0") as daemon:
-        address = daemon.running.probe_address
+        address = not_none(daemon.running.probe_address)
         assert address.startswith("127.0.0.1:")
         assert daemon.running.status().probe == address
         code, body = await http(address, "GET /ready HTTP/1.1\r\nHost: probe\r\n\r\n")

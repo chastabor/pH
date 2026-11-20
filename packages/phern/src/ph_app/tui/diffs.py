@@ -141,9 +141,9 @@ class DiffEntry:
     ordered by it."""
     title: str
     summary: str
-    producer: str
+    producer: str | None
     """Who made the change, as the log reports it: the name of a plugin, or the
-    types of the records beside the change. It is empty when the log does not
+    types of the records beside the change. It is `None` when the log does not
     say."""
     texts: Callable[[], tuple[str, str]] = field(compare=False, repr=False)
     """`(before, after)`, rendered on each call and kept by nobody here."""
@@ -177,7 +177,8 @@ class DiffGroup:
     @property
     def producers(self) -> str:
         """Who made its changes, each producer one time, oldest first."""
-        return ", ".join(dict.fromkeys(entry.producer for entry in self.entries if entry.producer))
+        named = (entry.producer for entry in self.entries if entry.producer is not None)
+        return ", ".join(dict.fromkeys(named))
 
 
 DiffSource: TypeAlias = Callable[[Session], list[DiffGroup]]
@@ -222,12 +223,18 @@ def _entry(session: Session, event: SessionEvent) -> DiffEntry:
         seq=event.seq,
         title=revision.shape,
         summary=stated or _summary(revision.shape, event, revision.replaced),
-        producer=revision.producer or ", ".join(dict.fromkeys(record.type for record in records)),
+        producer=revision.producer or _beside(records),
         texts=revision.texts,
         facts=tuple(_facts(session, event, revision.shape, revision.replaced)),
         records=records,
         recorded=revision.size,
     )
+
+
+def _beside(records: Sequence[ProducerRecord]) -> str | None:
+    """The types of the records beside a change, each type one time. `None` when
+    no record is beside it."""
+    return ", ".join(dict.fromkeys(record.type for record in records)) or None
 
 
 SOURCES: tuple[DiffSource, ...] = (revisions,)
