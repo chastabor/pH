@@ -154,7 +154,6 @@ topics:
             - ["`shutdownGraceSeconds`", "5", "how long after `shutdown` before the process group is killed"]
             - ["`cancelGraceSeconds`", "2", "how long a canceled cell has before the guest is killed"]
             - ["`probeSeconds`", "1", "the `ping` interval; `null` sends none"]
-            - ["`sweepOrphans`", "true", "read and ignored; the `subprocess-local` row sweeps"]
       - title: Two things passed in the environment, not in boot
         list:
           - "`PH_RUNTIME_FD`: the number of the inherited descriptor. `pass_fds` keeps the parent's number, so the host names it. 3 when unset."

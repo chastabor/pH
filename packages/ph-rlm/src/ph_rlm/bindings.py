@@ -1,30 +1,30 @@
-"""`rlm-bindings` — the `rlm` namespace, as governed tool calls (P3-10, C2/C3).
+"""`rlm-bindings`: the `rlm` namespace, as governed tool calls (P3-10, C2/C3).
 
-Prime Agent's `await rlm("task", name=..., model=...)` traveled over a Jupyter
-comm channel as a `host.request`, which meant it was invisible to
+In prime-agent, `await rlm("task", name=..., model=...)` traveled over a Jupyter
+comm channel as a `host.request`. The call was therefore invisible to
 `tools/pre-execute`, to `ctx.approval`, to the call limits and to the offload
-policy. Here the same call is a **binding**: one `call` frame out of the kernel,
-through the whole tool pipeline, landing as a durable
+policy. Here the same call is a **binding**. It leaves the kernel as one `call`
+frame, goes through the whole tool pipeline, and is recorded as a durable
 `tool/code-dispatch-start`/`tool/code-dispatch` pair. A deployment can therefore
 deny or `ask` on subagent spawning by policy, and `max_subagent_spawns_per_run`
-counts it, without a line of code here.
+counts the call. Neither needs any code in this module.
 
-Two decisions worth stating:
+Two decisions need a statement:
 
-**The program-facing name is not the tool name.** A cell writes `rlm.run(...)`;
-the governed tool is `rlm_run`. A namespace cannot claim a bare global name like
-`run` — and it does not need to, because the SDK renders the namespaced form
-while the log records the tool. Only the tools exist as a registry surface, so a
-policy row addresses `rlm_run` and means exactly one thing.
+**The name that a program uses is not the tool name.** A cell writes
+`rlm.run(...)`, and the governed tool is `rlm_run`. A namespace cannot claim a
+bare global name such as `run`. It does not need to, because the SDK renders the
+namespaced form and the log records the tool. Only the tools exist as a registry
+surface, so a policy row that addresses `rlm_run` means exactly one thing.
 
-**Spawning is `counts_as_spawn`.** The bridge holds it to C4's spawn budget
-rather than the general dispatch budget, so one approved cell cannot fan out
-past `max_subagent_spawns_per_run` on the strength of that one approval.
+**Spawning is `counts_as_spawn`.** The bridge counts a spawn against the spawn
+budget of C4 as well as against the general dispatch budget. One approved cell
+therefore cannot fan out past `max_subagent_spawns_per_run` on that one approval.
 
-`find_models` is deliberately absent: it would need a model *catalog* on
-`ctx.llm`, which does not exist yet. Advertising a discovery call that could only
-answer "I don't know" would be worse than not offering one, and the model already
-inherits the parent's model when it names none.
+`find_models` is deliberately absent. It would need a model *catalog* on
+`ctx.llm`, which does not exist yet. A discovery call that could only answer "I
+don't know" would be worse than no call. A child that names no model already
+inherits the model of its parent.
 
 @module ph_rlm.bindings
 """
@@ -78,33 +78,40 @@ class RunArgs(ToolModel):
     prompt: str
     name: str | None = None
     model: str | None = None
-    """A model your profile lists, by key; `None` runs the child on your own (S7b)."""
+    """The key of a model that the profile of the caller lists. `None` runs the
+    child on the model of the caller (S7b)."""
     output: dict[str, Any] | None = None
-    """A JSON Schema object for the result you need back. The child returns a value
-    matching it, which reaches you in its ending message and its roster row, or it
-    fails. A skill you give it may declare one; this overrides it."""
+    """A JSON Schema object for the result that the caller needs back. The child
+    returns a value that matches it, or the child fails. The value reaches the
+    caller in the ending message of the child and in its roster row. A skill that
+    the child is given may declare a schema, and this argument overrides it."""
     thinking: str | None = None
-    """A reasoning effort for the child, by a name its model's profile defines, or
-    `default` for its provider's own. `None` runs it at what its skills or its model
-    name."""
+    """A reasoning effort for the child. The value is a name that the profile
+    defines for the model of the child, or `default` for the effort of the
+    provider itself. `None` runs the child at the effort that its skills or its
+    model name."""
     access: Access = "read"
-    """`read` | `write`. Defaults to `read` (E4): a child that only needs to read
-    must not be handed a writable repo because nobody said otherwise. Typed, so
-    pydantic validates it and the model sees the two values in the schema."""
+    """`read` | `write`. The default is `read` (E4). A child that only needs to
+    read must not get a writable repo because nobody said otherwise. The field is
+    typed, so pydantic validates it and the model sees the two values in the
+    schema."""
     preset: str | None = None
-    """A named kind of child this deployment configured. Fills in what you did not
-    name; it cannot give the child more than you have (P4-13b)."""
+    """A named kind of child that this deployment configured. It fills in what the
+    caller did not name. It cannot give the child more than the caller has
+    (P4-13b)."""
     skills: tuple[str, ...] | None = None
-    """Skills the child gets, by name from your own catalog. Naming one is also an
-    instruction: its full text goes in the child's prompt, so the child starts by
-    following that procedure rather than having to fetch it. `None` gives it
-    everything you have; you cannot name a skill you do not have (P4-13b)."""
+    """The skills that the child gets, by name from the catalog of the caller. To
+    name a skill is also an instruction: the full text of the skill goes in the
+    prompt of the child. The child therefore starts by following that procedure
+    and does not have to fetch it. `None` gives the child every skill that the
+    caller has. The caller cannot name a skill that it does not have (P4-13b)."""
     tools: tuple[str, ...] | None = None
-    """Tools the child may call. `None` gives it everything you have. You cannot
-    name a tool you do not have."""
+    """The tools that the child may call. `None` gives the child every tool that
+    the caller has. The caller cannot name a tool that it does not have."""
     profile: str | None = None
-    """A named profile for the child: it keeps only what that profile runs of what
-    you hold. One that would give it more than you have is refused (S7b)."""
+    """A named profile for the child. The child keeps only what that profile runs
+    of what the caller holds. A profile that would give the child more than the
+    caller has is refused (S7b)."""
 
 
 class DeleteArgs(ToolModel):
@@ -114,19 +121,21 @@ class DeleteArgs(ToolModel):
 
 class WaitArgs(ToolModel):
     child_id: str
-    """The child to wait for: the `childId` its spawn handed back."""
+    """The child to wait for: the `childId` that its spawn returned."""
 
 
 class Settled(WireModel):
-    """What a wait hands back for a child that ended `done`: what it said, and its value."""
+    """What a wait returns for a child that ended `done`: the answer of the child,
+    and its value."""
 
     answer: str = ""
     value: dict[str, Any] | None = None
-    """The child's value, for one asked for an `output`, checked against it."""
+    """The value of the child, checked against the `output` schema. It is set for
+    a child that was asked for an `output`."""
 
 
 class SpawnHandle(WireModel):
-    """What a spawn hands back. Deliberately not the answer."""
+    """What a spawn returns. It is deliberately not the answer."""
 
     child_id: str
     name: str
@@ -135,23 +144,27 @@ class SpawnHandle(WireModel):
     requested_access: Access
     granted_access: Access
     note: str | None = None
-    """How the child was admitted, in the seam's sentences (`admission_notes`): a
-    narrower access than asked, or a model its skill asked for that it runs without.
+    """How the child was admitted, in the sentences of the seam
+    (`admission_notes`): a narrower access than was asked for, a model that its
+    skill asked for and that it runs without, media that it cannot see, or a
+    reasoning effort that it runs without.
 
-    The model needs prose; the *log* keeps the codes. One generator, so the two
-    cannot disagree and neither goes stale when the workspace tier lands."""
+    The model needs prose, and the *log* keeps the codes. One generator writes the
+    sentences, so the two cannot disagree, and neither goes stale when the
+    workspace tier lands."""
 
 
 class Config(WireModel):
-    """Row config for `rlm-bindings`."""
+    """The row config for `rlm-bindings`."""
 
     provider: str = PROVIDER_NAME
-    """Which `ctx.subagents` provider `rlm.run` delegates to."""
+    """The `ctx.subagents` provider that `rlm.run` delegates to."""
 
 
 def _spawn_handle(run: SubagentRun) -> dict[str, Any]:
-    """What a spawn hands back for the child `run` names, whether the spawn just
-    admitted it or the child's own log says, on resume, that it did."""
+    """What a spawn returns for the child that `run` names. Either the spawn just
+    admitted the child, or, on a resume, the log of the child says that the spawn
+    admitted it."""
     return SpawnHandle(
         child_id=run.id,
         name=run.name,
@@ -184,16 +197,17 @@ async def apply(ctx: Context, config: Config) -> None:
     async def run_child(args: RunArgs, run: ToolRunContext) -> dict[str, Any]:
         if run.agent is None:
             raise ToolCallError(RUN_TOOL, "this tool has to be called by an agent")
-        # **Not caught and re-raised** (D15): `SubagentSpawnError` is a
-        # `HarnessError`, so the code, the `failure_kind` and whether the turn
-        # should end reach `registry._failure` instead of being flattened here.
+        # The error is **not caught and re-raised** here (D15).
+        # `SubagentSpawnError` is a `HarnessError`, so the code, the
+        # `failure_kind` and whether the turn should end all reach
+        # `registry._failure`. A catch here would flatten them.
         handle = await ctx.require(SUBAGENTS).start(
             config.provider,
             SubagentRequest(
                 prompt=args.prompt,
                 parent=run.agent,
-                # The boundary the ceiling is computed in, stated rather than
-                # derived from the routing target (P6-31, P6-24).
+                # The boundary in which the ceiling is computed. It is stated here
+                # and not derived from the routing target (P6-31, P6-24).
                 scope=run.scope,
                 name=args.name,
                 reasoning_effort=args.thinking,
@@ -204,38 +218,45 @@ async def apply(ctx: Context, config: Config) -> None:
                 preset=args.preset,
                 skills=args.skills,
                 tools=args.tools,
-                # The dispatch's own id inside a cell, the model's call id outside
-                # one — whichever record a crash leaves for `reconciled_spawn`.
+                # Inside a cell, this is the id of the dispatch itself. Outside a
+                # cell, it is the call id of the model. In both cases it is the
+                # record that a crash leaves for `reconciled_spawn`.
                 call_id=run.call_id,
             ),
         )
         return _spawn_handle(handle)
 
     async def reconciled_spawn(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
-        """Did an `rlm.run` a crash cut short admit a child? The children's own logs
-        say (S2).
+        """Whether an `rlm.run` that a crash cut short admitted a child. The logs
+        of the children give the answer (S2).
 
-        The call's whole value is the admission handle, and the admission reaches the
-        child's disk before the child runs — so the child is the answer: `Done` with
-        the handle it would have returned, whatever the child has done since (the
-        resume sweep is what puts it back to work), and `NotDone` when no admission
-        names this call, since then no child was started and spawning is what the
-        program asked. Read off the store (`load_children`): this is asked while the
-        parent resumes, before any child is open.
+        The whole value of the call is the admission handle, and the admission
+        reaches the disk of the child before the child runs. The child is
+        therefore the answer:
+
+        * `Done`, with the handle that the call would have returned, when an
+          admission names this call. What the child has done since then does not
+          matter, because the resume sweep puts the child back to work.
+        * `NotDone` when no admission names this call. No child was started, and
+          a spawn is what the program asked for.
+
+        The children are read from the store (`load_children`), because this
+        question is asked while the parent resumes, before any child is open.
         """
         children = await ctx.require(SUBAGENTS).load_children(session.id, session.header.family)
         child = admitted_by(children, call)
         return NotDone() if child is None else Done(_spawn_handle(child.run()))
 
     def list_children(_args: object, run: ToolRunContext) -> dict[str, Any]:
-        """The children, each as its own log tells it — never a side table."""
+        """The children, each as its own log describes it. There is no side table."""
         session = run.session
         children = ctx.require(SUBAGENTS).children(session.id) if session is not None else {}
         return {"children": [state.to_wire() for state in children.values()]}
 
     async def wait_for_child(args: WaitArgs, run: ToolRunContext) -> dict[str, Any]:
-        """A failed child fails the call with its last text kept; a canceled wait stops
-        waiting and leaves the child working, where `task` releases it."""
+        """A failed child fails the call, and the error keeps the last text of the
+        child. A canceled wait stops waiting and leaves the child working. The
+        `task` tool, in contrast, releases the child."""
         session = run.session
         try:
             awaited = ctx.require(SUBAGENTS).waiter(session.id if session else "", args.child_id)
@@ -304,7 +325,8 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
     def namespace(request: CodeBindingsRequest) -> CodeBindingNamespace:
-        """`rlm.run` / `.list_subagents` / `.delete_subagent`, bound to the run."""
+        """`rlm.run` / `.list_subagents` / `.wait` / `.delete_subagent`, bound to
+        the run."""
         view = ctx.require(TOOLS).view(request.scope)
         specs = (
             ("run", RUN_TOOL, True),
@@ -315,8 +337,9 @@ async def apply(ctx: Context, config: Config) -> None:
         bindings = [
             governed_binding(request, public, definition.schema(), counts_as_spawn=spawns)
             for public, tool_name, spawns in specs
-            # A tool restricted away for this agent is absent from the SDK block
-            # too, so the prompt cannot offer what a cell could not call.
+            # A tool that is restricted away for this agent is also absent from
+            # the SDK block. The prompt therefore cannot offer what a cell could
+            # not call.
             if (definition := view.visible.get(tool_name)) is not None
         ]
         return CodeBindingNamespace(

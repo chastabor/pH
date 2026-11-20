@@ -824,8 +824,8 @@ def test_the_bundle_is_discoverable_without_importing_it() -> None:
     """The entry point is the whole coupling between a profile and this package.
 
     `phern` must be able to compose a profile that layers this bundle without
-    depending on this distribution. The profile therefore discovers the bundle
-    through the `ph.bundles` group. With a typo in that entry point, the profile
+    importing this package. The profile therefore discovers the bundle through
+    the `ph.bundles` group. With a typo in that entry point, the profile
     would fail for a user, and nothing else in the suite would notice.
     """
     from ph.bundles import installed_bundles, resolve_bundle
@@ -891,9 +891,9 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
     waits on would fail here and in no other place.
 
     This is asserted from this package because the profile exists for it.
-    `phern` owns the `PROFILES` entry and cannot test it. Nothing in `phern`
-    depends on the two indexing distributions, which is the purpose of
-    discovering them as bundles.
+    `phern` owns the `PROFILES` entry and cannot test it. `ph_app` imports
+    neither of the two indexing packages, which is the purpose of discovering
+    them as bundles.
     """
     from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
     from ph_app.profiles import resolve_profile

@@ -1,19 +1,19 @@
-"""`rlm-skills-python` — the half of a skill that only Code Mode can use (P3-18).
+"""`rlm-skills-python`: the half of a skill that only Code Mode can use (P3-18).
 
-A skill is a directory with a `SKILL.md`, and `ph.seams.skills` owns that:
-the format, the limits, the registry, the catalog, and the `skill` tool that
-hands the model a body. This row owns the part that is only true here — **a
-skill directory that is also an installable package** gets installed into the
-kernel venv and its import name handed to every kernel at boot, so `await
-name(...)` works inside a cell.
+A skill is a directory with a `SKILL.md`. `ph.seams.skills` owns that part: the
+format, the limits, the registry, the catalog, and the `skill` tool that gives
+the model a body. This row owns the part that is true only here. **A skill
+directory that is also an installable package** is installed into the kernel
+venv, and its import name is given to every kernel at boot. `await name(...)`
+therefore works inside a cell.
 
-Which is why the catalog entry is a `hint` on the registered skill rather than a
-second prompt section: the model should be told about a skill once, in one list,
-with the ways it can actually be used attached to it.
+That is why the catalog entry is a `hint` on the registered skill and not a
+second prompt section. The model must be told about a skill one time, in one
+list, with the ways that the skill can be used attached to it.
 
-**Two lists, deliberately.** `skills` is what to install and `skill_modules` is
-what to import — a distribution named `acme-websearch` imports as
-`acme_websearch`, so one list could not answer both.
+**There are two lists, deliberately.** `skills` is what to install, and
+`skill_modules` is what to import. A distribution named `acme-websearch` imports
+as `acme_websearch`, so one list could not answer both questions.
 
 @module ph_rlm.skills
 """
@@ -43,14 +43,15 @@ log = logging.getLogger("ph_rlm.skills")
 
 
 class Config(WireModel):
-    """Row config for `rlm-skills-python`."""
+    """The row config for `rlm-skills-python`."""
 
     paths: list[str] = Field(default_factory=list)
-    """Directories to scan, earliest first. Each holds `<name>/SKILL.md`.
+    """The directories to scan, earliest first. Each one holds `<name>/SKILL.md`.
 
-    Ordered because the last source wins: a project directory listed after a
-    user one shadows it by name, which is the layering `skills-progressive`
-    adopts (Deep Agents' base → user → project → team)."""
+    The order matters because the last source wins. A project directory that is
+    listed after a user directory shadows it by name. That is the layering that
+    `skills-progressive` adopts (base → user → project → team, from Deep
+    Agents)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +64,10 @@ class PythonSkill:
 
     @property
     def directory(self) -> Path:
-        """Derived, so a wrapper cannot hold a directory that disagrees with the
-        skill it wraps — `python_half` is the only constructor and computed it
-        from the same field anyway."""
+        """The directory of the skill. It is derived, so a wrapper cannot hold a
+        directory that disagrees with the skill that it wraps. `python_half` is
+        the only constructor, and it computed the directory from the same field
+        anyway."""
         return Path(self.skill.path or ".").parent
 
     @property
@@ -82,19 +84,21 @@ class PythonSkill:
 def python_half(skill: Skill) -> PythonSkill:
     """Pair a discovered skill with its package facts.
 
-    Derived from the skill's own path rather than re-scanned: the seam already
-    found the file and validated it, and a second walk of the same directories
-    is a second answer to "which skills are installed" waiting to disagree.
+    The facts are derived from the path of the skill itself, and the directories
+    are not scanned again. The seam already found the file and validated it. A
+    second walk of the same directories would be a second answer to "which skills
+    are installed", and the two answers could disagree.
     """
     return PythonSkill(skill=skill, module=_module_name(Path(skill.path or ".").parent))
 
 
 def _module_name(directory: Path) -> str | None:
-    """The import name a skill directory provides, or `None`.
+    """The import name that a skill directory provides, or `None`.
 
-    Read from `pyproject.toml` rather than guessed from the directory: a package
-    named `acme-websearch` imports as `acme_websearch`, and a `[project] name`
-    that disagrees with the folder is the normal case, not the odd one.
+    The name is read from `pyproject.toml` and not guessed from the directory. A
+    package named `acme-websearch` imports as `acme_websearch`, and a
+    `[project] name` that disagrees with the folder is the normal case, not the
+    unusual one.
     """
     manifest = directory / "pyproject.toml"
     if not manifest.is_file():
@@ -109,7 +113,7 @@ def _module_name(directory: Path) -> str | None:
 
 
 class _SkillHolder(Protocol):
-    """What `give_to_runtime` writes: `PythonCodeRuntime`'s two skill lists."""
+    """What `give_to_runtime` writes: the two skill lists of `PythonCodeRuntime`."""
 
     skills: tuple[str, ...]
     skill_modules: tuple[str, ...]
@@ -118,26 +122,29 @@ class _SkillHolder(Protocol):
 def give_to_runtime(
     ctx: Context, runtime: _SkillHolder, requirements: tuple[str, ...], modules: tuple[str, ...]
 ) -> None:
-    """Add a row's skills to the runtime's lists, and take them back as the row goes.
+    """Add the skills of a row to the lists of the runtime, and take them back
+    when the row goes.
 
-    **Taken back, one occurrence each** (Holdings rules 2 and 4): the row appended
-    and kept nothing to undo it with, so a row mounted again added its packages a
-    second time, and one let go left them for every later kernel to install and
-    import. Another row's entries, an equal one included, are left where they are.
+    **The skills are taken back, one occurrence each** (Holdings rules 2 and 4).
+    The row used to append and keep nothing to undo the append with. A row that
+    was mounted again then added its packages a second time, and a row that was
+    let go left its packages for every later kernel to install and import. The
+    entries of another row are left where they are, including an entry that is
+    equal.
     """
 
     def take_back() -> None:
         runtime.skills = _without(runtime.skills, requirements)
         runtime.skill_modules = _without(runtime.skill_modules, modules)
 
-    # The take-back before the write it undoes (Holdings rule 1).
+    # The take-back is registered before the write that it undoes (Holdings rule 1).
     ctx.add_disposer(take_back, label="rlm-skills-python(runtime)")
     runtime.skills = (*runtime.skills, *requirements)
     runtime.skill_modules = (*runtime.skill_modules, *modules)
 
 
 def _without(held: tuple[str, ...], gone: tuple[str, ...]) -> tuple[str, ...]:
-    """`held` less one occurrence of each of `gone`, in order."""
+    """`held` without one occurrence of each item of `gone`, in order."""
     left = list(held)
     for one in gone:
         if one in left:
@@ -149,11 +156,12 @@ def _without(held: tuple[str, ...], gone: tuple[str, ...]) -> tuple[str, ...]:
 async def apply(ctx: Context, config: Config) -> None:
     """Discover skills, register them, and make their packages importable.
 
-    Injects `python_runtime` rather than reading a config knob on it: the venv
-    and the boot frame are the runtime's to own, and this row is the one that
-    knows which packages a skill directory provides. Contributed at mount, which
-    is before the interpreter is resolved (it is lazy) and before any kernel
-    boots — so nothing has to be rebuilt or restarted for a skill to be there.
+    The row injects `python_runtime` and does not read a config setting on it.
+    The venv and the boot frame belong to the runtime, and this row is the one
+    that knows which packages a skill directory provides. The skills are
+    contributed at mount. That is before the interpreter is resolved (it is lazy)
+    and before any kernel boots, so nothing must be rebuilt or restarted for a
+    skill to be there.
     """
     if not config.paths:
         return

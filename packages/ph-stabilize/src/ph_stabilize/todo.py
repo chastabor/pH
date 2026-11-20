@@ -289,22 +289,24 @@ class PlanError(ValueError):
     wrongly for the rest of the session."""
 
 
+# **`TodoItem` is where the port forks from langchain** (P7-16). The upstream
+# `Todo` is `{content, status}` and has no `requires`. The upstream prompt works
+# around that absence in prose ("When blocked, create a new task describing what
+# needs to be resolved"). That is a dependency graph written as a naming
+# convention, and nothing can read it, order it or check it. A declared
+# dependency can be checked: a reference to nothing, a self-reference and a cycle
+# are all refused, and `blocked_by` answers what can really be started.
+#
+# There is still no `activeForm`, on purpose. The reason was never that upstream
+# lacks it. pH renders a glyph beside the content in both the sidebar and the
+# prompt, so a second phrasing of one task would be a field with no reader.
+# `requires` has three readers.
+#
+# This history is a comment and not part of the class docstring. Pydantic copies
+# the class docstring into the JSON schema of `write_todos`, so the model reads
+# it on every request. The docstring therefore says only what an entry is.
 class TodoItem(ToolModel):
-    """One entry: what the step is, how far it has got, and what it waits on.
-
-    **This is where the port forks from langchain** (P7-16). The upstream `Todo`
-    is `{content, status}` and has no `requires`. The upstream prompt works
-    around that absence in prose ("When blocked, create a new task describing
-    what needs to be resolved"). That is a dependency graph written as a naming
-    convention, and nothing can read it, order it or check it. A declared
-    dependency can be checked: a reference to nothing, a self-reference and a
-    cycle are all refused, and `blocked_by` answers what can really be started.
-
-    There is still no `activeForm`, on purpose. The reason was never that
-    upstream lacks it. pH renders a glyph beside the content in both the sidebar
-    and the prompt, so a second phrasing of one task would be a field with no
-    reader. `requires` has three readers.
-    """
+    """One entry: what the step is, where it has got to, and what it waits on."""
 
     content: str = Field(
         description="What the step is.",

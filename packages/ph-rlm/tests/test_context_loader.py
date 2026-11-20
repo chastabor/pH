@@ -1,20 +1,22 @@
 """The context loader (P3-17): a corpus reached through bindings, not a variable.
 
-The row's gates, one test each: *queries produce dispatch records and are
-individually offloadable; the corpus rehydrates after restart.*
+The gates of the row, with one test for each: *queries produce dispatch records
+and are individually offloadable; the corpus rehydrates after restart.*
 
-The first is the whole argument for this shape. A corpus in the kernel namespace
-queried as `context.search(...)` yields no `call` frame — the results reach the
-model as merged cell stdout, capped but never offloaded, with nothing to attribute
-a query to. Registered tools reached as `await tools.context_search(...)` yield
-one governed dispatch per query, which is what lets `tools/post-execute` reshape
-one oversized result and leave its siblings alone (C5).
+The first gate is the whole argument for this shape. A corpus in the kernel
+namespace that is queried as `context.search(...)` yields no `call` frame. The
+results reach the model as merged cell stdout, capped but never offloaded, with
+nothing to attribute a query to. Registered tools that are reached as
+`await tools.context_search(...)` yield one governed dispatch for each query.
+That lets `tools/post-execute` reshape one oversized result and leave the other
+results alone (C5).
 
-## Why `_joined` is built once and sliced
+## Why `_joined` is built one time and sliced
 
-`chunk` slices it through the offsets `Document` already keeps, so paging a large
-corpus is arithmetic per call. The first version rebuilt — and, for lines, re-split
-— the whole corpus on **every page of a walk that exists to visit all of it**.
+`chunk` slices it through the offsets that `Document` already keeps, so to page a
+large corpus is arithmetic for each call. The first version rebuilt the whole
+corpus, and for lines also split it again, on **every page of a walk that exists
+to visit all of it**.
 """
 
 from __future__ import annotations
@@ -33,7 +35,14 @@ from ph.json import as_seq
 from ph.keys import SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.system_prompt import render_prompt
 from ph.tools import Accept, ToolExecution
-from ph_rlm.context_loader import LOADED, Corpus, Document, render_manifest
+from ph_rlm.context_loader import (
+    LOADED,
+    ContextSource,
+    Corpus,
+    Document,
+    _resolve,
+    render_manifest,
+)
 from ph_rlm.keys import CONTEXT_CORPUS
 
 pytestmark = pytest.mark.anyio
@@ -53,8 +62,8 @@ def row(sources: list[dict[str, Any]], **config: object) -> dict[str, Any]:
 def loaded(mounted_runtime: MountedRuntime, tmp_path: Path) -> Loaded:
     """`await loaded(sources=…)` → `(ctx, session, agent)` on the real runtime.
 
-    The real kernel, because the load-bearing claim is about what a *cell* sees
-    when it calls one of these tools.
+    The kernel is real, because the main claim is about what a *cell* sees when
+    it calls one of these tools.
     """
 
     async def build(
@@ -80,14 +89,14 @@ def loaded(mounted_runtime: MountedRuntime, tmp_path: Path) -> Loaded:
 
 
 def test_a_document_indexes_its_lines_without_splitting_it() -> None:
-    """Offsets, not a tuple of lines: a corpus worth this row would otherwise
-    hold every line as its own string for the life of the process."""
+    """Offsets, not a tuple of lines. Otherwise a corpus that is worth this row
+    would hold every line as its own string for the life of the process."""
     document = Document.of("a.md", "first\nsecond\nthird\n")
 
     assert document.line_count == 3
     assert document.line(2) == "second"
     assert document.lines(2, 3) == "second\nthird"
-    # Clamped rather than raising: a match on line 1 asks for line 0's context.
+    # Clamped, with no error: a match on line 1 asks for the context of line 0.
     assert document.lines(0, 1) == "first"
     assert document.lines(3, 99) == "third"
     assert document.lines(9, 12) == ""
@@ -117,10 +126,11 @@ def test_search_returns_lines_with_context_not_documents() -> None:
 
 
 def test_search_says_when_it_held_matches_back() -> None:
-    """The model can narrow a query; it cannot know to unless it is told.
+    """The model can narrow a query. It cannot know that it should unless it is
+    told.
 
-    At most `limit` matches are ever built — the eleventh hit here sets the flag
-    and stops the scan rather than being constructed and discarded.
+    At most `limit` matches are ever built. The fourth hit here sets the flag and
+    stops the scan. It is not constructed and then discarded.
     """
     corpus = _corpus(a="hit\n" * 10)
     found = corpus.search("hit", limit=3, context_lines=0, regex=False)
@@ -130,8 +140,8 @@ def test_search_says_when_it_held_matches_back() -> None:
 
 
 def test_a_regex_keeps_its_line_anchors() -> None:
-    """The scan runs over whole documents; `re.MULTILINE` is what keeps a model's
-    `^`/`$` meaning what it meant when matching was per line."""
+    """The scan runs over whole documents. `re.MULTILINE` keeps the `^` and `$` of
+    a model meaning what they meant when matching was per line."""
     corpus = _corpus(a="prefix beta\nbeta starts here\n")
     found = corpus.search("^beta", limit=10, context_lines=0, regex=True)
     assert [(one.line, one.text) for one in found.matches] == [(2, "beta starts here")]
@@ -143,8 +153,8 @@ def test_a_bad_regex_is_the_callers_mistake() -> None:
 
 
 def test_chunking_pages_the_whole_corpus_deterministically() -> None:
-    """Paging, not one big read: the model walks the corpus as a sequence of
-    governed dispatches it can stop, and every line is in exactly one chunk."""
+    """Paging, not one big read. The model walks the corpus as a sequence of
+    governed dispatches that it can stop, and every line is in exactly one chunk."""
     corpus = _corpus(a="1\n2\n3\n4\n", b="5\n6\n")
     first = corpus.chunk(by="lines", size=4, index=0)
     pages = [corpus.chunk(by="lines", size=4, index=n).text for n in range(first.chunks)]
@@ -153,16 +163,16 @@ def test_chunking_pages_the_whole_corpus_deterministically() -> None:
     walked = "\n".join(pages)
     assert all(str(number) in walked for number in range(1, 7))
     assert walked.count("# a") == 1 and walked.count("# b") == 1
-    # An index past the end is clamped, so paging cannot fail into an error.
+    # An index past the end is clamped, so paging cannot end in an error.
     assert corpus.chunk(by="lines", size=4, index=99).index == first.chunks - 1
     assert corpus.chunk(by="bytes", size=8, index=0).text == "# a\n1\n2\n"
 
 
 def test_a_page_by_bytes_is_bytes_cut_between_characters() -> None:
-    """`by="bytes"` pages the corpus by its bytes, each page cut between
-    characters. Sliced by index it counted code points under the name of bytes,
-    so a page of CJK text was three times its size, and a page could end inside
-    a character.
+    """`by="bytes"` pages the corpus by its bytes, and cuts each page between
+    characters. When the text was sliced by index, it counted code points under
+    the name of bytes. A page of CJK text was then three times its size, and a
+    page could end inside a character.
 
     Sabotage: slice `joined.text` by `size` again and a page of CJK runs past
     its size in bytes.
@@ -180,11 +190,11 @@ def test_a_page_by_bytes_is_bytes_cut_between_characters() -> None:
 
 
 async def test_each_query_is_its_own_governed_dispatch(loaded: Loaded) -> None:
-    """The plan's gate, and the reason access is a binding.
+    """The gate of the plan, and the reason that access is a binding.
 
-    Two queries in one cell are two dispatch pairs — per-query provenance a
-    namespace variable could not produce, because a bare `context.search(...)`
-    never leaves the kernel.
+    Two queries in one cell are two dispatch pairs. That is provenance for each
+    query, which a namespace variable could not produce, because a bare
+    `context.search(...)` never leaves the kernel.
     """
     ctx, session, agent = await loaded()
     result = await run_python_cell(
@@ -204,11 +214,12 @@ async def test_each_query_is_its_own_governed_dispatch(loaded: Loaded) -> None:
 
 
 async def test_one_oversized_query_is_offloaded_without_its_siblings(loaded: Loaded) -> None:
-    """C5, on the seam the Phase 4 spill row attaches to.
+    """C5, on the seam that the Phase 4 spill row attaches to.
 
-    The property that matters is per-dispatch reshaping: the big query's result is
-    replaced in what the *program* receives, and the small one passes through.
-    A corpus read as merged cell stdout could offer neither.
+    The property that matters is reshaping for each dispatch. The result of the
+    big query is replaced in what the *program* receives, and the small result
+    passes through. A corpus that is read as merged cell stdout could offer
+    neither.
     """
     ctx, session, agent = await loaded()
 
@@ -244,8 +255,8 @@ async def test_one_oversized_query_is_offloaded_without_its_siblings(loaded: Loa
 async def test_the_corpus_rehydrates_and_says_when_it_changed(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """The plan's other gate. A recipe, not a snapshot (D17/Q4): what is durable
-    is `{loader, sources, digest}`, and a later session re-resolves it."""
+    """The other gate of the plan. A recipe, not a snapshot (D17/Q4): the durable
+    part is `{loader, sources, digest}`, and a later session resolves it again."""
     source = tmp_path / "notes.md"
     source.write_text("original content\n")
     sources = [{"kind": "path", "value": str(source)}]
@@ -258,15 +269,16 @@ async def test_the_corpus_rehydrates_and_says_when_it_changed(
     assert list(as_seq(record.data["sources"])) == [str(source)]
     assert record.data["note"] == "", "a first load has nothing to report"
 
-    # Re-resolving unchanged sources gives the same digest, so nothing new is
-    # recorded and nothing is said — the silent case, and the common one.
+    # To resolve unchanged sources again gives the same digest, so nothing new is
+    # recorded and nothing is said. This is the silent case, and the common one.
     ctx2, _session2, _agent2 = await mounted_runtime(session_id="c2", extra_rows=[row(sources)])
     assert ctx2.require(CONTEXT_CORPUS).corpus.digest == first_digest
     assert ctx2.require(CONTEXT_CORPUS).announce(session) == ""
     assert len([event for event in session.events if event.type == LOADED]) == 1
 
-    # Now the source moves under a session that was already told about it. A
-    # snapshot would have restored the old bytes; a recipe re-resolves and says so.
+    # Now the source changes under a session that was already told about it. A
+    # snapshot would have restored the old bytes. A recipe resolves the sources
+    # again and says so.
     source.write_text("rewritten content, quite different\n")
     ctx3, _s3, _a3 = await mounted_runtime(session_id="c3", extra_rows=[row(sources)])
     assert ctx3.require(CONTEXT_CORPUS).corpus.digest != first_digest
@@ -308,8 +320,8 @@ async def _assemble(ctx: Context, agent: AgentDriver) -> str:
 
 
 async def test_the_prompt_carries_metadata_and_no_content(loaded: Loaded) -> None:
-    """The point of the row: a corpus large enough to load is large enough that
-    putting any of it in the prompt defeats the purpose."""
+    """The purpose of the row. A corpus that is large enough to load is large
+    enough that putting any of it in the prompt defeats the purpose."""
     ctx, _session, agent = await loaded()
     prompt = await _assemble(ctx, agent)
 
@@ -320,8 +332,8 @@ async def test_the_prompt_carries_metadata_and_no_content(loaded: Loaded) -> Non
 
 
 async def test_the_corpus_is_in_the_cached_prefix(loaded: Loaded) -> None:
-    """A `section`, not a `context()`: resolved once at mount, so the text is
-    fixed for the session and belongs in the stable prefix (A12)."""
+    """A `section`, not a `context()`. The corpus is resolved one time at mount, so
+    the text is fixed for the session and belongs in the stable prefix (A12)."""
     ctx, _session, agent = await loaded()
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
 
@@ -338,7 +350,7 @@ def test_a_manifest_names_every_document() -> None:
 
 
 async def test_no_sources_means_no_row(mounted_runtime: MountedRuntime) -> None:
-    """Off by default is the shipped state; a row with nothing to load must not
+    """Off by default is the shipped state. A row with nothing to load must not
     advertise three tools that would answer nothing."""
     ctx, _session, agent = await mounted_runtime(session_id="empty", extra_rows=[row([])])
 
@@ -350,8 +362,9 @@ async def test_no_sources_means_no_row(mounted_runtime: MountedRuntime) -> None:
 async def test_a_corpus_under_the_threshold_stands_down(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """Q4's threshold: a corpus small enough to read with `tools.read` should be
-    read with `tools.read` — governed, logged and offloadable already."""
+    """The threshold of Q4. A corpus that is small enough to read with
+    `tools.read` should be read with `tools.read`, which is governed, logged and
+    offloadable already."""
     small = tmp_path / "small.md"
     small.write_text("a few characters\n")
     ctx, _session, agent = await mounted_runtime(
@@ -366,10 +379,12 @@ async def test_a_corpus_under_the_threshold_stands_down(
 async def test_a_sessions_note_goes_with_the_session(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """The note settled at a session's first announce is let go with the session.
+    """The note that the first announce of a session settled is let go with the
+    session.
 
-    `_notes` is a per-session memo, and nothing took a session out when the store
-    let it go: one entry per session the mount ever announced to.
+    `_notes` is a memo for each session. Nothing removed a session when the store
+    let it go, so the memo kept one entry for each session that the mount ever
+    announced to.
 
     Sabotage: make `_notes` a plain dict, and the note stays.
     """
@@ -384,3 +399,31 @@ async def test_a_sessions_note_goes_with_the_session(
     ctx.require(SESSIONS).dispose(session.id)
 
     assert session not in service._notes
+
+
+def test_a_relative_source_is_read_from_the_workspace_not_the_process_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative source is resolved against the workspace root.
+
+    The loader tested a relative path against the working directory of the
+    process first. A daemon does not run in the workspace. A file of the same
+    name beside the process was therefore read in place of the file in the
+    workspace, and the model queried the wrong document.
+
+    Sabotage: drop the `root /` join in `_resolve`, and the document holds the
+    text of the other file.
+    """
+    root, elsewhere = tmp_path / "root", tmp_path / "elsewhere"
+    root.mkdir()
+    elsewhere.mkdir()
+    (root / "notes.md").write_text("from the workspace", encoding="utf-8")
+    (elsewhere / "notes.md").write_text("from the process directory", encoding="utf-8")
+    monkeypatch.chdir(elsewhere)
+
+    corpus = _resolve(root, "corpus", [ContextSource(value="notes.md")])
+
+    assert [(one.name, one.text) for one in corpus.documents] == [
+        ("notes.md", "from the workspace")
+    ]
+    assert corpus.missing == ()

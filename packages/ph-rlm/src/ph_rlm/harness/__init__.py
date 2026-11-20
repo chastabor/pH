@@ -1,31 +1,35 @@
-"""`rlm-harness` — the Continual Harness: state as a fold, `/refine` as a job.
+"""`rlm-harness`: the Continual Harness. Its state is a fold, and `/refine` is a job.
 
-The fold and the checks are in `state.py` and `service.py`; the model that writes
-a proposal is in `planner.py`; when it runs unasked is in `auto.py`. This module
-is the row: what it provides, what it puts in the prompt, and the one command.
+The fold and the checks are in `state.py` and `service.py`. The model that writes
+a proposal is in `planner.py`. The rule for when a refinement runs without a
+request is in `auto.py`. This module is the row: what it provides, what it puts
+in the prompt, and the one command.
 
-Four placements worth stating:
+Four design decisions need an explanation:
 
-* **The command is not a tool.** `/refine` is something the *human* asks for, so
-  routing it through a model turn would be both slower and dishonest — the log
-  would show the model deciding something the user decided. It dispatches
-  directly and records `command/run`/`command/done` (`ctx.commands`).
-* **H3's gate is an approval request, not a tool call.** The plan describes a
-  global edit as a `tools/pre-execute` `ask` "on the `refine` tool" — but there is
-  no such tool, precisely because `/refine` is a command, so no `pre-execute`
-  waterfall ever fires for it. `ctx.approval.request(tool_name="refine")` asks
-  the same question through the same seam: the deployment's answerer sees it, the
-  log records `approval/asked` and `approval/decided`, and it fails closed with
-  nowhere to ask (B3). Registering a model-callable `refine` tool to satisfy the
-  letter would hand the model the one operation the design says is the human's.
+* **The command is not a tool.** The *user* asks for `/refine`. A route through
+  a model turn would be slower. It would also make the log misleading: the log
+  would show the model deciding something that the user decided. The command
+  dispatches directly and records `command/run` and `command/done`
+  (`ctx.commands`).
+* **The gate of H3 is an approval request, not a tool call.** The plan describes
+  a global edit as a `tools/pre-execute` `ask` "on the `refine` tool". There is
+  no such tool, because `/refine` is a command, so no `pre-execute` waterfall
+  runs for it. `ctx.approval.request(tool_name="refine")` asks the same question
+  through the same seam. The answerer of the deployment sees the request, the
+  log records `approval/asked` and `approval/decided`, and the request fails
+  closed when there is nowhere to ask (B3). A `refine` tool that the model can
+  call would follow the wording of the plan. It would also give the model the
+  one operation that the design reserves for the user.
 * **Refining is a job, not a command body.** A planner pass makes a model call
-  that outlives the keystroke that asked for it, which is `ctx.jobs`' own example.
-  It is owned by the *agent's* scope: a refinement is about one conversation, and
-  when that conversation goes there is nothing left for the pass to learn from.
-* **An automatic pass is local-only.** `refine --global` is a human's decision;
-  an automatic one would put an approval prompt in front of a user who did not
-  ask for anything, about a change reaching every future project. Nothing here
-  passes `scope="global"` unless a person typed it.
+  that outlives the keystroke that asked for it. That is the example that
+  `ctx.jobs` itself gives. The scope of the *agent* owns the job. A refinement
+  is about one conversation, and when that conversation goes, the pass has
+  nothing left to learn from.
+* **An automatic pass is local only.** `refine --global` is a decision for a
+  human. An automatic global pass would put an approval prompt in front of a
+  user who asked for nothing, about a change that reaches every future project.
+  Nothing here passes `scope="global"` unless a person typed it.
 
 @module ph_rlm.harness
 """
@@ -77,10 +81,10 @@ from .state import (
 _LOG = log_writer(__name__)
 
 __all__ = [
-    # What a consumer of the harness actually needs: the row, the state
-    # vocabulary a caller of `ctx.harness` handles, and the folds. Everything
-    # else lives in its submodule — the sibling `kernel` package keeps the same
-    # line, and a re-export list longer than the used surface is only churn.
+    # What a consumer of the harness needs: the row, the state vocabulary that
+    # a caller of `ctx.harness` handles, and the folds. Everything else stays in
+    # its submodule. The sibling `kernel` package follows the same rule. A
+    # re-export list that is longer than what consumers use only adds churn.
     "CONSIDERED",
     "GLOBAL_LOG_NAME",
     "PROJECTION_NAME",
@@ -105,18 +109,19 @@ log = logging.getLogger("ph_rlm.harness")
 
 MAX_PER_KIND = 12
 MAX_REFINEMENTS = 5
-"""Prime Agent's bounds on the prompt section. A harness that grew without them
-would eventually be the whole prompt."""
+"""The bounds that prime-agent puts on the prompt section. Without them, a
+harness that kept growing would in the end be the whole prompt."""
 
 
 class Config(WireModel):
-    """Row config for `rlm-harness`."""
+    """The row config for `rlm-harness`."""
 
     max_per_kind: int = MAX_PER_KIND
     max_refinements: int = MAX_REFINEMENTS
     auto_refine: bool = True
-    """H7, ported on. A deployment that would rather refine only when asked sets
-    this false; the command works either way."""
+    """Whether the harness refines itself at the end of a turn (H7). The port
+    keeps this on by default. A deployment that wants a refinement only on
+    request sets this to false. The `/refine` command works with either value."""
     turns_between_refinements: int = TURNS_BETWEEN_REFINEMENTS
     cooldown_minutes: int = COOLDOWN_MINUTES
     conversation_chars: int = CONVERSATION_CHARS
@@ -126,9 +131,10 @@ class Config(WireModel):
 def render_state(state: HarnessState, *, per_kind: int, refinements: int) -> str:
     """`formatHarnessStateForPrompt`, ported: bounded lists, newest last.
 
-    Rendered from the fold, so an entry the model is told about is one the log
-    actually carries. Empty when the harness is empty — a heading with nothing
-    under it costs tokens to say nothing.
+    The text is rendered from the fold, so every entry that the model is told
+    about is an entry that the log carries. The result is empty when the harness
+    is empty, because a heading with nothing under it costs tokens and says
+    nothing.
     """
     lines: list[str] = []
     for kind in KINDS:
@@ -168,15 +174,16 @@ async def apply(ctx: Context, config: Config) -> None:
         max_tokens=config.max_tokens,
     )
     running: set[str] = set()
-    """Sessions with a pass in flight. In-process state on purpose: it is about
-    this runner's concurrency, not about the session, and a resumed session with
-    no pass running is correct to start one."""
+    """The sessions that have a pass in progress. This is in-process state on
+    purpose. It describes the concurrency of this runner, not the session, and a
+    resumed session with no pass running is correct to start one."""
 
     def section(request: AssembleContext) -> str:
         """The harness as a cache-safe snapshot (A12).
 
-        A `context()`, not a `section`: a refinement changes this text mid-session,
-        and in the cached prefix every apply would re-bill the whole prompt.
+        This is a `context()`, not a `section`. A refinement changes this text in
+        the middle of a session. In the cached prefix, every apply would bill the
+        whole prompt again.
         """
         session = request.session
         return render_state(
@@ -190,25 +197,27 @@ async def apply(ctx: Context, config: Config) -> None:
     # ----------------------------------------------------------- the pass --
 
     async def refine(request: RefineRequest) -> str:
-        """Plan one refinement and apply it. Returns the line worth showing.
+        """Plan one refinement and apply it. Return the line to show.
 
-        Every outcome that is *not* a refinement records `harness/refine-considered`
-        — a declined review, an empty proposal, a planner that failed. That event
-        is what advances the cooldown, so a broken planner or a quiet conversation
-        costs one cheap call rather than one per turn.
+        Every outcome that is *not* a refinement records
+        `harness/refine-considered`: a declined review, an empty proposal, a
+        planner that failed. That event advances the cooldown, so a broken
+        planner or a quiet conversation costs one cheap call and not one call
+        for each turn.
         """
         when_idle = getattr(request.agent, "when_idle", None)
         if when_idle is not None:
-            # The plan's "waits for agent idle": a pass that read a half-finished
-            # turn would refine on a conversation the user is still having.
+            # This is the "waits for agent idle" of the plan. A pass that read a
+            # half-finished turn would refine on a conversation that the user is
+            # still having.
             await when_idle()
 
         vetoed = await veto_reason(ctx, request)
         if vetoed is not None:
-            # Recorded, not silent: a user who typed `/refine` is owed an answer,
-            # and this is the only place one can appear once the command has
-            # returned. It costs no tokens, which is what the waterfall running
-            # before the review call is for.
+            # The veto is recorded, not silent. A user who typed `/refine` must
+            # get an answer, and after the command has returned this is the only
+            # place where one can appear. The veto costs no tokens, because the
+            # waterfall runs before the review call.
             return _considered(request, f"vetoed: {vetoed}")
 
         return await _plan_and_apply(request)
@@ -249,23 +258,26 @@ async def apply(ctx: Context, config: Config) -> None:
         """Run one pass as a job owned by the agent's scope."""
 
         async def body(job: Job) -> str:
-            # Raced against the job's own token: a job's cancellation is
-            # cooperative, and a pass is a model call or two that would otherwise
-            # run on after its scope was disposed, past a mount's bounded teardown
-            # or a daemon's shutdown.
+            # The pass is raced against the token of the job. The cancellation
+            # of a job is cooperative, and a pass is one or two model calls.
+            # Without the race, those calls would continue after the scope of
+            # the pass was disposed, past the bounded teardown of a mount or the
+            # shutdown of a daemon.
             refined = await raced(job.token, lambda: refine(request))
             return refined if refined is not None else "refinement canceled"
 
         def settled(job: Job) -> None:
-            # However the job ended, one canceled before `body` ran included (S6):
-            # taken down in `body`, the mark outlived such a job, and the session
-            # answered "already running" for the life of the mount.
+            # This runs however the job ended, including a job that was canceled
+            # before `body` ran (S6). When `body` removed the mark, the mark
+            # outlived such a job, and the session answered "already running"
+            # for the life of the mount.
             running.discard(request.session.id)
-            # Released, not abandoned: the work is over, so the entry goes rather
-            # than sitting in the table until the agent does. Without this an
-            # auto-refining session accretes one job per pass. `get`, as `_quiesce`
-            # reads it: a pass its owner stopped at a mount's unwind ends after the
-            # row that holds the table has gone.
+            # The job is released, not abandoned. The work is over, so the entry
+            # goes now and does not stay in the table until the agent goes.
+            # Without this, a session that refines automatically gains one job
+            # for each pass. This uses `get`, as `_quiesce` (`subagents.py`)
+            # does: a pass that its owner stopped when a mount unwound ends
+            # after the row that holds the table has gone.
             jobs = ctx.get(JOBS)
             if jobs is not None:
                 jobs.forget(job.id)
@@ -280,9 +292,9 @@ async def apply(ctx: Context, config: Config) -> None:
                 on_settled=settled,
             )
         except BaseException:
-            # A start that failed never ran `body`, so nothing else would take
-            # the flag down — without this, the session answers "already
-            # running" forever on the strength of a job that does not exist.
+            # A start that failed never ran `body`, so nothing else would remove
+            # the mark. Without this, the session answers "already running"
+            # forever because of a job that does not exist.
             running.discard(request.session.id)
             raise
 
@@ -290,9 +302,9 @@ async def apply(ctx: Context, config: Config) -> None:
 
     def show(_rest: str, invocation: CommandContext) -> str:
         """`/refine --show`: the whole harness, whichever scope was named."""
-        # Unbounded, unlike the prompt section: a human auditing the harness wants
-        # the entries the bound hides, which are exactly the ones they cannot see
-        # any other way.
+        # The output is unbounded, unlike the prompt section. A user who audits
+        # the harness wants the entries that the bound hides, because there is
+        # no other way to see them.
         state = service.state(invocation.session)
         entries = sum(len(rows) for rows in state.entries.values())
         shown = render_state(state, per_kind=entries or 1, refinements=len(state.refinements))
@@ -328,20 +340,22 @@ async def apply(ctx: Context, config: Config) -> None:
                 instructions=" ".join(rest),
             )
         )
-        # The outcome reaches the transcript on its own: a refinement appends
-        # `harness/refined`, and a pass that declined appends
-        # `harness/refine-considered`, which is rendered for a user-triggered
-        # pass precisely so an answer nobody would otherwise see is visible.
+        # The outcome reaches the transcript without help from here. A
+        # refinement appends `harness/refined`. A pass that declined appends
+        # `harness/refine-considered`. That event is rendered for a pass that
+        # the user started, so that an answer which nobody would see otherwise
+        # is visible.
         return f"refining the {scope} harness in the background ({job.id})"
 
     ctx.require(COMMANDS).register(
         CommandDefinition(
             name="refine",
             summary="Refine the Continual Harness, or roll a refinement back.",
-            # `--show` leading the line only asks — `--show --global` included, since
-            # the show is the whole harness either way; everything else, instructions
-            # and a rollback, acts. A `--show` behind `--global` is still shown, through
-            # the durable path an act takes: unsure is the safe side.
+            # A line that starts with `--show` only asks. That includes
+            # `--show --global`, because the show is the whole harness for either
+            # scope. Everything else acts: instructions and a rollback. A `--show`
+            # behind `--global` is still shown, but through the durable path that
+            # an action takes. When unsure, the durable path is the safe choice.
             run=Verbs(
                 {"--show": CommandVerb(show, record="after")}, otherwise=CommandVerb(command)
             ),
@@ -352,22 +366,23 @@ async def apply(ctx: Context, config: Config) -> None:
     # ------------------------------------------------------- auto-refine --
 
     def on_session_event(session: Session, event: SessionEvent) -> MaybeAwaitable[None]:
-        """H7: consider refining at the end of a turn.
+        """H7: consider a refinement at the end of a turn.
 
-        On `turn/end` rather than on a timer, because that is the one moment the
-        conversation is both complete and quiet.
+        The check runs on `turn/end` and not on a timer, because that is the one
+        moment when the conversation is both complete and quiet.
 
-        **Sync until there is something to consider.** `session/event` fires for
-        every event of every session, each streamed chunk included, and an async
-        listener is a task each time: spawned, held and ended per chunk to read one
-        field. Only a turn's end gets one now.
+        **The listener is sync until there is something to consider.**
+        `session/event` fires for every event of every session, including each
+        streamed chunk. An async listener is a task each time: spawned, held and
+        ended for each chunk to read one field. Now only the end of a turn gets
+        a task.
         """
         return consider(session) if event.type == "turn/end" else None
 
     async def consider(session: Session) -> None:
-        # Here rather than in the sync half: in the task's one step with the `start`
-        # that claims the session, so two ends heard in one turn of the loop cannot
-        # both start a pass.
+        # This check is here and not in the sync half. It runs in the same step
+        # of the task as the `start` that claims the session, so two ends that
+        # arrive in one turn of the loop cannot both start a pass.
         if session.id in running:
             return
         trigger = due(
@@ -377,9 +392,9 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         if trigger is None:
             return
-        # The loop agent's id is its session's id, so the registry answers the
-        # session→agent hop directly — its own docstring warns against keeping
-        # a side table where `get` already is one.
+        # The id of the loop agent is the id of its session, so the registry
+        # answers the hop from session to agent directly. The docstring of
+        # `get` warns against a side table where `get` already is one.
         agent = ctx.require(AGENTS).get(session.id)
         if agent is None:
             return

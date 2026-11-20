@@ -1,16 +1,16 @@
 """The `rlm` profile: it composes, it boots, and a turn runs through it (P3-20).
 
-`test_bundle.py` asserts things about the bundle *document*. This is about the
-**profile** — `phern --profile rlm` — which is a different claim with a different
-failure mode: a bundle can be perfectly well-formed and still not be reachable,
-because nothing wired it to a name a person can type.
+`test_bundle.py` asserts things about the bundle *document*. This module is about
+the **profile**, `phern --profile rlm`. That is a different claim with a
+different failure mode. A bundle can be well-formed and still not be reachable,
+because nothing wired it to a name that a person can type.
 
-The wiring is deliberately indirect. `ph-app` does not depend on `ph-rlm` — the
-same rule that lets the app read `subagent/*` events without importing the row
-that emits them — so the profile discovers the bundle through the `ph.bundles`
-entry-point group rather than importing it. The tests below are what make that
-indirection safe: a typo in the entry point would leave `--profile rlm` failing
-for a user, and nothing else in the suite would notice.
+The wiring is deliberately indirect. `ph_app` does not import `ph_rlm`. This is
+the same rule that lets the app read `subagent/*` events without importing the
+row that emits them. The profile therefore discovers the bundle through the
+`ph.bundles` entry-point group. The tests below make that indirection safe: a
+typo in the entry point would leave `--profile rlm` failing for a user, and
+nothing else in the suite would notice.
 """
 
 from __future__ import annotations
@@ -38,23 +38,25 @@ pytestmark = pytest.mark.anyio
 
 
 def test_the_bundle_is_discoverable_without_importing_it() -> None:
-    """The entry point is the whole coupling between the app and this bundle."""
+    """The entry point is the only coupling between the app and this bundle."""
     assert "rlm" in installed_bundles()
     assert resolve_bundle("rlm") == BUNDLE
 
 
 def test_an_unregistered_bundle_resolves_to_nothing() -> None:
-    """`None`, not an exception: "that profile needs ph-rlm installed" is a
-    configuration answer, and the caller has the context to word it."""
+    """The result is `None`, not an exception. "That profile needs ph-rlm
+    installed" is a configuration answer, and the caller has the context to word
+    it."""
     assert resolve_bundle("no-such-bundle") is None
 
 
 def test_the_profile_is_tui_plus_the_bundle() -> None:
-    """The interactive posture, because a person is present for the approvals
-    Code Mode's dispatches raise."""
-    # Resolved paths, not basenames: this bundle and ph-stabilize's are both
-    # called `bundle.yaml`, so a name comparison cannot tell them apart — and
-    # since every profile carries the stabilize layer, both are in this list.
+    """The profile has the interactive posture, because a person is present for
+    the approvals that the dispatches of Code Mode raise."""
+    # The test compares resolved paths, not basenames. This bundle and the bundle
+    # of ph-stabilize are both called `bundle.yaml`, so a name comparison cannot
+    # tell them apart. Every profile carries the stabilize layer, so both are in
+    # this list.
     assert resolve_profile("rlm") == [
         BASE,
         HEADLESS,
@@ -73,8 +75,8 @@ def test_the_profile_is_offered_by_name() -> None:
 
 
 def test_the_composed_profile_is_code_mode_on_the_shipped_runtime() -> None:
-    """What `--dump-config --profile rlm` would print: the facts a person reads
-    to know which pH they are running."""
+    """What `--dump-config --profile rlm` would print: the facts that a person
+    reads to know which pH is running."""
     rows = {row.id: row for row in Profile.from_paths(resolve_profile("rlm")).rows}
 
     assert as_obj(rows["tools"].config)["mode"] == "code"
@@ -82,8 +84,8 @@ def test_the_composed_profile_is_code_mode_on_the_shipped_runtime() -> None:
     assert rows["rlm-presentation"].name == "rlm-presentation"
     # The interactive posture survived the bundle layering on top of it.
     assert as_obj(rows["sandbox"].config)["defaultMode"] == "workspace-write"
-    # Off by default, and still in the profile so a deployment can turn it on
-    # by id rather than by forking the bundle.
+    # The row is off by default. It is still in the profile, so that a deployment
+    # can turn it on by id and does not have to fork the bundle.
     assert rows["rlm-context-loader"].disabled is True
 
 
@@ -91,14 +93,15 @@ def test_the_composed_profile_is_code_mode_on_the_shipped_runtime() -> None:
 
 
 async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfile) -> None:
-    """P3-20's gate: the profile boots and a turn goes through it.
+    """The gate of P3-20: the profile boots and a turn goes through it.
 
-    Mounted from `resolve_profile("rlm")` through the shared `mount` fixture, so
-    what boots here is what `phern --profile rlm` composes — including the `tui`
-    layer, which the bundle-level fixtures do not carry — and the session root
-    is redirected rather than the developer's own. The interpreter is pinned to
-    the host's, because building the managed venv shells out to `uv` and reaches
-    the network.
+    The profile is mounted from `resolve_profile("rlm")` through the shared
+    `mount` fixture. What boots here is therefore what `phern --profile rlm`
+    composes, including the `tui` layer, which the bundle-level fixtures do not
+    carry. The session root is redirected, so the test does not use the session
+    root of the developer. The interpreter is pinned to the interpreter of the
+    host, because building the managed venv shells out to `uv` and reaches the
+    network.
     """
     ctx = await mount(
         {"id": "code-runtime-python", "config": HOST_INTERPRETER},
@@ -124,11 +127,12 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
     assert ctx.require(HARNESS) is not None
     assert ctx.require(COMMANDS).get("refine") is not None
 
-    # What the TUI's card is built from, read off the *mounted* definition. Both
-    # halves of P3-19's cell hid here: `present_call` computed the program and
-    # dropped it, and `present_result` tested its meta with `isinstance(..., dict)`
-    # — which a frozen `MappingProxyType` off the log is not. Every widget test
-    # constructs a `ToolCard` by hand, so nothing else crosses this seam.
+    # What the card of the TUI is built from, read from the *mounted* definition.
+    # Both halves of the P3-19 cell had a defect that hid here. `present_call`
+    # computed the program and dropped it. `present_result` tested its meta with
+    # `isinstance(..., dict)`, and a frozen `MappingProxyType` from the log is not
+    # a `dict`. Every widget test constructs a `ToolCard` by hand, so no other
+    # test crosses this seam.
     definition = ctx.require(TOOLS).get(PYTHON, scope=agent.ctx)
     assert definition is not None
     assert definition.present_call is not None, "the mounted definition renders a card"
@@ -140,9 +144,10 @@ async def test_a_turn_runs_end_to_end_on_the_composed_profile(mount: MountProfil
     assert call_view.input == "rows = 1", "the header line"
     assert call_view.body == "rows = 1\nrows", "the program the code cell renders"
 
-    # The card's meta, through the chain the log puts it through: the tool
-    # computes it, the log freezes it, the view reads it back. Frozen, because
-    # `MappingProxyType` is what a live payload is and is *not* a `dict`.
+    # The meta of the card, taken through the same chain as in the log: the tool
+    # computes it, the log freezes it, and the view reads it back. The meta is
+    # frozen here, because a live payload is a `MappingProxyType`, which is *not*
+    # a `dict`.
     computed = definition.output.presentation_meta({}, {"value": 1, "dispatches": 1})
     assert computed is not None
     result_view = definition.present_result(

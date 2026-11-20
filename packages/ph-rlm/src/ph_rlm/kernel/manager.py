@@ -1,35 +1,36 @@
-"""`code-runtime-python` — one CPython child per agent, governed at the frame (D1).
+"""`code-runtime-python`: one CPython child for each agent, governed at the frame (D1).
 
-This is the provider dsh withheld, on the grounds that *"cross-call state would be
-invisible to the log"*. What answers that is not this file but the obligation the
-seam checks at registration — `persistence: "namespace"` requires
-`kernel/snapshot` emission — so the state a cell leaves behind is in the log with
-everything else.
+dsh withheld this provider, on the grounds that *"cross-call state would be
+invisible to the log"*. This file does not answer that objection. The answer is
+the obligation that the seam checks at registration: `persistence: "namespace"`
+requires that the provider emits `kernel/snapshot` events. The state that a cell
+leaves behind is therefore in the log with everything else.
 
-Three properties are worth reading before changing anything here.
+Read these three properties before you change anything here.
 
 **A run reads its own frames, and owns the tasks that serve them.** `run()` opens
-a task group for the duration of one program: it reads frames inline until `done`,
-starts one task per concurrent binding call, and drains the child's stdout and
-stderr in the same group, so everything is entered and exited by **one** task. A
-long-lived reader task per kernel — the obvious design, and the first one here —
-needs a group entered when the kernel starts and exited when it closes, which is a
-*different* task; anyio refuses that, and the symptom was a `ClosedResourceError`
-from a canceled drain instead of the real failure being reported. `done` is
-therefore the last frame of a run, which is why the guest snapshots *before*
-settling.
+a task group for the duration of one program. It reads frames inline until
+`done`, starts one task for each concurrent binding call, and drains the stdout
+and stderr of the child in the same group. **One** task therefore enters and
+exits everything. The obvious design, and the first one here, was a long-lived
+reader task for each kernel. That design needs a group that is entered when the
+kernel starts and exited when it closes, and a *different* task does each.
+anyio refuses that. The symptom was a `ClosedResourceError` from a canceled
+drain, and the real failure was not reported. `done` is therefore the last frame
+of a run, which is the reason why the guest snapshots *before* it settles.
 
-None of this reintroduces the deadlock that made fd 3 a separate channel (D5): a
-cell awaiting a `reply` is not blocking the host's read loop, because the host's
-read loop is what delivers the reply.
+None of this brings back the deadlock that made fd 3 a separate channel (D5). A
+cell that awaits a `reply` does not block the read loop of the host, because
+that read loop is what delivers the reply.
 
 **Every inbound frame is rebuilt, never trusted.** The child executes
 model-written code and holds the descriptor, so it is a hostile peer (C10). See
 `codec.decode`.
 
-**A child that dies is replaced, and the model is told.** The namespace is gone —
-that is not recoverable — but the session is not, so the next run gets a fresh
-kernel prefixed with a reset notice rather than a dead harness.
+**A child that dies is replaced, and the model is told.** The namespace is gone
+and cannot be recovered. The session is not gone. The next run gets a fresh
+kernel, and its result starts with a reset notice. The model does not get a dead
+harness.
 
 @module ph_rlm.kernel.manager
 """
@@ -100,55 +101,61 @@ __all__ = ["RESET_NOTICE", "Config", "Kernel", "KernelLimits", "PythonCodeRuntim
 log = logging.getLogger("ph_rlm.kernel.manager")
 
 _STREAM_ENDED = (anyio.ClosedResourceError, anyio.BrokenResourceError, anyio.EndOfStream)
-"""What a child's pipe says when there is no more of it.
+"""What the pipe of a child raises when it has no more data.
 
-The three are one outcome told three ways — the group canceled the reader, the
-child exited, the stream closed underneath it — and none of them is a failure to
-report. A reader that let one escape would replace the outcome it was called to
-explain with its own, which is the bug `_drain` and `_collect_boot_noise` both
-exist downstream of. Named for the same reason `_CHANNEL_GONE` is."""
+The three exceptions are one outcome reported in three ways: the group canceled
+the reader, the child exited, or the stream closed under the reader. None of them
+is a failure to report. A reader that let one escape would replace the outcome
+that it was called to explain with its own outcome. That is the bug that
+`_drain` and `_collect_boot_noise` both guard against. The tuple has a name for
+the same reason that `_CHANNEL_GONE` has one."""
 
 RESET_NOTICE = "<runtime_reset>"
-"""Prefixed to the first result after a kernel died.
+"""The prefix of the first result after a kernel died.
 
-Named rather than described: the namespace is gone and every variable with it, so
-a model that reads this and re-derives what it needs is behaving correctly. Left
-unsaid, it would re-run one cell at a time discovering `NameError`s."""
+The notice names the event and does not describe it. The namespace is gone, and
+every variable with it, so a model that reads this and derives again what it
+needs behaves correctly. Without the notice, the model would run one cell at a
+time again and discover each `NameError`."""
 
 MAX_FRAME_BYTES = 64 * 1024 * 1024
-"""The floor under `frame_cap`. The reason a cap exists at all is that the child
-can write whatever it likes onto fd 3 (C10).
+"""The lowest value of `frame_cap`. A cap exists at all because the child can
+write whatever it likes onto fd 3 (C10).
 
-**The guest reads with the same derived number** (F8). It opens its connection
-before it has read a `boot` frame, so `start` hands it `frame_cap` through
-`FRAME_BYTES_ENV`, the way the descriptor itself crosses; `ph_runtime.channel`
-keeps its own 64 MiB only for a host that names none."""
+**The guest reads with the same derived number** (F8). The guest opens its
+connection before it has read a `boot` frame. `start` therefore passes
+`frame_cap` to it through `FRAME_BYTES_ENV`, in the same way that the descriptor
+itself crosses. `ph_runtime.channel` keeps its own 64 MiB only for a host that
+names no limit."""
 
 
 class KernelLimits(WireModel):
-    """What one child may consume. Every value is sent; the guest has no defaults.
+    """What one child may consume. The host sends every value, because the guest
+    has no defaults.
 
-    A `WireModel` rather than a dataclass so `Config` can extend it: a limit
-    added here reaches the row config and the `boot` frame without being typed
-    again in either. It was three declarations and two hand-written copies, which
-    is four edits before the protocol is even touched.
+    This is a `WireModel` and not a dataclass, so that `Config` can extend it. A
+    limit that is added here reaches the row config and the `boot` frame, and is
+    not typed again in either. Earlier there were three declarations and two
+    hand-written copies, which is four edits before the protocol is even touched.
     """
 
     cpu_seconds: int = 30
     idle_cpu_seconds: int = 2
-    """CPU a namespace may burn while **no cell is running** (M1).
+    """The CPU seconds that a namespace may use while **no cell is running** (M1).
 
-    The window nothing else bounds. `cpu_seconds` is armed at the start of a run
-    and disarmed by the first `SIGXCPU` — disarmed rather than lowered, because
-    a second delivery lands in the guest's teardown and costs the `done` frame.
-    What that leaves is a `to_thread` worker or a detached task spinning in pure
-    Python, which a cancel reaches neither of: the run reports `cpu`, the thread
-    keeps burning, and with the budget off no second signal ever comes.
+    This is the time that nothing else limits. `cpu_seconds` is armed at the
+    start of a run, and the first `SIGXCPU` disarms it. It is disarmed and not
+    lowered, because a second delivery lands in the teardown of the guest and
+    costs the `done` frame. What remains is a `to_thread` worker or a detached
+    task that spins in pure Python. A cancel reaches neither. The run reports
+    `cpu`, the thread continues to use CPU, and with the budget off no second
+    signal ever comes.
 
-    Small, because nothing legitimate spends it: a background thread a cell left
-    on purpose is *waiting*, and waiting costs no CPU. Only a runaway reaches
-    this, and the guest ends its own process when it does — the namespace is
-    already lost, and the alternative is a core burned until the session ends."""
+    The value is small, because nothing legitimate uses it. A background thread
+    that a cell left on purpose is *waiting*, and waiting costs no CPU. Only a
+    runaway reaches this limit, and the guest ends its own process when it does.
+    The namespace is already lost, and the alternative is a core that is used
+    until the session ends."""
     address_space_bytes: int = 2 * 1024**3
     max_log_bytes: int = 65_536
     max_value_bytes: int = 65_536
@@ -170,21 +177,22 @@ class KernelLimits(WireModel):
 
 
 def frame_cap(limits: KernelLimits) -> int:
-    """The largest inbound frame *this* kernel will assemble (M3).
+    """The largest inbound frame that *this* kernel will assemble (M3).
 
-    **Derived, because the ratio is load-bearing.** F3's fix made the guest send
-    one frame per changed variable, so a frame holds one `maxSnapshotBytes`
-    payload — and the constant above used to assert on its own that 64 MiB was
-    enough for that. It is, for the shipped 16 MiB; it stops being true the
-    moment a deployment raises the limit, and what it costs is not a rejected
-    frame but a lost namespace: the host refuses the frame, closes the channel,
-    and the model is told the runtime exited. The old docstring claimed the
-    sizing; nothing made it so, and the only thing checking it was a test that
-    monkeypatched the constant.
+    **The value is derived, because the design depends on the ratio.** The fix
+    for F3 made the guest send one frame for each changed variable, so a frame
+    holds one `maxSnapshotBytes` payload. The constant above used to assert, with
+    nothing to support it, that 64 MiB was enough for that. It is enough for the
+    shipped 16 MiB. It stops being enough when a deployment raises the limit. The
+    cost is then not a rejected frame but a lost namespace: the host refuses the
+    frame and closes the channel, and the model is told that the runtime exited.
+    The old docstring claimed the sizing, but nothing enforced it. The only check
+    was a test that monkeypatched the constant.
 
-    Twice the payload plus a megabyte: base64 is four bytes per three, the JSON
-    envelope and the variable's name are bounded by a few hundred, and the
-    slack is free because this is a ceiling on junk rather than an allocation.
+    The result is twice the payload plus one megabyte. base64 uses four bytes for
+    each three, and the JSON envelope and the name of the variable take at most a
+    few hundred. The slack costs nothing, because this is a ceiling on junk and
+    not an allocation.
     """
     return max(MAX_FRAME_BYTES, limits.max_snapshot_bytes * 2 + 1024 * 1024)
 
@@ -202,106 +210,115 @@ class _ActiveRun:
     error: str | None = None
     truncated: bool = False
     dropped: int = 0
-    """Bytes of output this run's caps threw away, in all: what the guest's
-    print streams report on `done` and what the pipe drains here skipped."""
+    """The total bytes of output that the caps of this run discarded: what the
+    print streams of the guest report on `done`, plus what the pipe drains here
+    skipped."""
     failure: CodeRunFailure | None = None
-    """A refusal or a budget, raised out of `run()` once the program unwinds (C3)."""
+    """A refusal or a budget. `run()` raises it after the program unwinds (C3)."""
     probe_id: int = 0
-    """The last probe sent, compared against the answer's `id`.
+    """The id of the last probe that was sent. It is compared with the `id` of
+    the answer.
 
-    A pong whose id is not this one is unsolicited — a late duplicate, or a
-    forged frame off fd 3, which this module assumes is possible everywhere
-    else (C10). It clears nothing and times nothing."""
+    A pong with a different id is unsolicited. It is a late duplicate, or a
+    forged frame from fd 3, which this module assumes is possible everywhere
+    else (C10). Such a pong clears nothing and times nothing."""
     probed_at: float = 0.0
-    """When the last probe went out, answered or not; before the first, when the run
-    opened, as `run` stamps it. So the first probe is due `probe_seconds` into the
-    run, and a cell shorter than that is never probed. A plain default rather than
-    a factory reading the clock, so a run can be built with no loop running, as a
-    test of `settle` does.
+    """The time when the last probe was sent, whether it was answered or not.
+    Before the first probe, it is the time when the run opened, which `run` sets.
+    The first probe is therefore due `probe_seconds` into the run, and a cell
+    that is shorter than that is never probed. The default is a plain value and
+    not a factory that reads the clock, so that a run can be built with no loop
+    running, as a test of `settle` does.
 
-    **Never moved while a probe is outstanding**, which is what makes it a
-    measurement rather than a cadence: the round trip finally recorded is the
-    whole time the loop took to get back to its reader, stall included. It also
-    carries the cadence, because a probe is due `probe_seconds` after the last
-    one *left*, not after the last one was answered: gating on the answer alone
-    would send the next the moment the last came back."""
+    **This value never changes while a probe is outstanding.** That makes it a
+    measurement and not only a schedule: the round trip that is finally recorded
+    is the whole time that the loop took to return to its reader, including the
+    stall. The value also sets the schedule. A probe is due `probe_seconds`
+    after the last one was *sent*, not after the last one was answered. If only
+    the answer decided, the next probe would be sent at the moment the last
+    answer arrived."""
     probe: Literal["idle", "waiting", "stalled"] = "idle"
-    """Where the outstanding probe stands. `stalled` is `waiting` past its due
-    time, latched so one starved stretch is counted once."""
+    """The state of the outstanding probe. `stalled` is `waiting` past its due
+    time. The state is held, so that one starved period is counted one time."""
     aborting_since: float | None = None
-    """When this run was asked to stop, by either route — the caller canceling,
-    or a dispatch being refused. Held here rather than in `_pump` because
-    `_serve_call` starts the abort from its own task, and the escalation clock
-    the pump runs has to be the same clock."""
+    """The time when this run was asked to stop, by either route: the caller
+    canceled, or a dispatch was refused. The field is here and not in `_pump`,
+    because `_serve_call` starts the abort from its own task, and the escalation
+    clock that `_watch` runs must be the same clock."""
     moved: anyio.Event | None = None
-    """Set when a deadline `_watch` sleeps toward may have moved under it: an abort
-    begun from another task (`_serve_call`), or a probe answered after it stalled.
-    `_watch` makes a fresh one each time it plans; `None` before it first does."""
+    """Set when a deadline that `_watch` sleeps toward may have changed: an abort
+    that another task started (`_serve_call`), or a probe that was answered after
+    it stalled. `_watch` makes a new event each time it plans. The value is
+    `None` before the first plan."""
 
     def _move(self) -> None:
         if self.moved is not None:
             self.moved.set()
 
     def begin_abort(self) -> bool:
-        """Start the escalation clock. **The first caller wins**; returns whether
-        this call was it.
+        """Start the escalation clock. **The first caller wins.** Returns whether
+        this call was the first.
 
-        Separate from *asking* the guest to stop, and that separation is the
-        point. The ask is a socket write, and a write blocks when the guest has
-        stopped reading — which is precisely the run the escalation exists for.
-        Both callers used to start the clock by calling a helper that sent the
-        frame first, so the clock for a wedged channel started only once the
-        wedged channel had accepted a frame: `_watch` sat inside its own
-        `_send`, never returned to the loop that times the grace, and the ladder
-        stopped one rung short of the kill. The clock now starts here, in a
-        method that cannot block, and the ask follows it.
+        This is separate from *asking* the guest to stop, and the separation is
+        the purpose. The ask is a socket write, and a write blocks when the guest
+        has stopped reading. That is exactly the run that the escalation exists
+        for. Both callers used to start the clock through a helper that sent the
+        frame first. The clock for a blocked channel therefore started only
+        after the blocked channel had accepted a frame. `_watch` waited inside
+        its own `_send` and never returned to the loop that times the grace, so
+        the abort ladder stopped one step before the kill. The clock now starts
+        here, in a method that cannot block, and the ask follows it.
         """
         if self.aborting_since is not None:
             return False
         self.aborting_since = anyio.current_time()
-        # The grace deadline exists now; `_watch` may be asleep toward a probe.
+        # The grace deadline exists now, and `_watch` may be asleep until a probe
+        # is due.
         self._move()
         return True
 
     def answered(self, probe: int, at: float) -> float | None:
-        """Record one `pong`. Returns the round trip, or `None` if it is not ours.
+        """Record one `pong`. Returns the round trip, or `None` if the pong does
+        not answer the outstanding probe.
 
-        One reading, because the repair travels as a `done` rather than in the
-        answer — `PingFrame.run` says why. What is left is the loop gauge, which
-        `phern doctor` prints and nothing acts on.
+        There is one reading, because the repair arrives as a `done` frame and
+        not in the answer. `PingFrame.run` gives the reason. What remains is the
+        loop gauge, which `phern doctor` prints and which nothing acts on.
 
-        The id is compared rather than trusted: a frame off fd 3 can say
-        anything, and an unsolicited pong would otherwise book a round trip
-        against whichever probe happened to be outstanding.
+        The id is compared and not trusted. A frame from fd 3 can say anything,
+        and an unsolicited pong would otherwise record a round trip against
+        whichever probe was outstanding.
         """
         if self.probe != "waiting" and self.probe != "stalled":
             return None
         if probe != self.probe_id:
             return None
         if self.probe == "stalled":
-            # A stalled probe has no deadline, so `_watch` sleeps until this:
-            # the next probe was due a while ago.
+            # A stalled probe has no deadline, so `_watch` sleeps until this
+            # answer. The next probe has been due for some time.
             self._move()
         self.probe = "idle"
         return at - self.probed_at
 
     def settle(self, *, error: str | None = None, value: object = None) -> bool:
-        """Record how this run ended. **The first writer wins**; returns whether
-        this call was it.
+        """Record how this run ended. **The first writer wins.** Returns whether
+        this call was the first.
 
-        Three places end a run — a `done` frame, the channel closing, and the
-        kill that follows an unresponsive abort — and they race by construction:
-        `_watch` can kill while `_pump` is blocked mid-frame, and `_teardown`
-        closing the socket is itself what wakes the pump. Each used to assign
-        `error` and `settled` directly, and only `_on_closed` checked first, so
-        the outcome depended on three call sites ordering themselves correctly
-        around each other. That ordering was load-bearing and invisible: a
-        `done` frame already buffered when the kill landed would overwrite "the
-        runtime was killed" with the program's own value, and nothing said so.
+        Three places end a run: a `done` frame, the close of the channel, and the
+        kill that follows an abort that got no response. They race by
+        construction. `_watch` can kill while `_pump` is blocked in the middle of
+        a frame, and the socket close in `_teardown` is itself what wakes
+        `_pump`. Each place used to assign `error` and `settled` directly, and
+        only `_on_closed` checked first. The outcome therefore depended on three
+        call sites that had to run in the correct order relative to each other.
+        The design depended on that order, and nothing showed it. A `done` frame
+        that was already buffered when the kill landed would replace "the
+        runtime was killed" with the value of the program, and nothing reported
+        that.
 
-        Idempotent here rather than ordered there, so the account the caller
-        sees is decided by which stop happened first and not by which task
-        happened to reach the assignment last.
+        The method is idempotent here, so the call sites need no order. The
+        account that the caller sees is decided by which stop happened first,
+        and not by which task reached the assignment last.
         """
         if self.settled:
             return False
@@ -312,11 +329,13 @@ class _ActiveRun:
 
 
 class SnapshotPolicy(Protocol):
-    """What the runtime needs of whoever keeps the namespace in the log (D17).
+    """What the runtime needs from the component that keeps the namespace in the
+    log (D17).
 
-    Two responsibilities, deliberately apart: the provider knows about processes
-    and frames, the policy knows about events and blobs. Neither has to know
-    both, and `ph_rlm.snapshot` can fold a stored log with no runtime running.
+    The two responsibilities are separate on purpose. The provider knows about
+    processes and frames, and the policy knows about events and blobs. Neither
+    needs to know both, and `ph_rlm.snapshot` can fold a stored log with no
+    runtime running.
     """
 
     async def record(self, namespace: str, run_id: int, variables: list[dict[str, Any]]) -> None:
@@ -324,17 +343,18 @@ class SnapshotPolicy(Protocol):
         ...
 
     async def materialize(self, namespace: str) -> tuple[list[dict[str, Any]], list[str]]:
-        """The payloads a freshly started kernel should be given back, and the names
-        whose payload could not be read — which a restore reports as failed."""
+        """The payloads to give back to a kernel that just started, and the names
+        whose payload could not be read. A restore reports those names as
+        failed."""
         ...
 
     async def restored(self, namespace: str, outcome: dict[str, Any]) -> None:
-        """Record which of them came back and which did not."""
+        """Record which variables came back and which did not."""
         ...
 
 
 class KernelDied(RuntimeError):
-    """The child is gone. The namespace with it; the session is not."""
+    """The child is gone, and the namespace with it. The session is not gone."""
 
 
 @dataclass(slots=True)
@@ -346,123 +366,136 @@ class Kernel:
     limits: KernelLimits
     journal: OrphanJournal | None
     cwd: Path | None = None
-    """The child's working directory — `workspace.root` for this agent (D21).
+    """The working directory of the child: `workspace.root` for this agent (D21).
 
-    **This is what makes the `worktree` tier bound authored code rather than
-    merely observe it.** A cell's `open("notes.txt", "w")` reaches no policy
-    waterfall by construction (N1), but it does resolve against this directory,
-    so a relative write lands in the agent's own checkout. An absolute path escapes
-    *this* mechanism, and only confinement refuses it (§4.8, E13) — which is
-    `confine` below, when a backend is there to do it."""
+    **Because of this field, the `worktree` tier limits authored code and does
+    not only observe it.** By construction, the `open("notes.txt", "w")` of a
+    cell reaches no policy waterfall (N1). But it does resolve against this
+    directory, so a relative write lands in the checkout of the agent itself. An
+    absolute path escapes *this* mechanism, and only confinement refuses it
+    (§4.8, E13). Confinement is `confine` below, when a backend exists to do
+    it."""
     confine: Callable[[tuple[str, ...]], ConfinedArgv] | None = None
-    """How to bound this child at the kernel, or `None` where nothing can.
+    """How to confine this child at the kernel, or `None` where nothing can.
 
-    **This is what makes `sandbox` mean something for authored code.** `cwd` above
-    bounds a *relative* write by putting the child in the agent's tree; only this
-    refuses `open("/etc/passwd", "w")` from inside a cell, which §4.8 names as the
-    one thing no tier below `sandbox` can do. Until it existed, `permissions-fs`
-    told operators that "a sandbox provider bounds what a code cell can reach
-    directly" while the kernel was spawned unconfined — the sentence is true now.
+    **This field gives `sandbox` a meaning for authored code.** `cwd` above
+    limits a *relative* write, because it puts the child in the tree of the
+    agent. Only this field refuses `open("/etc/passwd", "w")` from inside a cell,
+    and §4.8 names that as the one thing that no tier below `sandbox` can do.
+    Before this field existed, `permissions-fs` told operators that "a sandbox
+    provider bounds what a code cell can reach directly" while the kernel was
+    spawned unconfined. The sentence is true now.
 
-    Supplied by the runtime rather than resolved here, and resolved per *kernel*,
-    because the writable set is the agent's own workspace and scratch. `None` when
-    no backend is mounted or the agent has no workspace, which is the same
-    condition `ctx.shell` declines on and for the same reason: the seam refuses
-    rather than passing through, so asking for confinement that cannot be given
-    would turn every cell into a `SANDBOX_UNAVAILABLE` denial."""
+    The runtime supplies the value, and it is not resolved here. It is resolved
+    for each *kernel*, because the writable set is the workspace and the scratch
+    directory of the agent itself. The value is `None` when no backend is mounted
+    or the agent has no workspace. `ctx.shell` declines on the same condition,
+    for the same reason. The seam refuses and does not pass a command through,
+    so a request for confinement that cannot be given would turn every cell into
+    a `SANDBOX_UNAVAILABLE` denial."""
     applied_limits: dict[str, Any] = field(default_factory=dict)
-    """What the guest reported it could actually apply, from `boot-ack`.
+    """What the guest reported that it could actually apply, from `boot-ack`.
 
-    **Stored because `phern doctor` reports it, and it is not always the request.**
-    `KernelLimits` is what the host *asked* for; macOS refuses `RLIMIT_AS`
-    outright, so a limit named in the request can simply not be in force. Printing
-    the request there would claim a bound nothing enforces, which is E1's failure
-    one layer down from the tier table — so `PythonCodeRuntime.describe` reads this
-    and says "not applied" where the guest said `None`. Empty until `boot-ack`."""
+    **This is stored because `phern doctor` reports it, and it is not always the
+    request.** `KernelLimits` is what the host *asked* for. macOS refuses
+    `RLIMIT_AS` outright, so a limit that the request names can be not in force.
+    Printing the request there would claim a limit that nothing enforces. That is
+    the failure of E1, one layer down from the tier table.
+    `PythonCodeRuntime.describe` therefore reads this field, through `_limits`,
+    and says "not applied" where the guest said `None`. The field is empty until
+    `boot-ack`."""
     confined: ConfinedArgv | None = None
-    """What `confine` produced, once this kernel has started.
+    """What `confine` produced, after this kernel has started.
 
-    One field rather than a fact copied out of it per reader: `_interrupt` needs
-    `forwards_signals` — which is *not* the same question as "was I confined at
-    all", since `bwrap` puts a wrapper and a PID namespace in the way while
-    `sandbox-exec` execs its target — and reporting a refusal needs the effective
-    `policy` to know whether the network was even in play. Deriving either from
-    "confinement happened" would drop a working cancel route on macOS and misread
-    an outage as a denial."""
+    This is one field, and not one fact copied out of it for each reader.
+    `_interrupt` needs `forwards_signals`. That is *not* the same question as
+    "was I confined at all": `bwrap` puts a wrapper and a PID namespace between
+    the host and the guest, while `sandbox-exec` execs its target. The report of
+    a refusal needs the effective `policy`, to know whether the network was
+    involved at all. If either were derived from "confinement happened", macOS
+    would lose a working cancel route, and an outage would be read as a
+    denial."""
     env: Mapping[str, str] = field(default_factory=dict)
-    """Extra environment for the child, from `workspace.env`.
+    """Extra environment for the child: `workspace.env`, or `confined_env` for a
+    confined kernel.
 
-    The build-tool redirection (E12): `TMPDIR`, `PYTEST_ADDOPTS` and friends
-    pointed inside the agent's scratch, so a cell that runs the project's tests
-    does not dirty the worktree with `.pytest_cache/` — which would flip the
-    disposal policy from "remove a clean tree" to "keep everything"."""
+    This is the build-tool redirection (E12). `TMPDIR`, `PYTEST_ADDOPTS` and
+    similar variables point inside the scratch directory of the agent. A cell
+    that runs the tests of the project then does not leave `.pytest_cache/` in
+    the worktree. That directory would change the disposal policy from "remove a
+    clean tree" to "keep everything"."""
     snapshots: SnapshotPolicy | None = None
     skills: tuple[str, ...] = ()
-    """Import names bound callable at boot (P3-18), from `rlm-skills-python`."""
+    """The import names that are bound as callables at boot (P3-18). They come
+    from `rlm-skills-python`."""
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
     """How long a canceled cell has to unwind before the child is killed.
 
-    **What the abort ladder can and cannot do**, stated here because this field is
-    the ladder's only tuning point. `cancel` frame → `SIGINT` → `SIGKILL` at
-    expiry stops a cell at its next yield point, or kills it if it never reaches
-    one. It cannot preempt straight-line synchronous Python: statements after a
-    caught refusal run before the guest's loop regains control, so C3's bound is
-    "about one cell" rather than exactly one. The residue is narrower than the
-    raw-`pathlib` non-goal (§11, Q10) and distinct from it: this one is about
-    *time*, and a deployment widens it by raising this number."""
+    **What the abort ladder can and cannot do** is stated here, because this
+    field is the only setting of the ladder. The abort ladder is the `cancel`
+    frame, then `SIGINT`, then `SIGKILL` when this time expires. It stops a cell
+    at its next yield point, or kills it if it never reaches one. It cannot
+    preempt straight-line synchronous Python. Statements after a caught refusal
+    run before the loop of the guest gets control again, so the limit of C3 is
+    "about one cell" and not exactly one. What remains is narrower than the
+    raw-`pathlib` non-goal (§11, Q10) and different from it. This one is about
+    *time*, and a deployment widens it when it raises this number."""
 
     probe_seconds: float | None = 1.0
     """How often a run is probed while it is open (M2), or `None` for never.
 
-    A frame each way, answered from the guest's reader task. Cheap enough to run
-    continuously — which is the point, because a gauge that is only read when
-    something already looks wrong tells you nothing about what normal was.
-    `Config.probe_seconds` says what turning it off costs."""
+    A probe is one frame each way, answered from the reader task of the guest. It
+    is cheap enough to run continuously, and that is the purpose. A gauge that is
+    read only when something already looks wrong tells nothing about what normal
+    was. `Config.probe_seconds` says what turning it off costs."""
     _process: anyio.abc.Process | None = None
     _sock: socket.socket | None = None
     loop_worst: float | None = None
-    """The worst probe round trip this kernel has seen, or `None` before the
-    first (M2). The tail is the number worth reading: a loop that is usually
-    prompt and occasionally seconds behind is a cell doing bursts of CPU, which
-    is what somebody looking at a sluggish agent is trying to see.
+    """The worst probe round trip that this kernel has seen, or `None` before the
+    first (M2). The worst value is the number to read. A loop that is usually
+    prompt and sometimes seconds behind is a cell that uses CPU in bursts, and
+    that is what a person who looks at a slow agent wants to see.
 
-    A plain field, like `applied_limits` above — `PythonCodeRuntime._loops`
-    reads it from outside the class either way, so a property enforced nothing
-    and put the same sentence in two places."""
+    This is a plain field, like `applied_limits` above.
+    `PythonCodeRuntime._loops` reads it from outside the class in either case, so
+    a property enforced nothing and put the same sentence in two places."""
     loop_stalls: int = 0
-    """Probes that went a whole `probe_seconds` unanswered — one per starved
-    stretch, not one per tick."""
+    """The number of probes that went a whole `probe_seconds` with no answer. One
+    is counted for each starved period, not one for each tick."""
     _run_seq: int = 0
     _buffer: bytearray = field(default_factory=bytearray)
     _scanned: int = 0
-    """How much of `_buffer` has already been searched for a frame boundary, so
-    a large frame is scanned once rather than once per chunk."""
+    """How much of `_buffer` was already searched for a frame boundary. A large
+    frame is then scanned one time, and not one time for each chunk."""
     _boot_noise: bytearray = field(default_factory=bytearray)
-    """Whatever the child wrote to fd 1/2 before it acked (F7). Read while boot
-    waits, so a guest cannot block on a full pipe — and quoted by `_boot_said`
-    when boot fails, which is the one moment it is worth having."""
+    """Whatever the child wrote to fd 1 and fd 2 before it sent `boot-ack` (F7).
+    It is read while boot waits, so that a guest cannot block on a full pipe.
+    `_boot_said` quotes it when boot fails, which is the one moment when it is
+    useful."""
     _alive: bool = False
     _closed: bool = False
-    """Closed for good (`aclose`), as against stopped for a restart (`_teardown`): a
-    run that already held this kernel when its namespace was closed is refused,
-    rather than starting a guest no table holds and no close reaches (K1)."""
+    """Closed permanently (`aclose`), as opposed to stopped for a restart
+    (`_teardown`). A run that already held this kernel when its namespace was
+    closed is refused. It does not start a guest that no table holds and no close
+    reaches (K1)."""
     _reset_notice: bool = False
     _lock: anyio.Lock = field(default_factory=anyio.Lock)
     _send_lock: anyio.Lock = field(default_factory=anyio.Lock)
     """Serializes writes. `wait_writable` refuses two waiters on one socket, and
-    there are genuinely three writers: the run loop sending `run`/`cancel`, and a
-    `_serve_call` task per concurrent binding call answering with `reply`."""
+    several tasks write during one run: `run` sends the `run` frame, tasks that
+    `_watch` starts send `cancel` and `ping`, and one `_serve_call` task for each
+    concurrent binding call answers with `reply`."""
 
     # ---------------------------------------------------------------- start --
 
     async def start(self, namespaces: list[dict[str, Any]]) -> None:
-        """Spawn the child, hand it fd 3, and wait for it to report ready.
+        """Spawn the child, give it fd 3, and wait for it to report ready.
 
-        Also the *restart* path, so the read buffer is cleared here: a leftover
-        half-frame would otherwise prepend one incarnation's bytes to the next
-        one's `boot-ack`.
+        This is also the *restart* path, so the read buffer is cleared here. A
+        half-frame that was left over would otherwise put the bytes of one guest
+        process before the `boot-ack` of the next.
         """
         await self._teardown()
         self._buffer.clear()
@@ -470,26 +503,27 @@ class Kernel:
         host_end, child_end = socket.socketpair()
         argv = (str(self.environment.python), "-m", "ph_runtime")
         child_fd = child_end.fileno()
-        # `scrub_env`, not `os.environ`: this is the child the seam's own
-        # docstring describes — "a child runs code the model wrote, so it does
+        # Use `scrub_env`, not `os.environ`. This is the child that the docstring
+        # of the seam describes: "a child runs code the model wrote, so it does
         # not inherit `*KEY*`". A cell that can read `os.environ` can print the
-        # provider credential into its own output, which is then logged.
+        # provider credential into its own output, and the output is then logged.
         environ = scrub_env(
             extra={
                 **self.env,
                 "NO_COLOR": "1",
                 "PYTHONUNBUFFERED": "1",
                 FD_ENV: str(child_fd),
-                # Both readers from one expression: a variable at the
-                # snapshot limit must fit one frame going *in* as well (F8).
+                # One expression gives the limit to both readers. A variable at
+                # the snapshot limit must also fit one frame going *in* (F8).
                 FRAME_BYTES_ENV: str(frame_cap(self.limits)),
             }
         )
-        # **fd 3 crosses the boundary**, which is the property that makes confining
-        # this child possible at all: `bwrap` passes an inherited descriptor
-        # through to the command it execs, and so does the `sh -c … exec "$@"` the
-        # egress shim wraps around it. Measured on both, with the socket live at
-        # the far end — see `test_kernel_confinement.py`.
+        # **fd 3 crosses the boundary.** That property makes it possible to
+        # confine this child at all. `bwrap` passes an inherited descriptor
+        # through to the command that it execs, and so does the
+        # `sh -c … exec "$@"` that the egress shim wraps around it. Both were
+        # measured, with the socket live at the far end. See
+        # `test_kernel_confinement.py`.
         spawn: tuple[str, ...] = argv
         if self.confine is not None:
             confined = self.confine(argv)
@@ -505,25 +539,26 @@ class Kernel:
                 cwd=str(self.cwd) if self.cwd is not None else None,
                 pass_fds=(child_fd,),
                 # **A session of its own, whatever confines it** (J9). This is
-                # the one pH child that does not go through `ph.seams.subprocess`
-                # — which sets the same flag for everything it launches — and it
-                # is the child that most needs it: it executes model-authored
-                # cells, so a cell could `open("/dev/tty")` and reach the
-                # person's terminal directly, or push characters back into it
-                # with `TIOCSTI`, both of which require the *controlling*
-                # terminal that `setsid()` takes away.
+                # the one pH child that does not go through `ph.seams.subprocess`,
+                # which sets the same flag for everything that it launches. It
+                # is also the child that most needs the flag. It executes
+                # model-authored cells, so a cell could `open("/dev/tty")` and
+                # reach the terminal of the user directly, or push characters
+                # back into it with `TIOCSTI`. Both require the *controlling*
+                # terminal, which `setsid()` takes away.
                 #
-                # Stated here rather than only as bwrap's `--new-session`,
-                # because that argv element closes the hole on exactly one of
-                # three configurations: Seatbelt has no equivalent, and a
+                # The flag is set here, and not only as the `--new-session` of
+                # bwrap, because that argv element closes the hole on exactly
+                # one of three configurations. Seatbelt has no equivalent, and a
                 # deployment with no sandbox backend got nothing at all. The
-                # bwrap flag stays as belt-and-braces for a `ConfinedArgv`
-                # somebody else spawns.
+                # bwrap flag stays as a second protection for a `ConfinedArgv`
+                # that other code spawns.
                 start_new_session=True,
             )
         finally:
-            # Closed in the parent either way: held open, the parent would never
-            # see the child's EOF, and a failed spawn would leak a descriptor.
+            # Close the descriptor in the parent in both cases. If it stayed
+            # open, the parent would never see the EOF of the child, and a failed
+            # spawn would leak a descriptor.
             child_end.close()
 
         host_end.setblocking(False)
@@ -531,22 +566,23 @@ class Kernel:
         self._alive = True
         pid = self._process.pid
         if pid is not None and self.journal is not None:
-            # What is actually running, wrapper included: the journal verifies an
-            # orphan is ours before killing it, and the pid it holds is the
-            # wrapper's.
+            # Record what is actually running, including the wrapper. The journal
+            # verifies that an orphan is ours before it kills the orphan, and the
+            # pid that it holds is the pid of the wrapper.
             self.journal.record(pid=pid, argv=spawn, label=self.namespace)
         try:
             await self._boot(namespaces)
         except BaseException:
-            # **A boot that does not finish takes its guest down** (K2), however it
-            # ends: `_alive` is set ahead of `boot-ack`, so a stop between the two
-            # left a guest the next run took for ready — no start, no restore, and
-            # its cell sent to a guest still booting. `_teardown` shields itself.
+            # **A boot that does not finish stops its guest** (K2), however the
+            # boot ends. `_alive` is set before `boot-ack`. A stop between the two
+            # used to leave a guest that the next run treated as ready: no start,
+            # no restore, and its cell sent to a guest that was still booting.
+            # `_teardown` shields itself.
             await self._teardown(ask=False)
             raise
 
     async def _boot(self, namespaces: list[dict[str, Any]]) -> None:
-        """Hand a spawned guest its boot frame and wait for it to say it is ready."""
+        """Send the boot frame to a spawned guest and wait for it to report ready."""
         assert self._process is not None
         await self._send(
             self.limits.to_boot(
@@ -556,28 +592,28 @@ class Kernel:
         self._boot_noise.clear()
         try:
             with anyio.fail_after(self.boot_timeout):
-                # **The pipes are read while we wait for `boot-ack`** (F7).
-                # `_drain` only runs for the duration of a *run*, so during boot
-                # nothing consumed fd 1 or 2 — and a guest that writes more than
-                # the pipe buffer before it acks blocks on the write and never
-                # acks at all. The host then reports "did not report ready
-                # within Ns" for a child that was ready and stuck, quoting
-                # whatever fits in one late read.
+                # **The pipes are read while the host waits for `boot-ack`**
+                # (F7). `_drain` runs only for the duration of a *run*, so
+                # during boot nothing consumed fd 1 or fd 2. A guest that writes
+                # more than the pipe buffer before `boot-ack` blocks on the
+                # write and never sends it. The host then reports "did not
+                # report ready within Ns" for a child that was ready and
+                # blocked, and quotes whatever fits in one late read.
                 #
-                # A group entered and exited inside this function, which is the
-                # rule the module header states: the long-lived reader task is
-                # what anyio refuses, and what reported a canceled drain instead
-                # of the real failure.
+                # The group is entered and exited inside this function, which is
+                # the rule that the module docstring states. The long-lived
+                # reader task is what anyio refuses, and what reported a
+                # canceled drain when the real failure was something else.
                 async with anyio.create_task_group() as booting:
                     booting.start_soon(self._collect_boot_noise, self._process.stdout)
                     booting.start_soon(self._collect_boot_noise, self._process.stderr)
                     fault = await self._await_boot_ack()
                     booting.cancel_scope.cancel()
         except TimeoutError as timeout:
-            # Quoted here too, and this is the branch that catches a wrapper which
-            # *hangs* rather than exits — the egress shim waiting on its readiness
-            # poll, a bind that never completes. Read here, before `start` tears
-            # down the process this reads from.
+            # The output is quoted here too. This branch catches a wrapper that
+            # *hangs* and does not exit: the egress shim that waits on its
+            # readiness poll, or a bind that never completes. The output is read
+            # here, before `start` stops the process that it comes from.
             said = first_line(self._boot_said())
             raise KernelDied(
                 f"the runtime did not report ready within {self.boot_timeout}s "
@@ -587,13 +623,14 @@ class Kernel:
             raise KernelDied(fault)
 
     async def _collect_boot_noise(self, stream: Any) -> None:  # noqa: ANN401
-        """Read one pipe into `_boot_noise` until boot settles or it ends.
+        """Read one pipe into `_boot_noise` until boot settles or the pipe ends.
 
-        Capped like `_drain`'s, and for the same reason: this is a stream a
-        wrapper — or, through a `sitecustomize`, the environment — can write
-        without bound, and the host is holding it in memory to quote back.
-        Every ending is ordinary here (the group cancels this, or the child
-        exits), so nothing escapes to replace the failure being reported.
+        The read is capped like the read of `_drain`, and for the same reason. A
+        wrapper can write to this stream without limit, and so can the
+        environment through a `sitecustomize`. The host holds the text in memory
+        to quote it. Every ending is ordinary here (the group cancels this task,
+        or the child exits), so nothing escapes to replace the failure that is
+        being reported.
         """
         if stream is None:
             return
@@ -606,29 +643,31 @@ class Kernel:
     def _boot_said(self) -> str:
         """Whatever the child wrote to its pipes before boot settled.
 
-        **Both pipes, not only stderr.** `_collect_boot_noise` is started on fd 1
-        and fd 2 alike, so this is the two interleaved in arrival order — and that
-        is the right answer for the callers, which are quoting a child that failed
-        to start: a wrapper explaining itself on stdout is naming the same
-        failure, and dropping it would be dropping the sentence that says why.
+        **Both pipes, not only stderr.** `_collect_boot_noise` is started on both
+        fd 1 and fd 2, so this is the two streams interleaved in arrival order.
+        That is the correct answer for the callers, which quote a child that
+        failed to start. A wrapper that explains itself on stdout names the same
+        failure, and to drop that text would drop the sentence that gives the
+        reason.
 
-        Reading the buffer is the whole implementation, and a second read of the
-        pipe would be wrong rather than merely redundant: both callers run inside
-        the boot window, where `_collect_boot_noise` is iterating those streams,
-        and a concurrent `receive` on one of them is a `BusyResourceError`. The
-        cap is already applied by the collector.
+        The implementation only reads the buffer. A second read of the pipe would
+        be wrong, not only redundant. Both callers run during boot, while
+        `_collect_boot_noise` iterates those streams, and a concurrent `receive`
+        on one of them raises `BusyResourceError`. The collector already applied
+        the cap.
 
-        Empty is an ordinary answer — a child that died without a word — and the
-        callers leave the quote off rather than inventing one.
+        An empty result is an ordinary answer: the child died and wrote nothing.
+        The callers then leave the quote out and do not invent one.
         """
         return capped_text(self._boot_noise, self.limits.max_log_bytes)
 
     async def _rehydrate(self) -> None:
-        """Hand a freshly started kernel the namespace the log remembers (D17).
+        """Give a kernel that just started the namespace that the log holds (D17).
 
-        Not on a restart after a crash: those payloads describe a namespace the
-        model already knows is gone, and silently reconstituting half of it would
-        be worse than the empty namespace the reset notice announces.
+        This does not happen on a restart after a crash. Those payloads describe
+        a namespace that the model already knows is gone. To rebuild half of it
+        silently would be worse than the empty namespace that the reset notice
+        announces.
         """
         if self.snapshots is None or self._reset_notice:
             return
@@ -636,41 +675,47 @@ class Kernel:
         if not variables and not unreadable:
             return
         outcome = await self._restore(variables)
-        # Recorded even when nothing came back (S11): a namespace whose every blob
-        # was unreadable is exactly the one the model most needs told about.
+        # The outcome is recorded even when nothing came back (S11). A namespace
+        # whose every blob was unreadable is exactly the case that the model most
+        # needs to be told about.
         failed = [*outcome.get("failed", []), *unreadable]
         await self.snapshots.restored(self.namespace, {**outcome, "failed": failed})
 
     async def _await_boot_ack(self) -> str | None:
-        """Read the child's first frame. Returns a fault message, or `None`.
+        """Read the first frame of the child. Returns a fault message, or `None`.
 
-        **Until `boot-ack`, the only frames that exist are `boot-ack` and `fault`,
-        and anything else is a fault to report.** The guest sends `boot-ack` before
-        `Runner.serve` and before any skill import or cell, so nothing
-        model-written has written to fd 3 yet and C10's tolerance — junk is skipped,
-        the peer is hostile — is not owed here. It is actively wrong here: every
-        frame this loop declines to understand is one it would wait `boot_timeout`
-        for in silence with nothing to quote, which is the failure this function was
-        rewritten to end. So the phase is stated once, over both ways a guest can
-        violate it (a line that will not decode, and a decodable frame that is not
-        one of the two), rather than over only the first.
+        **Until `boot-ack`, the only frames that exist are `boot-ack` and
+        `fault`, and anything else is a fault to report.** The guest sends
+        `boot-ack` before `Runner.serve` and before any cell, so nothing
+        model-written has written to fd 3 yet. (The guest does import its skills
+        before `boot-ack`: `Runner.__init__` calls `install_skills`.) The
+        tolerance of C10 (junk is skipped, because the peer is hostile) is
+        therefore not needed here. It is actively wrong here. For every frame
+        that this loop declines to understand, it would wait `boot_timeout` in
+        silence with nothing to quote, and this function was rewritten to end
+        that failure. The rule for this phase is therefore stated one time, for
+        both ways in which a guest can break it: a line that does not decode,
+        and a decodable frame that is not one of the two. It does not cover only
+        the first.
 
-        The die-with-parent mechanism it applied is logged rather than stored: the
-        mechanisms carry genuinely different guarantees, and a log that names one
-        says what was in force. (Before P12-07 a macOS guest ran under
-        `getppid-poll`, with a one-second window in which a hard-killed host could
-        leave a stray; `kqueue-exit` closed it.) What it *could not apply* is
-        stored, because `describe()` reports it: see `applied_limits`.
+        The die-with-parent mechanism that the guest applied is logged and not
+        stored. The mechanisms give different guarantees, and a log that names
+        one says what was in force. (Before P12-07, a macOS guest ran under
+        `getppid-poll`, with a window of one second in which a host that was
+        killed hard could leave a stray process. `kqueue-exit` closed that
+        window.) What the guest *could not apply* is stored, because
+        `describe()` reports it. See `applied_limits`.
         """
         while True:
             line = await self._recv_line()
             if line is None:
-                # **The child's own words**, which this used to throw away. A guest
-                # that cannot start says why on stderr — a missing module, an
-                # interpreter that will not run, `bwrap` refusing a bind source —
-                # and without it every one of those reads as the same sentence.
-                # The same argument `probe_sandbox` makes about quoting a backend:
-                # "the runtime did not start" is true and useless.
+                # **The words of the child itself**, which this code used to
+                # discard. A guest that cannot start gives the reason on stderr:
+                # a missing module, an interpreter that does not run, or `bwrap`
+                # refusing a bind source. Without that text, every one of those
+                # reads as the same sentence. `probe_sandbox` makes the same
+                # argument about quoting a backend: "the runtime did not start"
+                # is true and useless.
                 said = first_line(self._boot_said())
                 because = f": {said}" if said else ""
                 return (
@@ -679,14 +724,16 @@ class Kernel:
                 )
             frame = decode(line)
             if frame is None:
-                # Not C10's "junk → skip": nothing model-written has run yet, so a
-                # line this host cannot read is the guest speaking a shape it does
-                # not accept (D7), and skipping it means waiting out `boot_timeout`
-                # in silence with nothing to quote. How it was found: on macOS the
-                # guest reported `addressSpaceBytes` as RLIM_INFINITY, the codec of
-                # the day refused the whole frame over it, and every start ended
-                # 60 s later as "did not report ready" — the codec is fixed, and
-                # this is what would have said so in a minute instead of never.
+                # This is not the "junk → skip" of C10. Nothing model-written has
+                # run yet, so a line that this host cannot read is the guest
+                # sending a shape that the host does not accept (D7). To skip it
+                # means to wait for `boot_timeout` in silence with nothing to
+                # quote. This was found on macOS. The guest reported
+                # `addressSpaceBytes` as RLIM_INFINITY, the codec of that time
+                # refused the whole frame because of it, and every start ended
+                # 60 s later as "did not report ready". The codec is fixed. This
+                # branch would have reported the cause in a minute, where
+                # nothing ever did.
                 return (
                     "the runtime's first frame could not be read as protocol "
                     f"{PROTOCOL_VERSION} ({self.environment.describe()}): "
@@ -701,15 +748,17 @@ class Kernel:
                     frame["python"],
                     frame["limits"],
                 )
-                # No `isinstance`: the codec coerced `limits` to its declared
-                # `"obj"` or refused the frame, and the type now says so.
+                # No `isinstance` is needed. The codec coerced `limits` to its
+                # declared `"obj"` or refused the frame, and the type now says
+                # so.
                 self.applied_limits = frame["limits"]
                 return None
             if frame["type"] == "fault":
                 return as_str(frame["message"])
-            # Readable, and still not one of the two frames that exist before the
-            # guest is ready. Looping here is how a `log` or `done` arriving early
-            # became the same silent `boot_timeout` an undecodable line did.
+            # The frame is readable, but it is not one of the two frames that
+            # exist before the guest is ready. When this code looped here, a
+            # `log` or `done` that arrived early became the same silent
+            # `boot_timeout` as a line that does not decode.
             return (
                 f"the runtime sent {frame['type']!r} before reporting ready "
                 f"({self.environment.describe()})"
@@ -723,7 +772,8 @@ class Kernel:
         namespaces: Sequence[CodeBindingNamespace],
         token: CancelToken | None,
     ) -> CodeRunResult:
-        """Run one program to settlement. Serialized: one namespace, one program."""
+        """Run one program until it settles. Runs are serialized: one namespace,
+        one program at a time."""
         async with self._lock:
             if self._closed:
                 raise KernelDied(f"the runtime for {self.namespace} was closed; its agent is gone")
@@ -731,10 +781,10 @@ class Kernel:
             if not self._alive:
                 await self.start([_declare(namespace) for namespace in namespaces])
                 await self._rehydrate()
-                # Consumed by the run that *gets* the fresh namespace, not by the
-                # run that lost the old one: the cell that called `os._exit` knows
-                # what it did, and the next one is the one facing an empty
-                # namespace with no idea why.
+                # The notice goes to the run that *gets* the fresh namespace, not
+                # to the run that lost the old one. The cell that called
+                # `os._exit` knows what it did. The next cell is the one that
+                # meets an empty namespace and does not know why.
                 restarted, self._reset_notice = self._reset_notice, False
             self._run_seq += 1
             active = _ActiveRun(
@@ -751,34 +801,36 @@ class Kernel:
                     process = self._process
                     tasks.start_soon(self._drain, process.stdout if process else None, active)
                     tasks.start_soon(self._drain, process.stderr if process else None, active)
-                    # The stop ladder's clock, as a sibling rather than as an
-                    # interruption of the read — `_pump` says why.
+                    # The clock of the abort ladder runs as a sibling task, and
+                    # does not interrupt the read. `_pump` gives the reason.
                     tasks.start_soon(self._watch, active, token, tasks)
                     await self._send(RunFrame(id=active.run_id, program=program))
                     await self._pump(active, tasks)
                     # The drains and any in-flight call tasks belong to this run.
                     tasks.cancel_scope.cancel()
             except BaseException:
-                # **A run that does not settle takes its guest down** (K2). A stop
-                # through `token` takes the abort ladder and settles; one from outside
-                # — the tool call's task canceled — skipped it, and the guest ran the
-                # cell on and kept the next run waiting behind it. The next run starts
-                # a guest and restores what the log holds of the namespace.
+                # **A run that does not settle stops its guest** (K2). A stop
+                # through `token` goes through the abort ladder and settles. A
+                # stop from outside (the task of the tool call was canceled)
+                # used to skip the ladder. The guest then continued the cell and
+                # kept the next run waiting behind it. The next run now starts a
+                # guest and restores what the log holds of the namespace.
                 await self._teardown(ask=False)
                 raise
 
             if active.failure is not None:
-                # C3: the refusal ends the tool call, not just the program, so it
-                # reaches the model as the reason the cell produced nothing.
+                # C3: the refusal ends the tool call, not only the program. It
+                # reaches the model as the reason why the cell produced nothing.
                 raise active.failure
             logs = "".join(active.logs)
             if restarted:
                 logs = f"{RESET_NOTICE} the runtime restarted; the namespace is empty.\n{logs}"
             if active.dropped:
-                # The run's whole drop, said once now that every stream has
-                # ended: the markers in the logs could say only where each was
-                # cut. The one sentence `tool-bash` says it in (D4), so every
-                # renderer of the logs passes it on.
+                # The total that the run dropped is reported one time, now that
+                # every stream has ended. The markers in the logs could say only
+                # where each stream was cut. The sentence is the one that
+                # `tool-bash` uses (D4), so every renderer of the logs passes it
+                # on.
                 logs += truncation_marker(active.dropped, self.limits.max_log_bytes)
             return CodeRunResult(
                 logs=logs,
@@ -791,53 +843,59 @@ class Kernel:
             )
 
     async def _pump(self, active: _ActiveRun, tasks: anyio.abc.TaskGroup) -> None:
-        """Read this run's frames until it settles. Nothing interrupts the read.
+        """Read the frames of this run until it settles. Nothing interrupts the
+        read.
 
-        **The scope it used to sit in was paid per frame, not per read.** The
-        body was wrapped in a 50 ms `move_on_after` so the loop
-        could ask two questions between reads — has the caller canceled, and
-        has the abort grace expired — neither of which is about the socket. But
-        `_recv_line` returns straight out of its buffer whenever a frame is
-        already there, and a 64 KiB read of a chatty cell carries many: the
-        scope was entered and exited for every `log` frame, not every syscall.
-        Measured on a cell emitting 3,000 of them, **37.5 ms against 13.8 ms** —
-        2.7 times, or 7.9 µs a frame, for a deadline almost never reached.
+        **The scope that this loop used to run in cost time for each frame, not
+        for each read.** The body was wrapped in a 50 ms `move_on_after`, so that
+        the loop could ask two questions between reads: has the caller canceled,
+        and has the abort grace expired. Neither question is about the socket.
+        But `_recv_line` returns directly from its buffer whenever a frame is
+        already there, and a 64 KiB read from a cell that prints a lot carries
+        many frames. The scope was entered and exited for every `log` frame, not
+        for every syscall. This was measured on a cell that emitted 3,000 of
+        them: **37.5 ms against 13.8 ms**. That is 2.7 times, or 7.9 µs for each
+        frame, for a deadline that was almost never reached.
 
-        So the clock moved to `_watch`, a sibling task that sleeps instead of
-        holding a socket. **What wakes this now** is the thing it is waiting on:
-        a settling frame, or the channel closing — `_teardown` calls
-        `notify_closing` before it closes, so a kill from `_watch` lands here as
-        `_recv_line` returning `None` on the next turn.
+        The clock therefore moved to `_watch`, a sibling task that sleeps and
+        does not hold a socket. **What wakes this loop now** is the thing that it
+        waits for: a frame that settles the run, or the close of the channel.
+        `_teardown` calls `notify_closing` (in `_close_channel`) before it
+        closes the socket, so a kill from `_watch` arrives here as `_recv_line`
+        returning `None` on the next turn.
 
-        **On issue 58, which this was first written to fix: it does not, and the
-        attribution was wrong.** The claim was that canceling the wait leaves
-        the fd wired — anyio's `_wait_until_readable` registers `f.set_result`
-        as the reader callback and removes the reader in a done-callback one
-        loop iteration later, so a queued readiness callback can fire
-        `set_result(None)` on a canceled future and raise `InvalidStateError`
-        from a bare loop callback. That mechanism is real, and the captured
-        `<Handle Future.set_result(None)>` is its signature. It is not reachable
-        from here. `_recv_line` calls the *free* `anyio.wait_readable`, which is
-        `AsyncIOBackend.wait_readable` — a different implementation that wraps
-        `fut.set_result` in `except InvalidStateError: pass` and removes the
-        reader synchronously inside the callback. Canceling it is safe. The
-        defective shape belongs to `_RawSocketMixin`, i.e. `UNIXSocketStream`,
-        `UNIXSocketListener.accept` and `connect_unix` — the **daemon** socket,
-        where the flake was observed both times. Issue 58 is still open and now
-        scoped there. This change stands on the measurement above instead.
+        **About issue 58, which this change was first written to fix: it does
+        not fix it, and the attribution was wrong.** The claim was that canceling
+        the wait leaves the fd registered. The `_wait_until_readable` of anyio
+        registers `f.set_result` as the reader callback, and removes the reader
+        in a done-callback one loop iteration later. A queued readiness callback
+        can therefore call `set_result(None)` on a canceled future and raise
+        `InvalidStateError` from a bare loop callback. That mechanism is real,
+        and the captured `<Handle Future.set_result(None)>` is its signature.
+        But it cannot be reached from here. `_recv_line` calls the *free*
+        `anyio.wait_readable`, which is `AsyncIOBackend.wait_readable`. That is
+        a different implementation: it wraps `fut.set_result` in
+        `except InvalidStateError: pass` and removes the reader synchronously
+        inside the callback. Canceling it is safe. The defective code belongs to
+        `_RawSocketMixin`, that is, to `UNIXSocketStream`,
+        `UNIXSocketListener.accept` and `connect_unix`. That is the **daemon**
+        socket, where the intermittent failure was observed both times. Issue 58
+        is still open, and its scope is now that socket. This change is
+        justified by the measurement above.
         """
         while not active.settled:
             line = await self._recv_line()
             if line is None:
                 self._on_closed(active)
-                # **Torn down, not merely disowned.** A channel that ended
-                # because the guest exited leaves a child to reap; one that
-                # ended because the host refused an oversized frame leaves a
-                # child that is *still running*, still holding the namespace's
-                # memory, and unreachable — `_alive` is false, so the next run
-                # spawns a second process beside it and the first leaks until
-                # the session ends. Either way this channel is over, and the
-                # process on the other end of it has no further use.
+                # **The guest is stopped, not only disowned.** A channel that
+                # ended because the guest exited leaves a child to reap. A
+                # channel that ended because the host refused an oversized frame
+                # leaves a child that is *still running*. That child still holds
+                # the memory of the namespace, and nothing can reach it:
+                # `_alive` is false, so the next run spawns a second process
+                # beside it, and the first leaks until the session ends. In both
+                # cases this channel is finished, and the process at the other
+                # end has no further use.
                 await self._teardown()
                 return
             frame = decode(line)
@@ -849,28 +907,30 @@ class Kernel:
     async def _watch(
         self, active: _ActiveRun, token: CancelToken | None, tasks: anyio.abc.TaskGroup
     ) -> None:
-        """The stop ladder's clock, off the read path (C3).
+        """The clock of the abort ladder, outside the read path (C3).
 
-        The two questions `_pump` used to interrupt itself to ask, asked by
-        something that is otherwise asleep. **Asleep until something is due**
-        (P12-03), not on a 50 ms tick: it plans the next moment it has a question
-        for (`_next_deadline`) and sleeps until then, until the caller cancels
-        (`token.wait()`), or until `active.moved` says a deadline moved under it.
-        A run that is never canceled wakes once per `probe_seconds`, for the probe,
-        and not at all with the probe off.
+        This task asks the two questions that `_pump` used to interrupt itself to
+        ask, and is otherwise asleep. **It sleeps until something is due**
+        (P12-03), and does not wake on a 50 ms tick. It plans the next moment
+        when it has a question (`_next_deadline`). It then sleeps until that
+        moment, until the caller cancels (`token.wait()`), or until
+        `active.moved` says that a deadline changed. A run that is never
+        canceled wakes this task one time for each `probe_seconds`, for the
+        probe, and never when the probe is off.
 
-        Concurrency with `_pump` is not new: `_serve_call` has always started an
-        abort from its own task, which is why `aborting_since` lives on
-        `_ActiveRun` rather than in the pump. This is a second caller of the
-        same shape, and `begin_abort` sets `moved` so the grace deadline is
+        Concurrency with `_pump` is not new. `_serve_call` has always started an
+        abort from its own task, which is the reason why `aborting_since` is on
+        `_ActiveRun` and not in `_pump`. This task is a second caller of the
+        same kind, and `begin_abort` sets `moved` so that the grace deadline is
         planned at once.
 
-        `while True` rather than `while not active.settled`: the loop is started
-        before the first frame can arrive, so the entry test could never be
-        false, and the check that matters is the one *after* the wait — a run
-        that settled while this task slept must not be sent a spurious
-        interrupt or killed. Written as an entry condition it reads as the
-        termination test and invites the real one to be deleted as redundant.
+        The loop is `while True` and not `while not active.settled`. The loop
+        starts before the first frame can arrive, so the entry test could never
+        be false. The check that matters is the one *after* the wait: a run that
+        settled while this task slept must not get a false interrupt and must
+        not be killed. If the check were written as an entry condition, it would
+        read as the termination test, and a reader could delete the real check
+        as redundant.
         """
         while True:
             active.moved = moved = anyio.Event()
@@ -882,50 +942,55 @@ class Kernel:
             if active.settled:
                 return
             if active.aborting_since is None:
-                # **The clock the host never had** (M2). Both rungs below start
-                # only because somebody pressed stop, so a run that is never
-                # canceled and never settles had nothing watching it at all — the
-                # host waits on `done` with no wall clock of its own.
+                # **The clock that the host never had** (M2). Both steps below
+                # start only because somebody pressed stop. A run that is never
+                # canceled and never settles therefore had nothing watching it:
+                # the host waits for `done` with no wall clock of its own.
                 #
-                # What this asks is narrow, and worth stating exactly because the
-                # prose here once claimed more: it catches a guest that reached
-                # `_send_done`, cleared what it owed, and left the host with no
-                # terminal frame. The guest-side failures that `_snapshot`'s guard
-                # and `relax_cpu_budget` cover all leave the run still *owed*, so
-                # `_answer_if_owed` answers those and this never sees them — those
-                # guards stay load-bearing.
+                # What this asks is narrow. It is stated exactly here, because
+                # this text once claimed more. The probe catches a guest that
+                # reached `_send_done`, cleared what it owed, and left the host
+                # with no terminal frame. The guest-side failures that the guard
+                # of `_snapshot` and `relax_cpu_budget` cover all leave the run
+                # still *owed*. `_answer_if_owed` answers those, and this probe
+                # never sees them. Those guards are still necessary.
                 #
-                # No rung follows it, because the guest settles the run itself.
+                # No step follows the probe, because the guest settles the run
+                # itself.
                 self._probe(active, tasks)
                 if is_canceled(token):
-                    # **The clock first, and the ask started rather than
+                    # **The clock starts first, and the ask is started, not
                     # awaited.** `_interrupt` writes a frame, and a write waits
-                    # on `_send_lock` — which a reply the guest is not reading
-                    # can hold indefinitely. Awaiting it here would park the
-                    # clock inside the thing it is timing, so the grace below
-                    # never expired and the kill never came. Started, the ask can
-                    # take as long as it likes.
+                    # for `_send_lock`. A reply that the guest does not read can
+                    # hold that lock indefinitely. If this code awaited the ask,
+                    # the clock would wait inside the thing that it times. The
+                    # grace below then never expired and the kill never came.
+                    # When the ask is only started, it can take any amount of
+                    # time.
                     active.begin_abort()
                     tasks.start_soon(self._interrupt, active.run_id)
             elif anyio.current_time() - active.aborting_since >= self.cancel_grace:
-                # Neither the frame nor the signal reached it, which means the
-                # cell is spinning in Python and the guest's loop is starved.
-                # Killing costs the namespace; leaving it costs the session.
+                # Neither the frame nor the signal reached the cell. That means
+                # the cell spins in Python and the loop of the guest is starved.
+                # A kill costs the namespace. No kill costs the session.
                 await self._kill_unresponsive(active)
                 return
 
     def _next_deadline(self, active: _ActiveRun) -> float:
-        """When `_watch` next has a question to ask, on the loop's clock, or `inf`.
+        """The time when `_watch` next has a question to ask, on the clock of the
+        loop, or `inf`.
 
-        **Monotonic on purpose**, unlike the daemon's deadlines (`ph.wall_clock`):
-        these are intervals inside one running cell, and a cell suspended with the
-        machine was suspended too.
+        **The clock is monotonic on purpose**, unlike the deadlines of the
+        daemon (`ph.wall_clock`). These are intervals inside one running cell,
+        and a cell that was suspended with the machine was suspended too.
 
-        Aborting, only the grace matters. Otherwise the probe: due `probe_seconds`
-        after the last one left (or after the run opened), and while one is
-        outstanding, due to be called stalled at the same distance. A stalled
-        probe, or the probe off, has no deadline: a stalled one's answer arrives
-        through `active.moved`. `_probe` asks this too, so the rule is one rule.
+        During an abort, only the grace matters. Otherwise the probe decides. A
+        probe is due `probe_seconds` after the last one was sent (or after the
+        run opened). While one is outstanding, it is due to be called stalled
+        after the same interval. A stalled probe has no deadline, and neither
+        does a run with the probe off. The answer to a stalled probe arrives
+        through `active.moved`. `_probe` asks this function too, so there is one
+        rule.
         """
         if active.aborting_since is not None:
             return active.aborting_since + self.cancel_grace
@@ -934,24 +999,28 @@ class Kernel:
         return active.probed_at + self.probe_seconds
 
     def _probe(self, active: _ActiveRun, tasks: anyio.abc.TaskGroup) -> None:
-        """Keep the loop gauge fed, and give the guest a chance to settle (M2).
+        """Keep the loop gauge supplied, and give the guest a chance to settle
+        (M2).
 
-        **Started, never awaited**, for the reason the cancel ask below it is:
-        `_send` waits on `_send_lock`, which a reply the guest is not reading
-        can hold indefinitely, and a clock parked inside the thing it is timing
-        is not a clock. One probe outstanding at a time, so a starved loop costs
-        one unanswered frame rather than one per interval.
+        **The send is started and never awaited**, for the same reason as the
+        cancel ask that follows it in `_watch`. `_send` waits for `_send_lock`,
+        which a reply that the guest does not read can hold indefinitely. A
+        clock that waits inside the thing that it times is not a clock. One
+        probe is outstanding at a time, so a starved loop costs one unanswered
+        frame and not one for each interval.
 
-        `_watch` also calls this when it woke for something else (a cancel, a
-        moved deadline), so it acts only once `_next_deadline` says the probe is
-        due: an idle probe is sent, a waiting one is called stalled. With the probe
-        off, or one stalled, that moment never comes.
+        `_watch` also calls this when it woke for something else (a cancel, or a
+        deadline that changed). This method therefore acts only when
+        `_next_deadline` says that the probe is due: an idle probe is sent, and a
+        waiting probe is called stalled. With the probe off, or with one
+        stalled, that moment never comes.
 
-        **No verdict is taken here.** The frame names the run the host is
-        waiting on, and a guest that is neither running it nor owing it a `done`
-        answers by sending one — so the repair arrives as an ordinary terminal
-        frame through `_pump`, and there is no rung to add. What is left on this
-        side is the measurement: how late the answer was, and whether it came.
+        **No verdict is made here.** The frame names the run that the host waits
+        for. A guest that is not running that run and does not owe it a `done`
+        answers by sending one. The repair therefore arrives as an ordinary
+        terminal frame through `_pump`, and no step needs to be added. What
+        remains on this side is the measurement: how late the answer was, and
+        whether it came.
         """
         now = anyio.current_time()
         if now < self._next_deadline(active):
@@ -962,9 +1031,9 @@ class Kernel:
             active.probe = "waiting"
             tasks.start_soon(self._ping, active.run_id, active.probe_id)
         elif active.probe == "waiting":
-            # Once per starved stretch; the probe keeps its own timestamp,
-            # because what is worth measuring is how long the loop took to come
-            # back and resetting the clock here would throw that away.
+            # Counted one time for each starved period. The probe keeps its own
+            # timestamp, because the value to measure is how long the loop took
+            # to return. To reset the clock here would discard that value.
             active.probe = "stalled"
             self.loop_stalls += 1
 
@@ -974,29 +1043,32 @@ class Kernel:
     async def _interrupt(self, run_id: int) -> None:
         """Ask twice, by two routes that fail in different ways (D5).
 
-        The frame is read by the guest's reader task; `SIGINT` arrives as a loop
-        callback. Both are cooperative and both need the guest's loop to be
-        running, so a cell spinning in Python answers neither — that is what the
-        grace period and `_kill_unresponsive` are for.
+        The reader task of the guest reads the frame, and `SIGINT` arrives as a
+        loop callback. Both are cooperative, and both need the loop of the guest
+        to be running. A cell that spins in Python answers neither. The grace
+        period and `_kill_unresponsive` exist for that case.
 
-        **The signal route is dropped when it would not reach the guest, and that
-        is a refusal to make cancellation destructive.** Under `bwrap`,
-        `self._process` is the wrapper, and it does not forward signals — measured,
-        it dies of `SIGINT` itself (`rc=-2`), taking the PID namespace and the
-        agent's whole namespace with it. So sending it would turn every "stop this
-        cell" into "lose everything the cell had", which is the outcome the ladder's
-        last rung exists to avoid rather than to reach first.
+        **The signal route is not used when the signal would not reach the
+        guest. This is a refusal to make cancellation destructive.** Under
+        `bwrap`, `self._process` is the wrapper, and the wrapper does not
+        forward signals. This was measured: the wrapper itself dies of `SIGINT`
+        (`rc=-2`), and takes with it the PID namespace and the whole namespace
+        of the agent. To send the signal would turn every "stop this cell" into
+        "lose everything that the cell had". That is the outcome of the last
+        step of the abort ladder, and the ladder exists to avoid that outcome,
+        not to reach it first.
 
-        Asked of `ConfinedArgv.forwards_signals` rather than of "am I confined":
-        `sandbox-exec` execs its target and signals land, so a backend that does
-        forward keeps both routes.
+        The question is put to `ConfinedArgv.forwards_signals`, and is not "am I
+        confined". `sandbox-exec` execs its target and signals land, so a
+        backend that does forward keeps both routes.
 
-        What is lost is narrower than it looks. The guest installs `SIGINT` through
-        `loop.add_signal_handler`, so it arrives as an ordinary loop callback —
-        the same loop the `cancel` frame's reader runs on — and the two therefore
-        cover the *same* situation. The signal's independent value is as a backup
-        for a wedged channel with a live loop, and `_kill_unresponsive` still
-        covers that after the grace period.
+        Less is lost than it seems. The guest installs `SIGINT` through
+        `loop.add_signal_handler`, so the signal arrives as an ordinary loop
+        callback, on the same loop that the reader of the `cancel` frame runs
+        on. The two routes therefore cover the *same* situation. The separate
+        value of the signal is as a backup for a blocked channel with a live
+        loop, and `_kill_unresponsive` still covers that case after the grace
+        period.
         """
         await self._send(CancelFrame(id=run_id))
         if self.confined is not None and not self.confined.forwards_signals:
@@ -1007,9 +1079,9 @@ class Kernel:
                 process.send_signal(signal.SIGINT)
 
     def _kill_group(self, process: anyio.abc.Process) -> None:
-        """Kill the guest **and whatever it started** (J9), before its reap or
-        after it (`ph.orphans.signal_child`): `start_new_session` alone leaves a
-        cell's subprocess in a session nothing signals."""
+        """Kill the guest **and whatever it started** (J9), before or after the
+        guest is reaped (`ph.orphans.signal_child`). `start_new_session` alone
+        leaves the subprocess of a cell in a session that nothing signals."""
         with suppress(OSError):
             signal_child(process, kill=True)
 
@@ -1017,11 +1089,11 @@ class Kernel:
         process = self._process
         if process is not None and process.returncode is None:
             self._kill_group(process)
-        # Settled before the teardown, because the teardown is what wakes the
-        # pump: `_teardown` closes the channel, `_recv_line` returns `None`,
-        # and `_on_closed` would otherwise be the first writer with a vaguer
-        # account of the same death. `settle` decides the rest — it cannot be
-        # overwritten once this has claimed it.
+        # The run is settled before the teardown, because the teardown is what
+        # wakes `_pump`: `_teardown` closes the channel, and `_recv_line` returns
+        # `None`. `_on_closed` would otherwise be the first writer, with a vaguer
+        # account of the same death. `settle` decides the rest: after this call
+        # has claimed the outcome, nothing can overwrite it.
         active.settle(
             error=(
                 "the program did not stop when canceled and the runtime was killed; "
@@ -1034,31 +1106,34 @@ class Kernel:
     async def _restore(self, variables: list[dict[str, Any]]) -> dict[str, Any]:
         """Put snapshotted variables back before the next run (D17).
 
-        Called only from `_rehydrate`, which runs *inside* `run()` — so the run
-        lock is already held and must not be taken again: `anyio.Lock` is not
-        reentrant, and going through a locking wrapper here raised instead of
-        waiting, surfacing as a restored namespace becoming a failed cell.
+        Only `_rehydrate` calls this, and `_rehydrate` runs *inside* `run()`. The
+        run lock is therefore already held and must not be taken again.
+        `anyio.Lock` is not reentrant. When this went through a wrapper that
+        took the lock, the wrapper raised and did not wait, and a restored
+        namespace appeared as a failed cell.
         """
         if not self._alive:
             return {"restored": [], "failed": [record.get("var") for record in variables]}
         if not variables:
-            # Reached when every blob a namespace named was unreadable (S11):
-            # `_rehydrate` still reports those, with nothing to send. The loop
-            # below sends one frame per variable and none for none, and the guest
-            # answers a restore by *counting* frames to the one with `more` unset —
-            # so a restore of nothing would wait out `boot_timeout` for an answer
-            # that was never asked for.
+            # This is reached when every blob that a namespace named was
+            # unreadable (S11). `_rehydrate` still reports those, with nothing to
+            # send. The loop below sends one frame for each variable, so it
+            # sends none here. The guest answers a restore by *counting* frames
+            # up to the one with `more` unset. A restore of nothing would
+            # therefore wait for `boot_timeout` for an answer that nothing asked
+            # for.
             return {"restored": [], "failed": []}
         self._run_seq += 1
         active = _ActiveRun(run_id=self._run_seq, bindings={})
-        # **One frame per variable, the way `snapshot` comes back** (O3).
-        # `maxSnapshotBytes` bounds each *value*, and a frame carrying the whole
-        # namespace was bounded by nothing — so F3's defect survived in mirror
-        # image on the one direction its fix did not reach. It is worse here
-        # than there: an over-limit line is a `ValueError` in the guest's
-        # reader, `receive` answers `None`, and the guest exits — which is why
-        # that reader is sized from `frame_cap` too (F8). The namespace is lost
-        # on the way back in, which is precisely what restoring it was for.
+        # **One frame for each variable, in the way that `snapshot` arrives**
+        # (O3). `maxSnapshotBytes` limits each *value*, and a frame that carried
+        # the whole namespace had no limit. The defect of F3 therefore remained,
+        # mirrored, in the one direction that its fix did not reach. It is worse
+        # here than there. An over-limit line is a `ValueError` in the reader of
+        # the guest, `receive` returns `None`, and the guest exits. That is the
+        # reason why that reader is also sized from `frame_cap` (F8). In that
+        # case the namespace is lost on the way back in, although to keep it is
+        # the purpose of a restore.
         async with anyio.create_task_group() as tasks:
             for index, record in enumerate(variables):
                 await self._send(
@@ -1068,10 +1143,10 @@ class Kernel:
                         more=index < len(variables) - 1,
                     )
                 )
-            # No `_watch`: a restore has no bindings, so no dispatch can be
-            # refused and nothing can start an abort — the clock would have
-            # nothing to read. `boot_timeout` is the bound here, and it is one
-            # cancellation at the end rather than a poll throughout.
+            # There is no `_watch` here. A restore has no bindings, so no
+            # dispatch can be refused and nothing can start an abort. The clock
+            # would have nothing to read. `boot_timeout` is the limit here. It
+            # is one cancellation at the end, and not a poll throughout.
             with anyio.move_on_after(self.boot_timeout):
                 await self._pump(active, tasks)
             tasks.cancel_scope.cancel()
@@ -1082,9 +1157,10 @@ class Kernel:
     async def _handle(
         self, frame: InboundFrame, active: _ActiveRun, tasks: anyio.abc.TaskGroup
     ) -> None:
-        # `frame["type"]` compared in place, not bound to a name first: the
-        # union narrows on the comparison, and mypy does not carry that through
-        # an intermediate variable — `InboundFrame`'s docstring says so.
+        # `frame["type"]` is compared in place and not bound to a name first. The
+        # union narrows on the comparison, and mypy does not carry the narrowing
+        # through an intermediate variable. The docstring of `InboundFrame` says
+        # so.
         if frame["type"] == "call":
             tasks.start_soon(self._serve_call, frame, active)
         elif frame["type"] == "log":
@@ -1092,17 +1168,19 @@ class Kernel:
             if frame.get("truncated"):
                 active.truncated = True
         elif frame["type"] == "display":
-            # Converted here rather than widening the two ph-core types this
-            # flows into: a `TypedDict` is not a `dict` subtype, and a frame
-            # with no producer yet is a poor reason to loosen a wire-facing
-            # model in another package. `frame` is still a `DisplayFrame` to
-            # the checker on this line, so nothing goes unchecked.
+            # The frame is converted here, and the two ph-core types that it
+            # flows into are not widened. A `TypedDict` is not a subtype of
+            # `dict`, and a frame that has no producer yet is a poor reason to
+            # loosen a wire-facing model in another package. On this line the
+            # checker still sees `frame` as a `DisplayFrame`, so nothing is
+            # unchecked.
             active.displays.append(dict(frame))
         elif frame["type"] == "snapshot":
-            # Awaited, not spawned: the guest sends this *before* `done`, so the
-            # namespace is in the log — its blobs already on disk — before the
-            # cell's result is, and the next request's barrier writes both before
-            # the model reads it (S11).
+            # This is awaited, not spawned. The guest sends the frame *before*
+            # `done`. The namespace is therefore in the log, with its blobs
+            # already on disk, before the result of the cell is. The barrier of
+            # the next request writes both before the model reads the result
+            # (S11).
             if frame["id"] == active.run_id and self.snapshots is not None:
                 await self.snapshots.record(self.namespace, frame["id"], frame["variables"])
         elif frame["type"] == "pong":
@@ -1114,8 +1192,9 @@ class Kernel:
 
     def _settle(self, frame: DoneFrame, active: _ActiveRun) -> None:
         if frame["id"] != active.run_id:
-            # A `done` for another run is a forged frame — the guest sends one
-            # per run and only for the open one — so it settles nothing (C10).
+            # A `done` for another run is a forged frame, because the guest
+            # sends one for each run and only for the open run. It settles
+            # nothing (C10).
             return
         error = frame.get("error")
         if isinstance(error, dict):
@@ -1125,24 +1204,28 @@ class Kernel:
         else:
             settled = active.settle(value=frame.get("value"))
         if settled:
-            # Only alongside an outcome this frame actually supplied: a `done`
-            # arriving after a kill describes a program the caller is not being
-            # told about, and its truncation flag and total with it.
+            # These are taken only together with an outcome that this frame
+            # supplied. A `done` that arrives after a kill describes a program
+            # that the caller is not told about, and the same is true of its
+            # truncation flag and its total.
             if frame.get("truncated"):
                 active.truncated = True
-            # The guest's total, known only now that its streams have ended.
+            # The total of the guest, which is known only now that its streams
+            # have ended.
             active.dropped += max(as_int(frame.get("dropped")), 0)
 
     async def _serve_call(self, frame: CallFrame, active: _ActiveRun) -> None:
-        """One binding call, back through the full tool pipeline (C1)."""
+        """Serve one binding call through the full tool pipeline (C1)."""
         if frame["run"] != active.run_id:
-            # A call from a program that has already settled — a task the cell
-            # left behind, still running because the guest is persistent. Serving
-            # it would charge this run's budget for another run's work and record
-            # it under this run's dispatch id (F4). Answered rather than dropped:
-            # the caller is awaiting a reply, and silence would hold a task open
-            # for the life of the kernel. The guest cancels such tasks at settle,
-            # so reaching this is a task that survived cancellation.
+            # This call comes from a program that already settled. A task that
+            # the cell left behind made it, and the task still runs because the
+            # guest is persistent. To serve the call would charge the budget of
+            # this run for the work of another run, and record it under the
+            # dispatch id of this run (F4). The call is answered and not
+            # dropped, because the caller awaits a reply, and silence would hold
+            # a task open for the life of the kernel. The guest cancels such
+            # tasks at settle, so a call that reaches this point comes from a
+            # task that survived cancellation.
             await self._reply(
                 frame["id"], ok=False, message="the program that made this call has finished"
             )
@@ -1155,19 +1238,20 @@ class Kernel:
         try:
             value = await binding.dispatch(**frame["args"])
         except CodeRunFailure as failure:
-            # Recorded, answered, *and* aborted — all three, because only the
-            # third actually enforces C3. The reply makes a well-behaved cell
-            # raise `RunStopped` and unwind, but a cell is not obliged to behave
-            # and raw Python is not reachable by any waterfall — so the only
-            # thing that can stop it is ending the process's turn, via the same
-            # frame-then-signal-then-kill ladder user cancellation uses.
+            # The failure is recorded, answered, *and* aborted. All three are
+            # needed, because only the third enforces C3. The reply makes a
+            # well-behaved cell raise `RunStopped` and unwind. But a cell is not
+            # obliged to behave, and no waterfall can reach raw Python. The only
+            # thing that can stop the cell is to end the turn of the process,
+            # with the same abort ladder that user cancellation uses: the
+            # frame, then the signal, then the kill.
             active.failure = failure
-            # The clock first, the reply second, the ask third. The reply has to
-            # precede the cancel frame — a well-behaved cell raises `RunStopped`
-            # and unwinds, which is the tidier of the two stops — but it is also
-            # a write that can block behind a guest that has stopped reading, and
-            # a ladder that only starts once the reply has gone out never starts
-            # for the cell that has stopped listening.
+            # The clock is first, the reply is second, and the ask is third. The
+            # reply must precede the `cancel` frame: a well-behaved cell raises
+            # `RunStopped` and unwinds, which is the cleaner of the two stops.
+            # But the reply is also a write that can block behind a guest that
+            # has stopped reading. An abort ladder that starts only after the
+            # reply went out never starts for the cell that has stopped reading.
             asking = active.begin_abort()
             await self._reply(frame["id"], ok=False, message=failure.message, fatal=True)
             if asking:
@@ -1179,11 +1263,12 @@ class Kernel:
                 frame["id"], ok=False, message=error_message(error), name=frame["name"]
             )
         else:
-            # `thaw_json` is the whole job: a value that came back through the log is
-            # frozen — a `MappingProxyType` over tuples — and `json.dumps` will not
-            # serialize that. Deliberately **no round trip through JSON here**, because
-            # `encode` is about to serialize the frame anyway; anything `json` still
-            # cannot represent is handled by `encode`'s `default`.
+            # `thaw_json` does the whole job. A value that came back through the
+            # log is frozen (a `MappingProxyType` over tuples), and `json.dumps`
+            # does not serialize that. There is deliberately **no round trip
+            # through JSON here**, because `encode` serializes the frame next.
+            # The `default` of `encode` handles anything that `json` still cannot
+            # represent.
             await self._reply(frame["id"], ok=True, value=thaw_json(value))
 
     async def _reply(
@@ -1203,28 +1288,32 @@ class Kernel:
     # ----------------------------------------------------------------- pipes --
 
     async def _drain(self, stream: Any, active: _ActiveRun) -> None:  # noqa: ANN401
-        """Collect the *process's* own fd 1/2 — a grandchild's output, mainly.
+        """Collect fd 1 and fd 2 of the *process* itself. This is mainly the
+        output of a grandchild.
 
-        A `print` in the cell arrives as a `log` frame instead, because the guest
-        redirects `sys.stdout`. What reaches these pipes is what a subprocess the
-        cell spawned wrote, and it is capped for the same reason (D4).
+        A `print` in the cell arrives as a `log` frame, because the guest
+        redirects `sys.stdout`. What reaches these pipes is what a subprocess
+        that the cell spawned wrote. It is capped for the same reason (D4).
 
-        Both streams append into the run's one ordered log, so the result text
-        reads in the order things actually happened — which is what prime-agent's
-        `stdout + stderr + result` concatenation was approximating.
+        Both streams append to the one ordered log of the run, so the result
+        text reads in the order in which things happened. The
+        `stdout + stderr + result` concatenation of prime-agent approximated
+        that order.
         """
         if stream is None:
             return
         written = 0
         cap = self.limits.max_log_bytes
-        # One decoder for the whole stream, so a character split between two
-        # reads is joined rather than shown as two U+FFFDs; and the cap counted
-        # in the bytes it names, cut between characters.
+        # One decoder serves the whole stream, so a character that is split
+        # between two reads is joined and not shown as two U+FFFDs. The cap is
+        # counted in bytes, which is the unit that it names, and the cut falls
+        # between characters.
         decoder = stream_decoder()
 
         def take(text: str) -> None:
-            """Keep `text`, or as much as the cap has room for, marking where it
-            was cut — the one rule for a read and for what the stream left."""
+            """Keep `text`, or as much of it as the cap has room for, and mark
+            where it was cut. This one rule serves a read and the remainder of
+            the stream."""
             nonlocal written
             size = utf8_size(text)
             room = cap - written
@@ -1234,25 +1323,28 @@ class Kernel:
                 return
             kept = head_bytes(text, room)
             active.logs.append(kept)
-            # Where the cut fell; how much followed is the run's total.
+            # The marker shows where the cut is. The amount that followed is in
+            # the total of the run.
             active.logs.append(truncation_marker(None, cap))
             active.dropped += size - utf8_size(kept)
             active.truncated = True
             written = cap
 
-        # `ClosedResourceError` is the ordinary end of this task: the run is over
-        # and the group canceled it, or the child exited. Neither is a failure
-        # to report, and letting it escape would mask the real outcome.
+        # An exception in `_STREAM_ENDED` is the ordinary end of this task: the
+        # run is over and the group canceled the task, or the child exited.
+        # Neither is a failure to report, and an escaped exception would hide the
+        # real outcome.
         with suppress(*_STREAM_ENDED):
             async for chunk in stream:
                 if written >= cap:
-                    # Read, so the child never blocks on a full pipe, and
-                    # counted, so the run's total is the whole of it.
+                    # The chunk is read, so that the child never blocks on a
+                    # full pipe. It is counted, so that the total of the run is
+                    # complete.
                     active.dropped += len(chunk)
                 else:
                     take(decoder.decode(chunk))
-        # What a character the stream ended inside of left: one U+FFFD, said
-        # rather than lost.
+        # If the stream ended inside a character, the decoder returns one U+FFFD
+        # for it. That character is reported and not lost.
         rest = decoder.decode(b"", final=True)
         if rest and written >= cap:
             active.dropped += utf8_size(rest)
@@ -1260,26 +1352,28 @@ class Kernel:
             take(rest)
 
     async def _recv_line(self) -> bytes | None:
-        """The next frame's bytes, or `None` when the child is gone or hostile.
+        """The bytes of the next frame, or `None` when the child is gone or
+        hostile.
 
-        **The buffer is a `bytearray` and only its tail is scanned.** With `bytes` and
-        `+=`, a multi-megabyte frame copies the whole buffer per 64 KiB chunk and
-        re-scans it for a newline, which is quadratic in the frame size. Appending to a
-        `bytearray` and searching from the previous length makes both linear.
+        **The buffer is a `bytearray`, and only its tail is scanned.** With
+        `bytes` and `+=`, a frame of several megabytes copies the whole buffer
+        for each 64 KiB chunk and scans it again for a newline. That is
+        quadratic in the frame size. Appending to a `bytearray` and searching
+        from the previous length makes both linear.
 
-        **The buffer is capped.** The child holds this descriptor and runs model-written
-        code, so `os.write(3, b"x" * 10**10)` is a thing it can do; without a cap the host
-        grows the buffer until it is killed. A frame past the cap is not a frame — it is
-        treated as the channel being unusable (C10).
+        **The buffer is capped.** The child holds this descriptor and runs
+        model-written code, so it can do `os.write(3, b"x" * 10**10)`. Without a
+        cap, the host grows the buffer until the host is killed. A frame past
+        the cap is not a frame. The channel is then treated as unusable (C10).
         """
         sock = self._sock
         if sock is None:
             return None
         buffer = self._buffer
-        # Hoisted, like `max_log_bytes` two readers up: `limits` is frozen and
-        # set at construction, so this is one value for the kernel's life. It
-        # measured as 0.29% of a chunk rather than anything, which is why this
-        # is a tidiness note and not a fix.
+        # The value is read one time here, like `max_log_bytes` in `_drain` and
+        # `_collect_boot_noise`. `limits` is frozen and set at construction, so
+        # this is one value for the life of the kernel. The lookup measured as
+        # 0.29% of a chunk, so this is a note about tidiness and not a fix.
         cap = frame_cap(self.limits)
         while True:
             index = buffer.find(b"\n", self._scanned)
@@ -1317,15 +1411,16 @@ class Kernel:
                     await anyio.wait_writable(sock)
                     sent = sock.send(view)
                 except _CHANNEL_GONE:
-                    # Only a real closure gets here: `_send_lock` is what keeps
+                    # Only a real closure reaches this branch. `_send_lock` keeps
                     # contention from arriving as `BusyResourceError` and being
-                    # reported as the child having exited.
+                    # reported as an exit of the child.
                     self._on_closed()
                     return
                 view = view[sent:]
 
     def _on_closed(self, active: _ActiveRun | None = None) -> None:
-        """The child is gone. Fail whatever was waiting; do not lose the session."""
+        """The child is gone. Fail whatever was waiting, and do not lose the
+        session."""
         if self._alive:
             self._alive = False
             self._reset_notice = True
@@ -1335,23 +1430,27 @@ class Kernel:
     # ---------------------------------------------------------------- close --
 
     async def aclose(self) -> None:
-        """Ask, then wait, then kill — and reap on every path (F4). For good: a run
-        that held this kernel is refused from now on (K1)."""
+        """Ask, then wait, then kill, and reap on every path (F4). The close is
+        permanent: from now on, a run that held this kernel is refused (K1)."""
         self._closed = True
         await self._teardown()
 
     async def _teardown(self, *, ask: bool = True) -> None:
-        """Stop the guest, whatever stops this: a restart's, a close's, a failed boot's.
+        """Stop the guest for a restart, a close, or a failed boot, even when a
+        stop lands in this method itself.
 
-        **Shielded, and its last steps in a `finally`** (K2). The process is detached
-        from the kernel first, so a stop landing in the polite shutdown skipped the
-        kill, `_alive = False`, the reap and the journal's entry, and nothing would
-        come back for the guest. A journal entry is dropped only once the process is
-        reaped, so one a cut-short close leaves running is still the orphan sweep's.
+        **The work is shielded, and its last steps are in a `finally`** (K2). The
+        process is detached from the kernel first. A stop that landed in the
+        polite shutdown therefore used to skip the kill, `_alive = False`, the
+        reap, and the journal entry, and nothing would come back for the guest.
+        A journal entry is dropped only after the process is reaped. A guest
+        that a shortened close leaves running therefore still belongs to the
+        orphan sweep.
 
-        `ask=False` kills without asking first: for a guest that is being thrown away
-        mid-boot or mid-cell, which is usually one that cannot read the ask — a cell
-        blocking its loop — so asking only spent `shutdown_grace` before the kill.
+        `ask=False` kills without asking first. It is for a guest that is
+        discarded during boot or during a cell. Such a guest usually cannot read
+        the ask, because a cell blocks its loop, so the ask only used up
+        `shutdown_grace` before the kill.
         """
         process, self._process = self._process, None
         try:
@@ -1371,19 +1470,20 @@ class Kernel:
         if process is not None and process.returncode is None and not ask:
             self._kill_group(process)
         if process is not None and process.returncode is None:
-            # **Bounded, because the ask is a write and the peer may not be
-            # reading.** A guest spinning in Python drains nothing, so the socket
-            # buffer fills and this send waits on `_send_lock` forever — and
-            # `aclose` with it, which is a shutdown that hangs on exactly the
-            # kernel that most needs shutting down. A frame the guest never reads
-            # is worth waiting on no longer than the exit itself; the kill below
-            # is what actually ends it, and a half-written frame on a channel
-            # about to be closed costs nothing.
+            # **The ask has a time limit, because it is a write and the peer may
+            # not be reading.** A guest that spins in Python drains nothing. The
+            # socket buffer fills, and this send waits on `_send_lock` forever.
+            # `aclose` then waits with it, and the shutdown hangs on exactly the
+            # kernel that most needs to be shut down. A frame that the guest
+            # never reads deserves no longer wait than the exit itself. The kill
+            # below is what actually ends the guest, and a half-written frame on
+            # a channel that is about to be closed costs nothing.
             #
-            # **One instant for both**, which is the rule `serve`'s own teardown
-            # states: two scopes each given `shutdown_grace` spend it twice, so a
-            # wedged guest cost ten seconds under a constant that says five, and
-            # the number stopped meaning what it says.
+            # **One instant serves both scopes.** The teardown in the `serve` of
+            # the daemon states the same rule. Two scopes that each get
+            # `shutdown_grace` spend it twice. A blocked guest then cost ten
+            # seconds under a constant that says five, and the number no longer
+            # meant what it says.
             until = anyio.current_time() + self.shutdown_grace
             with anyio.CancelScope(deadline=until):
                 await self._send(ShutdownFrame())
@@ -1392,30 +1492,31 @@ class Kernel:
             if process.returncode is None:
                 self._kill_group(process)
         if process is not None:
-            # A child that exited while the parent lives and is never reaped is a
-            # zombie; this is the `finally` that prevents one (F4).
+            # A child that exited while the parent lives, and that is never
+            # reaped, is a zombie. This wait prevents one (F4).
             with suppress(Exception):
                 await process.wait()
-            # **And whatever the guest started, on this path too** (J9). A clean
-            # shutdown orphans a cell's subprocess exactly as thoroughly as a
-            # kill does — the guest exits, its session outlives it, and nothing
-            # else is looking. After the reap the group is named by the guest's
-            # pid, since the reap has taken `getpgid`'s answer away.
+            # **Whatever the guest started is killed on this path too** (J9). A
+            # clean shutdown orphans the subprocess of a cell as completely as a
+            # kill does: the guest exits, its session outlives it, and nothing
+            # else looks for it. After the reap, the group is named by the pid
+            # of the guest, because the reap removed the answer of `getpgid`.
             self._kill_group(process)
 
     def _close_channel(self) -> None:
-        """Close the host's end of the guest's socket, waking a read parked on it."""
+        """Close the host end of the socket of the guest, and wake a read that
+        waits on it."""
         if self._sock is not None:
-            # `notify_closing` before the close, because `_pump`'s read has no
-            # timeout of its own any more and this is what ends it. Closing an
-            # fd with a `wait_readable` pending is not enough on epoll: the
-            # closed fd leaves the interest list silently, no event is ever
-            # delivered, and the future never resolves — so the pump would
-            # block forever on a channel that no longer exists. Today the
-            # child's EOF from `_kill_unresponsive`'s `process.kill()` usually
-            # arrives first, which is exactly the kind of incidental rescue
-            # that stops being true after an unrelated edit. anyio provides
-            # this call for the case and documents the ordering.
+            # `notify_closing` comes before the close, because the read of
+            # `_pump` no longer has a timeout of its own, and this call is what
+            # ends it. To close an fd with a `wait_readable` pending is not
+            # enough on epoll. The closed fd leaves the interest list silently,
+            # no event is ever delivered, and the future never resolves. `_pump`
+            # would then block forever on a channel that no longer exists.
+            # Today the EOF of the child, from the kill in `_kill_unresponsive`,
+            # usually arrives first. That is an accidental rescue of the kind
+            # that stops being true after an unrelated edit. anyio provides this
+            # call for the case and documents the order.
             with suppress(OSError, ValueError):
                 anyio.notify_closing(self._sock)
             with suppress(OSError):
@@ -1424,24 +1525,26 @@ class Kernel:
 
 
 _CHANNEL_GONE = (OSError, ValueError, anyio.ClosedResourceError)
-"""What this socket says when it has been closed underneath a caller.
+"""What this socket raises when it was closed under a caller.
 
-Three, because the answer depends on *where* the close lands, and the third was
-missing. `sock.send`/`sock.recv` on a closed socket raise `OSError` (EBADF);
-`anyio.notify_closing` raises `ClosedResourceError` into a waiter that is already
-parked. But `wait_readable`/`wait_writable` **entered** with a closed socket
-raise `ValueError("Invalid file descriptor: -1")` — `socket.close()` sets the
-fileno to `-1`, and the event loop refuses to register it.
+There are three exceptions, because the answer depends on *where* the close
+lands, and the third was missing. `sock.send` and `sock.recv` on a closed socket
+raise `OSError` (EBADF). `anyio.notify_closing` raises `ClosedResourceError` into
+a waiter that already waits. But `wait_readable` and `wait_writable` that are
+**entered** with a closed socket raise
+`ValueError("Invalid file descriptor: -1")`: `socket.close()` sets the fileno to
+`-1`, and the event loop refuses to register it.
 
-That third case is a loop re-entry, which is why a partial write finds it: a
-frame larger than the socket buffer goes round `wait_writable`/`send` many
-times, and `_teardown` closing the channel between two of those turns lands
-exactly there. Reached from `test_a_cell_blocked_behind_a_large_reply_is_still_killed`,
-where an 8 MB reply is being written while the stop ladder kills the guest — and
-observed on macOS while Linux passed, because which of the three arrives first is
-a matter of buffer sizes and wakeup order rather than of anything this code
-decides. The module already reads `ValueError` as "this fd is gone" where it
-calls `notify_closing`; this is the same reading at the two places that wait.
+The third case needs a second pass through the wait, which is why a partial
+write finds it. A frame that is larger than the socket buffer goes through
+`wait_writable` and `send` many times. When `_teardown` closes the channel
+between two of those turns, the close lands exactly there.
+`test_a_cell_blocked_behind_a_large_reply_is_still_killed` reaches it: an 8 MB
+reply is being written while the abort ladder kills the guest. It was observed
+on macOS while Linux passed, because which of the three arrives first depends on
+buffer sizes and wakeup order, and not on anything that this code decides. The
+module already reads `ValueError` as "this fd is gone" where it calls
+`notify_closing`. This is the same reading at the two places that wait.
 """
 
 
@@ -1453,8 +1556,8 @@ class PythonCodeRuntime:
     isolation: ClassVar[Literal["process"]] = "process"
     persistence: ClassVar[Literal["namespace"]] = "namespace"
     declares_kernel_snapshots: ClassVar[bool] = True
-    """The promise the seam checks at registration (D6). `rlm-kernel-snapshot`
-    turns the frames this provider surfaces into `kernel/snapshot` events."""
+    """The promise that the seam checks at registration (D6). `rlm-kernel-snapshot`
+    turns the frames that this provider passes on into `kernel/snapshot` events."""
 
     limits: KernelLimits
     journal: OrphanJournal | None
@@ -1465,77 +1568,84 @@ class PythonCodeRuntime:
     """Requirement specs installed into the managed venv. A local directory is
     installed editable, so editing a skill does not need a venv rebuild."""
     skill_modules: tuple[str, ...] = ()
-    """The import names those specs provide, handed to each kernel at boot.
+    """The import names that those specs provide. Each kernel gets them at boot.
 
-    Two lists rather than one because they answer different questions and can
-    legitimately differ: a distribution named `acme-websearch` imports as
-    `acme_websearch`, and `rlm-skills-python` is what knows both."""
+    There are two lists and not one, because they answer different questions and
+    can correctly differ. A distribution named `acme-websearch` imports as
+    `acme_websearch`, and `rlm-skills-python` is the row that knows both."""
     workspaces: Callable[[str], Workspace | None] | None = None
     """Agent id → its `Workspace`, set by the row (D21). See `workspace_for`."""
     sandbox: Callable[[], SandboxSeam | None] | None = None
-    """The `ctx.sandbox` seam, asked for **when a kernel starts** rather than held.
+    """The `ctx.sandbox` seam, which is requested **when a kernel starts** and is
+    not held.
 
-    A resolver rather than the seam itself, for the reason `workspaces` is one: a
-    value read at mount would be `None` for every kernel this runtime ever spawns
-    if the backend row is layered after this one, and `FsPermissions.ctx` is the
-    same shape for the same reason. Absent entirely — a profile with no sandbox
-    seam at all — leaves cells bounded by `cwd` and nothing else, which is what
-    they were before."""
+    This is a resolver and not the seam itself, for the same reason as
+    `workspaces`. If the backend row is layered after this row, a value that is
+    read at mount would be `None` for every kernel that this runtime ever spawns.
+    `FsPermissions.ctx` has the same form for the same reason. When the resolver
+    is absent (a profile with no sandbox seam at all), cells are limited by `cwd`
+    and nothing else, which is how they were limited before."""
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
     probe_seconds: float | None = 1.0
     snapshots: SnapshotPolicy | None = None
-    """Set by the `rlm-kernel-snapshot` row. Absent, the runtime still runs — but
-    `persistence: "namespace"` would then be a promise nothing keeps, which is
-    why the bundle mounts both rows together."""
+    """Set by the `rlm-kernel-snapshot` row. Without it, the runtime still runs,
+    but `persistence: "namespace"` would then be a promise that nothing keeps.
+    For that reason the bundle mounts both rows together."""
     _kernels: dict[str, Kernel] = field(default_factory=dict)
     _closers: dict[str, Releaser] = field(default_factory=dict)
-    """Each kernel's close, registered on its agent's scope; dropped unrun when the
-    kernel is closed another way (`close_namespace`)."""
+    """The close of each kernel, registered on the scope of its agent. An entry is
+    dropped without being run when the kernel is closed in another way
+    (`close_namespace`)."""
     _acquire_lock: anyio.Lock = field(default_factory=anyio.Lock)
     """Held across the whole of `_acquire`, so one namespace gets one kernel.
 
-    Runtime-wide rather than per namespace, which costs nothing: the suspension
-    it covers is `environment()`, and that already serializes on its own
-    `_resolve_lock` — there is no concurrency here to preserve.
+    The lock is runtime-wide and not per namespace, and that costs nothing. The
+    suspension that it covers is `environment()`, which already serializes on its
+    own `_resolve_lock`. There is no concurrency here to keep.
     """
     scopes: Callable[[str], Context | None] | None = None
-    """Agent id → its live scope, so a kernel is released *structurally* (F1).
+    """Agent id → its live scope, so that a kernel is released *structurally*
+    (F1).
 
-    The alternative was closing on the `agent/disposed` event, but `emit`
-    schedules an async listener without awaiting it — so release would happen
-    eventually rather than as part of unwinding. Registering the disposer on the
-    agent's own scope makes the child process an artifact of that scope, which
-    is what every other acquired resource in pH already is.
+    The alternative was to close on the `agent/disposed` event. But `emit`
+    schedules an async listener and does not await it, so the release would
+    happen at some later time and not as part of unwinding. A disposer that is
+    registered on the scope of the agent itself makes the child process an
+    artifact of that scope, like every other acquired resource in pH.
 
-    Asked of the agent registry when a kernel is built (`AgentRegistry.scope_of`),
-    and the answer for an agent that is gone is a refusal (`apply`). `None`, for a
-    runtime no registry is wired to, builds a kernel only this row's unmount closes.
-    This was a table of its own, filled on `agent/created` and never emptied: it
-    held the scope of every agent the runtime had ever heard of."""
+    The agent registry is asked when a kernel is built
+    (`AgentRegistry.scope_of`), and the answer for an agent that is gone is a
+    refusal (`apply`). `None`, for a runtime that no registry is connected to,
+    builds a kernel that only the unmount of this row closes. This used to be a
+    separate table, filled on `agent/created` and never emptied. It held the
+    scope of every agent that the runtime had ever heard of."""
     _environment: RuntimeEnvironment | None = None
     _resolve_lock: anyio.Lock = field(default_factory=anyio.Lock)
 
     def _loops(self) -> str:
-        """How far behind the guests' event loops are running (M2).
+        """How far behind the event loops of the guests run (M2).
 
-        **A load reading, printed whether or not anything is wrong.** Each kernel
-        is probed every `probe_seconds` while a cell is open and answers from
-        the reader task a cell shares the loop with, so the round trip is the delay anything
-        cooperative would meet: a `cancel` frame, a `SIGINT` callback, a binding
-        reply. The worst is the number worth reading — a loop that is usually
-        prompt and occasionally seconds behind is a cell doing bursts of CPU,
-        which is what somebody looking at a sluggish agent is trying to see.
+        **This is a load reading, and it is printed whether or not anything is
+        wrong.** Each kernel is probed every `probe_seconds` while a cell is
+        open. The guest answers from the reader task, which shares the loop with
+        the cell. The round trip is therefore the delay that anything
+        cooperative would meet: a `cancel` frame, a `SIGINT` callback, or a
+        binding reply. The worst value is the number to read. A loop that is
+        usually prompt and sometimes seconds behind is a cell that uses CPU in
+        bursts, and that is what a person who looks at a slow agent wants to
+        see.
 
-        A stall is a probe that was never answered, which is a cell that did not
-        yield for a whole second. Counted, not judged: that is ordinary for
-        compute, and `CpuBudget` is what bounds it.
+        A stall is a probe that went a whole `probe_seconds` with no answer,
+        which means a cell that did not yield for that time (one second by
+        default). It is counted and not judged. That is ordinary for compute,
+        and the per-run CPU budget (`cpu_seconds`) is what limits it.
         """
-        # A kernel every one of whose probes was starved has a stall count and
-        # no round trip; filtering on the round trip alone dropped it from the
-        # total *and* from the sum, so the line could report nothing measured
-        # while stalls were recorded — the case most worth seeing.
+        # A kernel whose every probe was starved has a stall count and no round
+        # trip. A filter on the round trip alone dropped it from the total *and*
+        # from the sum. The line could then report nothing measured while stalls
+        # were recorded, which is the case that most needs to be seen.
         measured = [
             one for one in self._kernels.values() if one.loop_worst is not None or one.loop_stalls
         ]
@@ -1555,11 +1665,11 @@ class PythonCodeRuntime:
         """What `phern doctor` prints about the workers that run model code (I-2).
 
         **Nothing here resolves the interpreter.** `environment()` shells out to
-        `uv` to build the managed venv, and a diagnostic that took thirty
-        seconds and a network the first time someone ran it would be a
-        diagnostic people stop running. So an unresolved interpreter is reported
-        as unresolved, which is also the more useful fact: it says the venv has
-        not been built yet.
+        `uv` to build the managed venv. A diagnostic that took thirty seconds
+        and a network the first time someone ran it would be a diagnostic that
+        people stop running. An unresolved interpreter is therefore reported as
+        unresolved. That is also the more useful fact: it says that the venv is
+        not built yet.
         """
         environment = self._environment
         interpreter = (
@@ -1580,15 +1690,16 @@ class PythonCodeRuntime:
     def _limits(self) -> str:
         """The per-child limits, as the live kernels actually got them.
 
-        **Read from the guests where there are any**, which is `_confinement`'s rule
-        and for `_confinement`'s reason: the request is what the host asked for, and
-        on a platform that refuses `RLIMIT_AS` — macOS does, with `ValueError:
-        current limit exceeds maximum limit` — the number in force is not the number
-        configured. Printing the request would be `phern doctor` claiming a bound
-        nothing holds, which is the shape E1 forbids one level up in the tier table.
+        **The limits are read from the guests where there are any.** This is the
+        rule of `_confinement`, for the same reason. The request is what the
+        host asked for. On a platform that refuses `RLIMIT_AS`, the number in
+        force is not the number configured. macOS refuses it, with `ValueError:
+        current limit exceeds maximum limit`. To print the request would make
+        `phern doctor` claim a limit that nothing holds. E1 forbids that kind of
+        claim one level up, in the tier table.
 
-        The weakest live kernel wins, again as `_confinement` does: one child that
-        could not take the limit means the row must not say every child has it.
+        The weakest live kernel decides, as in `_confinement`. If one child could
+        not take the limit, the row must not say that every child has it.
         """
         gib = self.limits.address_space_bytes / 1024**3
         asked = f"{self.limits.cpu_seconds}s CPU, {gib:.3g} GiB address space"
@@ -1604,20 +1715,20 @@ class PythonCodeRuntime:
         return asked
 
     def _confinement(self) -> str:
-        """Whether authored code is bounded at the kernel, and by what.
+        """Whether authored code is confined at the kernel, and by what.
 
-        Its own row in `phern doctor` because it is the difference between a cell that
-        can write `/etc` and one that cannot, and because it is *conditional* — on a
-        backend, and on the agent having a workspace. Read from the kernels that are
-        actually running where there are any, so this reports what is true rather
-        than what would be true.
+        This has its own row in `phern doctor`, because it is the difference
+        between a cell that can write `/etc` and a cell that cannot. It is also
+        *conditional*: on a backend, and on the agent having a workspace. Where
+        kernels are running, the answer is read from them, so this reports what
+        is true and not what would be true.
 
         **It reports the weakest live kernel, not the strongest.** A first draft
-        joined the set of backends that had confined something, which read as
-        "bwrap — every live kernel's writes are bounded" in the very case that
-        sentence is false: one agent with a workspace and one without. There is only
-        ever one provider, so there was never a plurality to join — only a way to
-        overstate.
+        joined the set of backends that had confined something. That read as
+        "bwrap — every live kernel's writes are bounded" in the one case where
+        the sentence is false: one agent with a workspace and one without. There
+        is only ever one provider, so there was never more than one name to
+        join. The join was only a way to overstate.
         """
         seam = None if self.sandbox is None else self.sandbox()
         if seam is None or seam.provider is None:
@@ -1629,11 +1740,11 @@ class PythonCodeRuntime:
         return f"{seam.provider.backend} — every live kernel's writes are bounded at the kernel"
 
     async def environment(self) -> RuntimeEnvironment:
-        """Resolve the interpreter once, on first use.
+        """Resolve the interpreter one time, on first use.
 
-        Lazily, and in a worker thread: building the managed venv shells out to
-        `uv`, and neither `phern --dump-config` nor a session that runs no cells
-        should pay for it.
+        The work is lazy and runs in a worker thread. Building the managed venv
+        shells out to `uv`, and neither `phern --dump-config` nor a session that
+        runs no cells should pay for it.
         """
         async with self._resolve_lock:
             if self._environment is None:
@@ -1648,12 +1759,12 @@ class PythonCodeRuntime:
             return self._environment
 
     def workspace_for(self, agent_id: str) -> Workspace | None:
-        """This agent's workspace, or `None` before one is acquired.
+        """The workspace of this agent, or `None` before one is acquired.
 
-        Resolved per kernel rather than held as one runtime-wide `cwd`, because
-        the namespace *is* the agent id: a parent and its children share this
-        runtime and must not share a checkout, which is the collision the
-        `worktree` tier exists to prevent.
+        It is resolved for each kernel and not held as one runtime-wide `cwd`,
+        because the namespace *is* the agent id. A parent and its children share
+        this runtime and must not share a checkout. The `worktree` tier exists
+        to prevent that collision.
         """
         if self.workspaces is None:
             return None
@@ -1664,8 +1775,9 @@ class PythonCodeRuntime:
             return None
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
-        """Run one program in its namespace — the agent's own unless it names another —
-        within the agent's boundary either way (`CodeRunRequest.agent`, S21)."""
+        """Run one program in its namespace, within the boundary of the agent in
+        either case (`CodeRunRequest.agent`, S21). The namespace is the one of
+        the agent itself unless the request names another."""
         namespace = request.namespace or request.agent
         kernel = self._kernels.get(namespace)
         if kernel is None:
@@ -1675,22 +1787,23 @@ class PythonCodeRuntime:
         return result
 
     def _note_denial(self, kernel: Kernel, agent_id: str, result: CodeRunResult) -> None:
-        """Record a boundary the cell hit, the way `ctx.shell` records one.
+        """Record a boundary that the cell hit, in the way that `ctx.shell`
+        records one.
 
-        **Here rather than in `Kernel`**, which holds a confiner and no seam: this is
-        where both are in hand. The seam owns what counts as a refusal
-        (`report_denial`), so a cell that writes `/etc/passwd` now leaves the same
-        `sandbox/denied` record — and the same `/sandbox allow path` line — that the
-        identical refusal from `tool-bash` leaves. Without it the kernel had adopted
-        the boundary and not the rule, and the asymmetry was visible inside one
-        change: a *network* refusal was already recorded, because the proxy is told
-        which agent it is refusing.
+        **This is here and not in `Kernel`.** `Kernel` holds a confiner and no
+        seam, and both are available here. The seam owns the decision of what
+        counts as a refusal (`report_denial`). A cell that writes `/etc/passwd`
+        therefore now leaves the same `sandbox/denied` record, and the same
+        `/sandbox allow path` line, as the identical refusal from `tool-bash`.
+        Without this, the kernel had adopted the boundary and not the rule. The
+        asymmetry was visible inside one change: a *network* refusal was already
+        recorded, because the proxy is told which agent it refuses.
 
-        Only for a run that failed, which is `report_denial`'s own requirement: the
-        error is where `OSError: [Errno 30] Read-only file system` lands, and a cell
-        that printed those words and succeeded was refused nothing. Recorded for the
-        agent the run was for, so it lands in the transcript whoever wrote the cell
-        is reading.
+        This runs only for a run that failed, which `report_denial` itself
+        requires. The error is where `OSError: [Errno 30] Read-only file system`
+        lands, and a cell that printed those words and succeeded was refused
+        nothing. The record is made for the agent that the run was for, so it
+        lands in the transcript that the author of the cell reads.
         """
         confined = kernel.confined
         if confined is None or result.error is None:
@@ -1704,23 +1817,26 @@ class PythonCodeRuntime:
         agent_id: str,
         workspace: Workspace | None = None,
     ) -> Callable[[tuple[str, ...]], ConfinedArgv] | None:
-        """How to bound this agent's kernel, or `None` where nothing can.
+        """How to confine the kernel of this agent, or `None` where nothing can.
 
-        **The same condition `ctx.shell` applies, deliberately.** A command the
-        harness runs for an agent and a cell the agent writes are the same kind of
-        thing — somebody else's code, in that agent's workspace — so they get the
-        same boundary from the same `workspace_policy`, and a deployment cannot end
-        up with `tool-bash` confined and `run_code` not. It is *not* gated on the
-        containment tier for the same reason: `ctx.shell` confines at every rung
-        where a backend exists, and `phern doctor`'s containment section already says
-        so in the sentence about commands the harness wraps.
+        **This is the same condition that `ctx.shell` applies, on purpose.** A
+        command that the harness runs for an agent and a cell that the agent
+        writes are the same kind of thing: code from somebody else, in the
+        workspace of that agent. They therefore get the same boundary from the
+        same `workspace_policy`, and a deployment cannot have `tool-bash`
+        confined and `run_code` not confined. For the same reason, this is *not*
+        gated on the containment tier. `ctx.shell` confines at every tier where
+        a backend exists, and the containment section of `phern doctor` already
+        says so in the sentence about commands that the harness wraps.
 
-        `None` when there is no backend, none that enforces, or no workspace to be
-        the writable root — never a passthrough, because the seam refuses rather
-        than pretending and a caller must not mistake absence for confinement.
+        The result is `None` when there is no backend, no backend that enforces,
+        or no workspace to be the writable root. It is never a passthrough. The
+        seam refuses and does not pretend, and a caller must not mistake absence
+        for confinement.
 
-        `workspace` is the one `_acquire` has already resolved; omitted, it is looked
-        up. Two lookups for one spawn also logged the failure warning twice.
+        `workspace` is the one that `_build` already resolved. When it is
+        omitted, it is looked up. Two lookups for one spawn also logged the
+        failure warning twice.
         """
         seam = None if self.sandbox is None else self.sandbox()
         if workspace is None:
@@ -1728,25 +1844,27 @@ class PythonCodeRuntime:
         if seam is None or not seam.available or workspace is None:
             return None
         policy: SandboxPolicy = workspace_policy(workspace)
-        # `agent=` so a host the egress proxy refuses is recorded in *this* agent's
-        # session, which is the transcript whoever wrote the cell is reading.
+        # `agent=` is passed so that a host that the egress proxy refuses is
+        # recorded in the session of *this* agent. That is the transcript that
+        # the author of the cell reads.
         return partial(seam.confine, policy=policy, agent=agent_id)
 
     async def _acquire(self, namespace: str, agent_id: str) -> Kernel:
-        """The one kernel for this namespace, built once however many ask (F6).
+        """The one kernel for this namespace, built one time however many callers
+        ask (F6).
 
-        **Double-checked, because `environment()` suspends.** `run` reads
-        `_kernels` and finds nothing, then awaits the interpreter resolve — which
-        on a cold cache builds a venv and takes seconds. Two first runs on one
-        namespace both got past the read, both built a `Kernel`, and the second
-        overwrote the first in the dict. Both then spawned a guest on their first
-        cell, and only the one still in `_kernels` was reachable by
-        `close_namespace`: the other ran until the process exited, holding a
-        socket, a pid and whatever the cell had open.
+        **The check is made twice, because `environment()` suspends.** `run`
+        reads `_kernels` and finds nothing, then awaits the interpreter resolve.
+        On a cold cache the resolve builds a venv and takes seconds. Two first
+        runs on one namespace both got past the read, and both built a `Kernel`.
+        The second overwrote the first in the dict. Both then spawned a guest on
+        their first cell, and `close_namespace` could reach only the one that
+        was still in `_kernels`. The other ran until the process exited, and
+        held a socket, a pid, and whatever the cell had open.
 
-        Two first runs on one namespace is ordinary — a model's namespace *is* its
-        agent id, and a fan-out of parallel tool calls on one agent is what Code
-        Mode is for.
+        Two first runs on one namespace are ordinary. The namespace of a model
+        *is* its agent id, and a fan-out of parallel tool calls on one agent is
+        what Code Mode is for.
         """
         async with self._acquire_lock:
             settled = self._kernels.get(namespace)
@@ -1755,16 +1873,17 @@ class PythonCodeRuntime:
             return await self._build(namespace, agent_id)
 
     async def _build(self, namespace: str, agent_id: str) -> Kernel:
-        """A kernel for `namespace`, within `agent_id`'s boundary: its workspace as the
-        directory and environment, its confinement, and its scope as the owner that
-        closes it. The same whether the namespace is the agent's own or another it
-        runs beside, such as the H1 probe's."""
+        """A kernel for `namespace`, within the boundary of `agent_id`: the
+        workspace of the agent as the directory and environment, its
+        confinement, and its scope as the owner that closes the kernel. This is
+        the same whether the namespace is the one of the agent itself or another
+        that it runs beside, such as the namespace of the H1 probe."""
         workspace = self.workspace_for(agent_id)
         confine = self.confiner(agent_id, workspace)
         env: Mapping[str, str] = {}
         if workspace is not None:
-            # As `ctx.shell` gives a confined command: a confined kernel has no
-            # `/tmp` of its own (`confined_env`).
+            # This is what `ctx.shell` gives a confined command. A confined
+            # kernel has no `/tmp` of its own (`confined_env`).
             env = confined_env(workspace) if confine is not None else workspace.env
         kernel = Kernel(
             namespace=namespace,
@@ -1783,8 +1902,9 @@ class PythonCodeRuntime:
         )
         scope = None if self.scopes is None else self.scopes(agent_id)
         if scope is not None:
-            # The close before the entry, and nothing that suspends between them:
-            # a kernel in the table always has the close that takes it out.
+            # The close is registered before the entry is made, and nothing
+            # suspends between them. A kernel in the table therefore always has
+            # the close that removes it.
             self._closers[namespace] = scope.add_disposer(
                 partial(self.close_namespace, namespace), label=f"code-runtime:{namespace}"
             )
@@ -1792,8 +1912,9 @@ class PythonCodeRuntime:
         return kernel
 
     async def close_namespace(self, namespace: str) -> None:
-        """Shut one agent's kernel down: when the agent goes, or before it does, which
-        takes the close off the agent's scope."""
+        """Shut down the kernel of one agent. This happens when the agent goes,
+        or before it goes. In the second case the close is removed from the scope
+        of the agent."""
         closer = self._closers.pop(namespace, None)
         if closer is not None:
             closer.drop()
@@ -1807,9 +1928,10 @@ class PythonCodeRuntime:
 
 
 def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
-    """What the guest needs to build a proxy: names, not dispatch closures — and each
-    binding's parameter names in the order the SDK listing shows them, so a call
-    written from the listing binds as it reads (`ph_runtime.proxies`)."""
+    """What the guest needs to build a proxy: names, not dispatch closures. It
+    also gets the parameter names of each binding, in the order that the SDK
+    listing shows them, so that a call written from the listing binds as it reads
+    (`ph_runtime.proxies`)."""
     return {
         "name": namespace.name,
         "description": namespace.description,
@@ -1825,62 +1947,64 @@ def _declare(namespace: CodeBindingNamespace) -> dict[str, Any]:
 
 
 class Config(KernelLimits):
-    """Row config for the Python runtime: the limits, plus how to reach a child.
+    """The row config for the Python runtime: the limits, plus how to reach a
+    child.
 
-    Extends `KernelLimits` so the YAML stays flat (`cpuSeconds: 30`) and the
-    limits have one declaration.
+    It extends `KernelLimits`, so that the YAML stays flat (`cpuSeconds: 30`) and
+    the limits have one declaration.
     """
 
     python: InterpreterMode = "managed"
-    """`managed` builds `$PH_CACHE/runtime-venv`; `host` reuses pH's own
-    interpreter, which is faster and wider — see `venv`."""
+    """Which interpreter runs the cells. `managed` builds
+    `$PH_CACHE/runtime-venv`. `host` reuses the interpreter of pH itself, which
+    is faster and is a wider surface. See `venv`."""
     interpreter: str | None = None
     boot_timeout_seconds: float = 30.0
     shutdown_grace_seconds: float = 5.0
     cancel_grace_seconds: float = 2.0
-    """How long a cell asked to stop has before it is killed.
+    """How long a cell that was asked to stop has before it is killed.
 
-    Both directions cost something: longer widens the window in which a cell that
-    swallowed a refusal can finish synchronous work (see `Kernel.cancel_grace`);
-    shorter kills a cell that is legitimately slow to unwind, and killing costs
-    the namespace."""
+    Both directions have a cost. A longer time widens the window in which a cell
+    that swallowed a refusal can finish synchronous work (see
+    `Kernel.cancel_grace`). A shorter time kills a cell that is legitimately slow
+    to unwind, and a kill costs the namespace."""
     probe_seconds: PositiveFloat | None = 1.0
-    """How often an open run's guest loop is probed (M2), or `null` for never.
+    """How often the guest loop of an open run is probed (M2), or `null` for
+    never.
 
-    A frame each way, answered by the guest's reader task, and the round trip is
-    what `phern doctor` reports as how far behind that loop is running. Lower
-    samples a bursty cell more finely; higher is cheaper on a host with many
-    namespaces. It is a measurement interval, not a deadline. Zero or less is
-    refused rather than read as "as often as possible".
+    A probe is one frame each way, answered by the reader task of the guest. The
+    round trip is what `phern doctor` reports as how far behind that loop runs. A
+    lower value samples a bursty cell more finely. A higher value is cheaper on a
+    host with many namespaces. It is a measurement interval, not a deadline.
+    Zero or less is refused, and is not read as "as often as possible".
 
-    **What `null` gives up** (P12-03). The doctor's loop gauge has nothing to
-    report. And the probe is the only thing that repairs a run whose `done` frame
-    was lost (`PingFrame.run`): no event says a frame was never sent. With the
-    probe off, such a run waits until somebody cancels it, and the abort ladder
-    ends it from there. An unattended run has nobody to do that."""
+    **What `null` gives up** (P12-03). The loop gauge of the doctor has nothing
+    to report. The probe is also the only thing that repairs a run whose `done`
+    frame was lost (`PingFrame.run`), because no event says that a frame was
+    never sent. With the probe off, such a run waits until somebody cancels it,
+    and the abort ladder ends it from there. An unattended run has nobody to do
+    that."""
     skills: tuple[str, ...] = ()
-    sweep_orphans: bool = True
-    """Vestigial: `subprocess-local` owns the one sweep now. Kept so a profile
-    that sets it still loads; see `apply`."""
 
 
 @plugin("code-runtime-python", affects="environment", config=Config, inject=[CODE_RUNTIME])
 async def apply(ctx: Context, config: Config) -> None:
-    """Register the runtime. The journal is shared; `subprocess-local` sweeps it.
+    """Register the runtime. The journal is shared, and `subprocess-local` sweeps
+    it.
 
-    **This row used to sweep too, and both rows swept the same file.** One
-    journal per user per boot meant an `rlm` profile parsed and rewrote it twice
-    at every start, the second pass a no-op over the first's output, each behind
-    its own thread hop. `subprocess-local` is in `base.yaml` and therefore always
-    mounted, so it owns the sweep; this row keeps its own handle because the
-    guest cannot be spawned through that seam at all — `spawn` passes
-    `stdin=None`, i.e. *inherit*, and handing the process that runs
-    model-authored cells a descriptor on the person's terminal is the opposite
-    of what J9 is for. (Not `pass_fds`, which an earlier version of this
-    sentence blamed: `anyio.open_process` takes it and the spec could forward
-    it, so that reading invited exactly the change this rules out.) The kernel
-    journals through `ph.orphans` directly while sharing the ledger and the
-    sweep.
+    **This row used to sweep too, and both rows swept the same file.** There is
+    one journal per user per boot, so an `rlm` profile parsed and rewrote it
+    twice at every start. The second pass did nothing to the output of the first,
+    and each pass was behind its own thread hop. `subprocess-local` is in
+    `base.yaml` and is therefore always mounted, so it owns the sweep. This row
+    keeps its own handle, because the guest cannot be spawned through that seam
+    at all. `spawn` passes `stdin=None`, which means *inherit*. To give the
+    process that runs model-authored cells a descriptor on the terminal of the
+    user is the opposite of the purpose of J9. (The cause is not `pass_fds`,
+    which an earlier version of this sentence blamed. `anyio.open_process` takes
+    it and the spec could forward it, so that reading invited exactly the change
+    that this rules out.) The kernel writes to the journal through `ph.orphans`
+    directly, and shares the ledger and the sweep.
     """
     roots = resolve_roots()
     journal = host_journal()
@@ -1907,18 +2031,19 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.require(CODE_RUNTIME).register(runtime)
 
     # The namespace *is* the agent id, so a kernel is scoped exactly like the
-    # agent's tools, its inbox and its log — and released by the same unwinding.
-    # Asked when a kernel is built: the registry is what knows who is live.
+    # tools, the inbox and the log of the agent, and the same unwinding releases
+    # it. The registry is asked when a kernel is built, because the registry
+    # knows which agents are live.
     def scope_of(agent_id: str) -> Context | None:
         agents = ctx.get(AGENTS)
         if agents is None:
             return None
         scope = agents.scope_of(agent_id)
         if scope is None:
-            # Its agent went while the interpreter was being resolved, which on a
-            # cold cache is seconds. Built anyway, the kernel had no owner: its
-            # guest ran until this row unmounted, and an agent brought back under
-            # the same id ran its cells in it.
+            # The agent went away while the interpreter was being resolved, which
+            # takes seconds on a cold cache. When the kernel was built anyway, it
+            # had no owner. Its guest ran until this row unmounted, and an agent
+            # that was brought back under the same id ran its cells in it.
             raise InactiveScopeError(
                 f"agent {agent_id} is gone; no kernel is built for an agent that cannot own it"
             )
@@ -1926,13 +2051,14 @@ async def apply(ctx: Context, config: Config) -> None:
 
     runtime.scopes = scope_of
 
-    # Asked at kernel start rather than captured here, because a workspace is
-    # acquired after the agent exists (P4-08) and a value read at mount would be
-    # `None` for every kernel this runtime ever spawns.
+    # The workspace is asked for at kernel start and not captured here. A
+    # workspace is acquired after the agent exists (P4-08), and a value read at
+    # mount would be `None` for every kernel that this runtime ever spawns.
     runtime.workspaces = partial(workspace_of, ctx)
-    # Asked when a kernel starts, not now: a profile may layer its backend after
-    # this row, and a seam read here would be the wrong answer for exactly that
-    # profile — `workspace-readonly-scratch` and `permissions-fs` both say so.
+    # The seam is asked for when a kernel starts, not now. A profile may layer
+    # its backend after this row, and a seam read here would be the wrong answer
+    # for exactly that profile. `workspace-readonly-scratch` and `permissions-fs`
+    # both say so.
     runtime.sandbox = partial(ctx.get, "sandbox")
 
     contribute(

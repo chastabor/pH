@@ -75,7 +75,7 @@ the bundle under test removed* — see `bench_layers` — which is a sharper con
 than the old pair anyway: the two arms differ by exactly the thing being
 measured, rather than by whatever else the two profile documents disagreed on."""
 
-HOST_INTERPRETER: dict[str, Any] = {"python": "host", "sweepOrphans": False}
+HOST_INTERPRETER: dict[str, Any] = {"python": "host"}
 """`code-runtime-python`, pinned to this interpreter rather than a built venv.
 
 A benchmark that spent a `uv` sync per profile would be measuring `uv`. Copied

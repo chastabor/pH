@@ -1,29 +1,33 @@
 """Applying a refinement: validate, then append, then project (P3-16).
 
 The order is the design. **Validation happens before anything durable is
-written**, and every refusal is recorded *on the event* rather than dropped — so
-a refinement that half-applied says which half and why.
+written.** Every refusal is recorded *on the event* and is not dropped, so a
+refinement that applied in part says which part and why.
 
-Four checks are pH's own, and each one closes a hole prime-agent leaves open:
+Four checks are specific to pH. Each one closes a hole that prime-agent leaves
+open:
 
-* **H1 — the reference must resolve.** An entry naming an import or callable that
-  does not exist teaches the model to call nothing. It is checked by running a
-  probe in the *runtime the model actually uses* (`_probe`), not against this
-  process: `/refine` cannot conjure capability, and an unresolvable reference is
-  the knowledge layer trying to (I7, Q13). The rejection is on the event.
-* **H2 — the call pattern is rendered, never accepted.** Wherever a binding of
-  that name exists, an entry's `call_pattern` becomes `await tools.<name>(...)`.
-  A proposal that could write its own would be able to steer the model onto the
-  raw-namespace path, which is what C2 exists to close.
-* **H3 — a global edit is approval-gated.** A `scope: "global"` entry is injected
-  into every future session, including other projects, so it goes through
-  `ctx.approval`. A local one does not.
-* **H5 — the doctrine is not editable.** `base_system_prompt` is refused by id.
+* **H1: the reference must resolve.** An entry that names an import or a
+  callable that does not exist teaches the model to call nothing. The check runs
+  a probe in the *runtime that the model uses* (`_probe`), not against this
+  process. `/refine` cannot create capability, and an unresolvable reference is
+  the knowledge layer trying to create it (I7, Q13). The rejection is on the
+  event.
+* **H2: the call pattern is rendered, never accepted.** Wherever a binding of
+  that name exists, the `call_pattern` of an entry becomes
+  `await tools.<name>(...)`. A proposal that could write its own call pattern
+  could steer the model onto the raw-namespace path, and C2 exists to close that
+  path.
+* **H3: a global edit needs approval.** An entry with `scope: "global"` is
+  injected into every future session, including other projects, so it goes
+  through `ctx.approval`. A local entry does not.
+* **H5: the doctrine is not editable.** `base_system_prompt` is refused by id.
 
 **The projection is written and never read.** `harness_state.json` exists for
-humans, `ph trace` and export. Deleting it loses nothing, and
-`verify_projection` asserts the file equals the fold — which is the only way a
-projection stays a projection rather than quietly becoming a second authority.
+humans, the trajectory viewer and export. Deleting it loses nothing.
+`verify_projection` asserts that the file equals the fold. That is the only way
+that a projection stays a projection and does not quietly become a second
+authority.
 
 @module ph_rlm.harness.service
 """
@@ -83,20 +87,21 @@ __all__ = ["HarnessService", "RefinementRefused", "slugify"]
 log = logging.getLogger("ph_rlm.harness")
 
 IMMUTABLE_ID = 'entry id "{entry_id}" is not editable'
-"""H5, in prime-agent's shape: the id is refused, not the content."""
+"""H5, in the form that prime-agent uses: the id is refused, not the content."""
 
 PROBE_NAMESPACE = "harness-probe:{agent}"
-"""Where H1 resolves a reference for one agent: a kernel of the agent's own beside
-its working one, within the same boundary (`CodeRunRequest.agent`), and closed with
-the agent."""
+"""Where H1 resolves a reference for one agent. It is a kernel that belongs to
+the agent and stands beside its working kernel. It is within the same boundary
+(`CodeRunRequest.agent`), and it is closed with the agent."""
 
 
 class RefinementRefused(Exception):
     """The whole refinement was refused before anything was written.
 
-    Distinct from an edit-level rejection, which is recorded on the event and
-    lets the rest apply: this one means no record was appended at all — a global
-    edit the human declined, or a proposal with nothing valid left.
+    This differs from a rejection of one edit, which is recorded on the event
+    and lets the rest apply. This exception means that no record was appended at
+    all. For example, the user declined a global edit, or the proposal had
+    nothing valid left.
     """
 
 
@@ -107,10 +112,10 @@ def slugify(text: str) -> str:
 
 
 def _invert(edit: AppliedEdit) -> AppliedEdit:
-    """One applied edit, undone: the snapshots swapped.
+    """One applied edit, undone: the snapshots are swapped.
 
-    The action is derived from the swap rather than carried, because it is what a
-    reader of the log sees and `after is None` is what the fold acts on.
+    The action is derived from the swap and is not carried over. The action is
+    what a reader of the log sees, and `after is None` is what the fold acts on.
     """
     return AppliedEdit(
         action="delete" if edit.before is None else "create" if edit.after is None else "update",
@@ -127,37 +132,39 @@ class HarnessService:
 
     ctx: Context
     directory: Path
-    """`$PH_HOME/harness` — the global log and the human-facing projection."""
+    """`$PH_HOME/harness`: the global log and the projection for humans."""
     _local: SessionFoldCache[HarnessState] = field(default_factory=local_fold_cache)
     _global_cache: tuple[int, HarnessState] | None = None
     _merged: SessionTable[tuple[HarnessState, HarnessState, HarnessState]] = field(
         default_factory=SessionTable
     )
-    """Per session: `(local, global, merged)` — the memo `state()` reads through. Let
-    go with the session, as `_local` is."""
+    """For each session: `(local, global, merged)`, the memo that `state()` reads
+    through. It is released with the session, as `_local` is."""
 
     # ------------------------------------------------------------------ read --
 
     def local(self, session: Session) -> HarnessState:
-        """This session's own refinements, folded and cached on `session.seq`."""
+        """The refinements of this session, folded and cached on `session.seq`."""
         return self._local.read(session)
 
     def stale_folds(self, sessions: Iterable[Session]) -> list[str]:
         """Cached local harness states that no longer equal their fold (I6).
 
-        The sibling of `stale_projections`, one layer in: that one asks whether the
-        file on disk equals the fold, this one whether the value in memory does.
-        Both matter, because the projection is written *from* the cache — a drifted
-        cache writes a file that agrees with it and with nothing else.
+        This is the sibling of `stale_projections`, one layer further in. That
+        method asks whether the file on disk equals the fold. This method asks
+        whether the value in memory does. Both matter, because the projection is
+        written *from* the cache. A cache that drifted writes a file that agrees
+        with the cache and with nothing else.
         """
         return self._local.stale(sessions)
 
     def globals(self) -> HarnessState:
         """The deployment-wide refinements, folded from `$PH_HOME`.
 
-        Cached on the log's size rather than its content: it is append-only, so a
-        byte count that has not moved cannot hide a new refinement, and a stat is
-        cheaper than a re-read on every prompt assembly.
+        The cache key is the size of the log, not its content. The log is
+        append-only, so a byte count that has not changed cannot hide a new
+        refinement. A stat is also cheaper than a new read on every prompt
+        assembly.
         """
         path = self.directory / GLOBAL_LOG_NAME
         try:
@@ -173,11 +180,12 @@ class HarnessService:
     def state(self, session: Session | None) -> HarnessState:
         """What the model should be told: local layered over global.
 
-        Memoized on the *identity* of the two folds it merges: each cache above
-        hands back the same object until its log actually gained a refinement,
-        so `is` on the pair is an exact "nothing changed" test — and this runs
-        every model step, where rebuilding the merge would re-copy every entry
-        and the whole refinement history to reproduce a byte-identical answer.
+        The result is memoized on the *identity* of the two folds that it
+        merges. Each cache above returns the same object until its log gains a
+        refinement, so `is` on the pair is an exact "nothing changed" test. This
+        method runs on every model step. A rebuilt merge would copy every entry
+        and the whole refinement history again, to produce an answer with the
+        same bytes.
         """
         world = self.globals()
         if session is None:
@@ -199,8 +207,9 @@ class HarnessService:
         agent: AgentHandle,
         refine_id: str,
     ) -> tuple[list[HarnessEdit], list[str]]:
-        """`(accepted, rejected)` — the checks, before the refinement is written, bar
-        H1's probes (`_probe`), which record themselves under `refine_id`."""
+        """`(accepted, rejected)`: the checks, which run before the refinement is
+        written. The checks write nothing, except the probes of H1 (`_probe`),
+        which record themselves under `refine_id`."""
         accepted: list[HarnessEdit] = []
         rejected: list[str] = []
         current = self.state(agent.session)
@@ -239,26 +248,29 @@ class HarnessService:
         entry_id: str,
         refine_id: str,
     ) -> str | None:
-        """H1: resolve a reference in the runtime, or say why it does not.
+        """H1: resolve a reference in the runtime, or say why it does not resolve.
 
-        **Within the boundary of the agent that proposed it** (S21), because an import
-        runs the module's top level and the model named the module: its workspace,
-        its confinement, and its scope as the kernel's owner. From a namespace no
-        agent owned it had none of them — code the model chose, run with more than
-        the model may, by auto-refine with nobody asking.
+        **Within the boundary of the agent that proposed it** (S21). An import
+        runs the top level of the module, and the model named the module. So the
+        probe gets the workspace of the agent, its confinement, and its scope as
+        the owner of the kernel. In a namespace that no agent owned, the probe
+        had none of them. It was code that the model chose, run with more
+        permission than the model has, by auto-refine with nobody asking.
 
-        **Beside the agent's kernel, not in it** (`PROBE_NAMESPACE`): a module that
-        hangs or crashes on import costs the probe's kernel and not the model's, and
-        nothing it binds reaches the model's namespace or snapshots.
+        **Beside the kernel of the agent, not in it** (`PROBE_NAMESPACE`). A
+        module that hangs or crashes on import costs the kernel of the probe and
+        not the kernel of the model. Nothing that the module binds reaches the
+        namespace or the snapshots of the model.
 
-        **On disk before it runs, in the agent's log** (`HARNESS_PROBE`), and settled
-        with what it found, so a probe that hangs or takes its kernel down still
-        shows what was started.
+        **On disk before it runs, in the log of the agent** (`HARNESS_PROBE`).
+        The probe is then settled with what it found. A probe that hangs or
+        takes its kernel down therefore still shows what was started.
         """
         runtime = self.ctx.get(CODE_RUNTIME)
         if runtime is None:
-            # A mounted seam with no provider is the seam's own error to word:
-            # `runtime.run` raises it, and the except below reports it.
+            # When the seam is mounted but has no provider, the seam words the
+            # error itself: `runtime.run` raises it, and the except below
+            # reports it.
             return "no code runtime is mounted to resolve it against"
         session = agent.session
         if session is None:
@@ -294,10 +306,10 @@ class HarnessService:
         return unresolved
 
     def render_call_pattern(self, entry: HarnessEntry, scope: Context) -> str | None:
-        """H2: the binding form wherever a binding of that name exists.
+        """H2: the binding form, wherever a binding of that name exists.
 
-        Derived rather than accepted, so a refinement cannot author prompt text
-        that points at the ungoverned path.
+        The pattern is derived and not accepted, so a refinement cannot write
+        prompt text that points at the ungoverned path.
         """
         if entry.reference is None:
             return None
@@ -315,14 +327,14 @@ class HarnessService:
         agent: AgentHandle,
         scope: HarnessScope = "local",
     ) -> RefinementRecord:
-        """Validate, then record. The record is the state; nothing else is.
+        """Validate, then record. The record is the state, and nothing else is.
 
-        Made by an agent, into its session's harness: a skill entry is probed as
-        that agent, in its boundary and recorded in its log (S21), and a global
-        edit asks that agent's person (H3).
+        An agent makes the refinement, into the harness of its session. A skill
+        entry is probed as that agent: within its boundary, and recorded in its
+        log (S21). A global edit asks the user of that agent (H3).
 
-        :raises RefinementRefused: a global edit the human declined, or nothing
-            valid left to apply.
+        :raises RefinementRefused: the user declined a global edit, or nothing
+            valid was left to apply.
         """
         refine_id, approving = await self._authorize(
             scope,
@@ -338,13 +350,14 @@ class HarnessService:
             )
 
         current = self.state(session)
-        # The agent's scope, because whether a binding of that name is visible
-        # is a per-agent question (B7).
+        # The scope of the agent is used, because whether a binding of that name
+        # is visible is a question for each agent (B7).
         target_scope = agent.ctx
         applied: list[AppliedEdit] = []
         for edit in accepted:
-            # `validate` stamped an id on every accepted edit — it is the one
-            # place ids are derived, so apply cannot disagree with what it checked.
+            # `_validate` stamped an id on every accepted edit. It is the one
+            # place where ids are derived, so apply cannot disagree with what
+            # `_validate` checked.
             entry_id = edit.id
             assert entry_id is not None
             before = current.entry(edit.kind, entry_id)
@@ -391,11 +404,12 @@ class HarnessService:
     async def _authorize(
         self, scope: HarnessScope, agent: AgentHandle | None, refused: str
     ) -> tuple[str, Session | None]:
-        """A new refinement's id, and for a global one the session whose log holds the
-        approval that allowed it (H3, L4). Both writers go through here.
+        """The id of a new refinement. For a global refinement, also the session
+        whose log holds the approval that allowed it (H3, L4). Both writers
+        (`apply` and `rollback`) go through here.
 
-        The id is made first so the ask can carry it, and the approval's `callId`
-        names the record it allowed.
+        The id is made first so that the ask can carry it. The `callId` of the
+        approval then names the record that it allowed.
 
         :raises RefinementRefused: `refused`, for a global edit that was not approved.
         """
@@ -407,11 +421,12 @@ class HarnessService:
         return refine_id, agent.session if agent is not None else None
 
     async def _approved(self, agent: AgentHandle | None, refine_id: str) -> bool:
-        """H3: a global edit asks. A local one never reaches here.
+        """H3: a global edit asks. A local edit never reaches here.
 
-        The ask carries the refinement's id as its `callId`, so the `approval/decided`
-        in the approving session's log names the record it allowed, and the global
-        record names that session (`approved_in`, L4).
+        The ask carries the id of the refinement as its `callId`. So the
+        `approval/decided` event in the log of the approving session names the
+        record that it allowed, and the global record names that session
+        (`approved_in`, L4).
         """
         approval = self.ctx.get(APPROVAL)
         if approval is None or agent is None:
@@ -424,9 +439,9 @@ class HarnessService:
             reason="a global refinement is injected into every future session, "
             "including other projects",
         )
-        # `allowed-once` is the only outcome that proceeds; the other three
-        # are distinct so a caller can tell a refusal from a missing channel.
-        # (`bool()` because `approval` arrives untyped through `ctx.get`.)
+        # `allowed-once` is the only outcome that proceeds. The other three are
+        # distinct so that a caller can tell a refusal from a missing channel.
+        # (`bool()` is here because `approval` arrives untyped through `ctx.get`.)
         return bool(outcome == "allowed-once")
 
     async def _commit(
@@ -437,26 +452,28 @@ class HarnessService:
         session: Session | None,
         approving: Session | None,
     ) -> None:
-        """The one durable write, to whichever log owns this scope, then project.
+        """The one durable write, to the log that owns this scope, then the projection.
 
-        Both callers go through here so a rollback and an apply cannot come to
-        differ in what they leave behind.
+        Both callers go through here, so that a rollback and an apply cannot
+        come to differ in what they leave behind.
 
         **The session reaches disk before anything outside it does** (L4). For a
-        global edit that is the approving agent's session, whose `approval/decided`
-        allowed the edit. Every future session reads the global log, and an edit
-        written there first could outlive a crash that took its approval: an edit in
-        force that nothing says anyone allowed. So a global edit whose approval cannot
-        be written is refused. For a local edit it is the session holding
-        `harness/refined`, ahead of the projection that restates it.
+        global edit, that session is the session of the approving agent, whose
+        `approval/decided` allowed the edit. Every future session reads the
+        global log. An edit that was written there first could outlive a crash
+        that destroyed its approval. The result would be an edit in force with
+        no record that anyone allowed it. So a global edit whose approval cannot
+        be written is refused. For a local edit, that session is the session
+        that holds `harness/refined`, and it is written ahead of the projection
+        that restates it.
         """
         if scope == "local":
             if session is None:
                 raise RefinementRefused("a local refinement needs a session to record it in")
             _LOG.append(session, REFINED, record.to_wire())
-            # The record is the state, in memory already; a write that fails here is
-            # the session's own flushes failing next, and the projection is only
-            # a restatement.
+            # The record is the state, and it is in memory already. A write that
+            # fails here means that the next flushes of the session fail too,
+            # and the projection is only a restatement.
             await session_written(self.ctx, session)
         else:
             if approving is not None and not await session_written(self.ctx, approving):
@@ -470,13 +487,14 @@ class HarnessService:
     def _append_global(self, record: RefinementRecord) -> None:
         """Append one record to `$PH_HOME/harness/events.jsonl`, under a lock.
 
-        Concurrent sessions share this log, so the lock is what makes two
-        refinements at once two records rather than one torn line. Held for the
-        append alone — a reader folds whatever complete lines it finds.
+        Concurrent sessions share this log. The lock makes two refinements at
+        the same time two records and not one torn line. The lock is held for
+        the append only. A reader folds whatever complete lines it finds.
 
-        **`fsync`ed, and a failed write taken back** (`append_records`, L4). Every
-        future session reads this log, so a record left in the page cache could be
-        gone after a power loss while the sessions that acted on it are not.
+        **The write is `fsync`ed, and a failed write is taken back**
+        (`append_records`, L4). Every future session reads this log. A record
+        that stayed in the page cache could be gone after a power loss, while
+        the sessions that acted on it are not.
         """
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / GLOBAL_LOG_NAME
@@ -489,22 +507,24 @@ class HarnessService:
     async def rollback(
         self, refine_id: str, *, session: Session | None, agent: AgentHandle | None = None
     ) -> RefinementRecord:
-        """H6: the inverse of one refinement — that record, read backwards.
+        """H6: the inverse of one refinement, which is that record read backwards.
 
-        Each applied edit carries both snapshots, so the inverse is the same
-        edits reversed with `before` and `after` swapped. Built as a record rather
-        than re-proposed through `apply`, for two reasons:
+        Each applied edit carries both snapshots. The inverse is therefore the
+        same edits in reverse order, with `before` and `after` swapped. The
+        inverse is built as a record and is not proposed again through `apply`,
+        for two reasons:
 
-        * **An inverse must actually invert.** Re-proposing would construct fresh
-          entries and bump their versions, so the restored entry would differ from
-          the one it restores. The churn belongs in the refinement history, which
-          the log keeps anyway.
-        * **It is not revalidated.** This state was validated when it was written,
-          and refusing to undo a bad refinement because the world has since moved
-          would trap a user in the state they are trying to leave.
+        * **An inverse must invert.** A new proposal would construct fresh
+          entries and bump their versions, so the restored entry would differ
+          from the entry that it restores. The churn belongs in the refinement
+          history, which the log keeps in any case.
+        * **It is not validated again.** This state was validated when it was
+          written. A refusal to undo a bad refinement because the world has
+          changed since then would trap a user in the state that the user is
+          trying to leave.
 
-        A global rollback still asks (H3): undoing a deployment-wide entry changes
-        every future session exactly as writing one does.
+        A global rollback still asks (H3). Undoing a deployment-wide entry
+        changes every future session exactly as writing one does.
         """
         state = self.state(session)
         target = next((one for one in state.refinements if one.refine_id == refine_id), None)
@@ -532,14 +552,14 @@ class HarnessService:
     # ---------------------------------------------------------- projection --
 
     def projection_path(self, session: Session | None) -> Path:
-        """Where this session's projection lives — one file per session.
+        """Where the projection of this session is. There is one file per session.
 
-        Per session because the projection is of *local layered over global*, so
-        a single shared path would have two sessions overwriting each other's and
-        the "file equals the fold" invariant (P6-01) flapping in any deployment
-        that runs more than one. `<session artifacts>/harness/` in the plan;
-        until artifact roots exist, a directory named for the session under the
-        harness root is the same shape.
+        The projection is of *local layered over global*. With a single shared
+        path, two sessions would each overwrite the file of the other, and the
+        "file equals the fold" invariant (P6-01) would flap in any deployment
+        that runs more than one session. The plan names
+        `<session artifacts>/harness/`. Until artifact roots exist, a directory
+        named for the session under the harness root has the same shape.
         """
         if session is None:
             return self.directory / PROJECTION_NAME
@@ -548,29 +568,33 @@ class HarnessService:
     async def write_projection(self, session: Session | None) -> Path:
         """Write `harness_state.json` for humans. Nothing reads it back.
 
-        Through a rename: a human can read this file while a refinement is
-        applying, and under the daemon two sessions project at once, so a
-        truncating write makes both of those a torn file.
+        The write goes through a rename. A human can read this file while a
+        refinement is being applied, and under the daemon two sessions project
+        at the same time. A truncating write would make a torn file in both
+        cases.
         """
         path = self.projection_path(session)
         payload = dumps(self.state(session).to_wire())
-        # Not durable: nothing reads it back — the log is the state, and this restates it.
+        # Not durable. Nothing reads the file back: the log is the state, and
+        # the file restates it.
         await anyio.to_thread.run_sync(partial(write_atomic, path, f"{payload}\n", durable=False))
         return path
 
     def stale_projections(self) -> list[str]:
         """Every written projection that no longer equals the fold behind it (I6, P6-01).
 
-        Here rather than in the invariant row that declares it, because the
-        projection's layout is this service's own: which sessions have one, where
-        it lives, what it projects. A row that enumerated `[None, *sessions]` from
-        outside encoded a write path this service does not have — nothing calls
-        `write_projection(None)` — and would silently miss a third projection the
-        day one is added.
+        The check is here and not in the invariant row that declares it, because
+        the layout of the projection belongs to this service: which sessions
+        have one, where it is, and what it projects. A row that enumerated
+        `[None, *sessions]` from outside encoded a write path that this service
+        does not have, because nothing calls `write_projection(None)`. Such a
+        row would also silently miss a third projection on the day that one is
+        added.
 
-        Per session because the projection is per session. **A missing file is not
-        drift**: nothing requires a session to have projected, and an alarm loudest
-        where the feature is used least is one people learn to ignore.
+        The check is per session because the projection is per session. **A
+        missing file is not drift.** Nothing requires a session to have
+        projected. An alarm that is loudest where the feature is used least is
+        an alarm that people learn to ignore.
         """
         sessions = self.ctx.get(SESSIONS)
         if sessions is None:
@@ -585,8 +609,8 @@ class HarnessService:
     def verify_projection(self, session: Session | None) -> bool:
         """Whether the file on disk equals the fold.
 
-        The invariant that keeps a projection a projection: if this can drift,
-        something has started treating the file as state.
+        This invariant keeps a projection a projection. If the file can drift,
+        something has started to treat the file as state.
         """
         path = self.projection_path(session)
         if not path.exists():

@@ -1,31 +1,32 @@
-"""`rlm-messaging` — agent-to-agent messages, and the boundary on them (P3-12).
+"""`rlm-messaging`: messages between agents, and the boundary on them (P3-12).
 
-Prime Agent's `agent_message.send` traveled over the comm channel, so the
-nuclear-family check lived inside a handler where nothing else could see it.
-Here the send is a governed tool, which lets the boundary be the strongest thing
-the pipeline offers and the rate limit be the weakest — and those are
-deliberately different mechanisms:
+The `agent_message.send` of prime-agent traveled over the comm channel. The
+nuclear-family check was therefore inside a handler, where nothing else could
+see it. Here the send is a governed tool. The boundary can then be the strongest
+mechanism that the pipeline offers, and the rate limit can be the weakest. The
+two mechanisms are deliberately different.
 
-**The family boundary is a `ctx.tools.guard` (C7).** Guards are deny-only, run
-*last*, and cannot be turned back into permission by any later listener — so
-there is no ordering in which a permissive row re-permits a send outside the
-family. It also covers the same resolution `send` itself uses, from
-`reachable_family`, so the roster the model reads and the rule that refuses it
-are one implementation.
+**The family boundary is a `ctx.tools.guard` (C7).** A guard can only deny, it
+runs *last*, and no later listener can turn its denial back into permission. So
+there is no ordering in which a permissive row permits a send outside the family
+again. The guard also uses the same resolution that `send` itself uses, from
+`reachable_family`. The roster that the model reads and the rule that refuses a
+send are therefore one implementation.
 
-**The rate limit is not.** A token bucket is backpressure, not a refusal: the
-right response is to wait and send again. Under C3 a *denial* ends the whole
-cell, which would mean four messages in one second costs the model its program.
-So the bucket raises `ToolCallError` from the tool body — the program's to
-handle — and the deployment tunes it by row config. This is a deliberate
-deviation from the plan's "rate limit as a `tools/pre-execute` listener", and the
-reason is exactly the asymmetry C3 creates between a denial and a failure.
+**The rate limit is not a guard.** A token bucket is backpressure, not a refusal.
+The right response is to wait and send again. Under C3 a *denial* ends the whole
+cell, so four messages in one second would cost the model its program. The
+bucket therefore raises `ToolCallError` from the tool body, which the program
+can handle. The deployment tunes the bucket in the row config. This is a
+deliberate deviation from the plan, which says "rate limit as a
+`tools/pre-execute` listener". The reason is the asymmetry that C3 creates
+between a denial and a failure.
 
 **Delivery is always steer.** A message reaches the target at its next *step*,
 not its next turn, so a running agent picks it up without finishing first. A
-target that is busy or already holding input reports `queued` rather than
-`delivered`, because "it is in the queue" and "it is in the next request" are
-different facts and the sender can act on the difference.
+target that is busy or already holds input reports `queued` and not `delivered`.
+"It is in the queue" and "it is in the next request" are different facts, and
+the sender can act on the difference.
 
 @module ph_rlm.messaging
 """
@@ -95,16 +96,16 @@ OBSERVE_LIST_TOOL = "agent_observe_list"
 OBSERVE_GET_TOOL = "agent_observe_get"
 
 MAX_MESSAGE_CHARS = 16_384
-"""Prime Agent's `DEFAULT_AGENT_MESSAGE_MAX_CHARS`. A message is a message, not a
-file transfer: a sibling that needs to hand over 200 KiB writes it down and sends
-the path."""
+"""The `DEFAULT_AGENT_MESSAGE_MAX_CHARS` of prime-agent. A message is a message,
+not a file transfer. A sibling that needs to hand over 200 KiB writes it to a
+file and sends the path."""
 MAX_PENDING_PER_SESSION = 20
-"""How much unclaimed input one target may hold. Past this the send *fails* —
-the program's to handle — rather than growing a queue the target will never
-work through."""
+"""How much unclaimed input one target may hold. Past this number the send
+*fails*, and the program can handle the failure. The alternative is a queue that
+grows and that the target will never work through."""
 
 OUT_OF_REACH = "Agent reach is limited to parent, siblings, and children"
-"""Ported verbatim: the sentence prime-agent's model has already seen."""
+"""Ported verbatim. The model of prime-agent has already seen this sentence."""
 
 
 class Config(WireModel):
@@ -113,12 +114,14 @@ class Config(WireModel):
     max_message_chars: int = MAX_MESSAGE_CHARS
     max_pending: int = MAX_PENDING_PER_SESSION
     rate_capacity: int = 3
-    """Token bucket per sender→target. Prime Agent's capacity."""
+    """The capacity of the token bucket for one sender and one target. The default
+    is the capacity that prime-agent uses."""
     rate_refill_seconds: float = 1.0
     observe_max_messages: int = 40
-    """How much of another agent's transcript one read may return. Bounded so the
-    result is offloadable like any other large tool result (C5) rather than
-    arriving as unbounded cell output."""
+    """The most messages from the transcript of another agent that one read may
+    return. The bound makes the result offloadable like any other large tool
+    result (C5). Without the bound, the result would arrive as unbounded cell
+    output."""
 
 
 class SendArgs(ToolModel):
@@ -126,8 +129,8 @@ class SendArgs(ToolModel):
 
     message: str
     receiver_role: str = "parent"
-    """`parent` | `child` | `sibling`. The role, not the id, because that is how a
-    child knows who to answer without being told an id it never saw."""
+    """`parent` | `child` | `sibling`. The argument is the role and not the id. A
+    child then knows who to answer, although nobody told it an id."""
     receiver_name: str | None = None
     """Required when more than one family member holds the role."""
 
@@ -141,15 +144,17 @@ class Receipt(WireModel):
     """What a send hands back. A receipt, not a reply."""
 
     delivery_status: str
-    """`delivered` — in the target's next request — or `queued` behind work it
-    has not finished. `recorded` on a receipt a resume rebuilt from the receiver's
-    log (L6b), which is all a log can say about a message sent before a crash."""
+    """`delivered` means that the message is in the next request of the target.
+    `queued` means that the message waits behind work that the target has not
+    finished. `recorded` is on a receipt that a resume rebuilt from the log of the
+    receiver (L6b). That is all a log can say about a message that was sent before
+    a crash."""
     receiver_id: str
     receiver_role: str
     message_id: str
     pending: int | None = None
-    """How much unclaimed input the target now holds, so a sender can slow down
-    before it hits the cap. `None` on a rebuilt receipt."""
+    """How much unclaimed input the target now holds. A sender can use the number
+    to slow down before it reaches the cap. `None` on a rebuilt receipt."""
 
 
 @dataclass(slots=True)
@@ -185,9 +190,9 @@ class _Limiter:
         return True
 
     def forget(self, agent_id: str) -> None:
-        """Drop every bucket naming `agent_id`, on either side: an agent that has gone
-        sends and receives nothing more, and a long-lived root kept one bucket per
-        child it ever wrote to."""
+        """Drop every bucket that names `agent_id`, on either side. An agent that
+        is gone sends and receives nothing more. Without this, a long-lived root
+        kept one bucket for each child that it ever wrote to."""
         for pair in [pair for pair in self._buckets if agent_id in pair]:
             del self._buckets[pair]
 
@@ -195,11 +200,12 @@ class _Limiter:
 def render_received(
     *, sender_label: str, sender_id: str, target_id: str, message_id: str, body: str
 ) -> str:
-    """The text the *target* sees. Ported from prime-agent's rendering.
+    """The text that the *target* sees. Ported from the rendering of prime-agent.
 
-    Verbatim because it is the shape a model has been trained to parse, and the
-    body is reproduced exactly — framing is the sender's, and a harness that
-    rewrote it would make the log stop saying what the target read.
+    The text is verbatim because it is the shape that a model has been trained to
+    parse. The body is reproduced exactly. The framing belongs to the sender, and
+    a harness that rewrote it would make the log stop saying what the target
+    read.
     """
     return (
         f"[from {sender_label}]\n"
@@ -213,7 +219,7 @@ def render_received(
 
 
 def _label(role: FamilyRole, name: str) -> str:
-    """`child:scout`, `parent`, `sibling:beta` — the sender as the target sees it."""
+    """The sender as the target sees it: `child:scout`, `parent`, `sibling:beta`."""
     return role if role in ("parent", "self") else f"{role}:{name}"
 
 
@@ -227,24 +233,25 @@ async def apply(ctx: Context, config: Config) -> None:
     """Register the send/observe tools, the family guard, and the two namespaces."""
     tools = ctx.require(TOOLS)
     limiter = _Limiter(capacity=config.rate_capacity, refill_seconds=config.rate_refill_seconds)
-    # An agent's id is its session's.
+    # The id of an agent is the id of its session.
     ctx.on("session/disposed", lambda session: limiter.forget(session.id))
 
     def family(agent_id: str) -> dict[str, FamilyRole]:
         return reachable_family(ctx.require(SESSIONS).list(), agent_id)
 
     def resolve(sender_id: str, role: str, wanted: str | None) -> tuple[str | None, str]:
-        """`(target_id, refusal)` — the one resolution the guard and the body share.
+        """Return `(target_id, refusal)`. The guard and the body share this one
+        resolution.
 
-        Returning the refusal rather than raising, because the guard needs the
-        reason as a string and the body needs it as an error; deciding twice is
-        how a boundary and its error message drift apart.
+        The function returns the refusal and does not raise. The guard needs the
+        reason as a string, and the body needs it as an error. A boundary and its
+        error message drift apart when the decision is made twice.
 
-        Takes the two fields rather than the payload: both callers hold a
-        validated `SendArgs`, so reading them back out by string key was the one
-        way the guard and the body could still disagree — a role neither `str`
-        nor absent read as one thing to a `str()` coercion and another to a
-        default.
+        The function takes the two fields and not the payload. Both callers hold
+        a validated `SendArgs`. To read the fields back out by string key was the
+        one way in which the guard and the body could still disagree. A role that
+        was neither a `str` nor absent read as one thing to a `str()` coercion
+        and as another thing to a default.
         """
         reach = family(sender_id)
         candidates = [
@@ -273,8 +280,9 @@ async def apply(ctx: Context, config: Config) -> None:
 
     # ------------------------------------------------------------- the guard --
     #
-    # C7. Deny-only and last, so no later listener can re-permit a send outside
-    # the family — the boundary is not a policy a deployment may relax.
+    # C7. The guard can only deny and it runs last, so no later listener can
+    # permit a send outside the family again. The boundary is not a policy that a
+    # deployment may relax.
 
     def family_guard(execution: ToolExecution) -> str | None:
         if execution.name != SEND_TOOL:
@@ -295,14 +303,14 @@ async def apply(ctx: Context, config: Config) -> None:
     # ------------------------------------------------------------- the tools --
 
     def sender_of(tool: str, run: ToolRunContext) -> str:
-        """Who is calling, refusing rather than guessing when nobody is.
+        """Return who is calling. Refuse, and do not guess, when nobody is.
 
-        Every tool here answers *relative to the caller* — reach is computed from
-        the sender's place in the family — so a call arriving without an agent
-        has no question to answer, not a default one. While `run.agent` was
-        untyped each tool read `.id` off it directly, which made the caller-less
-        call an `AttributeError` raised from inside a body rather than a refusal
-        the program can handle.
+        Every tool here answers *relative to the caller*, because reach is
+        computed from the place of the sender in the family. A call that arrives
+        without an agent therefore has no question to answer. It does not have a
+        default question. While `run.agent` was untyped, each tool read `.id`
+        from it directly. A call without a caller was then an `AttributeError`
+        raised from inside a body, and not a refusal that the program can handle.
         """
         sender = run.agent
         if sender is None:
@@ -322,8 +330,8 @@ async def apply(ctx: Context, config: Config) -> None:
             )
         target_id, refusal = resolve(sender_id, args.receiver_role, args.receiver_name)
         if target_id is None:
-            # The guard has already refused this; reaching here means the guard
-            # was not mounted, and the message must still not be delivered.
+            # The guard has already refused this. If control reaches here, the
+            # guard was not mounted, and the message must still not be delivered.
             raise ToolCallError(SEND_TOOL, refusal)
 
         if not limiter.take(sender_id, target_id):
@@ -336,11 +344,11 @@ async def apply(ctx: Context, config: Config) -> None:
 
         target = ctx.require(AGENTS).get(target_id)
         if target is None:
-            # A settled child kept its session and its log; what it lost was the
-            # agent that holds an inbox. Waking it is the seam's
-            # job (P3-13), and addressing one is exactly the trigger the plan
-            # names — so a send to a finished child works rather than telling the
-            # sender to go read a transcript.
+            # A settled child kept its session and its log. It lost the agent
+            # that holds an inbox. To wake it is the job of the seam (P3-13), and
+            # to address a settled child is exactly the trigger that the plan
+            # names. So a send to a finished child works, and the sender is not
+            # told to go and read a transcript.
             await ctx.require(SUBAGENTS).ensure_addressable(target_id)
             target = ctx.require(AGENTS).get(target_id)
         if target is None:
@@ -375,20 +383,23 @@ async def apply(ctx: Context, config: Config) -> None:
                     }
                 ],
                 source=PluginSource(plugin="ph_rlm.messaging", form="relay"),
-                # The id the receipt names and the text shows, so the receiver's log
-                # can be searched for it (`reconcile_send`, L6b).
+                # The id that the receipt names and the text shows, so that the
+                # log of the receiver can be searched for it (`reconcile_send`,
+                # L6b).
                 message_id=message_id,
             )
         )
-        # **On the receiver's disk before the sender is told** (L6). `steer` records
-        # the message in the receiver's log, and that record used to wait for the
-        # receiver's next flush, which for an agent in a long tool call comes after
-        # the sender's own. A crash in between left the sender's log saying
-        # `delivered` and the receiver's saying nothing. Written first, the worst a
-        # crash leaves is the sender's call unresolved, which repair reports as
-        # outcome unknown. `written`, not `flush`, for `_mutate`'s reason: the
-        # message is in the receiver's inbox already, so a write that fails must
-        # not tell the sender it was not sent.
+        # **On the disk of the receiver before the sender is told** (L6). `steer`
+        # records the message in the log of the receiver. That record used to wait
+        # for the next flush of the receiver. For an agent in a long tool call,
+        # that flush comes after the flush of the sender. A crash in between left
+        # the log of the sender saying `delivered` and the log of the receiver
+        # saying nothing. With the receiver written first, the worst that a crash
+        # leaves is the call of the sender unresolved, and repair reports that as
+        # outcome unknown. The call is `written` and not `flush`, for the reason
+        # that the daemon gives in `_acted`, which `_mutate` calls. The message is
+        # already in the inbox of the receiver, so a write that fails must not
+        # tell the sender that the message was not sent.
         if target.session is not None:
             await session_written(ctx, target.session)
         return Receipt(
@@ -418,11 +429,11 @@ async def apply(ctx: Context, config: Config) -> None:
         return list_agents(_args, run)
 
     def observe_get(args: ObserveArgs, run: ToolRunContext) -> dict[str, Any]:
-        """A bounded read of another family member's transcript.
+        """A bounded read of the transcript of another family member.
 
-        Reach-limited by the same rule as a send: an agent that may not talk to
-        another may not read it either, and a bounded read is offloadable like
-        any other large result rather than arriving as cell output (C5).
+        The same rule limits reach as for a send. An agent that may not talk to
+        another agent may not read it either. A bounded read is offloadable like
+        any other large result, and does not arrive as cell output (C5).
         """
         sender_id = sender_of(OBSERVE_GET_TOOL, run)
         role = family(sender_id).get(args.agent_id)
@@ -435,8 +446,9 @@ async def apply(ctx: Context, config: Config) -> None:
         return {"agentId": args.agent_id, "role": role, "messages": _transcript(session, limit)}
 
     def stored_log(session_id: str) -> Sequence[SessionEvent] | None:
-        """A log from the store, `()` when it has none, `None` when it could not be
-        read. Blocking: a whole log is read and parsed."""
+        """Return a log from the store: `()` when the store has none, and `None`
+        when the log could not be read. This call blocks, because it reads and
+        parses a whole log."""
         persistence = ctx.get(SESSION_PERSISTENCE)
         if persistence is None:
             return None
@@ -448,28 +460,35 @@ async def apply(ctx: Context, config: Config) -> None:
         return () if stored is None else stored[1]
 
     async def log_of(session_id: str) -> Sequence[SessionEvent] | None:
-        """A log as a resume finds it: live, else stored, else empty. The stored read
-        runs off the event loop, since a daemon resumes its roots concurrently."""
+        """Return a log as a resume finds it: live, else stored, else empty. The
+        stored read runs off the event loop, because a daemon resumes its roots
+        concurrently."""
         live = ctx.require(SESSIONS).get(session_id)
         if live is not None:
             return live.events
         return await anyio.to_thread.run_sync(stored_log, session_id)
 
-    async def candidates(sender: Session, role: str) -> tuple[list[str], bool] | None:
-        """Every session a send in `role` could have reached, and whether that is all
-        of them. `None` when the list itself could not be read.
+    async def candidates(sender: Session, role: str) -> tuple[list[str], bool]:
+        """Return every session that a send in `role` could have reached, and
+        whether that list is complete.
 
-        Not the send's own resolution: that reads the live family, and after a
-        restart most of it is not live yet. A parent is named in the sender's header,
-        and children — the sender's, or its parent's for a sibling — are read off
-        their own logs, live or stored (`load_children`); a child is filed with its
-        parent, so the sender's family is where both are. A root's siblings are the
-        other roots, which only the live ones stand for, so a root's sibling send can
-        be found but never ruled out.
+        This is not the resolution that the send itself uses. That resolution
+        reads the live family, and after a restart most of the family is not live
+        yet. Here:
 
-        The parent is the agent that spawned the sender (`delegating_parent`), not
-        the log a fork continues: a forked root's parent send reached nobody, and its
-        siblings are the roots, as `reachable_family` has it.
+        - A parent is named in the header of the sender.
+        - Children are read from their own logs, live or stored
+          (`load_children`). They are the children of the sender, or the children
+          of the parent of the sender for a sibling. A child is filed with its
+          parent, so both sets are in the family of the sender.
+        - The siblings of a root are the other roots, and only the live roots
+          stand for them. So a sibling send from a root can be found but never
+          ruled out.
+
+        The parent is the agent that spawned the sender (`delegating_parent`),
+        not the log that a fork continues. A parent send from a forked root
+        reached nobody, and the siblings of a forked root are the roots, as in
+        `reachable_family`.
         """
         parent_id = sender.header.delegating_parent
         if role == "parent":
@@ -490,26 +509,28 @@ async def apply(ctx: Context, config: Config) -> None:
         opened: SessionEvent,
         session: Session,
     ) -> Reconciled:
-        """Did this send reach its receiver's log? Asked on resume (L6b).
+        """Did this send reach the log of its receiver? A resume asks this (L6b).
 
-        The message's id is derived from the call (`relay_message_id`), and the
-        receiver's log is written before the sender is told (L6), so the message is
-        in a receiver's log exactly when the send happened. Found, the send is done,
-        and the model is shown a receipt rather than told to decide whether to send
-        again. Looked for in every session the send could have reached and absent
-        from all of them, it did not happen. Any log that could not be read, or a
-        list of receivers that is not everyone, leaves it unknown.
+        The id of the message is derived from the call (`relay_message_id`). The
+        log of the receiver is written before the sender is told (L6). So the
+        message is in the log of a receiver exactly when the send happened.
+
+        - Found: the send is done. The model is shown a receipt, and is not told
+          to decide whether to send again.
+        - Searched for in every session that the send could have reached, and
+          absent from all of them: the send did not happen.
+        - A log that could not be read, or a list of receivers that is not
+          complete: the outcome stays unknown.
         """
         call_id = call_id_of(opened)
         try:
             asked = SendArgs.model_validate(arguments)
         except ValidationError:
             return Unknown()
-        found = await candidates(session, asked.receiver_role) if call_id else None
-        if found is None:
+        if not call_id:
             return Unknown()
         wanted = relay_message_id(f"{session.id}/{call_id}")
-        targets, complete = found
+        targets, complete = await candidates(session, asked.receiver_role)
         for target_id in targets:
             events = await log_of(target_id)
             if events is None:
@@ -606,8 +627,8 @@ def _namespace(
     bindings = [
         governed_binding(request, public, definition.schema())
         for public, tool_name in specs
-        # Restricted away for this agent: absent from the SDK block too, so the
-        # prompt cannot offer what a cell could not call.
+        # A tool that is restricted away for this agent is absent from the SDK
+        # block too, so the prompt cannot offer what a cell could not call.
         if (definition := view.visible.get(tool_name)) is not None
     ]
     return CodeBindingNamespace(name=name, description=description, bindings=tuple(bindings))
@@ -618,11 +639,12 @@ def _named(ctx: Context, agent_id: str, wanted: str) -> bool:
 
 
 def _display(ctx: Context, agent_id: str) -> str:
-    """The name an agent's own admission gives it, or its id when nobody named it.
+    """The name that the admission of an agent gives it, or its id when nobody
+    named it.
 
-    One line, because the lookup lives in the seam that owns the fold: the prompt
-    needs the same answer, and two copies is how a prompt names one agent while a
-    send delivers to another.
+    This is one line because the lookup is in the seam that owns the fold. The
+    prompt needs the same answer. With two copies, a prompt could name one agent
+    while a send delivers to another.
     """
     return ctx.require(SUBAGENTS).name_of(agent_id)
 
@@ -645,20 +667,24 @@ def _transcript(session: Session, limit: int) -> list[dict[str, Any]]:
 
 
 def replied_to_parent(child: Session) -> bool:
-    """Whether `child` sent its parent a message since it was last handed a task: the
-    reply that makes "completed without sending a reply" untrue of it.
+    """Whether `child` sent its parent a message since it was last handed a task.
+    That message is the reply that makes "completed without sending a reply"
+    untrue of the child.
 
-    **Read from the child's own log** (Phase 11), where a send is the call it was: a
-    native `tool/call` and its `tool/result`, or a Code Mode dispatch's start and
-    settle, each named for the tool. A send counts once it addressed the parent and
-    settled without an error. One a crash cut off counts once its resume has
-    reconciled it from the parent's inbox (`reconcile_send`), which settles it as
-    done. It was a flag on the provider's in-memory child, so a child readmitted after
-    a restart had forgotten a reply it sent, and its parent was told it never replied.
+    **The answer is read from the log of the child** (Phase 11). There a send is
+    the call that it was: a native `tool/call` and its `tool/result`, or the
+    start and the settle of a Code Mode dispatch, each named for the tool. A send
+    counts when it addressed the parent and settled without an error. A send that
+    a crash cut off counts after its resume has reconciled it from the inbox of
+    the parent (`reconcile_send`), which settles it as done. The answer used to
+    be a flag on the in-memory child of the provider. A child that was readmitted
+    after a restart had therefore forgotten a reply that it sent, and its parent
+    was told that it never replied.
 
-    **Since it was last handed a task**: a rehydration asks a settled child something
-    new, so its start begins the count again. A resumed start carries on the task the
-    child had, and a reply from before the restart still counts.
+    **Since it was last handed a task**: a rehydration asks a settled child
+    something new, so the start of the rehydration begins the count again. A
+    resumed start continues the task that the child had, and a reply from before
+    the restart still counts.
     """
     asked: set[str] = set()
     replied = False
@@ -677,12 +703,13 @@ def replied_to_parent(child: Session) -> bool:
 
 
 _NEW_TASK: StatusCause = "rehydrated"
-"""The start that hands a settled child a new task. Typed, so a rename of the seam's
-causes fails the type check here rather than quietly ending the reset."""
+"""The start that hands a settled child a new task. The constant is typed, so a
+rename of the causes of the seam fails the type check here. Without the type, the
+rename would quietly end the reset."""
 
 
 def _to_parent(call: SessionEvent) -> bool:
-    """Whether a send's record addressed the sender's parent."""
+    """Whether the record of a send addressed the parent of the sender."""
     try:
         return SendArgs.model_validate(recorded_arguments(call)).receiver_role == "parent"
     except ValidationError:
@@ -701,18 +728,20 @@ _RELAY_IDS = uuid.uuid5(uuid.NAMESPACE_URL, "ph_rlm.messaging")
 
 
 def relay_message_id(call_key: str) -> str:
-    """The id of the message a send relays, derived from the call that sent it (L6b).
+    """The id of the message that a send relays, derived from the call that sent
+    it (L6b).
 
-    `ToolRunContext.idempotency_key` — `{session}/{call id}`, a Code Mode dispatch's
-    sub-call id included — is unique to one call and can be rebuilt from the call's
-    record, so the send's `reconcile` can look for the message in the receiver's
-    log after a crash. A UUID, the shape `new_message_id` mints.
+    `ToolRunContext.idempotency_key` is `{session}/{call id}`, and it includes the
+    sub-call id of a Code Mode dispatch. The key is unique to one call and can be
+    rebuilt from the record of the call. The `reconcile` of the send can
+    therefore look for the message in the log of the receiver after a crash. The
+    id is a UUID, the shape that `new_message_id` produces.
     """
     return str(uuid.uuid5(_RELAY_IDS, call_key))
 
 
 def _carries(event: SessionEvent, message_id: str) -> bool:
-    """Whether a record put this message in its session's inbox."""
+    """Whether a record put this message in the inbox of its session."""
     return event.type == "agent/inbox/spliced" and any(
         as_obj(message).get("id") == message_id for message in as_seq(event.data.get("inserted"))
     )

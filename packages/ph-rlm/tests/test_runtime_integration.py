@@ -1,15 +1,16 @@
 """The runtime inside the harness: C1 and C2 against the real pipeline.
 
-`test_kernel.py` drives the runtime directly, with handler functions standing in
-for bindings. This file uses neither stand-in: it mounts the profile, registers a
-real tool, and calls `run_code` through `ctx.tools.execute`, so every binding
-call goes out over fd 3, comes back through `tools/pre-execute` → guards →
-approval → `tools/execute` → `tools/post-execute`, and lands in the session log.
+`test_kernel.py` drives the runtime directly, with handler functions that stand
+in for bindings. This file uses neither stand-in. It mounts the profile,
+registers a real tool, and calls `run_code` through `ctx.tools.execute`. Every
+binding call therefore goes out over fd 3, comes back through
+`tools/pre-execute` → guards → approval → `tools/execute` →
+`tools/post-execute`, and lands in the session log.
 
-That is the claim the whole containment argument rests on: **one cell is one tool
-call, but forty writes are forty governance evaluations.** Under prime-agent's
-`ipython` they were one, which is what the feature map records and what C1-C3
-exist to undo.
+The whole containment argument depends on this claim: **one cell is one tool
+call, but forty writes are forty governance evaluations.** Under the `ipython`
+of prime-agent they were one. The feature map records that, and C1-C3 exist to
+undo it.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ async def test_the_runtime_registers_as_the_code_runtime_provider(
     assert provider.language == "python"
     assert provider.isolation == "process"
     assert provider.persistence == "namespace"
-    # The promise the seam checked at registration (D6).
+    # The promise that the seam checked at registration (D6).
     assert getattr(provider, "declares_kernel_snapshots", False) is True
 
 
@@ -51,8 +52,8 @@ async def test_each_binding_call_is_its_own_governed_dispatch(
 ) -> None:
     """C2: three calls, three durable pairs, and `ToolCallLimit` sees three.
 
-    The gate's own wording. Under one bespoke `ipython` tool these three writes
-    would have been one `tool/call` and one `tool/result`.
+    This is the wording of the gate itself. Under one bespoke `ipython` tool,
+    these three calls would have been one `tool/call` and one `tool/result`.
     """
     ctx, session, agent = await mounted_runtime(snapshots=False)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
@@ -71,7 +72,8 @@ async def test_each_binding_call_is_its_own_governed_dispatch(
     assert len(starts) == 3
     assert len(settles) == 3
     assert [event.data["name"] for event in starts] == ["ping", "ping", "ping"]
-    # Ordered and pairable without a timestamp: the sub-call id carries the index.
+    # The records can be ordered and paired without a timestamp, because the
+    # sub-call id carries the index.
     assert [event.data["subCallId"] for event in starts] == [
         "call-1:code:0",
         "call-1:code:1",
@@ -81,11 +83,11 @@ async def test_each_binding_call_is_its_own_governed_dispatch(
 
 
 async def test_dispatch_records_are_log_only(mounted_runtime: MountedRuntime) -> None:
-    """C2's other half: sub-calls never re-enter model context.
+    """The other half of C2: sub-calls never enter model context again.
 
     Forty dispatch records in the log must not become forty messages in the next
-    request, or the compaction they would force is worse than the blob they
-    replaced.
+    request. The compaction that they would force is worse than the blob that
+    they replaced.
     """
     ctx, session, agent = await mounted_runtime(snapshots=False)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
@@ -108,7 +110,7 @@ async def test_a_tools_result_reaches_the_program(mounted_runtime: MountedRuntim
 async def test_the_namespace_is_the_agent_and_persists_between_calls(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """The namespace key is the agent id, so a kernel is scoped like its tools."""
+    """The namespace key is the agent id, so a kernel is scoped like the tools of the agent."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
     await run_cell(ctx, "remembered = 'from the first call'", agent=agent, session=session)
     result = await run_cell(ctx, "remembered", agent=agent, session=session, call_id="call-2")
@@ -126,17 +128,18 @@ async def test_two_agents_do_not_share_a_namespace(mounted_runtime: MountedRunti
 
 
 async def test_the_sdk_section_lists_the_bindings(mounted_runtime: MountedRuntime) -> None:
-    """The generated block replaces prime-agent's hand-written call contract.
+    """The generated block replaces the hand-written call contract of prime-agent.
 
-    Mechanically generated from the registry, so it cannot describe a surface
-    that no longer exists.
+    The block is generated mechanically from the registry, so it cannot describe
+    a surface that no longer exists.
     """
     ctx, _session, agent = await mounted_runtime(snapshots=False)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     text = "\n".join(body for _name, body in assembly.sections)
     assert "tools.ping" in text
-    # And the rule that only the transport may be called directly (C6's prompt half).
+    # The text also has the rule that only the transport may be called directly
+    # (the prompt half of C6).
     assert RUN_CODE in text
 
 
@@ -158,7 +161,8 @@ async def test_the_kernel_closes_when_the_agent_is_disposed(
     runtime = ctx.get("python_runtime")
     assert agent.id in runtime._kernels  # the kernel table is the subject
 
-    # Disposal unwinds the agent's scope, and the kernel is an effect of it.
+    # Disposal unwinds the scope of the agent, and the kernel is an effect of
+    # that scope.
     await ctx.require(AGENTS).dispose(agent.id)
     assert agent.id not in runtime._kernels
 
@@ -169,18 +173,18 @@ async def test_the_kernel_closes_when_the_agent_is_disposed(
 async def test_a_cell_runs_inside_the_agents_workspace(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """D21, and the sentence the whole `worktree` tier rests on.
+    """D21, and the sentence that the whole `worktree` tier depends on.
 
-    A cell's `open("notes.txt", "w")` reaches no waterfall — a deny-list needs a
-    registered name, and the model is authoring the tool (§4.8). What it *does*
-    do is resolve against the child's cwd, so the tier bounds authored code
-    rather than merely observing it. This asserts the kernel is actually started
-    there: a runtime that inherited the host's directory would leave that whole
-    argument false, and every relative write from a cell would land in the shared
-    tree.
+    The `open("notes.txt", "w")` of a cell reaches no waterfall. A deny-list
+    needs a registered name, and the model is authoring the tool (§4.8). But the
+    write *does* resolve against the cwd of the child, so the tier limits
+    authored code and does not only observe it. This test asserts that the kernel
+    is actually started there. If a runtime inherited the directory of the host,
+    that whole argument would be false, and every relative write from a cell
+    would land in the shared tree.
 
-    An absolute path still escapes, which is exactly why §4.8 calls this
-    collision isolation and reserves confinement for `sandbox` (E13).
+    An absolute path still escapes. For that reason, §4.8 calls this collision
+    isolation and reserves confinement for `sandbox` (E13).
     """
     ctx, session, agent = await mounted_runtime(snapshots=False)
     scratch = tmp_path / "scratch"
@@ -205,9 +209,9 @@ async def test_a_cell_runs_inside_the_agents_workspace(
 
     where, pycache = result.value["value"]
     assert where == str(root)
-    # The write a policy row could never have stopped landed in the agent's own
-    # tree, which is the whole property the tier buys.
+    # A policy row could never have stopped this write. It landed in the tree of
+    # the agent itself, which is the whole benefit of the tier.
     assert (root / "authored.txt").read_text(encoding="utf-8") == "a cell wrote this"
-    # And the redirection env reached the child, so a cell that runs the
-    # project's tests does not dirty that tree with caches (E12).
+    # The redirection environment also reached the child, so a cell that runs the
+    # tests of the project does not leave caches in that tree (E12).
     assert pycache == str(scratch / "pycache")

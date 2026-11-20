@@ -1,27 +1,30 @@
 """The fd-3 frame vocabulary, host side.
 
-The twin of `ph_runtime.protocol` — see that module for which parts are shared
-and which are written twice, and `test_protocol_mirror.py` for what keeps the
-twinned half honest.
+This module is the twin of `ph_runtime.protocol`. That module says which parts
+are shared and which are written twice. `test_protocol_mirror.py` keeps the
+parts that are written twice equal.
 
-The split inside this module is deliberate:
+This module is split in two on purpose:
 
-* **Outbound** frames (host → guest) are `WireModel`s, so their camelCase field
-  names come from pH's one alias function rather than from string literals, and
-  their field sets are *derived* from the models. The host cannot drift from its
-  own outbound schema.
-* **Inbound** frames (guest → host) are `TypedDict`s, and the `FieldSpec` table
-  the codec rebuilds from — `INBOUND` — is *derived* from them (P8-07), the way
-  the outbound field sets are derived from the models. `TypedDict` rather than
-  `WireModel` on purpose: the guest is a hostile peer (C10) and the codec's rule
-  is that junk becomes `None` and a handler never raises, where a model's
-  `extra="forbid"` would *raise* on a forged field. A `TypedDict` is only a
-  type, and the dict `decode` rebuilds is exactly the dict the type describes —
-  every key it names and no other, each of its declared shape — so the name is
-  honest at the one point it is applied, and `manager.py` reads `frame["id"]`
-  off a `DoneFrame` rather than off a `dict[str, Any]`.
+* **Outbound** frames (host → guest) are `WireModel`s. Their camelCase field
+  names therefore come from the one alias function of pH and not from string
+  literals, and their field sets are *derived* from the models. The host cannot
+  drift from its own outbound schema.
+* **Inbound** frames (guest → host) are `TypedDict`s. `INBOUND`, the `FieldSpec`
+  table that the codec rebuilds from, is *derived* from them (P8-07), in the
+  same way that the outbound field sets are derived from the models.
 
-`FRAME_FIELDS` is the union, and the mirror test compares it to the guest's.
+The inbound frames are `TypedDict`s and not `WireModel`s on purpose. The guest
+is a hostile peer (C10). The rule of the codec is that junk becomes `None` and a
+handler never raises, but the `extra="forbid"` of a model would *raise* on a
+forged field. A `TypedDict` is only a type. The dict that `decode` rebuilds is
+exactly the dict that the type describes: every key that the type names and no
+other key, each with its declared shape. The type name is therefore correct at
+the one point where it is applied, and `manager.py` reads `frame["id"]` from a
+`DoneFrame` and not from a `dict[str, Any]`.
+
+`FRAME_FIELDS` is the union of the two halves, and the mirror test compares it
+with the `FRAME_FIELDS` of the guest.
 
 @module ph_rlm.kernel.protocol
 """
@@ -46,11 +49,12 @@ from pydantic import BaseModel
 from ph.text import truncation_marker
 from ph.wire import WireModel
 
-# **Imported, not re-spelled.** `ph-rlm` already depends on `ph-runtime-guest`,
-# so the host can read the guest's declarations and the two cannot disagree at
-# all. Re-exported through `__all__` below, so this module stays the complete
-# host-side view and `venv`/`manager` keep importing them from here.
-# `ph_runtime.protocol` owns the reasoning for each, and says what else is shared.
+# **Imported, not declared again.** `ph-rlm` already depends on
+# `ph-runtime-guest`, so the host can read the declarations of the guest, and
+# the two sides cannot disagree at all. The names are re-exported through
+# `__all__` below. This module therefore stays the complete host-side view, and
+# `venv` and `manager` keep importing the names from here. `ph_runtime.protocol`
+# holds the reasoning for each constant and says what else is shared.
 from ph_runtime.protocol import (
     FD_ENV,
     FRAME_BYTES_ENV,
@@ -100,11 +104,12 @@ GUEST_FRAMES: Final = frozenset(
 
 
 class BootFrame(WireModel):
-    """Limits and bindings, once, before anything runs.
+    """Limits and bindings, sent one time, before anything runs.
 
     Every limit is required, because the host is the only owner of a default.
-    A guest with its own fallbacks would mean two answers to "what is the log
-    cap", and the one that applied would depend on which side was older.
+    If the guest had its own fallbacks, there would be two answers to "what is
+    the log cap", and the answer that applied would depend on which side was
+    older.
     """
 
     type: Literal["boot"] = "boot"
@@ -118,10 +123,11 @@ class BootFrame(WireModel):
     namespaces: list[dict[str, Any]]
     namespace_id: str | None = None
     skills: list[str]
-    """Python skills to import and bind callable before any cell runs (P3-18).
+    """The Python skills to import and bind as callables before any cell runs (P3-18).
 
-    Import names, not requirement specs: what to install is the venv builder's
-    business and happens once, while this is what the *namespace* should hold."""
+    These are import names and not requirement specs. What to install is the
+    concern of the venv builder and happens one time. This field is what the
+    *namespace* must hold."""
 
 
 class RunFrame(WireModel):
@@ -133,8 +139,8 @@ class RunFrame(WireModel):
 class ReplyFrame(WireModel):
     """The answer to one `call`.
 
-    `fatal` is C3 on the wire: a denial or a budget settles the whole run, so the
-    proxy raises something the program is not offered a chance to catch.
+    `fatal` is C3 on the wire. A denial or a budget settles the whole run. The
+    proxy therefore raises an exception that the program is not meant to catch.
     """
 
     type: Literal["reply"] = "reply"
@@ -143,13 +149,13 @@ class ReplyFrame(WireModel):
     value: Any = None
     message: str | None = None
     name: str | None = None
-    """The call's own `name`, echoed back so a failure can say what failed.
+    """The `name` of the call, echoed back so that a failure can say what failed.
 
-    The guest raises `ToolFailed(name, message)`, and read it off a field the
-    host never sent: every tool failure inside a cell reported the tool as the
-    literal string `"the call"`, from the day the RLM landed. Optional because
-    only a failure needs it — a successful reply is the hot path and carries the
-    value instead."""
+    The guest raises `ToolFailed(name, message)`. It used to read the name from
+    a field that the host never sent. Every tool failure inside a cell therefore
+    reported the tool as the literal string `"the call"`, from the day the RLM
+    landed. The field is optional because only a failure needs it. A successful
+    reply is the hot path and carries the value instead."""
     fatal: bool | None = None
 
 
@@ -158,8 +164,8 @@ class RestoreFrame(WireModel):
     id: int
     variables: list[dict[str, Any]]
     more: bool = False
-    """Whether another batch follows (O3). The guest accumulates and answers on
-    the frame without it, so one `restore` is still one `done`."""
+    """Whether another batch follows (O3). The guest accumulates, and answers on
+    the frame where `more` is false. One `restore` is therefore still one `done`."""
 
 
 class CancelFrame(WireModel):
@@ -172,28 +178,31 @@ class ShutdownFrame(WireModel):
 
 
 class PingFrame(WireModel):
-    """A probe the guest's reader task answers from its event loop (M2).
+    """A probe that the reader task of the guest answers from its event loop (M2).
 
-    **A gauge first.** The round trip is the only measurement the host has of
-    how far behind the guest's loop is, and a cell burning CPU starves the
-    reader — so a late or missing answer reads as *load*, reported by `phern
-    doctor`, and never as a reason to kill anything. `CpuBudget` bounds a busy
-    cell.
+    **It is a gauge first.** The round trip is the only measurement that the
+    host has of how far behind the event loop of the guest is. A cell that burns
+    CPU starves the reader task. A late or missing answer is therefore read as
+    *load*, which `phern doctor` reports, and never as a reason to kill
+    anything. The CPU budget of the guest (`ph_runtime.limits.arm_cpu_budget`)
+    limits a busy cell.
     """
 
     type: Literal["ping"] = "ping"
     id: int
-    """The probe's own number, compared in `_ActiveRun.answered` so a late — or
-    unsolicited — answer is told from the current one and times nothing."""
+    """The number of the probe itself. `_ActiveRun.answered` compares it, so
+    that a late or unsolicited answer is told apart from the current answer and
+    times nothing."""
     run: int
-    """The run the host is waiting on, so the guest can settle it if nobody will.
+    """The run that the host is waiting on, so that the guest can settle it if
+    nothing else will.
 
-    The question travels outward rather than the guest's state travelling back.
-    A guest neither running this run nor owing it a `done` sends one on the
-    spot; the host learns through an ordinary terminal frame and the namespace
-    survives. Asking the other way round — publishing `_owed` and letting the
-    host conclude — left the host able only to conclude, and the remedy for a
-    conclusion is a kill."""
+    The question travels outward. The state of the guest does not travel back.
+    A guest that is not running this run and does not owe it a `done` sends one
+    immediately. The host learns through an ordinary terminal frame, and the
+    namespace survives. The other direction was to publish `_owed` and let the
+    host conclude. That left the host able only to conclude, and the remedy for
+    a conclusion is a kill."""
 
 
 _OUTBOUND: Final[tuple[type[BaseModel], ...]] = (
@@ -212,23 +221,25 @@ _OUTBOUND: Final[tuple[type[BaseModel], ...]] = (
 FieldKind: TypeAlias = Literal["int", "str", "bool", "obj", "list", "any"]
 
 _SCALARS: Final[dict[Any, FieldKind]] = {bool: "bool", int: "int", str: "str"}
-"""The scalar annotations `_kind_of` can name, and what the codec calls each."""
+"""The scalar annotations that `_kind_of` can name, and the name that the codec
+uses for each."""
 
 
 @dataclass(frozen=True, slots=True)
 class FieldSpec:
-    """One field the codec will rebuild, and the only shape it will accept."""
+    """One field that the codec rebuilds, and the only shape that it accepts."""
 
     name: str
     kind: FieldKind
     required: bool = True
 
 
-# The seven frames a guest may send, as the shape each has *after* `decode` has
-# rebuilt it. `NotRequired` is the codec's `required=False`; a `dict[str, Any]`
-# is its `"obj"`, a `list[Any]` its `"list"`, `Any` its `"any"` — `_kind_of` is
-# the mapping, and a field of a shape it cannot name is an import-time error
-# rather than a frame the codec quietly accepts.
+# The eight frames that a guest may send, each with the shape that it has
+# *after* `decode` has rebuilt it. `NotRequired` is the `required=False` of the
+# codec. A `dict[str, Any]` is its `"obj"`, a `list[Any]` is its `"list"`, and
+# `Any` is its `"any"`. `_kind_of` is the mapping. A field with a shape that
+# `_kind_of` cannot name is an error at import time, and not a frame that the
+# codec quietly accepts.
 
 
 class BootAckFrame(TypedDict):
@@ -238,8 +249,9 @@ class BootAckFrame(TypedDict):
     limits: dict[str, Any]
 
 
-# Functional form for this one only: the wire key is `global` — dsh's name, and
-# the module docstring says why it stays — which a class body cannot spell.
+# Only this frame uses the functional form. The wire key is `global`, which a
+# class body cannot spell. `global` is the dsh name, and the module docstring of
+# `ph_runtime.protocol` says why it stays.
 CallFrame = TypedDict(
     "CallFrame",
     {
@@ -251,15 +263,15 @@ CallFrame = TypedDict(
         "args": dict[str, Any],
     },
 )
-"""`run` is which program issued this call, and it is required (F4).
+"""`run` says which program issued this call, and it is required (F4).
 
-A cell can leave a task behind — `asyncio.create_task` and never awaited — and
-that task can call a binding after its run has settled. The call then arrived
-while the *next* program was open and was served against that program's
-bindings, its budget and its parent dispatch id: one cell's work recorded as
-another's, with the approval and limit decisions taken for the wrong turn. The
-guest stamps the run it belongs to and the host refuses a stamp that is not the
-open one."""
+A cell can leave a task behind: one that `asyncio.create_task` started and that
+was never awaited. That task can call a binding after its run has settled. The
+call then arrived while the *next* program was open, and it was served against
+the bindings, the budget and the parent dispatch id of that program. The work of
+one cell was recorded as the work of another, and the approval and limit
+decisions were taken for the wrong turn. The guest now stamps each call with the
+run that it belongs to, and the host refuses a stamp that is not the open run."""
 
 
 class LogFrame(TypedDict):
@@ -297,13 +309,14 @@ class FaultFrame(TypedDict):
 
 
 class PongFrame(TypedDict):
-    """The guest's answer to a `ping`: the clock, and nothing else (M2).
+    """The answer of the guest to a `ping`: the clock, and nothing else (M2).
 
-    It carries no verdict because the guest acts on the question rather than
-    reporting about it — see `PingFrame.run`. What is left is the round trip,
-    which is how far behind the guest's event loop is running and is a *load*
-    reading: a slow answer is a busy cell and no answer is a starved one, and
-    `CpuBudget` is what bounds those.
+    The frame carries no verdict, because the guest acts on the question and
+    does not report about it. See `PingFrame.run`. What is left is the round
+    trip, which measures how far behind the event loop of the guest is. That is
+    a *load* reading: a slow answer is a busy cell, and no answer is a starved
+    cell. The CPU budget of the guest (`ph_runtime.limits.arm_cpu_budget`)
+    limits both.
     """
 
     type: Literal["pong"]
@@ -320,26 +333,28 @@ InboundFrame: TypeAlias = (
     | FaultFrame
     | PongFrame
 )
-"""What `decode` returns. A tagged union on `type`, so `if frame["type"] == "done":`
-narrows it — compared *directly*: mypy does not carry the narrowing through an
-intermediate `kind = frame["type"]`."""
+"""What `decode` returns. It is a tagged union on `type`, so
+`if frame["type"] == "done":` narrows it. Compare the tag *directly*: mypy does
+not carry the narrowing through an intermediate `kind = frame["type"]`."""
 
 _INBOUND: Final[tuple[Any, ...]] = get_args(InboundFrame)
-"""The union's members, read off the union — so a frame added to `InboundFrame`
-cannot be missing from `INBOUND`. Listed separately it could be, and the symptom
-would be `decode` returning `None` for every instance of the new frame: the
-codec's "junk becomes `None`" rule firing on a frame that is not junk."""
+"""The members of the union, read from the union itself. A frame that is added
+to `InboundFrame` therefore cannot be missing from `INBOUND`. With a separate
+list it could be missing. The symptom would be that `decode` returns `None` for
+every instance of the new frame: the "junk becomes `None`" rule of the codec
+would apply to a frame that is not junk."""
 
 
 def _kind_of(annotation: object) -> FieldKind:
-    """The codec's `FieldKind` for one declared field type — the whole mapping."""
+    """The `FieldKind` of the codec for one declared field type. This function is
+    the whole mapping."""
     if annotation is Any:
         return "any"
     if get_origin(annotation) is Literal:
         return "str"  # every tag is a string, and `type` is the only Literal
-    # Identity, not `isinstance`: an annotation is a class, not a value, so
-    # `bool`/`int` need no ordering care here — `codec._coerce` is where that
-    # hazard lives, and it carries the comment.
+    # This is an identity test and not `isinstance`. An annotation is a class
+    # and not a value, so the order of `bool` and `int` does not matter here.
+    # That hazard is in `codec._coerce`, which has the comment about it.
     if annotation in _SCALARS:
         return _SCALARS[annotation]
     origin = get_origin(annotation) or annotation
@@ -351,15 +366,16 @@ def _kind_of(annotation: object) -> FieldKind:
 
 
 def _inbound_specs() -> dict[str, tuple[FieldSpec, ...]]:
-    """`INBOUND`, read off the frame types, so the declaration has one source.
+    """Build `INBOUND` from the frame types, so that the declaration has one source.
 
-    **Through `get_type_hints`, never `__required_keys__`.** Under
-    `from __future__ import annotations` a class body's annotations are strings
-    when `TypedDict` builds the class, and it cannot see `NotRequired` inside a
-    string: on this interpreter every key then reports as required. That is the
-    exact drift the guest's own `TypedDict`s had before they were deleted
-    (`test_protocol_mirror` tells the story). `get_type_hints(...,
-    include_extras=True)` resolves the strings and keeps the qualifier.
+    **Use `get_type_hints`, never `__required_keys__`.** Under
+    `from __future__ import annotations`, the annotations of a class body are
+    strings when `TypedDict` builds the class, and `TypedDict` cannot see
+    `NotRequired` inside a string. On this interpreter every key is then
+    reported as required. That is the exact drift that the `TypedDict`s of the
+    guest had before they were deleted (`test_protocol_mirror` tells the story).
+    `get_type_hints(..., include_extras=True)` resolves the strings and keeps
+    the qualifier.
     """
     specs: dict[str, tuple[FieldSpec, ...]] = {}
     for frame in _INBOUND:
@@ -378,18 +394,18 @@ INBOUND: Final[dict[str, tuple[FieldSpec, ...]]] = _inbound_specs()
 
 
 def _outbound_fields() -> dict[str, tuple[frozenset[str], frozenset[str]]]:
-    """Field sets read off the models, so the declaration has one source."""
+    """Build the field sets from the models, so that the declaration has one source."""
     fields: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
     for model in _OUTBOUND:
         required: set[str] = set()
         optional: set[str] = set()
         for name, info in model.model_fields.items():
             alias = info.alias or name
-            # The rule follows the dump: `encode` uses `exclude_none=True`, so a
-            # field is omitted from the wire exactly when its value is `None`.
-            # A field with a non-`None` default — `type`, `protocol` — is
-            # therefore always *sent*, and so is required as the guest sees it,
-            # even though a caller need not pass it.
+            # The rule follows the dump. `encode` uses `exclude_none=True`, so a
+            # field is omitted from the wire exactly when its value is `None`. A
+            # field with a default that is not `None` (`type`, `protocol`) is
+            # therefore always *sent*. The guest sees it as required, even
+            # though a caller does not have to pass it.
             if info.is_required() or info.default is not None:
                 required.add(alias)
             else:
@@ -411,8 +427,8 @@ FRAME_FIELDS: Final[dict[str, tuple[frozenset[str], frozenset[str]]]] = {
 }
 
 
-# Re-exported, not re-spelled: the sentence moved to `ph.text` when `!!` and
+# Re-exported, not declared again. The sentence moved to `ph.text` when `!!` and
 # `tool-bash` became the third and fourth things that discard output against a
 # cap (P7-13). The mirror test still compares `host.truncation_marker` with the
-# guest's deliberate copy, which is the assertion that matters.
+# deliberate copy in the guest, and that is the assertion that matters.
 truncation_marker = truncation_marker

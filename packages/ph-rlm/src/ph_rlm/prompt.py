@@ -1,21 +1,22 @@
-"""`rlm-prompt` — the RLM doctrine, and what it deliberately does not say (P3-14).
+"""`rlm-prompt`: the RLM doctrine, and what it deliberately does not say (P3-14).
 
-Ported from prime-agent's `prompts/rlm.ts`. Three things about the port are
-decisions rather than transcription:
+The doctrine is ported from `prompts/rlm.ts` of prime-agent. Three things about
+the port are decisions and not transcription:
 
-**Nothing here re-describes the generated surface.** `tools:sdk` *is* the listing
-of the delegation calls, built from the registry, and the transport's own description
-(`presentation.PYTHON_DESCRIPTION`) says what the interpreter is and is not — so prose
-beside them would be a second description of one surface with the hand-written copy
-going stale first. What survives is what neither can say: the rules.
+**Nothing here describes the generated surface a second time.** `tools:sdk` *is*
+the listing of the delegation calls, built from the registry. The description of
+the transport itself (`presentation.PYTHON_DESCRIPTION`) says what the
+interpreter is and is not. Prose beside them would be a second description of
+one surface, and the hand-written copy would go stale first. What remains is
+what neither can say: the rules.
 
 **The non-blocking rule is stated as a rule, not a hint.** `rlm.run` returns an
 admission handle, so a model that waits for an answer waits forever.
 
-**Volatile facts are a `context()`, not a `section`.** Depth, working directory and
-the family change between turns; in a cached `section` each change would re-bill
-the whole prefix (A12). They are materialized as a snapshot after retained
-history, and only when the text changed.
+**Volatile facts are a `context()`, not a `section`.** Depth, working directory
+and the family change between turns. In a cached `section`, each change would
+bill the whole prefix again (A12). The facts are materialized as a snapshot
+after retained history, and only when the text changed.
 
 @module ph_rlm.prompt
 """
@@ -43,8 +44,9 @@ __all__ = ["CHILD_DOCTRINE", "DELEGATION", "DOCTRINE", "WORKSPACE_LINE", "apply"
 ORDER_RLM_DOCTRINE = ORDER_TOOL_GUIDANCE + 10
 ORDER_RLM_DELEGATION = ORDER_TOOL_GUIDANCE + 20
 ORDER_RLM_CHILD = ORDER_TOOL_GUIDANCE + 30
-"""After `tools:sdk` (order 100), because the doctrine refers to the surface the
-SDK block has just described. Prime Agent's order: RLM → subagent guidance."""
+"""The sections come after `tools:sdk` (order 100), because the doctrine refers
+to the surface that the SDK block has just described. The order of prime-agent
+is RLM, then subagent guidance."""
 
 DOCTRINE = f"""\
 # Writing code to solve tasks
@@ -120,17 +122,17 @@ WORKSPACE_LINE = (
 )
 """What the workspace line says when this agent holds no workspace (D21).
 
-Stated rather than omitted: an agent handed a read-only repo *without notice*
-attempts writes and reads the failures as its own bug, and "nothing is bounding
-you" is the same warning.
+The line is stated and not omitted. An agent that gets a read-only repo *without
+notice* attempts writes and reads the failures as its own bug. "Nothing is
+bounding you" is the same kind of warning.
 
-Reached by *asking* — `facts()` emits it only when the seam has no workspace for
-this agent — rather than by asserting an absence, which would keep telling every
-agent that nothing is mounted after something was.
+The line is reached by *asking*: `facts()` emits it only when the seam has no
+workspace for this agent. It does not assert an absence. An assertion would keep
+telling every agent that nothing is mounted after something was.
 
 **"none acquired", not "no tier is mounted".** The seam is mounted in every
-profile since `workspace-shared` joined `ph-base`; what varies is whether the
-agent lifecycle has taken a workspace and which tier answered.
+profile since `workspace-shared` joined `ph-base`. What varies is whether the
+agent lifecycle has taken a workspace, and which tier answered.
 """
 
 
@@ -141,12 +143,13 @@ async def apply(ctx: Context, config: None) -> None:
     prompt = ctx.require(SYSTEM_PROMPT)
 
     def delegation(request: AssembleContext) -> str:
-        """The delegation rules, and only when the agent can actually delegate.
+        """The delegation rules, and only when the agent can delegate.
 
-        Keyed on `rlm_run`'s *visibility* — the same question the SDK block asks
-        per tool — rather than on the namespace being registered. A deployment
-        that denied `rlm_run` alone would otherwise drop it from the listing
-        while this section kept teaching it.
+        The condition is the *visibility* of `rlm_run`, which is the same
+        question that the SDK block asks for each tool. It is not whether the
+        namespace is registered. Otherwise a deployment that denied only
+        `rlm_run` would drop it from the listing while this section still taught
+        it.
         """
         if not ctx.require(TOOLS).view(request.scope).visible.get(RUN_TOOL):
             return ""
@@ -154,7 +157,8 @@ async def apply(ctx: Context, config: None) -> None:
         keys = [entry.key for entry in listed.entries()] if listed is not None else []
         if not keys:
             return DELEGATION
-        # The list the key is checked against, so a model knows the names it may use.
+        # The list that the key is checked against, so that a model knows the
+        # names that it may use.
         return f"{DELEGATION}\nModels a child can run on: {', '.join(keys)}.\n"
 
     def child_doctrine(request: AssembleContext) -> str:
@@ -162,11 +166,12 @@ async def apply(ctx: Context, config: None) -> None:
         return CHILD_DOCTRINE if session is not None and delegation_depth(session) else ""
 
     def facts(request: AssembleContext) -> str:
-        """The turn-to-turn state, as a cache-safe snapshot (A12).
+        """The state that changes from turn to turn, as a cache-safe snapshot (A12).
 
-        Each child's state is its own cached fold (`SubagentService.children`), so
-        the family names and the children line cost a lookup each rather than a scan
-        of anybody's whole log per model step.
+        The state of each child is its own cached fold
+        (`SubagentService.children`). The family names and the children line
+        therefore cost one lookup each, and not a scan of a whole log for each
+        model step.
         """
         session = request.session
         if session is None:
@@ -209,18 +214,20 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 def _workspace(ctx: Context, agent_id: str) -> list[str]:
-    """What is true about *this agent's* workspace, asked of the seam.
+    """What is true about the workspace of *this agent*, asked of the seam.
 
-    Asked of the seam **for a specific agent**, not read off `ctx.workspace` as if the
-    provision were a workspace: `ctx.<name>` is a service everywhere in this codebase,
-    and a workspace is per-agent state a service hands out.
+    The question is asked of the seam **for a specific agent**. It is not read
+    from `ctx.workspace` as if the provision were a workspace. `ctx.<name>` is a
+    service everywhere in this codebase, and a workspace is per-agent state that
+    a service gives out.
 
-    `repo_writable` is reported as the seam states it and **never inferred from the
-    kind**: `worktree-ephemeral` is writable and reaches nobody, and a line that
-    called it read-only would tell the model the opposite of what happens.
+    `repo_writable` is reported as the seam states it and is **never inferred
+    from the kind**. `worktree-ephemeral` is writable and reaches nobody, and a
+    line that called it read-only would tell the model the opposite of what
+    happens.
 
-    Lines rather than one string with newlines in it, because `facts()` already owns
-    the joining.
+    The result is a list of lines and not one string with newlines in it, because
+    `facts()` already owns the joining.
     """
     workspace = workspace_of(ctx, agent_id)
     if workspace is None:
@@ -233,9 +240,10 @@ def _workspace(ctx: Context, agent_id: str) -> list[str]:
     if workspace.ref:
         lines.append(f"Branch: {workspace.ref}")
     if workspace.provision_failures:
-        # The one party who has to know `.env` did not arrive is the agent about
-        # to wonder why the tests fail (E14). A log line would reach an operator
-        # tomorrow; this reaches the model on the step it matters.
+        # The agent that is about to wonder why the tests fail is the one party
+        # that must know that `.env` did not arrive (E14). A log line would reach
+        # an operator tomorrow. This line reaches the model on the step where it
+        # matters.
         lines.append(
             "Missing from this workspace (do not treat these failures as your own bug): "
             + "; ".join(workspace.provision_failures)
@@ -246,10 +254,10 @@ def _workspace(ctx: Context, agent_id: str) -> list[str]:
 def _depth_limit(ctx: Context) -> int:
     """The delegation limit in force, asked of the provider that enforces it.
 
-    Read from the provider rather than from this row's own config, because two
-    copies of one limit is how a prompt tells a child it has a level left that
-    the provider refuses. The `None` branch is load-bearing: the doctrine row can
-    mount in a deployment with no delegation provider at all.
+    The limit is read from the provider and not from the config of this row. With
+    two copies of one limit, a prompt can tell a child that it has a level left
+    when the provider refuses that level. The `None` branch is needed: the
+    doctrine row can mount in a deployment with no delegation provider at all.
     """
     provider = ctx.get(RLM_CHILDREN)
     return RLM_MAX_DEPTH if provider is None else int(provider.depth_limit)

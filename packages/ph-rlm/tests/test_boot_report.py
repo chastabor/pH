@@ -1,24 +1,29 @@
-"""The boot handshake's two halves have to agree on what a number is (D7).
+"""The two halves of the boot handshake must agree on what a number is (D7).
 
-Found on macOS on 2026-09-07, while verifying the Seatbelt backend: every kernel
-start waited out `boot_timeout` and reported "did not report ready" with nothing to
-quote — and the guest had answered within 50 ms. macOS refuses `RLIMIT_AS`
-(`ValueError: current limit exceeds maximum limit`), the guest reported the soft
-limit in force — `RLIM_INFINITY`, 2**63-1 — and the host's codec, whose
-lossless-integer rule was then a `parse_int` hook over the whole line, dropped the
-`boot-ack` as junk and kept waiting for a frame that had already come.
+This was found on macOS on 2026-09-07, during verification of the Seatbelt
+backend. Every kernel start waited for the whole `boot_timeout` and reported "did
+not report ready" with nothing to quote, although the guest had answered within
+50 ms. macOS refuses `RLIMIT_AS` (`ValueError: current limit exceeds maximum
+limit`). The guest reported the soft limit in force, which was `RLIM_INFINITY`,
+2**63-1. The lossless-integer rule of the host codec was then a `parse_int` hook
+over the whole line. The codec dropped the `boot-ack` as junk, and the host
+continued to wait for a frame that had already come.
 
-The root cause is the codec's, and is fixed there: the bound applies to the `int`
-fields the spec declares and to nothing it declines to inspect (`test_codec.py`).
-Three things pinned here are true regardless of it. The guest reports `None` for a
-limit it could not apply, because a report is for reading and `RLIM_INFINITY` is
-not a limit. The host treats anything that is not `boot-ack` or `fault` as a fault
-to report — unreadable *or* merely unexpected — because nothing model-written has
-run before `boot-ack`, so C10's "junk is skipped, the peer is hostile" tolerance is
-not yet owed and looping on it is how a silent `boot_timeout` happens. And `ph
-doctor` reports the limits the guests actually applied, not the ones the host asked
-for, since on macOS those differ and claiming the request would be E1's failure one
-layer down from the tier table.
+The root cause is in the codec, and it is fixed there: the bound applies to the
+`int` fields that the spec declares, and to nothing that it declines to inspect
+(`test_codec.py`). The tests here check three things that are true regardless of
+that fix:
+
+* The guest reports `None` for a limit that it could not apply. A report is for
+  reading, and `RLIM_INFINITY` is not a limit.
+* The host treats anything that is not `boot-ack` or `fault` as a fault to
+  report, whether it is unreadable *or* only unexpected. Nothing model-written
+  has run before `boot-ack`, so the tolerance of C10 ("junk is skipped, the peer
+  is hostile") is not owed yet. A loop on such a frame is how a silent
+  `boot_timeout` happens.
+* `phern doctor` reports the limits that the guests actually applied, not the
+  limits that the host asked for. On macOS those differ. To claim the request
+  would be the failure of E1, one layer down from the tier table.
 """
 
 from __future__ import annotations
@@ -72,9 +77,9 @@ def test_a_limit_the_platform_refuses_is_reported_as_none_and_the_frame_stays_re
 def test_a_finite_soft_limit_already_in_force_is_still_the_number_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The docstring's promise — "the host logs the number in force" — holds where
-    there is one: a refused `setrlimit` under an existing finite soft limit reports
-    that limit, not `None`."""
+    """The promise of the `apply_limits` docstring ("the host logs the number that
+    is in force") holds where there is a number. A refused `setrlimit` under an
+    existing finite soft limit reports that limit, not `None`."""
     monkeypatch.setattr(resource, "getrlimit", lambda _which: (2**30, 2**30))
     monkeypatch.setattr(resource, "setrlimit", _refuse)
 
@@ -82,10 +87,10 @@ def test_a_finite_soft_limit_already_in_force_is_still_the_number_reported(
 
 
 async def test_an_unreadable_first_frame_is_a_fault_not_a_silence(tmp_path: Path) -> None:
-    """Driven through `_await_boot_ack` over a socketpair, with no guest spawned: a
-    `boot-ack` in a shape this host will not read — `protocol` as a string, the
-    kind of drift D7 is about — and the host's answer to it is a fault that quotes
-    the line rather than a wait for `boot_timeout`."""
+    """The test drives `_await_boot_ack` over a socketpair, with no guest spawned.
+    It sends a `boot-ack` in a shape that this host does not read: `protocol` as
+    a string, which is the kind of drift that D7 is about. The host answers with
+    a fault that quotes the line, and does not wait for `boot_timeout`."""
     kernel = Kernel(
         namespace="agent-test",
         environment=resolve_interpreter(cache=tmp_path, mode="host"),
@@ -111,12 +116,13 @@ async def test_an_unreadable_first_frame_is_a_fault_not_a_silence(tmp_path: Path
 
 
 async def test_a_frame_that_is_not_boot_ack_before_ready_is_also_a_fault(tmp_path: Path) -> None:
-    """The same phase rule over the other way a guest can break it.
+    """The same rule for this phase, for the other way in which a guest can break
+    it.
 
-    An unreadable line was made fatal and a *readable* frame that is not `boot-ack`
-    was still fallen through and re-looped — so a `log` or `done` arriving early
-    reproduced exactly the silent `boot_timeout` this module exists to end. One
-    rule, both shapes.
+    An unreadable line was made fatal, but a *readable* frame that is not
+    `boot-ack` still fell through, and the loop continued. A `log` or `done` that
+    arrived early therefore reproduced exactly the silent `boot_timeout` that
+    this module exists to end. There is one rule for both shapes.
     """
     kernel = Kernel(
         namespace="agent-test",
@@ -142,9 +148,9 @@ async def test_a_frame_that_is_not_boot_ack_before_ready_is_also_a_fault(tmp_pat
 
 
 async def test_doctor_reports_the_limits_the_guests_applied_not_the_ones_asked_for() -> None:
-    """E1, one layer down from the tier table: a row that printed the *request*
-    claimed an address-space bound macOS does not enforce. The weakest live kernel
-    wins, as the confinement row beside it already does."""
+    """E1, one layer down from the tier table. A row that printed the *request*
+    claimed an address-space limit that macOS does not enforce. The weakest live
+    kernel decides, as it already does in the confinement row beside this one."""
     runtime = PythonCodeRuntime(
         limits=KernelLimits(), journal=OrphanJournal(path=Path("processes.jsonl")), cache=Path(".")
     )
@@ -177,17 +183,18 @@ async def test_doctor_reports_the_limits_the_guests_applied_not_the_ones_asked_f
 
 
 def test_the_design_document_names_the_version_the_guest_declares() -> None:
-    """I1 — DESIGN.md §1 stated the kernel's `PROTOCOL_VERSION` as prose.
+    """I1: DESIGN.md §1 stated the `PROTOCOL_VERSION` of the kernel as prose.
 
-    It was wrong for a while: the document said 2 while the guest declared 1,
-    and the `2` a reader would have found by grepping is `ph_app.protocol`'s
-    *wire* version, which numbers a different protocol entirely. Two constants
-    with one name, one of them in a paragraph nothing checks.
+    The statement was wrong for some time. The document said 2 while the guest
+    declared 1. The `2` that a reader would have found with grep is the *wire*
+    version of `ph_app.protocol`, which numbers a completely different protocol.
+    There were two constants with one name, and one of them was in a paragraph
+    that nothing checks.
 
-    The bump has since landed, so this is the guard rather than the fix: the
-    number a person reads and the number the host negotiates with cannot drift
-    apart again without a test saying so. Asserted against the document text
-    because that is the copy with no compiler.
+    The bump has landed since then, so this test is the guard and not the fix.
+    The number that a person reads and the number that the host negotiates with
+    cannot drift apart again unless a test reports it. The assertion is made
+    against the text of the document, because that is the copy with no compiler.
     """
     design = (Path(__file__).resolve().parents[3] / "DESIGN.md").read_text(encoding="utf-8")
 
@@ -199,19 +206,19 @@ def test_the_design_document_names_the_version_the_guest_declares() -> None:
 async def test_two_first_runs_on_one_namespace_build_one_kernel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F6 — `environment()` suspends, and two first runs both got past the read.
+    """F6: `environment()` suspends, and two first runs both got past the read.
 
     The namespace *is* the agent id, and a fan-out of parallel tool calls on one
-    agent is what Code Mode is for, so two first runs on one namespace is
-    ordinary rather than exotic. Both built a `Kernel` and the second overwrote
-    the first in `_kernels`; both then spawned a guest on their first cell, and
-    only the one still in the dict was reachable by `close_namespace`. The other
-    ran until the process exited, holding a socket, a pid and whatever the cell
-    had open.
+    agent is what Code Mode is for. Two first runs on one namespace are therefore
+    ordinary. Both built a `Kernel`, and the second overwrote the first in
+    `_kernels`. Both then spawned a guest on their first cell, and
+    `close_namespace` could reach only the one that was still in the dict. The
+    other ran until the process exited, and held a socket, a pid, and whatever
+    the cell had open.
 
-    Driven through `_acquire`, with `environment()` held open at exactly the
-    await that suspends in production — a cold cache shelling out to `uv` takes
-    seconds, which is the window.
+    The test drives `_acquire`, and holds `environment()` open at exactly the
+    await that suspends in production. A cold cache that shells out to `uv`
+    takes seconds, and that time is the window.
 
     Sabotage: drop `async with self._acquire_lock:` and `environment()` is
     entered twice, returning two different kernels.
@@ -253,21 +260,23 @@ async def test_two_first_runs_on_one_namespace_build_one_kernel(
 
 
 class _Pipe:
-    """A child's pipe, which it cannot get past until the host reads it.
+    """The pipe of a child. The child cannot write past it until the host reads
+    it.
 
     The real failure is a blocking `write(2)`: a guest that puts more than the
-    pipe buffer on fd 1 or fd 2 before acking stops there. Modelled rather than
-    reproduced with an OS pipe, because a real one can only be un-blocked from a
-    worker thread, and a thread blocked in `read` is not cancellable — a host
-    that failed this test would hang it rather than fail it, which is the one
-    outcome a regression test must not have.
+    pipe buffer on fd 1 or fd 2 before it sends `boot-ack` stops there. The pipe
+    is modeled, and not reproduced with an OS pipe. A real pipe can be unblocked
+    only from a worker thread, and a thread that is blocked in `read` cannot be
+    canceled. A host that failed this test would then hang the test and not fail
+    it, and that is the one outcome that a regression test must not have.
 
-    What is kept is the causal chain that matters: `settled` fires only once the
-    host has consumed the stream, and the child sends `boot-ack` only once it
-    fires. A host that does not read this pipe never gets the ack.
+    The model keeps the causal chain that matters. `settled` is set only after
+    the host has consumed the stream, and the child sends `boot-ack` only after
+    `settled` is set. A host that does not read this pipe never gets the
+    `boot-ack`.
 
-    `chunks=0` and no `settled` is the other pipe in the same test: open, silent,
-    and never the reason boot finishes.
+    `chunks=0` with no `settled` is the other pipe in the same test. It is open
+    and silent, and it is never the reason why boot finishes.
     """
 
     def __init__(self, settled: anyio.Event | None = None, *, chunks: int = 8) -> None:
@@ -282,8 +291,8 @@ class _Pipe:
             yield b"x" * 4096
         if self._settled is not None:
             self._settled.set()
-        # Open, like a live child's: boot ends by cancelling this reader, not by
-        # the pipe running out.
+        # The pipe stays open, like the pipe of a live child. Boot ends when this
+        # reader is canceled, not when the pipe runs out.
         await anyio.sleep(3600)
 
 
@@ -291,17 +300,18 @@ class _Pipe:
 async def test_a_child_that_fills_a_pipe_before_acking_still_boots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe: str
 ) -> None:
-    """F7(b) — during boot, nothing was consuming fd 1 or fd 2.
+    """F7(b): during boot, nothing consumed fd 1 or fd 2.
 
-    `_drain` only runs for the duration of a *run*, so a guest that writes more
-    than the pipe buffer before it acks blocks on that write and never acks at
-    all. The host then reported "did not report ready within Ns" for a child
-    that was ready and stuck, quoting whatever fitted in one late read — the
-    reverse of the truth, and it sends whoever reads it looking at the guest.
+    `_drain` runs only for the duration of a *run*. A guest that writes more than
+    the pipe buffer before `boot-ack` therefore blocks on that write and never
+    sends it. The host then reported "did not report ready within Ns" for a child
+    that was ready and blocked, and quoted whatever fit in one late read. That is
+    the reverse of the truth, and it sends whoever reads it to look at the guest.
 
-    Both pipes, parametrized, because `_boot_said` quotes both and a wrapper
-    explaining itself on stdout is naming the same failure: draining only the
-    one that happened to be tested would leave the other deadlocking.
+    The test is parametrized over both pipes, because `_boot_said` quotes both,
+    and a wrapper that explains itself on stdout names the same failure. If the
+    host drained only the pipe that happened to be tested, the other would still
+    deadlock.
 
     Sabotage: drop either `start_soon(self._collect_boot_noise, ...)` line and
     the matching case waits out `boot_timeout` and raises `KernelDied`.

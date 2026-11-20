@@ -1,20 +1,23 @@
 """The program is a hostile peer (C10).
 
-Model code holds fd 3 and can write whatever it likes onto it. Every assertion
-here is about the host surviving that: no forged field reaches a handler, no
-non-numeric id is ever echoed back, and nothing the child can send makes the
-decoder raise — because a decoder that raises is a decoder the child can crash
-the host with, on demand.
+Model code holds fd 3 and can write anything to it. Every assertion here is
+about the host surviving that:
 
-## Why `_DECODER` is built once, and hookless
+* No forged field reaches a handler.
+* No non-numeric id is ever echoed back.
+* Nothing that the child can send makes the decoder raise. A decoder that raises
+  is a decoder that the child can use to crash the host on demand.
 
-`decode` runs on every frame the guest sends, so the per-call dispatch `json.loads`
-pays — a wrapper frame plus a str/bytes sniff — is worth owning: **0.334 µs against
-0.406 µs** on a `log` frame, the most numerous kind on the stdout path. The
-`parse_int` hook it once carried is gone, and that is a separate rule rather than a
-performance one: the integer bound belongs to the `int` fields the spec declares
-(`_coerce`), not to a parse hook that vetoed a whole frame over a field the spec
-never asked to see.
+## Why `ph.json._DECODER` is built one time, with no hooks
+
+`decode` runs on every frame that the guest sends. `json.loads` pays a dispatch
+on every call: a wrapper frame plus a str/bytes sniff. That cost is worth
+removing: **0.334 µs against 0.406 µs** on a `log` frame, the most numerous kind
+on the stdout path. The `parse_int` hook that the decoder carried before is
+gone. That is a separate rule and not a performance rule. The integer bound
+belongs to the `int` fields that the spec declares (`_coerce`), and not to a
+parse hook that vetoed a whole frame over a field that the spec never asked to
+see.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ def test_hostile_input_never_raises(raw: str) -> None:
 
 
 def test_a_valid_frame_is_rebuilt_and_stripped() -> None:
-    """Declared fields survive; everything else is dropped, not carried."""
+    """Declared fields survive. Everything else is dropped and not carried."""
     frame = decode(
         json.dumps(
             {
@@ -79,7 +82,7 @@ def test_a_valid_frame_is_rebuilt_and_stripped() -> None:
 def test_an_id_that_is_not_a_number_is_never_echoed() -> None:
     """The frame is dropped before there *is* an id to reply to.
 
-    That ordering is the point: a codec that coerced `"1"` to `1` would let the
+    That order is the purpose. A codec that coerced `"1"` to `1` would let the
     child choose which pending call a reply lands on.
     """
     for bad in ('"1"', "1.0", "true", "null", "[1]"):
@@ -90,27 +93,27 @@ def test_an_id_that_is_not_a_number_is_never_echoed() -> None:
 
 
 def test_an_integer_too_large_for_a_js_reader_is_refused_where_the_host_reads_one() -> None:
-    """pH's log is JSON that dsh's TypeScript tooling reads (Q2), and an `id` the
-    host echoes back is exactly the number that must survive that reader — so past
-    2^53 an `int` field fails coercion like any other wrong shape, and a required
-    one drops the frame."""
+    """The log of pH is JSON that the TypeScript tooling of dsh reads (Q2), and an
+    `id` that the host echoes back is exactly the number that must survive that
+    reader. Past 2^53, an `int` field therefore fails coercion like any other
+    wrong shape, and a required one drops the frame."""
     assert decode(f'{{"type": "done", "id": {JSON_MAX_SAFE_INTEGER + 1}}}') is None
     assert decode(f'{{"type": "done", "id": {-JSON_MAX_SAFE_INTEGER - 1}}}') is None
     assert decode(f'{{"type": "done", "id": {JSON_MAX_SAFE_INTEGER}}}') == {
         "type": "done",
         "id": JSON_MAX_SAFE_INTEGER,
     }
-    # Digits inside a string are not a number, which a text scan would confuse.
+    # Digits inside a string are not a number. A text scan would confuse the two.
     assert decode('{"type": "fault", "message": "99999999999999999999"}') is not None
 
 
 def test_a_large_integer_inside_a_payload_does_not_veto_the_frame() -> None:
-    """The bound applies to the fields the spec declares `int`, and to nothing the
-    spec declines to inspect. It was a `parse_int` hook once, which made any big
-    number anywhere in the line drop the whole frame — so a `boot-ack` whose
-    `limits` said `RLIM_INFINITY` never arrived and a cell ending in `2**60` never
-    settled (2026-09-07). What reaches the log is the log's own walker to judge,
-    with a path in its message."""
+    """The bound applies to the fields that the spec declares `int`, and to nothing
+    that the spec declines to inspect. The bound was a `parse_int` hook before,
+    and then any big number anywhere in the line dropped the whole frame. A
+    `boot-ack` whose `limits` said `RLIM_INFINITY` never arrived, and a cell that
+    ended in `2**60` never settled (2026-09-07). The walker of the log itself
+    judges what reaches the log, with a path in its message."""
     huge = 2**63 - 1
     ack = decode(f'{{"type": "boot-ack", "protocol": 2, "python": "3", "limits": {{"a": {huge}}}}}')
     assert ack is not None and ack["type"] == "boot-ack"
@@ -143,12 +146,12 @@ def test_fuzzed_frames_neither_raise_nor_forge() -> None:
             "done",
             "fault",
         }
-        # Narrowed on the tag rather than on `"id" in frame`: a membership test
-        # tells mypy nothing about a `TypedDict` union, which is the same lesson
-        # `_WORKSPACE_KINDS` records for `Literal`s (issue 49c). Naming the
-        # three that carry one also made the set *checkable* — `fault` was in
-        # the first draft of this line and `FaultFrame` has no `id`, which the
-        # `in frame` form could never have said.
+        # The check narrows on the tag and not on `"id" in frame`. A membership
+        # test tells mypy nothing about a `TypedDict` union, which is the same
+        # lesson that `_WORKSPACE_KINDS` records for `Literal`s (issue 49c).
+        # Naming the three that carry an id also made the set *checkable*.
+        # `fault` was in the first draft of this line, and `FaultFrame` has no
+        # `id`. The `in frame` form could never have reported that.
         if frame["type"] in {"call", "done", "snapshot"}:
             assert type(frame["id"]) is int
 

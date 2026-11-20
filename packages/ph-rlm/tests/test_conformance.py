@@ -1,22 +1,23 @@
-"""The runtime conformance suite (P3-22): the protocol, exercised whole.
+"""The runtime conformance suite (P3-22): the protocol, exercised as a whole.
 
-Every property here has a behavioral test elsewhere — `test_kernel.py` drives
-the process boundary, `test_codec.py` fuzzes the decoder, `test_snapshot.py`
-folds the namespace. This module exists for the claim those cannot make:
-**completeness**. It enumerates the protocol's own vocabulary and the shipped
-profile's own namespaces, and fails when one of them has no coverage.
+Every property here has a behavioral test elsewhere. `test_kernel.py` drives the
+process boundary, `test_codec.py` fuzzes the decoder, and `test_snapshot.py`
+folds the namespace. This module exists for the one claim that those tests
+cannot make: **completeness**. It enumerates the vocabulary of the protocol and
+the namespaces of the shipped profile, and it fails when one of them has no
+coverage.
 
-That inversion is the point. A hand-written list of "the frames we test" agrees
-with the protocol until someone adds a frame, and then agrees with nothing — the
-suite stays green while a frame type nobody exercises ships. Reading
-`FRAME_FIELDS` and the mounted registry instead means the *absence* of a test is
-what breaks.
+That reversal is the purpose. A hand-written list of "the frames we test" agrees
+with the protocol until someone adds a frame, and then it agrees with nothing.
+The suite stays green while a frame type that nobody exercises ships. This
+module reads `FRAME_FIELDS` and the mounted registry instead, so the *absence*
+of a test is what breaks.
 
 Which frames have no producer, and which snapshot kinds are reserved, are facts
-about the vocabulary rather than about the tests, so they live beside it
-(`ph_runtime.protocol.UNPRODUCED_FRAMES`, `ph_rlm.snapshot.RESERVED_KINDS`) and
-are read from here. Whoever closes one of those gaps is reading that module, not
-this file.
+about the vocabulary and not about the tests. They are therefore declared beside
+the vocabulary (`ph_runtime.protocol.UNPRODUCED_FRAMES`,
+`ph_rlm.snapshot.RESERVED_KINDS`) and read from here. The developer who closes
+one of those gaps reads that module, and not this file.
 """
 
 from __future__ import annotations
@@ -64,13 +65,14 @@ COVERED_FRAMES: frozenset[str] = frozenset(
         "snapshot",  # test_snapshot.py::test_a_variable_becomes_a_snapshot_event
         "done",  # every cell test: it carries the value or the error
         "fault",  # test_a_protocol_mismatch_is_refused_at_boot, below
-        "pong",  # test_kernel.py::test_a_run_the_guest_no_longer_owes_...
+        "pong",  # test_kernel.py::test_a_run_the_guest_will_never_finish_is_repaired_not_waited_on
     }
 )
-"""Frames with a test that drives them.
+"""The frames that have a test that drives them.
 
-The comments name where; the *set* is what is checked. A test name held as a
-string goes stale in silence, while a frame missing from this set fails."""
+The comments name the test. The *set* is what is checked. A test name that is
+held as a string goes stale silently, but a frame that is missing from this set
+fails."""
 
 COVERED_KINDS: frozenset[str] = frozenset(
     {
@@ -81,10 +83,11 @@ COVERED_KINDS: frozenset[str] = frozenset(
 
 
 def test_every_frame_type_is_accounted_for() -> None:
-    """The suite's own completeness, read off the protocol rather than a list.
+    """The completeness of the suite itself, read from the protocol and not from
+    a list.
 
-    A frame added to `FRAME_FIELDS` without a test fails here, which is the only
-    moment anyone is looking.
+    A frame that is added to `FRAME_FIELDS` without a test fails here, which is
+    the only moment when anyone is looking.
     """
     assert set(FRAME_FIELDS) == COVERED_FRAMES | UNPRODUCED_FRAMES, (
         "a frame type has neither a test nor a recorded reason for having none"
@@ -95,8 +98,8 @@ def test_every_frame_type_is_accounted_for() -> None:
 def test_every_snapshot_kind_is_accounted_for() -> None:
     """The same completeness claim, one layer up (D17).
 
-    `kernel/snapshot` has its own closed vocabulary, and a kind that gains a
-    producer without a test is the same silent gap a frame would be.
+    `kernel/snapshot` has its own closed vocabulary. A kind that gets a producer
+    without a test is the same silent gap that a frame would be.
     """
     assert set(SNAPSHOT_KINDS) == COVERED_KINDS | RESERVED_KINDS
     assert not COVERED_KINDS & RESERVED_KINDS
@@ -116,18 +119,18 @@ def test_the_unproduced_frame_is_still_decodable() -> None:
 
 
 async def test_a_protocol_mismatch_is_refused_at_boot(tmp_path: Path) -> None:
-    """The `fault` frame's one producer, and D7's whole point.
+    """The one producer of the `fault` frame, and the purpose of D7.
 
-    A guest that cannot serve this protocol says so once and exits, rather than
-    misreading frames one at a time — which is why the version is refused at
+    A guest that cannot serve this protocol says so one time and exits. It does
+    not misread frames one at a time. That is why the version is refused at
     `boot` and not discovered later.
 
-    The frame is **built, not typed**: `to_boot` + `encode` is what the host
-    actually sends, so a required field added to `boot` (as `skills` was) reaches
-    this test instead of leaving a stale literal that fails for the wrong
-    reason. `FD_ENV` and `scrub_env` for the same reason — they are
-    the two things a hand-rolled spawn gets wrong, and `Kernel.start` is the
-    thing being imitated.
+    The frame is **built, not typed**. `to_boot` + `encode` is what the host
+    actually sends. A required field that is added to `boot` (as `skills` was)
+    therefore reaches this test, and does not leave a stale literal that fails
+    for the wrong reason. `FD_ENV` and `scrub_env` are used for the same reason.
+    They are the two things that a hand-written spawn gets wrong, and this test
+    imitates `Kernel.start`.
     """
     environment = await anyio.to_thread.run_sync(
         lambda: resolve_interpreter(cache=tmp_path, mode="host")
@@ -164,23 +167,24 @@ async def test_a_protocol_mismatch_is_refused_at_boot(tmp_path: Path) -> None:
 async def test_every_shipped_namespace_is_callable_from_a_cell(
     shipped_profile: ShippedProfile,
 ) -> None:
-    """One test per binding namespace, enumerated from the *mounted* profile.
+    """One test for each binding namespace, enumerated from the *mounted* profile.
 
-    A namespace the SDK block advertises and a cell cannot reach is the failure
-    this catches — and reading the registry means a namespace added to the
-    bundle without a call here fails rather than passing unnoticed.
+    This test catches a namespace that the SDK block advertises and that a cell
+    cannot reach. Because it reads the registry, a namespace that is added to
+    the bundle without a call here fails, and does not pass unnoticed.
 
-    Through `shipped_profile`, which merges the interpreter pin per row: three
-    call sites had re-spelled it as a raw patch, and that bypass is how the pin
-    once got dropped and a `uv` venv started building over the network.
+    The test goes through `shipped_profile`, which merges the interpreter pin
+    for each row. Three call sites had written the pin again as a raw patch.
+    That bypass is how the pin was dropped before, and a `uv` venv started to
+    build over the network.
     """
     ctx, session, agent = await shipped_profile(profile=resolve_profile("rlm"))
     declared = {"tools", *ctx.require(TOOLS).view(agent.ctx).code_namespaces}
 
-    # The names, not the calls: what is under test is that every namespace the
-    # host declares is *bound in the guest*. Which names the profile ought to
-    # have is `test_bundle.py`'s claim; the calls are governed and have their own
-    # tests.
+    # The program checks the names, not the calls. The test is that every
+    # namespace that the host declares is *bound in the guest*. Which names the
+    # profile must have is the claim of `test_bundle.py`. The calls are governed
+    # and have their own tests.
     program = "\n".join(f"assert {name}, {name!r}" for name in sorted(declared)) + "\n'reached'"
     result = await run_python_cell(ctx, program, agent=agent, session=session)
 
@@ -192,18 +196,19 @@ async def test_every_shipped_namespace_is_callable_from_a_cell(
 
 
 def test_the_transport_describes_the_runtime_it_runs_on() -> None:
-    """The runtime and what the model is told about it have to describe one runtime.
+    """The runtime and what the model is told about it must describe one runtime.
 
-    D19's argument is that owning the runtime is what closes the `%%bash` hole —
-    "the magic was the bypass; removing the mechanism closes the hole". The model is
-    told that by the transport's description, and for a phase the prompt said the
-    opposite: it promised `%%bash` shell cells, ported from prime-agent, which pH's
-    own guest raises a `SyntaxError` for. A model reading it would have spent turns
-    on a cell that cannot run. The doctrine now points at the description rather
-    than saying it again.
+    The argument of D19 is that owning the runtime closes the `%%bash` hole:
+    "the magic was the bypass; removing the mechanism closes the hole". The
+    description of the transport tells the model that. For one phase the prompt
+    said the opposite. It promised `%%bash` shell cells, ported from
+    prime-agent, and the guest of pH raises a `SyntaxError` for those. A model
+    that read the prompt would have spent turns on a cell that cannot run. The
+    doctrine now points at the description and does not repeat it.
 
-    The prefixes come from the guest's own tuple rather than a third copy, so a
-    fourth escape added there reaches the description by construction.
+    The prefixes come from the tuple of the guest itself and not from a third
+    copy, so a fourth escape that is added there reaches the description by
+    construction.
     """
     for prefix in MAGIC_PREFIXES:
         assert f"`{prefix}`" in PYTHON_DESCRIPTION, f"the description does not mention {prefix}"
@@ -214,12 +219,13 @@ def test_the_transport_describes_the_runtime_it_runs_on() -> None:
 
 @pytest.mark.parametrize("prefix", MAGIC_PREFIXES)
 def test_every_magic_prefix_is_refused(prefix: str) -> None:
-    """All three IPython escapes, because a hole left in one of them is the hole.
+    """All three IPython escapes, because a hole in one of them is a hole in the
+    rule.
 
-    Against `compile_cell` directly: refusing a magic is a *compile-time*
-    property of the guest, so a child process per prefix would spend three spawns
-    to observe what the pure function already decides. `test_kernel.py` drives
-    one through a real kernel, which is where that round trip belongs.
+    The test calls `compile_cell` directly. Refusing a magic is a *compile-time*
+    property of the guest, so a child process for each prefix would spend three
+    spawns to observe what the pure function already decides. `test_kernel.py`
+    drives one through a real kernel, which is where that round trip belongs.
     """
     with pytest.raises(SyntaxError) as raised:
         compile_cell(f"{prefix}bash\necho hi")

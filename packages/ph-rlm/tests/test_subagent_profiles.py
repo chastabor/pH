@@ -1,13 +1,24 @@
-"""A child's model from its parent's list, and a profile its parent assigns (S7b).
+"""The model of a child from the list of its parent, and a profile that its
+parent assigns (S7b).
 
-The gate: a skill naming `classify` starts its child on that route; a key the spawn
-names that the list does not hold is refused, while a skill's key this mount cannot run
-falls back to the parent's route and says so; and an assigned profile wider than the
-parent is refused, naming the row. Around it: a spawn names a key or a whole route
-itself, the admission records what it named apart from what that resolved to (a restart
-resolves it again, `test_child_logs`), and an assigned profile narrows
-what a child holds — its tools, its model, its access, its skills and its writable
-directories — on the parent's own mount, each row by the narrower its plugin declares.
+Gates:
+
+- A skill that names `classify` starts its child on that route.
+- A key that the spawn names and the list does not hold is refused. A key from a
+  skill that this mount cannot run falls back to the route of the parent, and
+  the fallback is reported.
+- An assigned profile that is wider than the parent is refused, and the refusal
+  names the row.
+
+The other tests cover the behavior around the gates:
+
+- A spawn names a key or a whole route itself.
+- The admission records what the spawn named separately from what that name
+  resolved to. A restart resolves the name again (`test_child_logs`).
+- An assigned profile narrows what a child holds: its tools, its model, its
+  access, its skills and its writable directories. The narrowing is read against
+  the mount of the parent itself, and each row narrows by the narrower that its
+  plugin declares.
 """
 
 from __future__ import annotations
@@ -50,7 +61,8 @@ pytestmark = pytest.mark.anyio
 
 
 class _Profiles:
-    """`ctx.named_profiles` for a test: each name, the parent's own layers plus a patch."""
+    """`ctx.named_profiles` for a test. Each name is the layers of the parent plus
+    a patch."""
 
     def __init__(self, parent: Profile, **patches: list[JsonObject]) -> None:
         self.parent = parent
@@ -83,8 +95,8 @@ async def _spawn(ctx: Context, parent: Any, **kwargs: Any) -> Any:  # noqa: ANN4
 
 
 def _admitted(ctx: Context, parent: Any) -> JsonObject:  # noqa: ANN401
-    """The one child's admission, from the child's own log — where a restart reads the
-    narrowing back from, so where it has to be recorded."""
+    """The admission of the one child, read from the log of the child. A restart
+    reads the narrowing back from there, so it must be recorded there."""
     (child,) = ctx.require(SUBAGENTS).children(parent.session.id).values()
     return as_obj(thaw_json(not_none(child.admission).to_wire()))
 
@@ -92,12 +104,13 @@ def _admitted(ctx: Context, parent: Any) -> JsonObject:  # noqa: ANN401
 async def test_a_skill_naming_a_listed_model_starts_its_child_on_that_route(
     mount: MountProfile,
 ) -> None:
-    """The gate's first half. The skill directs the child, so it says what the child
-    thinks with; the key is resolved by the parent's own list, and the admission
-    records both the key and the route, but not as the spawn's choice: a restart asks
-    the skill again. Sabotage: ask no skill's model in `_resolve_route`, and the child
-    runs on its parent's `fake-1`; record the skill's key as the choice, and a restart
-    keeps it after the skill names another."""
+    """The first half of the gate. The skill directs the child, so the skill says
+    which model the child thinks with. The list of the parent resolves the key.
+    The admission records both the key and the route, but not as the choice of
+    the spawn, because a restart asks the skill again. Sabotage: ask no skill's
+    model in `_resolve_route`, and the child runs on its parent's `fake-1`; record
+    the skill's key as the choice, and a restart keeps it after the skill names
+    another."""
     ctx, parent = await _parent(mount)
     ctx.require(SKILLS).register(skill("sort", model="classify"))
 
@@ -112,9 +125,9 @@ async def test_a_skill_naming_a_listed_model_starts_its_child_on_that_route(
 
 
 async def test_a_spawn_names_a_listed_model_by_key(mount: MountProfile) -> None:
-    """And the admission records the key as what the spawn named, which a restart
-    resolves again. Sabotage: record the resolved key only, and a restart has nothing
-    to resolve."""
+    """The admission records the key as the name that the spawn gave, and a
+    restart resolves that name again. Sabotage: record the resolved key only, and
+    a restart has nothing to resolve."""
     ctx, parent = await _parent(mount)
 
     run = await _spawn(ctx, parent, choice=ModelChoice(key="classify"))
@@ -146,12 +159,13 @@ TUNED: JsonObject = {
         },
     },
 }
-"""Routes with call settings and one with none, so a child that took its parent's
-settings rather than its route's shows it."""
+"""Routes with call settings and one route with none. A child that took the
+settings of its parent, and not the settings of its route, then shows it."""
 
 
 async def _tuned_parent(mount: MountProfile) -> tuple[Context, Any]:
-    """A parent started on `main` the way a daemon starts a root: the entry's options."""
+    """A parent started on `main` in the way that a daemon starts a root: with the
+    options of the entry."""
     ctx = await mount(dict(PROVIDER_ROW), dict(TUNED))
     session = ctx.require(SESSIONS).create("parent")
     return ctx, ctx.require(AGENTS).create(session, choose(ctx, ModelChoice(key="main")).options())
@@ -160,9 +174,10 @@ async def _tuned_parent(mount: MountProfile) -> tuple[Context, Any]:
 async def test_a_child_on_a_listed_route_runs_with_that_route_s_settings(
     mount: MountProfile,
 ) -> None:
-    """Its temperature, token budget and effort, as a root started on the key has them,
-    and recorded with the route for the audit. Sabotage: drop the entry from
-    `resolve_model`, and the child runs with its parent's."""
+    """The child has the temperature, the token budget and the effort of the
+    route, as a root started on the key has them. The admission records them with
+    the route for the audit. Sabotage: drop the entry from `resolve_model`, and
+    the child runs with its parent's."""
     ctx, parent = await _tuned_parent(mount)
 
     run = await _spawn(ctx, parent, choice=ModelChoice(key="careful"))
@@ -177,9 +192,10 @@ async def test_a_child_on_a_listed_route_runs_with_that_route_s_settings(
 async def test_a_listed_route_that_sets_nothing_takes_nothing_from_the_parent(
     mount: MountProfile,
 ) -> None:
-    """A temperature tuned for the parent's model is not one for this one. Sabotage:
-    build the child from its parent's options with the route swapped in, as `ph_rlm`
-    did, and it runs at its parent's 0.9 on a 64-token budget."""
+    """A temperature that was tuned for the model of the parent is not a
+    temperature for this model. Sabotage: build the child from its parent's
+    options with the route swapped in, as `ph_rlm` did, and it runs at its
+    parent's 0.9 on a 64-token budget."""
     ctx, parent = await _tuned_parent(mount)
 
     run = await _spawn(ctx, parent, choice=ModelChoice(key="plain"))
@@ -202,11 +218,12 @@ async def test_a_child_on_its_parent_s_route_runs_with_its_parent_s_settings(
 async def test_a_child_runs_at_the_spawn_s_effort_else_its_skills_else_its_route_s(
     mount: MountProfile,
 ) -> None:
-    """`child_options`' order: the effort the spawn names, else one its skills agree on
-    (`default` for the provider's own among them), else its route's; skills that name
-    different efforts leave it to the route. Sabotage: drop `_with_effort` from
-    `resolve_model`, put the skills' effort over the spawn's, or let one of two
-    disagreeing skills win."""
+    """The order of `child_options`: the effort that the spawn names, else an
+    effort that its skills agree on (`default` among them asks for the effort of
+    the provider itself), else the effort of its route. Skills that name
+    different efforts leave the effort to the route. Sabotage: drop `_with_effort`
+    from `resolve_model`, put the skills' effort over the spawn's, or let one of
+    two disagreeing skills win."""
     ctx, parent = await _tuned_parent(mount)
     skills = ctx.require(SKILLS)
     skills.register(skill("quick", effort="default"))
@@ -235,18 +252,21 @@ EFFORTS: JsonObject = {
         },
     },
 }
-"""`FAKE_OPTIONS`' route, listed with the two efforts its profile says how to send."""
+"""The route of `FAKE_OPTIONS`, listed with the two efforts that its profile says
+how to send."""
 
 
 async def test_a_child_runs_without_an_effort_its_route_cannot_send_and_its_parent_is_told(
     mount: MountProfile,
 ) -> None:
-    """The child's own request withholds an effort its route's profile does not define,
-    so its parent is told, or it reads a quick answer as a careful one: the admission
-    records the effort that wins and the spawn's answer says what the route runs at. One
-    the route defines, `default`, or none says nothing, and a resumed parent's handle
-    reads the same off the child's log. Sabotage: drop `_unsent_effort`, ask about the
-    spawn's effort rather than the one that wins, or leave it out of `ChildState.run`."""
+    """The request of the child itself withholds an effort that the profile of its
+    route does not define. The parent is therefore told. Otherwise the parent
+    reads a quick answer as a careful one. The admission records the effort that
+    wins, and the answer to the spawn says what the route runs at. An effort that
+    the route defines, `default`, or no effort produces no note. The handle of a
+    resumed parent reads the same from the log of the child. Sabotage: drop
+    `_unsent_effort`, ask about the spawn's effort rather than the one that wins,
+    or leave it out of `ChildState.run`."""
     ctx, parent = await _parent(mount, models=EFFORTS)
     ctx.require(SKILLS).register(skill("deep", effort="high"))
 
@@ -267,9 +287,10 @@ async def test_a_child_runs_without_an_effort_its_route_cannot_send_and_its_pare
 
 
 async def test_a_whole_route_the_list_holds_runs_as_its_entry(mount: MountProfile) -> None:
-    """Named as provider and model rather than by key, it is still the listed entry: its
-    key and its settings, as a root started on the route gets. Sabotage: leave a whole
-    route unresolved, and the child runs `fake-7` at its parent's 0.9."""
+    """A route that is named as provider and model, and not by key, is still the
+    listed entry. The child gets the key and the settings of the entry, as a root
+    started on the route does. Sabotage: leave a whole route unresolved, and the
+    child runs `fake-7` at its parent's 0.9."""
     ctx, parent = await _tuned_parent(mount)
 
     run = await _spawn(ctx, parent, choice=ModelChoice(provider="fake", model="fake-7"))
@@ -282,9 +303,10 @@ async def test_a_whole_route_the_list_holds_runs_as_its_entry(mount: MountProfil
 async def test_a_whole_route_the_list_does_not_hold_takes_nothing_from_the_parent(
     mount: MountProfile,
 ) -> None:
-    """A route no entry matches runs as given, with no settings: the parent's were tuned
-    for another model. Sabotage: leave a whole route unresolved, and the child runs at
-    its parent's 0.9 on a 64-token budget."""
+    """A route that no entry matches runs as given, with no settings, because the
+    settings of the parent were tuned for another model. Sabotage: leave a whole
+    route unresolved, and the child runs at its parent's 0.9 on a 64-token
+    budget."""
     ctx, parent = await _tuned_parent(mount)
 
     unlisted = ModelChoice(provider="fake", model="fake-unlisted")
@@ -298,10 +320,10 @@ async def test_a_whole_route_the_list_does_not_hold_takes_nothing_from_the_paren
 async def test_a_key_the_list_does_not_hold_is_refused_and_admits_nothing(
     mount: MountProfile,
 ) -> None:
-    """The models an agent can reach are the ones its profile says, and a key the spawn
-    names is the parent's own choice, so it is refused rather than run elsewhere.
-    Sabotage: fall back to the parent's route for an unknown key, and the child is
-    admitted."""
+    """An agent can reach the models that its profile lists. A key that the spawn
+    names is the choice of the parent itself, so an unknown key is refused and
+    the child is not run elsewhere. Sabotage: fall back to the parent's route for
+    an unknown key, and the child is admitted."""
     ctx, parent = await _parent(mount)
 
     with pytest.raises(SubagentSpawnError, match="it lists classify, main"):
@@ -338,11 +360,12 @@ async def test_a_skill_s_model_this_mount_cannot_run_falls_back_to_the_parent_s_
     reason: str,
     said: str,
 ) -> None:
-    """The skill's author wrote the key without knowing this profile, so the parent's
-    own model does the work as well as it can until the person sets one up: graceful
-    degradation, said to the parent, logged, and recorded in the admission. Sabotage:
-    refuse it as a spawn's own key is refused, or drop the fallback from the run, the
-    admission or the log."""
+    """The author of the skill wrote the key without knowing this profile. The
+    model of the parent itself therefore does the work as well as it can until
+    the user sets one up. This is graceful degradation: it is reported to the
+    parent, logged, and recorded in the admission. Sabotage: refuse it as a
+    spawn's own key is refused, or drop the fallback from the run, the admission
+    or the log."""
     ctx, parent = await _parent(mount, models=models)
     ctx.require(SKILLS).register(skill("sort", model=asked))
 
@@ -371,9 +394,10 @@ async def test_skills_that_name_different_models_are_refused(mount: MountProfile
 async def test_an_assigned_profile_wider_than_its_parent_is_refused_naming_the_row(
     mount: MountProfile,
 ) -> None:
-    """The gate's second half. The parent runs no question tool; a profile that does
-    cannot be given to its child, since there is no mount but the parent's to run it
-    on. Sabotage: drop the row check in `narrowing`, and the child is admitted."""
+    """The second half of the gate. The parent runs no question tool. A profile
+    that runs one cannot be given to its child, because the only mount to run it
+    on is the mount of the parent. Sabotage: drop the row check in `narrowing`,
+    and the child is admitted."""
     ctx, parent = await _parent(mount, asking=[{"id": "tool-ask-user", "disabled": False}])
 
     with pytest.raises(SubagentSpawnError, match='profile "asking": it runs tool-ask-user'):
@@ -383,10 +407,10 @@ async def test_an_assigned_profile_wider_than_its_parent_is_refused_naming_the_r
 async def test_an_assigned_profile_narrows_the_child_s_tools_model_and_access(
     mount: MountProfile,
 ) -> None:
-    """What it runs of what the parent holds: no `bash`, its own default model from
-    the parent's list, and the read-only sandbox it starts in — recorded at the
-    admission, so the reach is fixed there. Sabotage: skip the dropped rows in
-    `_tools`, and the child keeps `bash`."""
+    """The child runs part of what the parent holds: no `bash`, its own default
+    model from the list of the parent, and the read-only sandbox that it starts
+    in. The admission records these, so the reach is fixed there. Sabotage: skip
+    the dropped rows in `_given`, and the child keeps `bash`."""
     ctx, parent = await _parent(
         mount,
         sorter=[
@@ -445,8 +469,9 @@ async def test_a_spawn_cannot_name_a_tool_its_assigned_profile_does_not_give(
 async def test_a_skill_given_to_a_child_is_recorded_as_read_into_its_prompt(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A spawn that names a skill puts its body in the child's prompt, which is a read
-    at runtime like any other (S8): the parent's log says which text, by hash."""
+    """A spawn that names a skill puts the body of the skill in the prompt of the
+    child. That is a read at runtime like any other (S8), so the log of the
+    parent says which text was read, by hash."""
     write_skill(tmp_path, "sort", body="Sort by kind.")
     ctx = await mount(
         dict(PROVIDER_ROW),
@@ -463,10 +488,11 @@ async def test_a_skill_given_to_a_child_is_recorded_as_read_into_its_prompt(
 
 
 async def test_a_skill_goes_with_the_row_that_gave_it(mount: MountProfile) -> None:
-    """(b) A row the assigned profile does not run takes its skills with it, as it
-    takes its tools — found by the row that installed each (`SkillService.
-    registrants`), whatever row that is. A skill no row installed stays. Sabotage:
-    skip the registrants in `_skills`, and the dropped row's skill stays."""
+    """(b) A row that the assigned profile does not run takes its skills with it,
+    as it takes its tools. The skills are found by the row that installed each
+    (`SkillService.registrants`), whatever row that is. A skill that no row
+    installed stays. Sabotage: skip the registrants in `_skills`, and the dropped
+    row's skill stays."""
     ctx, parent = await _parent(mount, nobash=[{"id": "tool-bash", "disabled": True}])
     service = ctx.require(SKILLS)
     beside = not_none(ctx.require(MOUNT).forks["tool-bash"].ctx)
@@ -499,10 +525,11 @@ def _writable(*paths: str) -> tuple[JsonObject, JsonObject]:
 async def test_a_child_given_fewer_writable_directories_writes_only_those(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Item 3's paths: an assigned `sandbox-allow` with fewer directories binds only
-    those for the child — in the sandbox and in the prompt boundary drawn from it —
-    and its parent keeps both. Sabotage: skip `restrict_paths` in `Grant.apply`, and
-    the child binds its parent's store too."""
+    """The paths of item 3. An assigned `sandbox-allow` with fewer directories
+    binds only those directories for the child, both in the sandbox and in the
+    prompt boundary that is drawn from it. The parent keeps both directories.
+    Sabotage: skip `restrict_paths` in `Grant.apply`, and the child binds its
+    parent's store too."""
     cache, store = _dirs(tmp_path, "cache", "store")
     ctx, parent = await _parent(
         mount,
@@ -547,11 +574,12 @@ async def test_a_child_cannot_be_given_a_directory_its_parent_cannot_write(
 async def test_a_child_s_network_is_its_parent_s(
     mount: MountProfile, network: JsonObject, said: str
 ) -> None:
-    """Wider is refused as every widening is; narrower is refused too, since one
-    egress proxy serves every agent and a child cannot hold fewer hosts yet — given
-    its parent's instead, the ceiling its admission states would not be the one it
-    ran under. Sabotage: return the limit whatever the network says, and each is
-    admitted."""
+    """A wider network is refused, as every widening is. A narrower network is
+    refused too, because one egress proxy serves every agent and a child cannot
+    hold fewer hosts yet. If the child were given the network of its parent
+    instead, the ceiling that its admission states would not be the ceiling that
+    it ran under. Sabotage: return the limit whatever the network says, and each
+    is admitted."""
     ctx, parent = await _parent(
         mount, other=[{"id": "sandbox-allow", "config": {"network": network}}]
     )
@@ -572,11 +600,12 @@ async def test_a_child_s_sandbox_cannot_be_wider_than_its_parent_s(mount: MountP
 async def test_a_child_holds_the_skills_found_under_the_paths_it_keeps(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Of the row's own skills — by the row that installed each, so another row's,
-    found where this one does not look, stays. Sabotage: return an empty limit from
-    `skills.narrows`, and the child keeps the skill under the directory its profile
-    does not scan; test the skill's `source` rather than its row, and the other
-    row's goes too."""
+    """This applies to the skills of the row itself, decided by the row that
+    installed each skill. A skill of another row stays, even when it was found
+    in a directory that the assigned row does not scan. Sabotage: return an empty
+    limit from `skills.narrows`, and the child keeps the skill under the
+    directory its profile does not scan; test the skill's `source` rather than
+    its row, and the other row's goes too."""
     kept, other = tmp_path / "kept", tmp_path / "other"
     write_skill(kept, "sort", body="Sort by kind.")
     write_skill(other, "audit", body="Audit it.")
@@ -618,7 +647,7 @@ async def _shelf(ctx: Context, config: _Shelf) -> None:
 async def test_a_row_says_how_a_child_holds_less_of_it(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """(a) A row the narrowing module has never heard of joins by declaring
+    """(a) A row that the narrowing module does not know joins by declaring
     `narrows=` beside its body. Sabotage: skip the declared narrowers in
     `narrowing`, and the child keeps the skill its profile's shelf leaves off."""
     module = types.ModuleType("ph_test_shelf")
@@ -646,11 +675,11 @@ MAIN_ONLY: JsonObject = {
 async def test_the_shipped_categorize_skill_runs_on_the_classify_kind_where_one_is_listed(
     mount: MountProfile,
 ) -> None:
-    """A2's gate: the skill ph-core ships for sorting asks for the shared `classify`
-    kind and owes a checked value, so it runs on whatever route a profile lists under
-    that name; a profile that lists none runs the child on the parent's model and says
-    so to the parent. Sabotage: name a model rather than the kind, or stop offering the
-    skill with the provider."""
+    """The gate of A2. The skill that ph-core ships for sorting asks for the
+    shared `classify` kind and owes a checked value. It therefore runs on the
+    route that a profile lists under that name. A profile that lists none runs
+    the child on the model of the parent and tells the parent so. Sabotage: name
+    a model rather than the kind, or stop offering the skill with the provider."""
     listed, parent = await _parent(mount)
     shipped = not_none(listed.require(SKILLS).get("categorize", parent.ctx))
     assert shipped.model == "classify" and shipped.output is not None
@@ -694,9 +723,10 @@ async def _seeing(mount: MountProfile, *, parent_sees: bool) -> tuple[Context, A
 async def test_a_child_whose_kind_cannot_see_its_media_runs_on_a_parent_that_can(
     mount: MountProfile,
 ) -> None:
-    """A3's gate, first half: the route the kind resolves to takes no images, its
-    parent's does, so the child runs there, and the parent and the admission say why.
-    Sabotage: keep the blind route, or drop the reason."""
+    """The first half of the gate of A3. The route that the kind resolves to takes
+    no images, and the route of the parent does. The child therefore runs on the
+    route of the parent, and the parent and the admission say why. Sabotage: keep
+    the blind route, or drop the reason."""
     ctx, parent = await _seeing(mount, parent_sees=True)
 
     run = await _spawn(ctx, parent, skills=("sort-picture",))
@@ -711,9 +741,9 @@ async def test_a_child_whose_kind_cannot_see_its_media_runs_on_a_parent_that_can
 async def test_a_child_no_route_here_lets_see_its_media_runs_and_its_parent_is_told(
     mount: MountProfile,
 ) -> None:
-    """A3's gate, second half: neither route takes images, so the child still runs on
-    its kind's route, sees placeholders, and the parent is told what to set up.
-    Sabotage: refuse the spawn, or say nothing."""
+    """The second half of the gate of A3. Neither route takes images. The child
+    still runs on the route of its kind and sees placeholders, and the parent is
+    told what to set up. Sabotage: refuse the spawn, or say nothing."""
     ctx, parent = await _seeing(mount, parent_sees=False)
 
     run = await _spawn(ctx, parent, skills=("sort-picture",))
@@ -729,8 +759,8 @@ async def test_a_child_no_route_here_lets_see_its_media_runs_and_its_parent_is_t
 async def test_a_spawn_that_names_a_route_its_media_cannot_reach_is_refused(
     mount: MountProfile,
 ) -> None:
-    """The parent chose the route itself and can choose again at once, so it is refused
-    rather than moved. Sabotage: degrade it as a skill's own key is."""
+    """The parent chose the route itself and can choose again at once, so the
+    spawn is refused and not moved. Sabotage: degrade it as a skill's own key is."""
     ctx, parent = await _seeing(mount, parent_sees=True)
 
     with pytest.raises(SubagentSpawnError, match="cannot take image/\\*"):

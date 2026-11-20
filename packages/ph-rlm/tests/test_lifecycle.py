@@ -1,15 +1,16 @@
-"""Dying with the parent (F3), and why it needs saying at all.
+"""Die-with-parent (F3), and why it must be stated at all.
 
 The intuition is that killing a process kills what it started. POSIX does the
-opposite: a dead parent's children are re-parented to PID 1 and keep running,
-and `atexit` never runs under `SIGKILL`. So a hard-killed pH would otherwise
-leave a live CPython holding a model's namespace — one per agent, indefinitely,
-with nothing that will ever reconcile them because nobody reopens a session that
-died.
+opposite: the children of a dead parent are re-parented to PID 1 and continue to
+run, and `atexit` never runs under `SIGKILL`. A pH that was killed hard would
+therefore leave a live CPython process that holds the namespace of a model. There
+would be one for each agent, indefinitely. Nothing would ever reconcile them,
+because nobody reopens a session that died.
 
-This test kills a host the way the OS would and asserts the child is gone. It is
-the assertion that the mechanism in `ph_runtime.lifecycle` is actually armed,
-which no unit test of that module can show.
+This test kills a host in the way that the operating system would, and asserts
+that the child is gone. That assertion shows that the mechanism in
+`ph_runtime.lifecycle` is actually armed. No unit test of that module can show
+it.
 """
 
 from __future__ import annotations
@@ -71,12 +72,13 @@ def _await(path: Path, *, seconds: float = 30.0) -> None:
 @pytest.mark.skipif(not sys.platform.startswith(("linux", "darwin")), reason="POSIX re-parenting")
 @pytest.mark.parametrize("busy", [False, True], ids=["idle", "in a blocking cell"])
 def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path, busy: bool) -> None:
-    """Killed while idle, and killed while a cell blocks the guest's loop.
+    """The host is killed while the guest is idle, and while a cell blocks the
+    loop of the guest.
 
-    The second is the case the socket cannot cover (P12-07): a cell in
-    `time.sleep` never yields to the reader that would see the host's EOF, so
-    only a mechanism outside the loop — `PR_SET_PDEATHSIG`, or the kqueue
-    `NOTE_EXIT` thread on macOS — ends the guest.
+    The second case is the one that the socket cannot cover (P12-07). A cell in
+    `time.sleep` never yields to the reader that would see the EOF of the host.
+    Only a mechanism outside the loop ends the guest: `PR_SET_PDEATHSIG`, or the
+    kqueue `NOTE_EXIT` thread on macOS.
     """
     marker = tmp_path / "cell-started"
     cell = textwrap.dedent(BLOCKING_CELL).format(marker=str(marker))
@@ -96,7 +98,7 @@ def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path, b
         if busy:
             _await(marker)
 
-        # Not `terminate()`: `SIGKILL` is the case where no cleanup code of ours
+        # Not `terminate()`. `SIGKILL` is the case where none of our cleanup code
         # runs at all, on any platform.
         host.send_signal(signal.SIGKILL)
         host.wait(timeout=10)
@@ -112,11 +114,13 @@ def test_the_runtime_child_does_not_outlive_a_hard_killed_host(tmp_path: Path, b
 
 
 def test_the_guest_reports_which_mechanism_it_armed() -> None:
-    """`boot-ack` carries it, so the log says what was in force on this host.
+    """`boot-ack` carries the mechanism, so the log says what was in force on
+    this host.
 
-    Not cosmetic: the mechanisms have genuinely different guarantees. Until
-    P12-07, a session on macOS ran under `getppid-poll`, with a one-second window
-    where a hard-killed host could leave a stray; a log that names it says so.
+    This is not cosmetic. The mechanisms give different guarantees. Until P12-07,
+    a session on macOS ran under `getppid-poll`, with a window of one second in
+    which a host that was killed hard could leave a stray process. A log that
+    names the mechanism says so.
     """
     from ph_runtime.lifecycle import die_with_parent
 

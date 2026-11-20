@@ -1,7 +1,7 @@
-"""The one way these tests run a cell.
+"""The one way in which these tests run a cell.
 
-`run_tool` in `ph.testing` is generic over tools; the `{"program": ...}` shape is
-`run_code`'s, so it lives here rather than being spelled out at every call site.
+`run_tool` in `ph.testing` is generic over tools. The `{"program": ...}` shape
+belongs to `run_code`, so it is here and is not written out at every call site.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from ph.tools.registry import RUN_CODE
 
 DISPATCH_START = "tool/code-dispatch-start"
 DISPATCH_SETTLED = "tool/code-dispatch"
-"""The two durable records C2 is about, named once rather than spelled as bare
-strings in five test modules across two packages."""
+"""The two durable records that C2 is about. They are named one time here, and
+are not written as bare strings in five test modules across two packages."""
 
 
 async def run_cell(
@@ -33,8 +33,8 @@ async def run_cell(
 ) -> Any:  # noqa: ANN401
     """Execute one cell through the real transport and pipeline.
 
-    `name` is for the profile that presents the transport as `python` —
-    the reserved name stops resolving once the rename is mounted.
+    `name` is for the profile that presents the transport as `python`. The
+    reserved name stops resolving after the rename is mounted.
     """
     return await run_tool(
         ctx, name, {"program": program}, agent=agent, session=session, call_id=call_id
@@ -49,11 +49,11 @@ async def run_python_cell(
     session: Session | None = None,
     call_id: str = "c1",
 ) -> Any:  # noqa: ANN401
-    """`run_cell` under the name the RLM profile presents (`python`).
+    """`run_cell` under the name that the RLM profile presents (`python`).
 
-    Three modules wanted this two-liner; the reserved `run_code` stops resolving
-    once `rlm-presentation` is mounted, so a test on that profile has to name the
-    transport the model sees.
+    Several modules needed these two lines. The reserved `run_code` stops
+    resolving after `rlm-presentation` is mounted, so a test on that profile must
+    name the transport that the model sees.
     """
     from ph_rlm.presentation import PYTHON
 
@@ -61,10 +61,11 @@ async def run_python_cell(
 
 
 def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:  # noqa: ANN401
-    """A `CodeBindingNamespace` whose bindings are the handlers given.
+    """A `CodeBindingNamespace` whose bindings are the given handlers.
 
-    Here rather than in one test module because two wanted it and the second
-    copied the first — the same reason the row constants moved to `conftest`.
+    It is here and not in one test module because two modules needed it, and the
+    second copied the first. The row constants moved to `rlm_fixtures` for the
+    same reason.
     """
     from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
 
@@ -78,7 +79,7 @@ def namespace(name: str, **handlers: Any) -> CodeBindingNamespace:  # noqa: ANN4
 
 
 def dispatch_names(session: Any) -> list[str]:  # noqa: ANN401
-    """The governed tools a session's cells dispatched, in submission order."""
+    """The governed tools that the cells of a session dispatched, in submission order."""
     return [event.data["name"] for event in session.events if event.type == DISPATCH_START]
 
 
@@ -88,7 +89,8 @@ def settled_dispatches(session: Session) -> list[Any]:
 
 
 async def run_in_kernel(ctx: Context, agent_id: str, program: str) -> CodeRunResult:
-    """One program in this agent's own namespace, straight to the runtime — below the
-    tool, for a test about the kernel rather than the call. The namespace *is* the
-    agent id, so the kernel it reaches is the one bounded by that agent."""
+    """Run one program in the namespace of this agent itself, directly on the
+    runtime. This is below the tool, for a test that is about the kernel and not
+    about the call. The namespace *is* the agent id, so the kernel that the
+    program reaches is the one within the boundary of that agent."""
     return await ctx.require(CODE_RUNTIME).run(CodeRunRequest(program=program, agent=agent_id))

@@ -1,35 +1,39 @@
-"""`rlm-kernel-snapshot` — the persistent namespace, in the log (D17).
+"""`rlm-kernel-snapshot`: the persistent namespace, in the log (D17).
 
-This is the module that earns `persistence: "namespace"`. The seam takes the
-provider's *promise* at registration (D6); these events are the promise being
-kept. Without them the runtime would be exactly what dsh refused to ship — a REPL
-whose cross-call state is invisible to the log — with a declaration on top.
+This module is what makes the declaration `persistence: "namespace"` true. The
+seam takes the *promise* of the provider at registration (D6). These events are
+the provider keeping that promise. Without them the runtime would be exactly what
+dsh refused to ship: a REPL whose state between calls is invisible to the log,
+with a declaration on top.
 
-Four decisions, in the order they matter.
+There are four decisions, in order of importance.
 
-**Per variable, not per namespace.** An unchanged 200 MiB DataFrame emits nothing,
-because its digest did not move. Snapshotting the namespace as one blob would
-append it again on every cell that touched anything at all, and the log would grow
-with the *size of the namespace* rather than the size of the change.
+**A snapshot is per variable, not per namespace.** An unchanged 200 MiB DataFrame
+emits nothing, because its digest did not change. A snapshot of the namespace as
+one blob would append that DataFrame again on every cell that changed anything.
+The log would then grow with the *size of the namespace* and not with the size of
+the change.
 
-**Written, then recorded** (§4.9, S11): a blob is durable at its locator before the
-event naming it is appended (`SpillStore.try_save`). A death between the two leaves a
-blob nothing names, which the next read of the log collects; a blob that could not
-be written is recorded as a `clear`, and one that cannot be read on restore is
-reported by `kernel/restored` as failed. Nothing is dropped in silence.
+**A blob is written, then recorded** (§4.9, S11). A blob is durable at its
+locator before the event that names it is appended (`SpillStore.try_save`). A run
+that dies between the two leaves a blob that nothing names, and the next read of
+the log collects it. A blob that could not be written is recorded as a `clear`. A
+blob that cannot be read on restore is reported by `kernel/restored` as failed.
+Nothing is dropped silently.
 
 **`patch` is deliberately absent.** D17 allows a `bsdiff4` delta chain against an
-anchor *and* says to benchmark first, because `dill` output is not byte-stable
-across processes the way a QuickJS heap image is — memo ordering and `id()`-derived
-bytes move even when the value does not. Per-variable digesting is what actually
-keeps growth linear. `SNAPSHOT_KINDS` names `patch` so the vocabulary is ready.
+anchor *and* says to benchmark first. `dill` output is not byte-stable across
+processes in the way that a QuickJS heap image is. Memo ordering and bytes
+derived from `id()` change even when the value does not. The digest of each
+variable is what actually keeps growth linear. `SNAPSHOT_KINDS` names `patch` so
+that the vocabulary is ready.
 
-**The tag is provenance, not secrecy.** HMAC-SHA256 keyed by the session id, so a
-blob from another session or a mangled file fails verification instead of being
-unpickled. Anyone who can write the log can write the tag too — this is not a
-defense against a hostile filesystem writer, it is a defense against the mistake
-that actually happens: a blob restored into the wrong session, or a half-written
-file, unpickled into a namespace as if it were sound.
+**The tag is provenance, not secrecy.** The tag is an HMAC-SHA256 keyed by the
+session id. A blob from another session, or a mangled file, fails verification
+and is not unpickled. Anyone who can write the log can write the tag too, so the
+tag is not a defense against a hostile writer to the filesystem. It is a defense
+against the mistake that actually happens: a blob restored into the wrong
+session, or a half-written file, unpickled into a namespace as if it were sound.
 
 @module ph_rlm.snapshot
 """
@@ -75,19 +79,21 @@ SNAPSHOT_KINDS: Final[tuple[SnapshotKind, ...]] = ("snap", "patch", "clear", "re
 """The full vocabulary D17 defines."""
 
 RESERVED_KINDS: Final[frozenset[str]] = frozenset({"patch", "recipe"})
-"""Kinds defined here that nothing writes, and what each is waiting for.
+"""The kinds that are defined here and that nothing writes, with what each one
+waits for.
 
-`patch` is benchmark-gated: a `bsdiff4` chain over `dill` bytes earns its
+`patch` waits for a benchmark. A `bsdiff4` chain over `dill` bytes is worth its
 complexity only if the delta ratio justifies it, and the module docstring argues
 why that is not obvious. `recipe` needs a *harness-owned declarative load of a
-kernel variable* — P3-17's corpus is the obvious candidate and deliberately is
-not one, because it never enters the kernel (see `ph_rlm.context_loader`).
+kernel variable*. The corpus of P3-17 is the obvious candidate, and it is
+deliberately not one, because it never enters the kernel (see
+`ph_rlm.context_loader`).
 
-Declared beside the vocabulary rather than in a test: whoever implements one
-reads this module, and the conformance suite reads this set."""
+The set is declared beside the vocabulary and not in a test. Whoever implements a
+kind reads this module, and the conformance suite reads this set."""
 
 INLINE_BLOB_MAX: Final = 64 * 1024
-"""Above this a payload goes to `ctx.spill_store` and the event carries the
+"""Above this size a payload goes to `ctx.spill_store`, and the event carries the
 locator. Below it the event carries the bytes, so a small namespace needs no
 second file to be restorable."""
 
@@ -100,9 +106,9 @@ class SnapshotRecord(WireModel):
     digest: str | None = None
     bytes: int | None = None
     blob: str | None = None
-    """Base64, when the payload is small enough to live in the event."""
+    """Base64, when the payload is small enough to be in the event."""
     locator: str | None = None
-    """Where the payload went, when it was not."""
+    """The locator of the payload, when the payload is not in the event."""
     tag: str | None = None
     reason: str | None = None
     """Why a variable was cleared: `deleted`, `too-large`, `unpicklable`."""
@@ -115,10 +121,10 @@ def _tag(session_id: str, payload: bytes) -> str:
 def fold_namespace(session: Session, namespace: str) -> dict[str, SnapshotRecord]:
     """The current state of one namespace, folded from its events.
 
-    A fold, so `ctx.sessions.fork(source, boundary)` reconstructs the namespace
-    *as of the boundary* by folding only the events at or before it. A side file
-    could not express that — it would hand every fork the parent's latest
-    namespace, which is the thing D17 was chosen over.
+    This is a fold, so `ctx.sessions.fork(source, boundary)` rebuilds the
+    namespace *as of the boundary* by folding only the events at or before it. A
+    side file could not express that. It would give every fork the latest
+    namespace of the parent, and D17 was chosen to avoid exactly that.
     """
     state: dict[str, SnapshotRecord] = {}
     for event in session.events:
@@ -138,7 +144,7 @@ def fold_namespace(session: Session, namespace: str) -> dict[str, SnapshotRecord
 
 
 def namespaces_in(session: Session) -> set[str]:
-    """Every namespace this session's log has snapshotted."""
+    """Every namespace that the log of this session has a snapshot for."""
     return {
         str(namespace)
         for event in session.events
@@ -149,24 +155,22 @@ def namespaces_in(session: Session) -> set[str]:
 
 @dataclass(slots=True)
 class KernelSnapshotPolicy:
-    """Turns the runtime's snapshot frames into events, and back again.
+    """Turns the snapshot frames of the runtime into events, and back again.
 
-    The provider knows about processes and frames; this knows about the log. The
-    split is why neither has to know both.
+    The provider knows about processes and frames. This class knows about the
+    log. Because of the split, neither has to know both.
     """
 
     ctx: Context
     inline_blob_max: int = INLINE_BLOB_MAX
 
     def _session(self, namespace: str) -> Session | None:
-        """The session a namespace's events belong in.
+        """The session that the events of a namespace belong in.
 
-        Read from `ctx.agents` rather than kept in a side table fed by
-        `agent/created`: the namespace key *is* the agent id, and the registry
-        already knows every live agent. A second copy of that mapping is a second
-        thing to keep correct — and for a subagent the agent id and the session
-        id are not the same string, so deriving one from the other is not
-        available either.
+        The session is read from `ctx.agents`. It is not kept in a side table
+        that `agent/created` feeds. The namespace key *is* the agent id, and the
+        registry already knows every live agent. A second copy of that mapping
+        would be a second thing to keep correct.
         """
         agent = self.ctx.require(AGENTS).get(namespace)
         return agent.session if agent is not None else None
@@ -174,20 +178,23 @@ class KernelSnapshotPolicy:
     # ------------------------------------------------------------- recording --
 
     async def record(self, namespace: str, run_id: int, variables: list[dict[str, Any]]) -> None:
-        """Append one `kernel/snapshot` per changed variable, and put their blobs where
-        the records say they are.
+        """Append one `kernel/snapshot` for each changed variable, and put the
+        blobs where the records say they are.
 
-        **Each blob written first, then the records, one batch for the cell** (S11),
-        the ordering every other producer keeps (`SpillStore.try_save`). Written after the
-        records instead, a blob the store could not take was a `snap` naming nothing,
-        dropped in silence on the next restore; now one that cannot be written is
-        recorded as a `clear` saying so, which is what a restore tells the model.
+        **Each blob is written first. Then the records follow, as one batch for
+        the cell** (S11). Every other producer keeps this order
+        (`SpillStore.try_save`). When the blobs were written after the records, a
+        blob that the store could not take left a `snap` that named nothing, and
+        the next restore dropped it silently. Now a blob that cannot be written
+        is recorded as a `clear` that says so, and a restore tells the model
+        that.
 
-        In the log, not yet on disk: the next request's barrier puts the records on
-        disk before the model reads the cell's result, and a blob is durable before
-        any record naming it is. The blobs are written together (`try_save_all`):
-        at once, each file synced, and their one directory synced once rather than once
-        per variable — the guest's `done` waits on all of it.
+        The records are in the log but not yet on disk. The barrier of the next
+        request puts the records on disk before the model reads the result of the
+        cell, and a blob is durable before any record names it. The blobs are
+        written together (`try_save_all`): all at the same time, each file
+        synced, and their one directory synced one time and not one time for each
+        variable. The `done` of the guest waits for all of it.
         """
         session = self._session(namespace)
         if session is None:
@@ -222,21 +229,23 @@ class KernelSnapshotPolicy:
     def _encode(
         self, session: Session, namespace: str, raw: dict[str, Any]
     ) -> tuple[SnapshotRecord, PlannedBlob | None] | None:
-        """The record to append, and the blob to write for it — `None` for an inline
-        record or a `clear`, which have nothing for the store.
+        """The record to append, and the blob to write for it. The blob is `None`
+        for an inline record or a `clear`, which have nothing for the store.
 
-        The payload is decoded **once** and handed on: base64-decoding it for the
-        tag, again to write the blob, and hashing it a third time to derive the path
-        is three passes re-deriving what is already in hand.
+        The payload is decoded **one time** and passed on. To base64-decode it
+        for the tag, decode it again to write the blob, and hash it a third time
+        to derive the path would be three passes that recompute what is already
+        available.
         """
         name = raw.get("var")
         if not isinstance(name, str):
             return None
         skipped = raw.get("skipped")
         if skipped is not None:
-            # The guest could not store it. Recorded as a `clear` with the reason,
-            # so a restore *tells the model the name is gone* instead of letting
-            # it find an undefined name mid-session and read it as a bug.
+            # The guest could not store the variable. It is recorded as a `clear`
+            # with the reason, so that a restore *tells the model that the name
+            # is gone*. Otherwise the model would find an undefined name in the
+            # middle of a session and read that as a bug.
             return SnapshotRecord(kind="clear", var=name, reason=str(skipped)), None
         blob = raw.get("blob")
         digest = raw.get("digest")
@@ -257,9 +266,10 @@ class KernelSnapshotPolicy:
                 ),
                 None,
             )
-        # The store derives the locator, so the record can name it without this
-        # module mirroring the store's naming rule. Planned once: the locator here
-        # and the write in `record` share one digest of the payload.
+        # The store derives the locator, so the record can name it and this
+        # module does not mirror the naming rule of the store. The blob is
+        # planned one time: the locator here and the write in `record` share one
+        # digest of the payload.
         planned = spill.plan(
             owner=_owner(namespace), suggested_name=f"{name}.dill", content=payload
         )
@@ -276,14 +286,15 @@ class KernelSnapshotPolicy:
     # ------------------------------------------------------------ restoring --
 
     async def materialize(self, namespace: str) -> tuple[list[dict[str, Any]], list[str]]:
-        """The payloads to hand a freshly started kernel, and the names whose payload
-        could not be read.
+        """The payloads to give a kernel that just started, and the names whose
+        payload could not be read.
 
-        **The second half is the one that was missing** (S11). A blob that was gone,
-        torn, or not this session's was skipped, so it appeared nowhere — not
-        restored and not failed — and when every variable dropped, nothing at all
-        was recorded: `df` was undefined after a restart, with no notice. Now each
-        is named, so `kernel/restored` reports it as failed.
+        **The second half is the one that was missing** (S11). A blob that was
+        gone, torn, or from another session was skipped. It then appeared
+        nowhere, neither as restored nor as failed. When every variable dropped,
+        nothing at all was recorded: `df` was undefined after a restart, with no
+        notice. Now each such name is returned, so `kernel/restored` reports it
+        as failed.
         """
         session = self._session(namespace)
         if session is None:
@@ -315,8 +326,9 @@ class KernelSnapshotPolicy:
         if record.tag is not None and not hmac.compare_digest(
             record.tag, _tag(session.id, payload)
         ):
-            # A blob from another session, or a mangled one. Refused rather than
-            # unpickled: `dill.loads` on arbitrary bytes executes arbitrary code.
+            # A blob from another session, or a mangled one. It is refused and
+            # not unpickled, because `dill.loads` on arbitrary bytes executes
+            # arbitrary code.
             log.warning("ph_rlm.snapshot: %s failed verification and was not restored", record.var)
             return None
         return payload
@@ -330,19 +342,21 @@ class KernelSnapshotPolicy:
 
 
 def render_live_variables(session: Session) -> str:
-    """The names the kernel still holds, for a compaction summary prompt (G10).
+    """The names that the kernel still holds, for a compaction summary prompt
+    (G10).
 
-    Compaction rewrites a *surface*; a REPL is not on it, so every variable here
-    survives the cut completely untouched. That is exactly why the summary has to
-    say so: the model is about to read "the conversation history has been
-    summarized" and has no way, from the conversation alone, to tell whether the
-    namespace went with it. A model that assumed it did would spend the next cell
-    recomputing a DataFrame it already has — and D17 exists so that it does not
-    have to.
+    Compaction rewrites a *surface*. A REPL is not on that surface, so every
+    variable here survives the cut completely untouched. That is exactly why the
+    summary has to say so. The model is about to read "the conversation history
+    has been summarized". From the conversation alone, it cannot tell whether the
+    namespace went too. A model that assumed that it did would spend the next
+    cell on recomputing a DataFrame that it already has. D17 exists so that the
+    model does not have to.
 
-    Read from the same fold `materialize` restores from, so what the summary
-    names and what a restart brings back cannot disagree. Empty when there is no
-    kernel state, which contributes nothing rather than a paragraph saying so.
+    The names are read from the same fold that `materialize` restores from, so
+    what the summary names and what a restart brings back cannot disagree. The
+    result is empty when there is no kernel state. An empty result contributes
+    nothing, and not a paragraph that says so.
     """
     lines: list[str] = []
     for namespace in sorted(namespaces_in(session)):
@@ -360,7 +374,7 @@ def render_live_variables(session: Session) -> str:
 
 
 def _owner(namespace: str) -> str:
-    """The spill owner one namespace's blobs live under."""
+    """The spill owner that holds the blobs of one namespace."""
     return f"kernel/{namespace}"
 
 
@@ -376,33 +390,37 @@ class Config(WireModel):
 async def apply(ctx: Context, config: Config) -> None:
     """Wire the policy to the runtime provider and to session open.
 
-    `python_runtime` is injected rather than `code_runtime`: the seam being
-    mounted says nothing about *which* provider answered it, and this row exists
-    to keep one specific provider's promise. Activation is service-availability
-    driven, so naming the real dependency is also what orders the two rows.
+    The row injects `python_runtime` and not `code_runtime`. A mounted seam says
+    nothing about *which* provider answered it, and this row exists to keep the
+    promise of one specific provider. Activation is driven by service
+    availability, so naming the real dependency is also what orders the two rows.
     """
     policy = KernelSnapshotPolicy(ctx=ctx, inline_blob_max=config.inline_blob_max)
     ctx.provide(KERNEL_SNAPSHOTS, policy)
     runtime = ctx.require(PYTHON_RUNTIME)
 
     def take_back() -> None:
-        # Taken back with the row, or the runtime went on recording into a policy
-        # whose row was gone — and only while it is still this row's, as
-        # `claim_slot` releases (Holdings rule 4).
+        # The policy is taken back with the row. Without that, the runtime went
+        # on recording into a policy whose row was gone. It is taken back only
+        # while it is still the policy of this row, as `claim_slot` releases
+        # (Holdings rule 4).
         if runtime.snapshots is policy:
             runtime.snapshots = None
 
-    # The take-back before the write it undoes (Holdings rule 1).
+    # The take-back is registered before the write that it undoes
+    # (Holdings rule 1).
     ctx.add_disposer(take_back, label="rlm-kernel-snapshot(runtime)")
     runtime.snapshots = policy
 
     def claim_kernel_blobs(scope: Context) -> None:
-        """Contribute this row's blobs to the seam's open-time sweep (P6-15).
+        """Contribute the blobs of this row to the open-time sweep of the seam
+        (P6-15).
 
-        Through `ctx.inject` for `announce_live_variables`' reason: the store is
-        optional here (a small namespace inlines), and a bare `ctx.get` at mount
-        reads `None` under a profile that orders `spill-local` later — a sweep that
-        silently collects nothing.
+        This goes through `ctx.inject` for the same reason as
+        `announce_live_variables`. The store is optional here, because a small
+        namespace is stored inline. A bare `ctx.get` at mount reads `None` under
+        a profile that orders `spill-local` later, and the sweep would then
+        silently collect nothing.
         """
         scope.require(SPILL_STORE).claim(
             SpillClaim(
@@ -419,11 +437,11 @@ async def apply(ctx: Context, config: Config) -> None:
     def announce_live_variables(scope: Context) -> None:
         """Tell a compaction summary what the kernel still holds (G10, P4-03).
 
-        Through `ctx.inject` rather than this row's own `inject` list: the
-        compaction seam is a *nice to have* here, and a deployment that removed
-        the compaction row must not thereby lose kernel snapshots. When the seam
-        appears the note registers; when it goes, the scope disposes and takes
-        the registration with it.
+        This goes through `ctx.inject` and not through the `inject` list of this
+        row. The compaction seam is a *nice to have* here, and a deployment that
+        removed the compaction row must not lose kernel snapshots because of it.
+        When the seam appears, the note registers. When the seam goes, the scope
+        disposes and takes the registration with it.
         """
         scope.require(COMPACTION).note(
             CompactionNote(name="rlm:live-variables", text=render_live_variables), scope=scope

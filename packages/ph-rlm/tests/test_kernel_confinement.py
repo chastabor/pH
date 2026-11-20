@@ -1,26 +1,28 @@
-"""The RLM kernel, bounded at the kernel (P6-39).
+"""The RLM kernel, confined at the kernel (P6-39).
 
-`cwd` puts a cell in the agent's tree, so a *relative* write lands there. Only
-confinement refuses `open("/etc/passwd", "w")` — §4.8's own line about what no
-tier below `sandbox` can do — and until this row the kernel was spawned
-unconfined, so `permissions-fs` was telling operators that "a sandbox provider
-bounds what a code cell can reach directly" while nothing did.
+`cwd` puts a cell in the tree of the agent, so a *relative* write lands there.
+Only confinement refuses `open("/etc/passwd", "w")`, and §4.8 names that as the
+one thing that no tier below `sandbox` can do. Until this row, the kernel was
+spawned unconfined. `permissions-fs` therefore told operators that "a sandbox
+provider bounds what a code cell can reach directly" while nothing did.
 
-**Two properties carry the whole design, and both are measured here rather than
-argued.** fd 3 has to survive the wrapper, or the kernel cannot talk to its host at
-all; and an absolute-path write has to actually fail. The first is checked against
-the real `bwrap` argv with a live socket at the far end, because it is the one that
-would fail *silently at boot* on a host nobody tested — the kernel would hang until
-`boot_timeout` and be reported as a dead runtime rather than as a lost channel.
+**The whole design depends on two properties, and both are measured here, not
+argued.** fd 3 must survive the wrapper, or the kernel cannot talk to its host at
+all. An absolute-path write must actually fail. The first is checked against the
+real argv that the backend of this platform builds, with a live socket at the far
+end. It is the one that would fail *silently at boot* on a host that nobody
+tested. The kernel would hang until `boot_timeout`, and would be reported as a
+dead runtime and not as a lost channel.
 
-The enforcement half skips where the kernel cannot enforce — no `bwrap`, or no
-AppArmor profile on Ubuntu 23.10+; no `sandbox-exec` — through the same in-body
-check `test_sandbox_local.py` uses, which asks whether the row actually registered
-a provider rather than whether the binary exists. `needs_backend` is only on the
-test that drives the platform's backend directly without mounting the row, where
-there is no provider to ask. Verified against both: `bwrap` on 2026-09-01, Seatbelt
-on 2026-09-07 — the latter only after the macOS boot hang `test_boot_report.py`
-pins was found, because a kernel that never reports ready confines nothing.
+The enforcement half skips where the kernel cannot enforce: no `bwrap`, no
+AppArmor profile on Ubuntu 23.10+, or no `sandbox-exec`. It skips through the
+same in-body check that `test_sandbox_local.py` uses. That check asks whether the
+row actually registered a provider, and not whether the binary exists.
+`needs_backend` is only on the test that drives the backend of the platform
+directly without mounting the row, where there is no provider to ask. Both
+backends were verified: `bwrap` on 2026-09-01, and Seatbelt on 2026-09-07.
+Seatbelt was verified only after the macOS boot hang that `test_boot_report.py`
+covers was found, because a kernel that never reports ready confines nothing.
 """
 
 from __future__ import annotations
@@ -53,12 +55,14 @@ pytestmark = pytest.mark.anyio
 SANDBOX_ROW: dict[str, Any] = {"id": "sandbox-local", "disabled": False}
 
 WRITABLE_ROW: dict[str, Any] = {"id": "sandbox", "config": {"defaultMode": "workspace-write"}}
-"""The posture a cell needs to write its own workspace, said rather than assumed.
+"""The posture that a cell needs to write its own workspace. It is stated here
+and not assumed.
 
-`SandboxSeam.effective` bounds a caller's mode by the deployment's resolved one
-since N1, and `workspace_policy` no longer guesses `workspace-write` — so
-`ph-base`'s shipped `read-only` default now reaches the kernel, correctly, and a
-test that states no posture gets a read-only cell. The RLM profile sets this."""
+Since N1, `SandboxSeam.effective` limits the mode of a caller to the resolved
+mode of the deployment, and `workspace_policy` no longer guesses
+`workspace-write`. The shipped `read-only` default of `ph-base` therefore now
+reaches the kernel, which is correct, and a test that states no posture gets a
+read-only cell. The RLM profile sets this."""
 
 needs_backend = pytest.mark.skipif(
     local_backend()[0] is None, reason="no local confinement backend on this host"
@@ -70,14 +74,16 @@ needs_backend = pytest.mark.skipif(
 
 @needs_backend
 def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
-    """**The property the whole design rests on.** `bwrap` passes an inherited
-    descriptor through to what it execs, and so does `sandbox-exec` (measured on
-    both), so the kernel's fd 3 reaches the guest.
+    """**The property that the whole design depends on.** `bwrap` passes an
+    inherited descriptor through to the command that it execs, and so does
+    `sandbox-exec` (both were measured). The fd 3 of the kernel therefore reaches
+    the guest.
 
-    Against the real argv this platform's backend builds, with a live socket at the far end,
-    because a wrapper that closed the descriptor would fail at *boot*: the guest
-    would find nothing on fd 3, the host would wait out `boot_timeout`, and the
-    report would say the runtime died rather than that the channel never crossed.
+    The test runs the real argv that the backend of this platform builds, with a
+    live socket at the far end. A wrapper that closed the descriptor would fail
+    at *boot*: the guest would find nothing on fd 3, the host would wait for the
+    whole `boot_timeout`, and the report would say that the runtime died, not
+    that the channel never crossed.
     """
     work = tmp_path / "w"
     work.mkdir()
@@ -109,12 +115,12 @@ def test_the_framed_channel_survives_the_wrapper(tmp_path: Path) -> None:
 
 
 async def _confined(mounted_runtime: MountedRuntime, tmp_path: Path) -> tuple[Any, Any, Any]:
-    """A mounted runtime whose kernels will really be confined, plus the agent and
-    its workspace — or a skip that says why not.
+    """A mounted runtime whose kernels are really confined, plus the agent and its
+    workspace. If that is not possible, a skip that says why.
 
-    `test_sandbox_local._enforcing`'s shape: the question is whether the row
-    *registered* a provider, which is what a probe against this host decided, not
-    whether a binary is on PATH.
+    This has the shape of `test_sandbox_local._enforcing`. The question is whether
+    the row *registered* a provider, which is what a probe against this host
+    decided. The question is not whether a binary is on PATH.
     """
     ctx, session, agent = await mounted_runtime(extra_rows=[SANDBOX_ROW, WRITABLE_ROW])
     if ctx.require(SANDBOX).provider is None:
@@ -126,9 +132,10 @@ async def _confined(mounted_runtime: MountedRuntime, tmp_path: Path) -> tuple[An
 async def test_a_kernel_is_confined_against_its_own_agents_workspace(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """The writable set is the agent's own workspace and scratch — `ctx.shell`'s
-    policy, from the same `workspace_policy`, so a deployment cannot end up with
-    `tool-bash` confined and `run_code` not."""
+    """The writable set is the workspace and the scratch directory of the agent
+    itself. That is the policy of `ctx.shell`, from the same `workspace_policy`,
+    so a deployment cannot have `tool-bash` confined and `run_code` not
+    confined."""
     ctx, session, agent = await mounted_runtime()
     ctx.require(SANDBOX).register_provider(StubSandboxProvider())
     workspace = await agent_with_workspace(ctx, session, agent, tmp_path)
@@ -148,8 +155,9 @@ async def test_a_kernel_is_confined_against_its_own_agents_workspace(
 async def test_no_backend_and_no_workspace_are_both_declines_not_passthroughs(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """`None`, never an unwrapped argv: the seam refuses rather than pretending, so
-    a kernel that cannot be bounded says so instead of looking bounded."""
+    """The answer is `None`, never an unwrapped argv. The seam refuses and does
+    not pretend, so a kernel that cannot be confined says so and does not look
+    confined."""
     ctx, session, agent = await mounted_runtime()
     runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
 
@@ -164,8 +172,9 @@ async def test_no_backend_and_no_workspace_are_both_declines_not_passthroughs(
 async def test_the_runtime_asks_for_the_seam_when_a_kernel_starts(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """A backend layered *after* this row still bounds the kernels it spawns —
-    the reason the seam is a resolver rather than a value read at mount."""
+    """A backend that is layered *after* this row still confines the kernels that
+    the runtime spawns. That is the reason why the seam is a resolver and not a
+    value read at mount."""
     ctx, _session, _agent = await mounted_runtime()
     runtime: PythonCodeRuntime = ctx.require(PYTHON_RUNTIME)
     assert runtime.sandbox is not None
@@ -173,8 +182,8 @@ async def test_the_runtime_asks_for_the_seam_when_a_kernel_starts(
 
 
 async def test_doctor_says_whether_cells_are_confined(mounted_runtime: MountedRuntime) -> None:
-    """ "Are my code cells bounded" is a question asked of the tool, and the answer
-    is conditional — on a backend, and on the agent having a workspace."""
+    """ "Are my code cells bounded" is a question for the tool to answer. The
+    answer is conditional: on a backend, and on the agent having a workspace."""
     ctx, _session, _agent = await mounted_runtime()
 
     assert "no sandbox backend" in report_section(ctx, "Code runtime")["cells confined by"]
@@ -191,13 +200,14 @@ async def test_doctor_says_whether_cells_are_confined(mounted_runtime: MountedRu
 async def test_a_cell_cannot_write_an_absolute_path_outside_its_workspace(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """**The gate.** A cell's raw `open()` on an absolute path is refused by the
-    kernel and the host file is untouched — the one thing `worktree` cannot do
-    (§4.8, E13), now true of authored code and not only of `tool-bash`.
+    """**The gate.** The kernel refuses the raw `open()` of a cell on an absolute
+    path, and the host file is untouched. That is the one thing that `worktree`
+    cannot do (§4.8, E13). It is now true of authored code and not only of
+    `tool-bash`.
 
-    Both directions in one test, for `probe_sandbox`'s reason: a kernel that could
-    write *nothing* would pass the escape half while being useless, and the write
-    inside the workspace is what stops that reading as success.
+    The test checks both directions, for the reason that `probe_sandbox` gives. A
+    kernel that could write *nothing* would pass the escape half and be useless.
+    The write inside the workspace stops that from reading as success.
     """
     ctx, agent, workspace = await _confined(mounted_runtime, tmp_path)
     outside = tmp_path / "outside.txt"
@@ -215,8 +225,8 @@ async def test_a_cell_cannot_write_an_absolute_path_outside_its_workspace(
 async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """`phern doctor` names it, read from the kernels actually running rather than
-    from what would be true."""
+    """`phern doctor` names the backend. It reads the name from the kernels that
+    are actually running, and not from what would be true."""
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
 
     assert (await run_in_kernel(ctx, agent.id, "x = 1")).error is None
@@ -228,14 +238,14 @@ async def test_a_confined_kernel_reports_the_backend_that_bounds_it(
 async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """The seam's rule — a refusal is a record, not a silence — reaches cells.
+    """The rule of the seam reaches cells: a refusal is a record, not a silence.
 
-    The kernel had adopted the *boundary* and not the rule: a cell writing outside
-    its workspace got a traceback with no way to act on it, while the identical
-    refusal from `tool-bash` got a `sandbox/denied` event carrying the
-    `/sandbox allow path` line. The asymmetry was visible inside this change —
-    *network* refusals were already recorded, because the proxy is told whose agent
-    it is refusing.
+    The kernel had adopted the *boundary* and not the rule. A cell that wrote
+    outside its workspace got a traceback with no way to act on it, while the
+    identical refusal from `tool-bash` got a `sandbox/denied` event that carries
+    the `/sandbox allow path` line. The asymmetry was visible inside this change:
+    *network* refusals were already recorded, because the proxy is told which
+    agent it refuses.
     """
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
     session = ctx.require(AGENTS).get(agent.id).session
@@ -255,8 +265,8 @@ async def test_a_cell_refused_by_the_kernel_leaves_the_same_record_bash_would(
 async def test_a_cell_that_merely_prints_the_words_is_not_a_refusal(
     mounted_runtime: MountedRuntime, tmp_path: Path
 ) -> None:
-    """`report_denial`'s own requirement, from this caller: a run that succeeded was
-    refused nothing, whatever it printed."""
+    """The requirement of `report_denial` itself, from this caller: a run that
+    succeeded was refused nothing, whatever it printed."""
     ctx, agent, _workspace = await _confined(mounted_runtime, tmp_path)
     session = ctx.require(AGENTS).get(agent.id).session
 
@@ -270,22 +280,22 @@ async def test_a_cell_that_merely_prints_the_words_is_not_a_refusal(
 async def test_the_signal_route_follows_the_backend_not_whether_it_confined(
     tmp_path: Path, forwards: bool
 ) -> None:
-    """`_interrupt` asks `ConfinedArgv.forwards_signals`, a declared fact, rather
-    than deriving the decision from "was I confined at all".
+    """`_interrupt` asks `ConfinedArgv.forwards_signals`, which is a declared
+    fact. It does not derive the decision from "was I confined at all".
 
-    The two differ, and the difference is a lost capability rather than a tidiness
-    point: `bwrap` puts a wrapper and a PID namespace in the way, so signaling it
-    destroys the namespace instead of interrupting the cell — but `sandbox-exec`
-    execs its target and the test stub wraps nothing, and on those the signal is a
-    second cancel route worth keeping.
+    The two differ, and the difference is a lost capability, not a matter of
+    tidiness. `bwrap` puts a wrapper and a PID namespace between the host and the
+    guest, so a signal to it destroys the namespace and does not interrupt the
+    cell. But `sandbox-exec` execs its target, and the test stub wraps nothing.
+    On those, the signal is a second cancel route that is worth keeping.
 
-    Driven through `_interrupt` rather than asserted on the flag, because the flag
-    having the right value proves nothing about the branch that reads it.
+    The test drives `_interrupt` and does not assert on the flag, because a
+    correct value of the flag proves nothing about the branch that reads it.
     """
     signaled: list[int] = []
-    # Built rather than started: `_interrupt` needs a process to signal and a
-    # confinement result to consult, and starting a real guest to replace its
-    # process with a fake would leak the one it spawned.
+    # The kernel is built and not started. `_interrupt` needs a process to signal
+    # and a confinement result to consult. To start a real guest and then replace
+    # its process with a fake would leak the guest that was spawned.
     kernel = Kernel(
         namespace="agent-test",
         environment=resolve_interpreter(cache=tmp_path, mode="host"),
@@ -306,7 +316,7 @@ async def test_the_signal_route_follows_the_backend_not_whether_it_confined(
 
 @dataclass
 class _FakeProcess:
-    """Just enough process for `_interrupt`: it is alive, and it records signals."""
+    """The minimum process that `_interrupt` needs: it is alive, and it records signals."""
 
     signaled: list[int]
     returncode: None = None
@@ -316,7 +326,7 @@ class _FakeProcess:
 
 
 def test_the_backends_declare_whether_a_signal_reaches_what_they_wrap() -> None:
-    """The values the branch above depends on, at their source."""
+    """The values that the branch above depends on, at their source."""
     policy = SandboxPolicy(mode="workspace-write", workspace_root="/w")
     assert Bubblewrap().confine(("python",), policy).forwards_signals is False
     assert Seatbelt().confine(("python",), policy).forwards_signals is True

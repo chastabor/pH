@@ -1,17 +1,23 @@
 """The Continual Harness: state as a fold, and the checks on writing it (P3-16).
 
-The plan's gates for this row, one test each: *delete-and-re-derive
-byte-identical; concurrent global writes safe; a missing import rejected with the
-failure on the event; an `edit` entry renders the binding form; a global edit
-prompts; rollback restores the fold.*
+The gates of the plan for this row, with one test for each:
 
-The claim worth stating once is why it is a fold at all (D14). Prime Agent keeps
-this in a JSON file; a file cannot express "the harness as of a fork boundary",
-and it needs an mtime guard and a conflict rule that an append-only log does not.
+* delete-and-re-derive is byte-identical
+* concurrent global writes are safe
+* a missing import is rejected, with the failure on the event
+* an `edit` entry renders the binding form
+* a global edit prompts
+* rollback restores the fold
 
-The real kernel is mounted throughout, because H1's probe resolves references in
-the runtime the model actually uses — checking them against this process would
-prove something about the harness's imports rather than the model's.
+One claim needs a statement here: why the state is a fold at all (D14). Prime
+Agent keeps this state in a JSON file. A file cannot express "the harness as of
+a fork boundary". It also needs an mtime guard and a conflict rule, and an
+append-only log needs neither.
+
+The tests mount the real kernel, because the probe of H1 resolves references in
+the runtime that the model uses. A check against this process would prove
+something about the imports of the harness and not about the imports of the
+model.
 """
 
 from __future__ import annotations
@@ -72,8 +78,9 @@ def _allow(ctx: Context) -> list[str]:
 async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
     """A harness that has taken two refinements: a create, then an update and a create.
 
-    One definition, because two tests need the same shape of log and a second copy
-    is one that keeps passing against a log the service has stopped writing.
+    There is one definition because two tests need the same shape of log. A
+    second copy would keep passing against a log that the service has stopped
+    writing.
     """
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
@@ -98,10 +105,11 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any]:
 
 
 async def test_a_sessions_merged_state_goes_with_the_session(harnessed: Harnessed) -> None:
-    """The per-session memo `state()` reads through is let go with the session.
+    """The per-session memo that `state()` reads through is released with the session.
 
-    `_merged` kept one `(local, global, merged)` triple per session the mount ever
-    asked about, and its fold cache one fold, for the life of the mount.
+    `_merged` used to keep one `(local, global, merged)` triple for each session
+    that the mount ever asked about, and the fold cache of the service used to
+    keep one fold, for the life of the mount.
 
     Sabotage: make `_merged` a plain dict, and the memo stays.
     """
@@ -134,15 +142,15 @@ async def test_an_applied_refinement_is_the_state(harnessed: Harnessed) -> None:
 
 
 async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: Harnessed) -> None:
-    """The plan's gate, and the whole D14 claim: the log *is* the state.
+    """The gate of the plan, and the whole D14 claim: the log *is* the state.
 
-    Asserted against a cold fold rather than the cached one, so the cache cannot
-    be what makes them agree.
+    The assertion compares against a cold fold and not the cached one, so the
+    cache cannot be what makes them agree.
     """
     ctx, session, _ = await _refined(harnessed)
 
     assert fold_session(session).to_wire() == ctx.require(HARNESS).local(session).to_wire()
-    # And an update bumped the version rather than replacing history.
+    # An update also bumped the version and did not replace the history.
     revised = fold_session(session).entry("note", "first")
     assert revised is not None
     assert (revised.version, revised.title) == (2, "revised")
@@ -150,19 +158,21 @@ async def test_deleting_the_state_and_re_deriving_is_byte_identical(harnessed: H
 
 async def test_the_harness_fold_obeys_the_fold_laws(harnessed: Harnessed) -> None:
     """`extend_session` is `fold_session` resumed from a prefix, and the cache
-    relies on that being the same fold. Asked over every prefix of a log the
-    real service wrote — create, update, and a second create in one refinement —
-    rather than assumed from the two functions sharing a step."""
+    relies on the two being the same fold. The test checks every prefix of a log
+    that the real service wrote: a create, then an update and a second create in
+    one refinement. It does not assume the law from the fact that the two
+    functions share a step."""
     _, session, _ = await _refined(harnessed)
 
     assert_fold_laws(session, fold_session, extend_session)
 
 
 async def test_a_fork_inherits_the_harness_as_of_its_boundary(harnessed: Harnessed) -> None:
-    """What a side file could not express, and the reason this is a fold.
+    """What a side file could not express, and the reason that this is a fold.
 
-    A file hands every fork the parent's latest; folding only the events at or
-    before the boundary hands it the harness that existed then.
+    A file gives every fork the latest state of the parent. A fold of only the
+    events at or before the boundary gives the fork the harness that existed
+    then.
     """
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
@@ -222,11 +232,11 @@ async def test_h5_the_doctrine_is_not_editable(harnessed: Harnessed) -> None:
 
 
 async def test_h1_an_unresolvable_reference_is_rejected_on_the_event(harnessed: Harnessed) -> None:
-    """`/refine` cannot conjure capability (I7), and the refusal is auditable.
+    """`/refine` cannot create capability (I7), and the refusal can be audited.
 
-    Resolved in the runtime the model uses, so an entry is only true if the
-    kernel can reach it — and the rejection is recorded beside the edits that
-    did apply rather than dropped.
+    The reference is resolved in the runtime that the model uses, so an entry
+    is true only if the kernel can reach it. The rejection is recorded beside
+    the edits that did apply, and is not dropped.
     """
     ctx, session, agent = await harnessed()
     record = await ctx.require(HARNESS).apply(
@@ -254,7 +264,7 @@ def _skill(entry_id: str, module: str, name: str) -> RefinementProposal:
 
 
 def _on_each_run(monkeypatch: pytest.MonkeyPatch, note: Callable[[CodeRunRequest], None]) -> None:
-    """Call `note` with every program the code runtime is asked to run, first."""
+    """Call `note` with every request to the code runtime, before the runtime runs it."""
     real = CodeRuntimeSeam.run
 
     async def spy(self: CodeRuntimeSeam, request: CodeRunRequest) -> CodeRunResult:
@@ -267,15 +277,18 @@ def _on_each_run(monkeypatch: pytest.MonkeyPatch, note: Callable[[CodeRunRequest
 async def test_h1_probes_within_the_agents_boundary_beside_its_kernel(
     harnessed: Harnessed, tmp_path: Path
 ) -> None:
-    """S21. The probe imports a module the model named, which runs its top level. So it
-    runs within the boundary of the agent that proposed it — its workspace, its
-    confinement — where from a namespace no agent owned it had none of those, and
-    the daemon's directory. And beside the agent's working kernel, not in it: a
-    module that hangs or crashes on import costs the probe's kernel, and nothing it
-    imports reaches the model's namespace or snapshots.
+    """S21. The probe imports a module that the model named, and an import runs
+    the top level of the module. So the probe runs within the boundary of the
+    agent that proposed it: the workspace of the agent and its confinement. From
+    a namespace that no agent owned, the probe had neither of those, and it ran
+    in the directory of the daemon. The probe also runs beside the working
+    kernel of the agent, not in it. A module that hangs or crashes on import
+    costs the kernel of the probe, and nothing that it imports reaches the
+    namespace or the snapshots of the model.
 
-    Shown by a module only the agent's workspace holds: the probe resolves it, and
-    the model's own kernel has not imported it.
+    The test shows this with a module that only the workspace of the agent
+    holds. The probe resolves it, and the kernel of the model has not imported
+    it.
 
     Sabotage: build the probe's kernel from its namespace rather than its agent, and
     it does not resolve; probe in the agent's own namespace, and the model's kernel
@@ -297,8 +310,9 @@ async def test_h1_probes_within_the_agents_boundary_beside_its_kernel(
 async def test_h1_a_probe_is_on_disk_before_it_runs(
     harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S21. Auto-refine probes with nobody asking, so the log says what was about to
-    run before the kernel runs it, and then what it found — in the agent's own log.
+    """S21. Auto-refine probes with nobody asking. So the log says what was about
+    to run before the kernel runs it, and then what the probe found. Both records
+    are in the log of the agent.
 
     Sabotage: run the probe outside `intents.claim`, and nothing is on disk.
     """
@@ -319,8 +333,9 @@ async def test_h1_a_probe_is_on_disk_before_it_runs(
 async def test_h1_a_probe_the_log_cannot_record_does_not_run(
     harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S21. Fail-closed, as a durable intent is: no record on disk, no import — and
-    the entry it was checking is refused, since nothing saw it resolve.
+    """S21. The probe fails closed, as a durable intent does: with no record on
+    disk, there is no import. The entry that the probe was checking is refused,
+    because nothing saw it resolve.
 
     Sabotage: make `HARNESS_PROBE`'s barrier `buffered`, and the kernel runs.
     """
@@ -351,10 +366,11 @@ async def test_h1_a_skill_without_a_reference_teaches_nothing(harnessed: Harness
 
 
 async def test_h2_a_skill_for_a_bound_tool_renders_the_binding_form(harnessed: Harnessed) -> None:
-    """The plan's gate: an entry naming a bound tool renders `await tools.…`.
+    """The gate of the plan: an entry that names a bound tool renders `await tools.…`.
 
-    Rendered rather than accepted from the proposal, so a refinement cannot write
-    prompt text steering the model onto the ungoverned raw-namespace path.
+    The pattern is rendered and is not accepted from the proposal, so a
+    refinement cannot write prompt text that steers the model onto the
+    ungoverned raw-namespace path.
     """
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
@@ -397,10 +413,11 @@ async def test_deleting_an_entry_that_is_not_there_is_refused(harnessed: Harness
 async def test_h3_a_canceled_turn_is_not_prompted_for_a_global_edit(
     harnessed: Harnessed,
 ) -> None:
-    """H3 asks a human, so a turn the human already stopped is not asked.
+    """H3 asks the user, so a turn that the user already stopped is not asked.
 
-    `ApprovalService.request` defaults its cancellation to the agent's own token,
-    so every prompt inherits the rule rather than each caller restating it.
+    `ApprovalService.request` uses the token of the agent as its default
+    cancellation. Every prompt therefore inherits the rule, and no caller has
+    to restate it.
     """
     ctx, _session, agent = await harnessed()
     asked = _allow(ctx)
@@ -417,7 +434,7 @@ async def test_h3_a_canceled_turn_is_not_prompted_for_a_global_edit(
 
 async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harnessed) -> None:
     """A global entry is injected into every future session, including other
-    projects, so the human is asked. A local one is this session's business."""
+    projects, so the user is asked. A local entry concerns only this session."""
     ctx, session, agent = await harnessed()
     asked = _allow(ctx)
 
@@ -432,7 +449,7 @@ async def test_h3_a_global_edit_prompts_and_a_local_one_does_not(harnessed: Harn
         agent=agent,
     )
     assert asked == ["refine"]
-    # Both halves in the log, so the answer is as durable as the refinement.
+    # Both halves are in the log, so the answer is as durable as the refinement.
     assert [event.type for event in session.events if event.type.startswith("approval/")] == [
         "approval/asked",
         "approval/decided",
@@ -483,7 +500,8 @@ async def test_a_global_refinement_folds_from_its_own_log(harnessed: Harnessed) 
 
     assert (ctx.require(HARNESS).directory / GLOBAL_LOG_NAME).exists()
     assert len(read_global_events(ctx.require(HARNESS).directory)) == 1
-    # Not in the session's log — that is what makes it outlive this session.
+    # The record is not in the log of the session. That is why it outlives this
+    # session.
     assert [event for event in session.events if event.type == REFINED] == []
     world = ctx.require(HARNESS).globals().entry("note", "house-style")
     assert world is not None and world.scope == "global"
@@ -494,16 +512,17 @@ async def test_a_global_refinement_folds_from_its_own_log(harnessed: Harnessed) 
 async def test_a_global_edit_is_written_only_after_the_approval_that_allowed_it(
     harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """L4. The approving session's log is on disk before the global log is appended,
-    and the global record names the approval.
+    """L4. The log of the approving session is on disk before the global log is
+    appended, and the global record names the approval.
 
-    Every future session reads the global log. Its record used to be appended while
-    the session's `approval/decided` was still in memory, so a crash in between left
-    a deployment-wide edit in force whose approval repair settled as outcome unknown:
-    an edit nothing said anyone allowed.
+    Every future session reads the global log. Its record used to be appended
+    while the `approval/decided` of the session was still in memory. A crash in
+    between left a deployment-wide edit in force, and repair settled its
+    approval as outcome unknown. The result was an edit with no record that
+    anyone allowed it.
 
-    Asked of the store the moment the global log is appended, through the durable
-    writer that append goes through.
+    The test asks the store at the moment when the global log is appended,
+    through the durable writer that the append goes through.
 
     Sabotage: drop the session write in `_commit` and the stored session has no
     decision when the edit is written; drop `call_id` from the ask and the decision
@@ -538,10 +557,10 @@ async def test_a_global_edit_is_written_only_after_the_approval_that_allowed_it(
 async def test_a_global_edit_whose_approval_cannot_be_written_is_refused(
     harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """L4, failing closed. With its approval unwritten, the edit is not made.
+    """L4, failing closed. When the approval is not written, the edit is not made.
 
-    Written anyway, it would be the same edit in force with no record of who
-    allowed it, which is the gap the ordering closes.
+    If the edit were written anyway, it would be the same edit in force with no
+    record of who allowed it. The ordering closes that gap.
     """
     ctx, _session, agent = await harnessed()
     _allow(ctx)
@@ -562,8 +581,9 @@ async def test_a_global_edit_whose_approval_cannot_be_written_is_refused(
 async def test_a_local_refinement_is_on_disk_before_its_projection(
     harnessed: Harnessed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """L4's local half. The session's `harness/refined` is written before the
-    projection that restates it, so the file on disk never runs ahead of the log.
+    """The local half of L4. The `harness/refined` of the session is written
+    before the projection that restates it, so the file on disk is never ahead
+    of the log.
 
     Sabotage: drop the session write in `_commit` and the projection is written
     while the stored log has no record of the refinement.
@@ -585,8 +605,8 @@ async def test_a_local_refinement_is_on_disk_before_its_projection(
 
 
 async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
-    """This session learned something specific; a deployment-wide note does not
-    get to overrule it."""
+    """This session learned something specific. A deployment-wide note does not
+    overrule it."""
     ctx, session, agent = await harnessed()
     _allow(ctx)
     await ctx.require(HARNESS).apply(
@@ -604,8 +624,8 @@ async def test_a_local_entry_shadows_a_global_one(harnessed: Harnessed) -> None:
 
 
 async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) -> None:
-    """The plan's gate. Concurrent sessions share this log, so the lock is what
-    makes eight refinements eight records rather than one torn line."""
+    """The gate of the plan. Concurrent sessions share this log, so the lock
+    makes eight refinements eight records and not one torn line."""
     ctx, _session, agent = await harnessed()
     _allow(ctx)
 
@@ -632,7 +652,8 @@ async def test_concurrent_global_writes_are_both_recorded(harnessed: Harnessed) 
 
 
 async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
-    """The plan's gate. Derivable because each apply recorded what it replaced."""
+    """The gate of the plan. A rollback is derivable because each apply recorded
+    what it replaced."""
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="original", edits=[note_edit("kept", "the first title")]),
@@ -658,11 +679,11 @@ async def test_h6_rollback_restores_the_fold(harnessed: Harnessed) -> None:
     restored = after.entry("note", "kept")
     assert restored is not None and restored.title == "the first title"
     assert after.entry("note", "also-added") is None
-    # Byte-for-byte the entries that were there, version included: an inverse that
+    # The entries are the same byte for byte, version included. An inverse that
     # left a v3 of a v1 entry would not be an inverse.
     assert after.entries == HarnessState.model_validate(before).entries
-    # The entries are back; the *history* is longer, because a rollback is itself
-    # a refinement and an append-only log does not forget.
+    # The entries are back. The *history* is longer, because a rollback is
+    # itself a refinement and an append-only log does not forget.
     assert len(after.refinements) == 3
     assert after.refinements[-1].rollback_of == bad.refine_id
 
@@ -691,8 +712,9 @@ async def test_h6_rolling_back_a_global_refinement_asks_too(harnessed: Harnessed
     await ctx.require(HARNESS).rollback(record.refine_id, session=session, agent=agent)
     assert asked == ["refine", "refine"]
     assert ctx.require(HARNESS).globals().entry("note", "shared") is None
-    # In the global log, not this session's — a rollback belongs to the scope it
-    # undoes, or reopening the session would resurrect the entry.
+    # The rollback is in the global log, not in the log of this session. A
+    # rollback belongs to the scope that it undoes. Otherwise, reopening the
+    # session would bring the entry back.
     assert len(read_global_events(ctx.require(HARNESS).directory)) == 2
     assert [event for event in session.events if event.type == REFINED] == []
 
@@ -734,8 +756,9 @@ async def test_the_command_refuses_an_unknown_id(harnessed: Harnessed) -> None:
 
 
 async def test_the_harness_reaches_the_model_as_a_snapshot(harnessed: Harnessed) -> None:
-    """A12: a refinement changes this text mid-session, so it must not sit in the
-    cached prefix — every apply would re-bill the whole prompt."""
+    """A12: a refinement changes this text in the middle of a session, so the text
+    must not be in the cached prefix. There, every apply would bill the whole
+    prompt again."""
     ctx, _session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
         RefinementProposal(
@@ -768,8 +791,9 @@ def test_an_empty_harness_renders_nothing() -> None:
 
 
 def test_the_prompt_section_is_bounded_and_stable() -> None:
-    """Bounded, because a harness that grew unchecked would be the whole prompt;
-    id-ordered, so the same state renders the same bytes (A12)."""
+    """The section is bounded, because a harness that grew without a bound would
+    be the whole prompt. It is ordered by id, so the same state renders the same
+    bytes (A12)."""
     entries = {
         f"n{index:02d}": HarnessEntry(kind="note", id=f"n{index:02d}", title="t", content="c")
         for index in range(20)
@@ -785,8 +809,8 @@ def test_the_prompt_section_is_bounded_and_stable() -> None:
 async def test_the_projection_is_written_and_equals_the_fold(harnessed: Harnessed) -> None:
     """The invariant that keeps a projection a projection.
 
-    `harness_state.json` is for humans, `ph trace` and export. Nothing reads it
-    back — and if it can drift, something has started treating it as state.
+    `harness_state.json` is for humans, the trajectory viewer and export. Nothing
+    reads it back. If it can drift, something has started to treat it as state.
     """
     ctx, session, agent = await harnessed()
     await ctx.require(HARNESS).apply(
@@ -795,8 +819,9 @@ async def test_the_projection_is_written_and_equals_the_fold(harnessed: Harnesse
 
     path = ctx.require(HARNESS).projection_path(session)
     assert path.exists()
-    # Per session, because the projection is of local layered over global: one
-    # shared path would have two sessions overwriting each other's.
+    # The path is per session, because the projection is of local layered over
+    # global. With one shared path, two sessions would each overwrite the file
+    # of the other.
     assert path == ctx.require(HARNESS).directory / session.id / PROJECTION_NAME
     assert ctx.require(HARNESS).verify_projection(session) is True
 

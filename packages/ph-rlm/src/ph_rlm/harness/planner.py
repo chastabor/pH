@@ -3,23 +3,24 @@
 A `RefinementProposal` comes from one non-reasoning model call whose whole output
 is JSON.
 
-Two calls, deliberately different sizes. **The review gate** is cheap and answers
-one question — is there anything here worth recording — because auto-refine fires
-on a turn count and most turns teach nothing. **The planner** is the expensive one
-and only runs when something says yes, or when a human typed `/refine`.
+There are two calls, and their sizes differ on purpose. **The review gate** is
+cheap and answers one question: is there anything here that is worth recording?
+Auto-refine fires on a turn count, and most turns teach nothing. **The
+planner** is the expensive call. It runs only when the gate says yes, or when a
+user typed `/refine`.
 
-**Neither call is a turn.** They are `purpose="refine"` requests: session-bound so
-usage is attributed, but outside `is_loop_request`, so the "model-visible means
-logged" invariant does not hold them to `derive_messages()` — which is right,
-because their prompt is *about* the conversation rather than part of it. That is
-also why nothing here appends `assistant/message`: the only durable record a
-refinement leaves is `harness/refined`, and the proposal that produced it is on
-that event.
+**Neither call is a turn.** Both are `purpose="refine"` requests. They are bound
+to the session, so that usage is attributed, but they are outside
+`is_loop_request`. The "model-visible means logged" invariant therefore does not
+hold them to `derive_messages()`. That is correct, because their prompt is
+*about* the conversation and is not part of it. For the same reason, nothing
+here appends `assistant/message`. The only durable record that a refinement
+leaves is `harness/refined`, and the proposal that produced it is on that event.
 
 **The model never writes a `call_pattern`.** It names a `reference`, and the
-harness renders the call form (H2). A planner that could author its own would be
-able to write prompt text steering the next session onto the ungoverned
-raw-namespace path — see `service.render_call_pattern`.
+harness renders the call form (H2). A planner that could write its own call
+pattern could write prompt text that steers the next session onto the ungoverned
+raw-namespace path. See `service.render_call_pattern`.
 
 @module ph_rlm.harness.planner
 """
@@ -61,8 +62,9 @@ __all__ = [
 log = logging.getLogger("ph_rlm.harness")
 
 PLANNER_MAX_TOKENS = 32_000
-"""The ceiling from the plan. A refinement is a handful of small edits; a model
-allowed its full window here would spend a session's budget describing them."""
+"""The ceiling from the plan. A refinement is a few small edits. A model that
+could use its full window here would spend the budget of a session on describing
+them."""
 
 CONVERSATION_CHARS = 80_000
 """How much of the tail of the conversation the planner is shown."""
@@ -170,10 +172,10 @@ class RefinementPlanner:
     # ------------------------------------------------------------- the gate --
 
     async def review(self, session: Session, agent: AgentHandle) -> ReviewVerdict:
-        """H7's cheap pass: is this conversation worth planning over?
+        """The cheap pass of H7: is this conversation worth planning over?
 
-        Fails *closed* in the cheap direction — an unparseable answer means no
-        refinement rather than an expensive call on a broken reply.
+        The pass fails *closed* in the cheap direction. An answer that cannot be
+        parsed means no refinement, and not an expensive call on a broken reply.
         """
         state = self.service.state(session)
         prompt = (
@@ -197,11 +199,11 @@ class RefinementPlanner:
         scope: HarnessScope = "local",
         instructions: str = "",
     ) -> RefinementProposal:
-        """One call, one proposal. Applying it is `HarnessService.apply`'s job.
+        """One call, one proposal. `HarnessService.apply` applies it.
 
-        Kept apart from applying so the planner cannot become a second path into
-        the state: whatever it returns still goes through the same validation as
-        a proposal typed by hand.
+        Planning is kept apart from applying so that the planner cannot become a
+        second path into the state. Whatever the planner returns still goes
+        through the same validation as a proposal that is typed by hand.
         """
         return await self._shaped(
             agent,
@@ -225,16 +227,19 @@ class RefinementPlanner:
             ),
         ]
         if instructions:
-            # Last, and named as the human's, so the model does not read it as
-            # one more piece of the conversation it is summarizing.
+            # The instructions come after the harness sections and before the
+            # conversation, under a heading that names them as the request of
+            # the user. The model then does not read them as one more piece of
+            # the conversation that it is summarizing.
             parts.append(f"# What the user asked for\n\n{instructions}")
         parts.append(f"# The conversation\n\n{self._conversation(session)}")
         return "\n\n".join(parts)
 
     def _state_overview(self, state: HarnessState) -> str:
-        """Everything the harness already holds, so the model can update rather
-        than duplicate — labeled by `entry_label`, the same identity the prompt
-        section shows, so "use its exact id" is an instruction both texts obey."""
+        """Everything that the harness already holds, so that the model can update
+        an entry and not duplicate it. Each entry is labeled by `entry_label`,
+        the same identity that the prompt section shows, so "use its exact id" is
+        an instruction that both texts obey."""
         lines: list[str] = ["# The harness as it stands"]
         for kind in KINDS:
             entries = state.of_kind(kind)
@@ -255,10 +260,10 @@ class RefinementPlanner:
     def _conversation(self, session: Session) -> str:
         """The tail of the derived conversation, as text.
 
-        `derive_messages()` rather than the raw log, so the planner reads what the
-        model actually saw — a compacted range is summarized here exactly as it is
-        for the agent, instead of the planner learning from history the agent has
-        already been told to forget.
+        The source is `derive_messages()` and not the raw log, so the planner
+        reads what the model saw. A compacted range is summarized here exactly
+        as it is for the agent. The planner therefore does not learn from
+        history that the agent has already been told to forget.
         """
         budget = self.conversation_chars
         parts: list[str] = []
@@ -268,9 +273,9 @@ class RefinementPlanner:
             parts.append(f"{message.role}: {text}")
             used += len(parts[-1]) + 2
             if used > budget:
-                # Rendered newest-first and stopped at the budget, so a long
-                # session pays for the tail it sends, not for the history it
-                # was always going to drop.
+                # The messages are rendered newest first, and the loop stops at
+                # the budget. A long session therefore pays for the tail that it
+                # sends, and not for the history that it would drop in any case.
                 break
         rendered = "\n\n".join(reversed(parts))
         if len(rendered) <= budget:
@@ -284,17 +289,18 @@ class RefinementPlanner:
     ) -> Shape:
         """One non-loop model call that must come back as `shape`.
 
-        Through `ph.llm.structured` (P7-17) rather than "ask for JSON and parse":
-        the model is the wire schema *and* the validator, so what comes back is
-        already the typed thing this planner wanted. What changed for a reader is
-        that a confirmation sentence in front of the document is now a corrected
-        call rather than a declined refinement.
+        The call goes through `ph.llm.structured` (P7-17), and not "ask for JSON
+        and parse". The `shape` class is the wire schema *and* the validator, so
+        what comes back is already the typed thing that this planner wanted. The
+        visible difference: a confirmation sentence in front of the document now
+        leads to a corrected call and not to a declined refinement.
 
-        `purpose="refine"` is what keeps it out of the conversation: session-bound
-        so usage is attributed and a telemetry sink sees it, but not a loop
-        request, so the "model-visible means logged" invariant does not hold its
-        messages to `derive_messages()`. Nothing is appended — the refinement's
-        record is `harness/refined`, and this call's output is on it.
+        `purpose="refine"` keeps the call out of the conversation. The call is
+        bound to the session, so that usage is attributed and a telemetry sink
+        sees it. It is not a loop request, so the "model-visible means logged"
+        invariant does not hold its messages to `derive_messages()`. Nothing is
+        appended. The record of the refinement is `harness/refined`, and the
+        output of this call is on it.
         """
         options = agent.options
         provider = str(options.provider or "")
@@ -314,8 +320,9 @@ class RefinementPlanner:
                 ),
             ),
             system=system,
-            # `min(model max, 32_000)`: a refinement is a handful of small edits,
-            # and no reasoning budget is asked for — this is a summarization.
+            # `min(model max, max_tokens)`, where `max_tokens` is 32_000 by
+            # default. A refinement is a few small edits, and no reasoning
+            # budget is requested, because this is a summarization.
             max_tokens=min(resolved.default_max_tokens or self.max_tokens, self.max_tokens),
             session_id=session.id,
             purpose="refine",

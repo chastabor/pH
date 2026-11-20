@@ -1,10 +1,10 @@
-"""`rlm-presentation` — one callable, and what a settled cell reads like (P3-09).
+"""`rlm-presentation`: one callable, and how a settled cell reads (P3-09).
 
-`test_code_mode.py` in ph-core tests the *mechanism* (a profile may present the
-transport under its own name, and every place the name is load-bearing follows).
-This file tests the RLM profile's use of it against the real kernel: the model
-sees `python`, the text it gets back is prime-agent's layout, and the card
-payload is derived from the durable result alone.
+`test_code_mode.py` in ph-core tests the *mechanism*: a profile may present the
+transport under its own name, and every place that depends on the name follows.
+This file tests how the RLM profile uses the mechanism, against the real kernel.
+The model sees `python`, the text that it gets back is in the layout of
+prime-agent, and the card payload is derived from the durable result alone.
 """
 
 from __future__ import annotations
@@ -34,13 +34,15 @@ pytestmark = pytest.mark.anyio
 async def test_the_description_says_what_runtime_the_model_is_in(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """The description describes the runtime the model is in — pH's interpreter, not
-    IPython — and never promises what the guest refuses.
+    """The description describes the runtime that the model is in, which is the
+    interpreter of pH and not IPython. It never promises what the guest refuses.
 
-    It used to be prime-agent's, verbatim, promising "`%%bash` shell cells" the guest
-    raises a `SyntaxError` for, so the doctrine had to contradict the tool it
-    introduced. Asserted against the constant so a change to the wording is
-    deliberate, and against the guest's own prefixes so it cannot drift from them.
+    The description used to be the description of prime-agent, verbatim. It
+    promised "`%%bash` shell cells", for which the guest raises a `SyntaxError`,
+    so the doctrine had to contradict the tool that it introduced. The test
+    asserts against the constant, so that a change to the wording is deliberate.
+    It also asserts against the prefixes of the guest itself, so that the
+    description cannot drift from them.
     """
     ctx, _session, agent = await mounted_runtime(presentation=True)
     definition = ctx.require(TOOLS).get(PYTHON, scope=agent.ctx)
@@ -64,8 +66,9 @@ async def test_a_cell_runs_under_the_presented_name(mounted_runtime: MountedRunt
 async def test_the_log_records_the_name_the_model_used(mounted_runtime: MountedRuntime) -> None:
     """I3: model-visible means logged, and the model never saw `run_code`.
 
-    Through the batch scheduler rather than `tools.execute`, because that is the
-    path a model's call actually takes and the path that writes `tool/call`.
+    The test goes through the batch scheduler and not through `tools.execute`.
+    The batch scheduler is the path that a call of the model takes, and the path
+    that writes `tool/call`.
     """
     ctx, session, agent = await mounted_runtime(presentation=True)
     outcome = await execute_tool_calls(
@@ -91,7 +94,7 @@ async def test_the_log_records_the_name_the_model_used(mounted_runtime: MountedR
 
 
 def test_the_result_text_is_logs_then_result_then_error() -> None:
-    """Prime Agent's section order, with absent sections dropped."""
+    """The section order of prime-agent, with absent sections dropped."""
     [block] = render_cell(
         {}, {"logs": "printed\n", "value": 42, "error": "Traceback: boom", "dispatches": 0}
     )
@@ -141,10 +144,12 @@ def test_the_details_payload_reports_a_reset_namespace() -> None:
 
 
 async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: MountedRuntime) -> None:
-    """The card flag is the runtime's own boolean, not a sniff of the notice.
+    """The card flag is the boolean of the runtime itself. It is not inferred from
+    the notice.
 
-    Recovering it from the log prefix froze the notice's wording forever and let
-    any program forge the flag by printing the marker as its first output.
+    An earlier version recovered the flag from the log prefix. That froze the
+    wording of the notice forever, and it let any program forge the flag by
+    printing the marker as its first output.
     """
     ctx, session, agent = await mounted_runtime(presentation=True)
     await run_python_cell(ctx, "import os\nos._exit(1)", agent=agent, session=session, call_id="c1")
@@ -159,7 +164,7 @@ async def test_a_reset_kernel_reports_it_on_the_card(mounted_runtime: MountedRun
 
 
 async def test_a_real_cell_produces_the_card_and_the_text(mounted_runtime: MountedRuntime) -> None:
-    """The two projections, computed by the pipeline rather than called directly."""
+    """The two projections, computed by the pipeline and not called directly."""
     ctx, session, agent = await mounted_runtime(presentation=True)
     ctx.require(TOOLS).register(simple_tool("ping", lambda _args, _run: "pong"))
     result = await run_python_cell(
@@ -186,9 +191,10 @@ async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: MountedRuntime
     """`truncated` reached the card only after `run_code` stopped dropping it.
 
     Both `truncated` and `displays` were on `CodeRunResult` and absent from the
-    transport's return value, so a presentation reading them off the tool value
-    saw a complete cell every time. Driven through a real capped stream rather
-    than a hand-built dict, because a hand-built dict is exactly what missed it.
+    return value of the transport. A presentation that read them from the tool
+    value therefore saw a complete cell every time. The test runs a real capped
+    stream and not a hand-built dict, because a hand-built dict is what missed
+    the defect.
     """
     ctx, session, agent = await mounted_runtime(presentation=True)
     result = await run_python_cell(
@@ -198,8 +204,9 @@ async def test_a_capped_cell_says_so_on_its_card(mounted_runtime: MountedRuntime
     assert result.meta["truncated"] is True
     text = "\n".join(block.text for block in result.content if hasattr(block, "text"))
     assert "output truncated" in text
-    # And the run's total, at the end of the logs every renderer passes on:
-    # every byte printed past the default 64 KiB cap, in `tool-bash`'s sentence.
+    # The total of the run is at the end of the logs, which every renderer passes
+    # on. It counts every byte that was printed past the default 64 KiB cap, in
+    # the sentence that `tool-bash` uses.
     dropped = 4_000 * 65 - 65_536
     assert text.rstrip().endswith(truncation_marker(dropped, 65_536).strip())
 
@@ -209,8 +216,8 @@ async def test_a_failing_cell_is_an_error_carrying_its_traceback(
 ) -> None:
     ctx, session, agent = await mounted_runtime(presentation=True)
     result = await run_python_cell(ctx, "1 / 0", agent=agent, session=session)
-    # The cell failed, but the *tool call* succeeded: a traceback is the model's
-    # to read and act on, exactly as under prime-agent.
+    # The cell failed, but the *tool call* succeeded. A traceback is for the
+    # model to read and act on, exactly as under prime-agent.
     assert result.is_error is False
     text = "\n".join(block.text for block in result.content if hasattr(block, "text"))
     assert "ZeroDivisionError" in text
@@ -223,8 +230,8 @@ async def test_a_failing_cell_is_an_error_carrying_its_traceback(
 async def test_without_the_row_the_transport_keeps_its_reserved_name(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """The rename is the profile's, not the runtime's: a deployment that mounts
-    the kernel without this row still gets `run_code`."""
+    """The rename belongs to the profile, not to the runtime. A deployment that
+    mounts the kernel without this row still gets `run_code`."""
     ctx, session, agent = await mounted_runtime(snapshots=False)
     assert ctx.require(TOOLS).view(agent.ctx).transport_name == RUN_CODE
     result = await run_cell(ctx, "1 + 1", agent=agent, session=session)

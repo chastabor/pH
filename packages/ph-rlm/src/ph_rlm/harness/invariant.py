@@ -1,15 +1,17 @@
 """Runtime invariant: `harness_state.json` equals the `harness/*` fold (P6-01, I6).
 
-The projection is written for humans and **nothing reads it back** — which is
+The projection is written for humans, and **nothing reads it back**. That is
 exactly the arrangement that lets it drift without anyone noticing. Drift means
-one of two things, and both are worth an alarm: either the fold changed and the
-file was not rewritten, so a person is reading a stale account of what the agent
-learned; or something started *writing* the file, in which case the deployment
-now has two carriers for one fact (A11) and the log has quietly stopped being the
-source of truth (I6).
+one of two things, and both need an alarm:
 
-This row declares the property; `HarnessService.stale_projections` is the check,
-because the projection's layout is the service's own.
+* The fold changed and the file was not rewritten. A person is then reading a
+  stale account of what the agent learned.
+* Something started to *write* the file. The deployment then has two carriers
+  for one fact (A11), and the log has quietly stopped being the source of truth
+  (I6).
+
+This row declares the property. `HarnessService.stale_projections` is the check,
+because the layout of the projection belongs to the service.
 
 @module ph_rlm.harness.invariant
 """
@@ -40,9 +42,10 @@ def violations(ctx: Context) -> list[str]:
 def stale_folds(ctx: Context, sessions: Iterable[Session]) -> list[str]:
     """Every cached local state that no longer equals the fold behind it.
 
-    The layer under `violations`: that one compares the *file* to the fold, this
-    one the value the file is written from. Declared here beside its sibling so a
-    reader meets the harness's two I6 claims together.
+    This is the layer under `violations`. That function compares the *file* to
+    the fold. This function compares the value that the file is written from.
+    It is declared here beside its sibling so that a reader finds the two I6
+    claims of the harness together.
     """
     harness = ctx.get(HARNESS)
     return [] if harness is None else list(harness.stale_folds(sessions))
@@ -50,11 +53,11 @@ def stale_folds(ctx: Context, sessions: Iterable[Session]) -> list[str]:
 
 @plugin("harness-invariant", affects="deployment", inject=[HARNESS])
 async def apply(ctx: Context, config: None) -> None:
-    """Declare I6's harness half, pollable.
+    """Declare the harness half of I6, in a form that can be polled.
 
-    `inject=[HARNESS]` because, unlike the *declaration* seam, the thing being
-    checked is a hard precondition: an invariant about a projection no row
-    produces is not a weaker promise, it is a meaningless one.
+    `inject=[HARNESS]` is here because the thing that is checked is a hard
+    precondition, unlike the *declaration* seam. An invariant about a projection
+    that no row produces is not a weaker promise. It is a meaningless one.
     """
     contribute(
         ctx,

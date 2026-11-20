@@ -1,9 +1,9 @@
 """The `rlm` namespace: delegation as a governed dispatch (P3-10, C2/C3/C4).
 
-Prime Agent's `rlm(...)` was a comm-channel RPC — invisible to `pre-execute`, to
-approval, to the call limits. These are the tests that ours is not: a spawn from
-inside a cell produces a durable dispatch pair, a policy row can deny it, and the
-spawn budget counts it.
+The `rlm(...)` of prime-agent was a comm-channel RPC. It was invisible to
+`pre-execute`, to approval and to the call limits. These tests check that the
+call in pH is not invisible: a spawn from inside a cell produces a durable
+dispatch pair, a policy row can deny it, and the spawn budget counts it.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ pytestmark = pytest.mark.anyio
 
 @pytest.fixture
 def delegating_runtime(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
-    """The real kernel plus the delegation rows, so a cell can spawn for real."""
+    """The real kernel plus the delegation rows, so that a cell makes a real spawn."""
 
     async def build(**kwargs: Any) -> tuple[Context, Session, AgentHandle]:  # noqa: ANN401
         built: tuple[Context, Session, AgentHandle] = await mounted_runtime(
@@ -59,15 +59,15 @@ async def test_the_namespace_appears_in_the_sdk_block(delegating_runtime: Mounte
     assert f"{NAMESPACE}.run" in text
     assert f"{NAMESPACE}.list_subagents" in text
     assert f"{NAMESPACE}.delete_subagent" in text
-    # The governed tool names are not what a cell writes, and the block says so
-    # by rendering only the namespaced form.
+    # A cell does not write the governed tool names. The block shows this,
+    # because it renders only the namespaced form.
     assert f"tools.{RUN_TOOL}" not in text
 
 
 async def test_a_restricted_tool_leaves_the_sdk_block(delegating_runtime: MountedRuntime) -> None:
-    """The prompt asks the same factory the run does, so it cannot advertise what
-    a cell could not call — the claim the previous test's docstring used to make
-    without checking."""
+    """The prompt asks the same factory that the run asks, so it cannot advertise
+    what a cell could not call. The docstring of the previous test used to make
+    this claim without a check."""
     ctx, _session, agent = await delegating_runtime()
     ctx.require(TOOLS).restrict(ToolRestriction(deny=frozenset({DELETE_TOOL})), scope=agent.ctx)
 
@@ -95,9 +95,10 @@ async def test_the_tools_are_not_directly_callable_under_code_mode(
 async def test_a_spawn_s_handle_says_its_child_runs_without_its_skill_s_model(
     delegating_runtime: MountedRuntime,
 ) -> None:
-    """`rlm.run` tells the cell what `task` tells the model (`admission_notes`): the
-    child runs on its parent's model because this profile cannot run the one its skill
-    asked for. Sabotage: build the handle's note from the downgrade alone."""
+    """`rlm.run` tells the cell what `task` tells the model (`admission_notes`):
+    the child runs on the model of its parent, because this profile cannot run the
+    model that its skill asked for. Sabotage: build the handle's note from the
+    downgrade alone."""
     ctx, session, agent = await delegating_runtime()
     ctx.require(SKILLS).register(skill("sort", model="classify"))
 
@@ -127,16 +128,17 @@ handle = await rlm.run(prompt="sort this report", output=Sort)
 value = await rlm.wait(handle)
 [type(value).__name__, value.kind, value.note]
 """
-"""A cell that asks a child for a value in its own model's shape, and waits for it."""
+"""A cell that asks a child for a value in the shape of a model class that the
+cell defines, and waits for the value."""
 
 
 async def test_a_cell_gets_an_instance_of_its_own_model_back(
     delegating_runtime: MountedRuntime,
 ) -> None:
-    """B4's gate, across the real process boundary: the class crosses as its schema,
-    `X | None` (`anyOf`) included, the child answers in that shape, and the cell gets
-    an instance of its own class back. Sabotage: send the class unconverted, or hand
-    the cell the plain dict."""
+    """The gate of B4, across the real process boundary. The class crosses as its
+    schema, including `X | None` (`anyOf`). The child answers in that shape, and
+    the cell gets back an instance of its own class. Sabotage: send the class
+    unconverted, or hand the cell the plain dict."""
     ctx, session, agent = await delegating_runtime()
     ctx.require(LLM_FAKE).respond = text_script('{"kind": "bug"}')
 
@@ -165,8 +167,9 @@ async def test_a_spawn_from_a_cell_is_a_durable_dispatch(
     settles = [e for e in session.events if e.type == "tool/code-dispatch"]
     assert [e.data["name"] for e in starts] == [RUN_TOOL]
     assert len(settles) == 1
-    # And the admission the dispatch caused is in the child's own log, naming the
-    # dispatch — which is how a resume finds the child a cut-short dispatch admitted.
+    # The admission that the dispatch caused is in the log of the child, and it
+    # names the dispatch. A resume uses that name to find the child that a
+    # cut-short dispatch admitted.
     child = admitted_by(ctx.require(SUBAGENTS).children(session.id), starts[0])
     assert child is not None, "no child's admission names the dispatch that caused it"
     assert child.name == "scout"
@@ -190,12 +193,13 @@ async def test_the_handle_is_not_the_answer(delegating_runtime: MountedRuntime) 
 
 
 async def test_access_defaults_to_read_from_a_cell(delegating_runtime: MountedRuntime) -> None:
-    """E4 all the way through: the binding's default is the seam's default.
+    """E4 all the way through: the default of the binding is the default of the
+    seam.
 
-    What comes back is the *tier's* answer, and the shipped tier is `advisory`,
-    where nothing can make a repository read-only — so a `read` request is
-    honestly reported as a writable shared checkout rather than flattered with
-    the word it asked for (§4.8's "not read-only" row).
+    The value that comes back is the answer of the *tier*. The shipped tier is
+    `advisory`, where nothing can make a repository read-only. A `read` request
+    is therefore reported correctly as a writable shared checkout, and not with
+    the word that it asked for (the "not read-only" row of §4.8).
     """
     ctx, session, agent = await delegating_runtime()
     result = await run_python_cell(
@@ -210,9 +214,9 @@ async def test_access_defaults_to_read_from_a_cell(delegating_runtime: MountedRu
 async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: MountedRuntime) -> None:
     """The note is for a *narrowing*, and there is none at this tier.
 
-    A note on every spawn is one a model learns to skip; this one appears when a
-    child asked for the repository and a tier refused it, which is the moment
-    the parent has to re-plan.
+    A model learns to skip a note that is on every spawn. This note appears when
+    a child asked for the repository and a tier refused it. That is the moment
+    when the parent must re-plan.
     """
     ctx, session, agent = await delegating_runtime()
     result = await run_python_cell(
@@ -229,10 +233,10 @@ async def test_nothing_narrowed_means_no_note_to_read(delegating_runtime: Mounte
 
 
 async def test_a_policy_row_can_deny_spawning(delegating_runtime: MountedRuntime) -> None:
-    """C3: the denial ends the run, and the program cannot catch past it.
+    """C3: the denial ends the run, and the program cannot catch its way past it.
 
-    This is the property prime-agent's comm channel could not have: spawning is
-    a tool call, so it is deniable by exactly the mechanism that denies a write.
+    The comm channel of prime-agent could not have this property. Spawning is a
+    tool call, so the mechanism that denies a write also denies a spawn.
     """
     ctx, session, agent = await delegating_runtime()
 
@@ -295,8 +299,8 @@ async def test_a_refused_spawn_is_the_programs_to_handle(
 
 
 async def test_the_roster_a_cell_reads_is_the_fold(delegating_runtime: MountedRuntime) -> None:
-    """Each child as its own log tells it — no side table, and no copy in the
-    parent's log to fall out of step with the child's."""
+    """Each child as its own log describes it. There is no side table, and no copy
+    in the log of the parent that could differ from the log of the child."""
     ctx, session, agent = await delegating_runtime()
     await run_python_cell(
         ctx,
@@ -333,7 +337,8 @@ async def test_deleting_from_a_cell_tombstones_the_child(
     )
     assert result.value["value"] is True
 
-    # In the child's own log, which alone then tells its whole story.
+    # The tombstone is in the log of the child. That log alone then holds the
+    # whole record of the child.
     child = ctx.require(SUBAGENTS).children(session.id)[child_id]
     assert (child.deleted, child.deleted_reason) == (True, "user")
     child_log = not_none(ctx.require(SESSIONS).get(child.session_id))
@@ -341,7 +346,8 @@ async def test_deleting_from_a_cell_tombstones_the_child(
         "subagent/deleted"
     ]
     assert [e for e in session.events if e.type.startswith("subagent/")] == []
-    # The dispatch is recorded under the governed tool name, not the cell's.
+    # The dispatch is recorded under the governed tool name, not under the name
+    # that the cell wrote.
     names = [e.data["name"] for e in session.events if e.type == "tool/code-dispatch-start"]
     assert DELETE_TOOL in names
     assert LIST_TOOL not in names

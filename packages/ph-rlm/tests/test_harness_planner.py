@@ -1,19 +1,19 @@
-"""The planner and auto-refine: P3-16's second increment.
+"""The planner and auto-refine: the second increment of P3-16.
 
-The first increment could apply a `RefinementProposal`; this is where one comes
-from. Two claims carry the module:
+The first increment could apply a `RefinementProposal`. This increment is where
+a proposal comes from. The module rests on two claims:
 
-* **A refinement is not a turn.** The planner's prompt is *about* the
-  conversation rather than part of it, so its call names `purpose="refine"`,
-  logs no message, and is exempt from the "model-visible means logged" invariant
-  by declaration rather than by omission.
-* **When it runs unasked is a fold.** `due()` reads turns, elapsed time and
-  compaction off the log, using the triggering event's own timestamp as the
-  clock — so the decision is the same on a resumed session, on a fork, and here,
-  with nothing to freeze.
+* **A refinement is not a turn.** The prompt of the planner is *about* the
+  conversation and is not part of it. So its call names `purpose="refine"` and
+  logs no message. It is exempt from the "model-visible means logged" invariant
+  by declaration, not by omission.
+* **When it runs without a request is a fold.** `due()` reads turns, elapsed
+  time and compaction from the log, and uses the timestamp of the triggering
+  event as the clock. The decision is therefore the same on a resumed session,
+  on a fork, and here, with nothing to freeze.
 
-No kernel is mounted: nothing here runs a cell, and H1's probe has its own tests
-in `test_harness.py`.
+No kernel is mounted. Nothing here runs a cell, and the probe of H1 has its own
+tests in `test_harness.py`.
 """
 
 from __future__ import annotations
@@ -114,8 +114,9 @@ def say(session: Session, text: str, message_id: str = "m1") -> Any:  # noqa: AN
 
 
 async def test_the_planner_call_is_not_a_turn(refining: Refining) -> None:
-    """`purpose="refine"`: session-bound so usage is attributed, outside the loop
-    so the invariant does not hold its messages to `derive_messages()`."""
+    """`purpose="refine"`: the call is bound to the session, so that usage is
+    attributed. It is outside the loop, so the invariant does not hold its
+    messages to `derive_messages()`."""
     ctx, session, agent = await refining()
     requests = script(ctx, planner=json.dumps(PROPOSAL))
     say(session, "hello")
@@ -128,10 +129,11 @@ async def test_the_planner_call_is_not_a_turn(refining: Refining) -> None:
     assert planner_request.purpose == "refine"
     assert planner_request.session_id == session.id
     assert planner_request.is_loop_request is False
-    # `min(model max, 32_000)`; the fake adapter declares no default, so the cap.
+    # `min(model max, 32_000)`: the fake adapter declares no default, so the cap
+    # applies.
     assert planner_request.max_tokens == 32_000
 
-    # Nothing of the conversation's own vocabulary was written by the pass.
+    # The pass wrote no event from the vocabulary of the conversation.
     added = {event.type for event in session.events[before:]}
     assert added & {"assistant/message", "assistant/chunk", "turn/start", "turn/end"} == set()
     assert REFINED in added
@@ -169,19 +171,21 @@ async def test_the_planner_prompt_carries_the_state_the_history_and_the_tail(
         .messages[0]
         .content[0]
     )
-    # What it already knows, so the model updates rather than duplicates.
+    # What the harness already knows, so that the model updates an entry and
+    # does not duplicate it.
     assert "[local:prefer-uv] prefer uv" in prompt
     assert "the project uses uv, not pip" in prompt
     assert "an earlier lesson" in prompt
-    # What the user asked for, named as theirs rather than mixed into the tail.
+    # What the user asked for, named as the request of the user and not mixed
+    # into the tail.
     assert "# What the user asked for\n\nfocus on the test commands" in prompt
     assert "You are editing the **local** harness." in prompt
     assert "user: run the tests" in prompt
 
 
 async def test_only_the_tail_of_a_long_conversation_is_sent(refining: Refining) -> None:
-    """The planner reads the end of the conversation, not a truncated beginning:
-    what was just learned is what is worth keeping."""
+    """The planner reads the end of the conversation, not a truncated beginning.
+    What was just learned is what is worth keeping."""
     ctx, session, agent = await refining(conversationChars=200)
     requests = script(ctx, planner=json.dumps(PROPOSAL))
     say(session, "x" * 5_000, "m1")
@@ -200,8 +204,9 @@ async def test_only_the_tail_of_a_long_conversation_is_sent(refining: Refining) 
 
 
 async def test_the_conversation_is_what_the_model_saw(refining: Refining) -> None:
-    """`derive_messages()`, not the raw log: a compacted range reaches the planner
-    as its summary, so it cannot learn from history the agent was told to forget.
+    """The source is `derive_messages()`, not the raw log. A compacted range
+    reaches the planner as its summary, so the planner cannot learn from history
+    that the agent was told to forget.
     """
     ctx, session, agent = await refining()
     requests = script(ctx, planner=json.dumps(PROPOSAL))
@@ -229,9 +234,9 @@ async def test_the_conversation_is_what_the_model_saw(refining: Refining) -> Non
 
 
 async def test_the_command_schedules_a_job_and_the_refinement_lands(refining: Refining) -> None:
-    """A planner pass outlives the keystroke that asked for it — `ctx.jobs`' own
-    example — so the command answers with the job and the outcome arrives in the
-    log."""
+    """A planner pass outlives the keystroke that asked for it. That is the
+    example that `ctx.jobs` itself gives. So the command answers with the job,
+    and the outcome arrives in the log."""
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps(PROPOSAL))
 
@@ -246,8 +251,8 @@ async def test_the_command_schedules_a_job_and_the_refinement_lands(refining: Re
 
 
 async def test_show_prints_what_the_bound_hides(refining: Refining) -> None:
-    """`--show` is unbounded on purpose: the entries the prompt section elides are
-    exactly the ones a human cannot see any other way."""
+    """`--show` is unbounded on purpose. A user has no other way to see the
+    entries that the prompt section leaves out."""
     ctx, session, agent = await refining(maxPerKind=1)
     await ctx.require(HARNESS).apply(
         RefinementProposal(
@@ -275,8 +280,8 @@ async def test_show_on_an_empty_harness_says_so(refining: Refining) -> None:
 
 
 async def test_a_user_pass_skips_the_review_gate(refining: Refining) -> None:
-    """The human already decided. Asking a model whether to do what they asked
-    would spend a call to second-guess them."""
+    """The user already decided. A model call that asks whether to do what the
+    user asked would be spent on questioning that decision."""
     ctx, session, agent = await refining()
     requests = script(ctx, review=NO, planner=json.dumps(PROPOSAL))
 
@@ -289,7 +294,7 @@ async def test_a_user_pass_skips_the_review_gate(refining: Refining) -> None:
 
 async def test_a_pass_that_proposes_nothing_is_recorded_and_visible(refining: Refining) -> None:
     """ "Nothing worth keeping" is a correct answer, and the user who typed
-    `/refine` has to be able to see it."""
+    `/refine` must be able to see it."""
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps({"summary": "nothing durable here", "edits": []}))
 
@@ -306,13 +311,13 @@ async def test_a_pass_that_proposes_nothing_is_recorded_and_visible(refining: Re
 async def test_a_planner_that_returns_junk_records_it_instead_of_raising(
     refining: Refining,
 ) -> None:
-    """The consideration is what advances the cooldown, so a broken planner costs
-    a bounded number of calls rather than one per turn.
+    """The consideration advances the cooldown, so a broken planner costs a
+    bounded number of calls and not one call for each turn.
 
-    **Corrected before it is given up on** (P7-17). The reply is asked for again
-    with the violation named, and only a planner that keeps missing the shape
-    records a consideration — where before, one sentence in front of the document
-    declined the refinement outright.
+    **The reply is corrected before the planner gives up** (P7-17). The reply
+    is asked for again with the violation named. Only a planner that keeps
+    missing the shape records a consideration. Before, one sentence in front of
+    the document declined the refinement outright.
     """
     ctx, session, agent = await refining()
     requests = script(ctx, planner="I'm afraid I can't do that.")
@@ -330,12 +335,13 @@ async def test_a_planner_that_returns_junk_records_it_instead_of_raising(
 async def test_a_reply_wrapped_in_prose_is_corrected_rather_than_declined(
     refining: Refining,
 ) -> None:
-    """The failure this replaces, end to end.
+    """The failure that this replaces, end to end.
 
-    "Return only JSON" is an instruction and not a guarantee, and a model that
-    writes a confirmation sentence first used to cost the whole refinement. Now
-    the first reply is read tolerantly and, when that is not enough, asked again
-    with the specific violation — so the ordinary near-miss recovers.
+    "Return only JSON" is an instruction and not a guarantee. A model that
+    writes a confirmation sentence first used to cost the whole refinement.
+    Now the first reply is read tolerantly. When that is not enough, the reply
+    is asked for again with the specific violation. So the ordinary near miss
+    recovers.
     """
     ctx, session, agent = await refining()
     replies = iter(["Certainly! Here you go.", json.dumps(PROPOSAL)])
@@ -365,11 +371,11 @@ async def test_a_second_pass_is_refused_while_one_is_running(refining: Refining)
 async def test_a_pass_canceled_before_it_ran_does_not_block_the_next(
     refining: Refining,
 ) -> None:
-    """S6. The "already running" mark comes down however the pass's job ends.
+    """S6. The "already running" mark is removed however the job of the pass ends.
 
-    It was taken down inside the job's body, which a job canceled before it ran
-    never enters: `/refine` then answered "already running" for that session for
-    the life of the mount.
+    The mark used to be removed inside the body of the job. A job that is
+    canceled before it runs never enters the body. `/refine` then answered
+    "already running" for that session for the life of the mount.
 
     Sabotage: take the mark down in the body again, and the second `/refine` is
     refused.
@@ -388,8 +394,9 @@ async def test_a_pass_canceled_before_it_ran_does_not_block_the_next(
 
 
 async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
-    """Released, not abandoned (`jobs.forget`): the work is over, so the entry
-    goes. Otherwise an auto-refining session accretes one job per pass."""
+    """The job is released, not abandoned (`jobs.forget`): the work is over, so
+    the entry goes. Otherwise a session that refines automatically gains one job
+    for each pass."""
     ctx, session, agent = await refining()
     script(ctx, planner=json.dumps(PROPOSAL))
 
@@ -405,10 +412,10 @@ async def test_a_finished_pass_leaves_no_job_behind(refining: Refining) -> None:
 async def test_a_canceled_pass_ends_rather_than_running_on(
     refining: Refining, gate: ModelGate
 ) -> None:
-    """A job's cancellation is cooperative, so a pass that never read its token ran its
-    model call on after its scope went: past a mount's bounded teardown, which then
-    cancelled it under the test. Sabotage: await the pass without racing the token,
-    and the canceled job never ends."""
+    """The cancellation of a job is cooperative. A pass that never read its token
+    therefore continued its model call after its scope went, past the bounded
+    teardown of a mount, which then canceled it under the test. Sabotage: await
+    the pass without racing the token, and the canceled job never ends."""
     ctx, session, agent = await refining()
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     (job,) = ctx.require(JOBS).list()
@@ -422,12 +429,13 @@ async def test_a_canceled_pass_ends_rather_than_running_on(
 async def test_a_teardown_stops_an_automatic_pass_through_its_owner_without_waiting(
     refining: Refining, gate: ModelGate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A teardown does not wait on a pass: the drain leaves jobs to their owners, so it
-    returns at once, and the `dispose` behind it stops the pass through its token,
-    `canceled` though the jobs row has gone by the time it ends. Held at its model call,
-    as a pass is for minutes on a local model, it used to hold every teardown for the
-    whole drain share and then be stopped anyway. Sabotage: let `drain` wait on `leave`
-    work, or `require` the jobs row as the pass ends."""
+    """A teardown does not wait for a pass. The drain leaves jobs to their owners,
+    so it returns immediately. The `dispose` behind it stops the pass through its
+    token, and the pass ends as `canceled` although the jobs row has gone by
+    then. A pass is held at its model call, for minutes on a local model. Such a
+    pass used to hold every teardown for the whole drain share, and then it was
+    stopped anyway. Sabotage: let `drain` wait on `leave` work, or `require` the
+    jobs row as the pass ends."""
     ctx, session, _agent = await refining(turnsBetweenRefinements=1, cooldownMinutes=0)
     monkeypatch.setattr(cordis_context, "DRAIN_SECONDS", 2.0)
     turn(session)
@@ -465,8 +473,8 @@ def test_the_turn_threshold_is_what_triggers_a_pass() -> None:
 
 
 def test_a_recent_consideration_holds_the_next_one_off() -> None:
-    """The cooldown runs from the triggering event's own timestamp, so this is a
-    fold rather than a race with the wall clock."""
+    """The cooldown is measured against the timestamp of the triggering event,
+    so this is a fold and not a race with the wall clock."""
     considered = SessionEvent(type=CONSIDERED, seq=0, time=0, data={})
     minute = 60_000
     within = [considered, *_turns(30, start_ms=minute, step_ms=minute // 2)]
@@ -478,13 +486,14 @@ def test_a_recent_consideration_holds_the_next_one_off() -> None:
 
 async def test_a_refinement_itself_starts_the_cooldown(refining: Refining) -> None:
     """An explicit `/refine` should quiet the automatic pass exactly as a
-    declined review does — both are "we just looked at this".
+    declined review does. Both mean "we just looked at this".
 
-    The automatic pass is off so that `/refine` is the only pass: its durable
-    `command/run` is flushed before the body runs, and the thirty turns below
-    would otherwise start an automatic pass in that await — which the command
-    then correctly reports as already running. `due` is the automatic pass's own
-    question, so it still answers whether one would fire.
+    The automatic pass is off so that `/refine` is the only pass. The durable
+    `command/run` of the command is flushed before the body runs. Without the
+    setting, the thirty turns below would start an automatic pass in that
+    await, and the command would then correctly report that a pass is already
+    running. `due` is the question that the automatic pass asks, so it still
+    answers whether one would fire.
     """
     ctx, session, agent = await refining(autoRefine=False)
     script(ctx, planner=json.dumps(PROPOSAL))
@@ -498,12 +507,13 @@ async def test_a_refinement_itself_starts_the_cooldown(refining: Refining) -> No
 
 
 def test_a_compaction_triggers_a_pass_on_its_own() -> None:
-    """The one moment the conversation gets *shorter*: what the summary dropped is
-    what the harness should have kept, and after it nobody can read it."""
-    # The compaction's own record, not a bare surface `replace`: `input-offload`
-    # (P4-02) also replaces on the surface, and a paste being relocated teaches
-    # the harness nothing. Written as this event because that is what
-    # `compaction-summarize` appends beside its replacement (P4-03).
+    """The one moment when the conversation gets *shorter*. What the summary
+    dropped is what the harness should have kept, and after the compaction
+    nobody can read it."""
+    # This is the record that compaction itself writes, not a bare surface
+    # `replace`. `input-offload` (P4-02) also replaces on the surface, and a
+    # relocated paste teaches the harness nothing. The test writes this event
+    # because `compaction-summarize` appends it beside its replacement (P4-03).
     compaction = SessionEvent(type="compaction/summarized", seq=0, time=0, data={})
     assert due(_Log([compaction, *_turns(2, start_ms=1_000)]), turns_between=25) == "compaction"
 
@@ -512,8 +522,9 @@ def test_a_compaction_triggers_a_pass_on_its_own() -> None:
 
 
 async def test_auto_refine_fires_at_the_threshold_and_stays_local(refining: Refining) -> None:
-    """H7. Local, always: an automatic global edit would put an approval prompt in
-    front of a user who asked for nothing, about a change reaching every project.
+    """H7. The pass is always local. An automatic global edit would put an
+    approval prompt in front of a user who asked for nothing, about a change
+    that reaches every project.
     """
     ctx, session, _agent = await refining(turnsBetweenRefinements=3, cooldownMinutes=0)
     script(ctx, review=YES, planner=json.dumps(PROPOSAL))
@@ -534,10 +545,11 @@ async def test_auto_refine_fires_at_the_threshold_and_stays_local(refining: Refi
 async def test_only_a_turns_end_costs_the_auto_refine_listener_a_task(
     refining: Refining,
 ) -> None:
-    """`session/event` fires for every event of every session, each streamed chunk
-    included, and an async listener is a task each time. The auto-refine listener is
-    sync until a turn ends, so anything else costs it no task, and a turn's end still
-    starts its pass. Sabotage: consider every event, not only a turn's end."""
+    """`session/event` fires for every event of every session, including each
+    streamed chunk, and an async listener is a task each time. The auto-refine
+    listener is sync until a turn ends. So any other event costs it no task, and
+    the end of a turn still starts its pass. Sabotage: consider every event, not
+    only a turn's end."""
     ctx, session, _agent = await refining(turnsBetweenRefinements=1, cooldownMinutes=0)
     script(ctx, review=YES, planner=json.dumps(PROPOSAL))
     await settle_background(ctx)
@@ -567,9 +579,9 @@ async def test_a_declined_review_costs_one_cheap_call(refining: Refining) -> Non
 
 
 async def test_a_veto_stops_it_before_any_model_call(refining: Refining) -> None:
-    """`harness/before-refine` runs first, so a refusal spends no tokens — and is
-    recorded, because a refusal nobody can see is indistinguishable from a pass
-    that never fired."""
+    """`harness/before-refine` runs first, so a refusal spends no tokens. The
+    refusal is recorded, because a refusal that nobody can see looks the same as
+    a pass that never fired."""
     ctx, session, agent = await refining(turnsBetweenRefinements=1, cooldownMinutes=0)
     script(ctx, review=YES, planner=json.dumps(PROPOSAL))
 
@@ -584,8 +596,8 @@ async def test_a_veto_stops_it_before_any_model_call(refining: Refining) -> None
     (auto,) = [event for event in session.events if event.type == CONSIDERED]
     assert auto.data["reason"] == "vetoed: this deployment does not refine (trigger: turns)"
 
-    # And the trigger is on the payload, so a listener can tell the automatic
-    # passes from a human's `/refine`.
+    # The trigger is also on the payload, so a listener can tell the automatic
+    # passes from the `/refine` of a user.
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await settle_background(ctx)
     assert ctx.require(LLM_FAKE).requests == []
@@ -602,7 +614,7 @@ async def test_auto_refine_can_be_turned_off(refining: Refining) -> None:
         await settle_background(ctx)
 
     assert ctx.require(LLM_FAKE).requests == []
-    # The command still works: turning the automatic pass off is not turning the
+    # The command still works. Turning the automatic pass off does not turn the
     # harness off.
     await ctx.require(COMMANDS).dispatch("/refine", session=session, agent=agent)
     await settle_background(ctx)

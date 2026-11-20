@@ -1,29 +1,30 @@
-"""Reading prime-agent's own session fixtures, and shaping them for comparison.
+"""Read the session fixtures of prime-agent, and shape them for comparison.
 
-P3-23 asks what a prime-agent trajectory looks like *under pH's surface*. It
-cannot be answered by re-running one — there is no model, no key and no network
-in a test — so it is answered structurally: read the recorded trajectory, reduce
-it to the facts the port could change (turn counts, tool-call shapes), and state
-which differences are expected and which are not.
+P3-23 asks what a prime-agent trajectory looks like *under the surface of pH*.
+Re-running a trajectory cannot answer that, because a test has no model, no key
+and no network. The question is therefore answered structurally: read the
+recorded trajectory, reduce it to the facts that the port could change (turn
+counts, tool-call shapes), and state which differences are expected and which
+are not.
 
-The fixtures live in `sources/`, a vendored reference checkout that is
-deliberately **not part of this repo** — it is another project's code, and
-copying 1.5 MB of it here to make a test run is a redistribution decision this
-repository has no reason to take.
+The fixtures are in `sources/`, a vendored reference checkout that is
+deliberately **not part of this repo**. It is the code of another project.
+Copying 1.5 MB of it here to make a test run would be a redistribution decision
+that this repository has no reason to take.
 
-**So the reduction is checked in and the corpus is not.** `shapes.json` holds
-what these tests actually assert on — the record-type, role and tool-name
-tallies — in 779 bytes of our own derivation rather than anyone else's source.
-The tests read it always, which is what makes them run on a clean clone and in
-CI; where the vendored checkout *does* exist, `test_fixture_replay` additionally
-re-derives from the raw JSONL and requires the two to agree, so the committed
-reduction cannot drift from the corpus it claims to summarize.
+**The reduction is therefore checked in, and the corpus is not.** `shapes.json`
+holds what these tests actually assert on: the tallies of record types, roles
+and tool names. It is 780 bytes of our own derivation, and not the source of
+anyone else. The tests always read it, so they run on a clean clone and in CI.
+Where the vendored checkout *does* exist, `test_fixture_replay` also derives the
+reduction again from the raw JSONL and requires the two to agree. The committed
+reduction therefore cannot drift from the corpus that it claims to summarize.
 
-That split is the whole point. Before it, every test in this module skipped on
-every runner — `sources/` has no tracked files — so P3-23's claim that "nothing
-in a recorded trajectory is unrepresentable here" was guarded only on a machine
-that happened to have the checkout. A guard that reads as enforced and is not is
-worse than none.
+That split is the purpose. Before it, every test in `test_fixture_replay`
+skipped on every runner, because `sources/` has no tracked files. The claim of
+P3-23 that "nothing in a recorded trajectory is unrepresentable here" was
+guarded only on a machine that happened to have the checkout. A guard that reads
+as enforced and is not enforced is worse than no guard.
 
 @module fixture_replay
 """
@@ -53,20 +54,23 @@ FIXTURE_DIR = (
 FIXTURES = ("before-compaction.jsonl", "large-session.jsonl")
 
 SHAPES_FILE = Path(__file__).with_name("shapes.json")
-"""The committed reduction of those fixtures — what the tests assert on.
+"""The committed reduction of those fixtures. The tests assert on it.
 
-Regenerate with `python -m fixture_replay` from this directory, which requires
-the vendored checkout; the test suite then checks the result still matches."""
+Regenerate it with `python -m fixture_replay` from this directory. That needs
+the vendored checkout. The test suite then checks that the result still
+matches."""
 
 
 MISSING = "?"
-"""What an absent type, role or tool name counts as. One sentinel, so a
-malformed record is visible in the tally rather than three different blanks."""
+"""What an absent type, role or tool name is counted as. There is one sentinel,
+so a malformed record is visible in the tally and does not appear as three
+different blanks."""
 
 
 @dataclass(slots=True)
 class TrajectoryShape:
-    """What one recorded trajectory is made of, at the grain the port changes."""
+    """The contents of one recorded trajectory, at the level of detail that the
+    port changes."""
 
     name: str
     record_types: Counter[str] = field(default_factory=Counter)
@@ -90,14 +94,16 @@ def available_fixtures() -> list[Path]:
 def read_shape(path: Path) -> TrajectoryShape:
     """Reduce one prime-agent JSONL session to its shape.
 
-    Tolerant of records this reader does not know: the fixtures are another
-    project's format at a version this port does not pin, so an unreadable line
-    is skipped rather than fatal — the same rule the harness fold uses.
+    The reader tolerates records that it does not know. The fixtures are in the
+    format of another project, at a version that this port does not pin. An
+    unreadable line is therefore skipped and is not fatal, which is the same
+    rule that the harness fold uses.
     """
     shape = TrajectoryShape(name=path.name)
-    # Streamed, not `read_text().splitlines()`: the larger fixture is 2.3 MB and
-    # the eager form holds the decoded string *and* the line list at once —
-    # 16.7 MB peak against 0.6 MB, for no gain in speed.
+    # The file is streamed, not read with `read_text().splitlines()`. The larger
+    # fixture is 2.3 MB, and the eager form holds the decoded string *and* the
+    # line list at the same time: a peak of 16.7 MB against 0.6 MB, for no gain
+    # in speed.
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
             text = line.strip()
@@ -122,11 +128,12 @@ def read_shape(path: Path) -> TrajectoryShape:
 
 
 def to_wire(shapes: list[TrajectoryShape]) -> str:
-    """The reduction as the committed JSON, sorted so a regeneration diffs cleanly.
+    """The reduction as the committed JSON, sorted so that a regeneration gives a
+    clean diff.
 
-    `sort_keys` and a trailing newline because this file is reviewed as a diff:
-    a tally whose keys moved would otherwise look like a change in the corpus
-    when it is a change in dictionary ordering.
+    `sort_keys` and a trailing newline are used because this file is reviewed as
+    a diff. Without them, a tally whose keys moved would look like a change in
+    the corpus when it is a change in dictionary order.
     """
     return (
         json.dumps(
@@ -147,11 +154,11 @@ def to_wire(shapes: list[TrajectoryShape]) -> str:
 
 
 def recorded_shapes() -> list[TrajectoryShape]:
-    """The committed reduction, read back. Available on a clean clone.
+    """The committed reduction, read back. It is available on a clean clone.
 
-    This is what every assertion in `test_fixture_replay` runs against, so those
-    assertions run everywhere. The raw corpus is consulted by exactly one test —
-    the one that checks this file still describes it.
+    Every assertion in `test_fixture_replay` runs against this, so those
+    assertions run everywhere. Exactly one test reads the raw corpus: the test
+    that checks that this file still describes it.
     """
     payload = json.loads(SHAPES_FILE.read_text(encoding="utf-8"))
     return [

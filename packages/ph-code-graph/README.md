@@ -378,9 +378,9 @@ phern --profile rlm-indexed --provider llama --model <model> --mode tui
 ```
 
 This package registers a `ph.bundles` entry point. That lets `phern` compose
-the profile without depending on this distribution. It also means that an
-install without this distribution sees no `rlm-indexed`, and does not see one
-that fails at mount.
+the profile without importing this package. It also means that an install
+without this distribution sees no `rlm-indexed`, and does not see one that
+fails at mount.
 
 ## It is a name-based graph, and it says so
 

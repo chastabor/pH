@@ -223,7 +223,7 @@ class FsPermissions:
     """The resolved policy of the row, published as `ctx.fs_permissions`.
 
     The policy is provided as a service and not kept in a closure. The reach
-    sentence is only useful if something can read it back, and `phern` cannot
+    sentence is only useful if something can read it back, and `ph_app` cannot
     import this package. This was the fourth row to need that, and that need is
     why `ctx.diagnostics` (P4-12) exists. It has the shape of `ctx.tui_status`
     without the `Session`. So `phern doctor` prints `reach` and does not know

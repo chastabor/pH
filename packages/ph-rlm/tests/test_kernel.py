@@ -1,43 +1,44 @@
 """The runtime, against a real child process (D1-D5, C1, C3, C10, F4).
 
-These are the tests that would have been prime-agent's own suite, had D19 not
-replaced its runtime. Nothing here is mocked: each test spawns CPython, hands it
+These tests would have been the suite of prime-agent itself, if D19 had not
+replaced its runtime. Nothing here is mocked. Each test spawns CPython, gives it
 fd 3, and drives the protocol, because every property under test is a property
 of the process boundary.
 
 ## Why guest stdout is coalesced into ~8 KiB frames
 
-A frame per `write` is quadratic twice over. `print` issues two writes (the text
-and the newline), and each becoming a `channel.send` means CPython 3.12's
-`_SelectorSocketTransport.write` calls `get_write_buffer_size()` —
-`sum(map(len, self._buffer))` over the pending deque — and a cell that never awaits
-never lets the transport drain, so that sum grows with everything written so far.
-The host then pays its own **~25 µs** of per-frame work.
+One frame for each `write` is quadratic, in two ways. `print` issues two writes
+(the text and the newline). If each write becomes a `channel.send`, then on
+CPython 3.12 `_SelectorSocketTransport.write` calls `get_write_buffer_size()`,
+which is `sum(map(len, self._buffer))` over the pending deque. A cell that never
+awaits never lets the transport drain, so that sum grows with everything written
+so far. The host then also pays its own **~25 µs** of work for each frame.
 
-Measured: `for i in range(10_000): print(i)` took **2.1-2.6 s**; buffered into
-~8 KiB frames it is **~2 ms**.
+Measured: `for i in range(10_000): print(i)` took **2.1-2.6 s**. Buffered into
+~8 KiB frames, it takes **~2 ms**.
 
 ## Why the frame buffer is a `bytearray` scanned from its tail
 
-With `bytes` and `+=`, a multi-megabyte frame copies the whole buffer per 64 KiB
-chunk and re-scans it for a newline. A **16 MiB snapshot spent 834 ms of 1160 ms**
-doing exactly that; appending to a `bytearray` and searching from the previous
-length makes both linear — **1160 ms -> 221 ms**.
+With `bytes` and `+=`, a frame of several megabytes copies the whole buffer for
+each 64 KiB chunk and scans it again for a newline. A **16 MiB snapshot spent
+834 ms of 1160 ms** on exactly that. Appending to a `bytearray` and searching
+from the previous length makes both linear: **1160 ms -> 221 ms**.
 
 ## Two caps that stop at the cap
 
-**No round trip through JSON in `_json_safe`.** `encode` is about to serialize the
-frame anyway; doing it twice cost **2.8 ms against 1.2 ms for a 1 MiB result**.
+**No round trip through JSON when `_serve_call` answers a call.** `encode`
+serializes the frame next. To serialize it twice cost **2.8 ms against 1.2 ms
+for a 1 MiB result**.
 
 **`_encode_value` never builds what it is about to discard.** `json.dumps` of a
-1M-element list took **40 ms and `repr` another 37 ms — 77 ms to produce 64 KiB**,
-and "end the cell with `df`" is exactly how models write cells.
+list of 1M elements took **40 ms, and `repr` another 37 ms: 77 ms to produce
+64 KiB**. To end the cell with `df` is exactly how models write cells.
 
 ## Why sends are serialized behind `_send_lock`
 
-Without it, contention lands in the `OSError`/`ClosedResourceError` branch as
-`BusyResourceError` and is reported as the child having exited — **eight concurrent
-replies were enough to "kill" a perfectly healthy kernel**.
+Without the lock, contention arrives in the `OSError`/`ClosedResourceError`
+branch as `BusyResourceError`, and is reported as an exit of the child. **Eight
+concurrent replies were enough to "kill" a perfectly healthy kernel.**
 """
 
 from __future__ import annotations
@@ -76,11 +77,12 @@ MakeKernel = Callable[..., Any]
 
 
 def tools(**handlers: Callable[..., Any]) -> CodeBindingNamespace:
-    """A `tools` namespace whose bindings are the handlers given.
+    """A `tools` namespace whose bindings are the given handlers.
 
-    Deliberately not the real `DispatchBridge`: this file tests the *runtime's*
-    half of C1 — that a call reaches a host closure and its answer reaches the
-    program — and `test_governance.py` tests the pipeline's half.
+    This is deliberately not the real `DispatchBridge`. This file tests the half
+    of C1 that belongs to the *runtime*: a call reaches a host closure, and its
+    answer reaches the program. `test_governance_gate.py` tests the half that
+    belongs to the pipeline.
     """
     return namespace("tools", **handlers)
 
@@ -102,7 +104,7 @@ async def test_a_trailing_expression_is_the_cells_value(make_kernel: MakeKernel)
 
 
 async def test_the_namespace_persists_across_cells(make_kernel: MakeKernel) -> None:
-    """C1's persistence, and the reason the seam demands snapshots (D6)."""
+    """The persistence of C1, and the reason why the seam demands snapshots (D6)."""
     kernel = await make_kernel()
     await kernel.run("import math\ncounter = 1\ndef bump(): return counter + 1", (), None)
     result = await kernel.run("counter = bump()\n(counter, math.floor(2.5))", (), None)
@@ -112,7 +114,7 @@ async def test_the_namespace_persists_across_cells(make_kernel: MakeKernel) -> N
 async def test_a_magic_is_a_syntax_error_that_names_the_governed_route(
     make_kernel: MakeKernel,
 ) -> None:
-    """D2. The magic *was* the bypass, so the message is the tool, not an apology."""
+    """D2. The magic *was* the bypass, so the message names the tool and does not apologize."""
     kernel = await make_kernel()
     result = await kernel.run("%%bash\necho hello", (), None)
     assert result.error is not None
@@ -135,7 +137,7 @@ async def test_a_cell_traceback_shows_the_cell_and_not_the_runner(
 
 
 async def test_output_is_capped_with_the_shared_marker(make_kernel: MakeKernel) -> None:
-    """D4: the cap holds and the marker is the one the host would have written."""
+    """D4: the cap holds, and the marker is the one that the host would have written."""
     kernel = await make_kernel(max_log_bytes=2_048)
     result = await kernel.run("print('x' * 50_000)", (), None)
     assert result.truncated is True
@@ -157,15 +159,16 @@ async def test_a_cpu_bomb_hits_its_budget_and_the_kernel_survives(
 ) -> None:
     """D3, plus the property that makes a *persistent* kernel possible.
 
-    `RLIMIT_CPU` is cumulative over the process, so the budget is re-armed at
+    `RLIMIT_CPU` is cumulative over the process, so the budget is armed again at
     each run. Without that, this test would pass and the *next* cell would die
-    on a limit this one spent.
+    on a limit that this cell used up.
     """
     kernel = await make_kernel(cpu_seconds=1)
     result = await kernel.run("while True:\n    pass", (), None)
     assert result.error is not None
     assert "CPU budget" in result.error
-    # Re-armed: the kernel is still usable, which is the whole point.
+    # The budget was armed again. The kernel is still usable, which is the
+    # purpose.
     assert (await kernel.run("1 + 1", (), None)).value == 2
 
 
@@ -173,28 +176,28 @@ async def test_a_cpu_bomb_hits_its_budget_and_the_kernel_survives(
 async def test_a_cpu_bomb_on_a_worker_thread_costs_the_cell_and_not_the_guest(
     make_kernel: MakeKernel,
 ) -> None:
-    """The budget must cost one run, wherever the CPU was burned (F1).
+    """The budget must cost one run, wherever the CPU was used (F1).
 
-    `SIGXCPU` was a raising `signal.signal` handler, and a raising handler
-    unwinds from wherever the **main thread** happens to be. When the cell is on
-    that thread the raise lands in the cell, which is the whole design. When the
-    burn is on a worker the main thread is sitting in the loop's `select()`, so
-    the exception came out of `asyncio`'s own internals and the guest exited —
-    the namespace, the session's kernel and every later cell, for a limit that is
-    supposed to end one run.
+    `SIGXCPU` had a `signal.signal` handler that raised, and such a handler
+    unwinds from wherever the **main thread** is. When the cell is on that
+    thread, the raise lands in the cell, which is the design. When a worker uses
+    the CPU, the main thread waits in the `select()` of the loop. The exception
+    then came out of the internals of `asyncio`, and the guest exited. The
+    namespace, the kernel of the session, and every later cell were lost for a
+    limit that should end one run.
 
     The handler now asks where the cell is before it raises, and cancels the run
-    task when the answer is "not here". Both routes report the same `cpu` error;
-    what differs is what they are allowed to interrupt.
+    task when the answer is "not here". Both routes report the same `cpu` error.
+    They differ only in what they are allowed to interrupt.
     """
 
     kernel = await make_kernel(cpu_seconds=1)
 
-    # Under `fail_after` because the old failure is a *hang*, not a wrong
-    # answer: the main thread died of the raise, and the worker it could not
-    # interrupt kept the process alive — so the channel never reached EOF and
-    # the host, which has no wall clock on a run, waited for a `done` frame no
-    # one was left to send.
+    # This runs under `fail_after`, because the old failure is a *hang* and not a
+    # wrong answer. The main thread died of the raise, and the worker that it
+    # could not interrupt kept the process alive. The channel therefore never
+    # reached EOF. The host has no wall clock for a run, so it waited for a
+    # `done` frame that nothing was left to send.
     with anyio.fail_after(60):
         result = await kernel.run(
             "import asyncio\n"
@@ -208,8 +211,8 @@ async def test_a_cpu_bomb_on_a_worker_thread_costs_the_cell_and_not_the_guest(
 
     assert result.error is not None
     assert "CPU budget" in result.error, result.error
-    # The guest is still serving — which is the regression. A restarted kernel
-    # would say so in the next run's logs.
+    # The guest still serves, which is what this regression test checks. A
+    # restarted kernel would say so in the logs of the next run.
     revived = await kernel.run("'alive'", (), None)
     assert revived.value == "alive"
     assert RESET_NOTICE not in revived.logs, "the guest died of the budget"
@@ -234,7 +237,7 @@ async def test_a_memory_bomb_hits_its_address_space_limit(make_kernel: MakeKerne
 async def test_cancel_aborts_a_waiting_cell_and_the_next_run_succeeds(
     make_kernel: MakeKernel,
 ) -> None:
-    """D5. No control-channel workaround: fd 3 is not the channel the run occupies."""
+    """D5. No workaround for the control channel: fd 3 is not the channel that the run occupies."""
 
     from ph.cancel import CancelToken
 
@@ -257,12 +260,13 @@ async def test_cancel_aborts_a_waiting_cell_and_the_next_run_succeeds(
 async def test_a_spinning_cell_is_killed_after_the_grace_period(
     make_kernel: MakeKernel,
 ) -> None:
-    """The case neither cooperative route can reach.
+    """The case that neither cooperative route can reach.
 
-    A cell spinning in Python starves the guest's loop, so the `cancel` frame is
-    never read and the `SIGINT` callback never runs. The host escalates. What is
-    being asserted is the *honesty* of the outcome: the namespace is gone and the
-    result says so, rather than the kernel wedging until the turn times out.
+    A cell that spins in Python starves the loop of the guest, so the `cancel`
+    frame is never read and the `SIGINT` callback never runs. The host
+    escalates. The test asserts that the outcome is reported *truthfully*: the
+    namespace is gone and the result says so. The kernel does not stay stuck
+    until the turn times out.
     """
 
     from ph.cancel import CancelToken
@@ -281,7 +285,8 @@ async def test_a_spinning_cell_is_killed_after_the_grace_period(
 
     assert result.error is not None
     assert "namespace is gone" in result.error
-    # And the session continues: the next cell gets a fresh kernel and is told.
+    # The session also continues: the next cell gets a fresh kernel and is told
+    # so.
     revived = await kernel.run("'back'", (), None)
     assert revived.value == "back"
     assert RESET_NOTICE in revived.logs
@@ -290,26 +295,30 @@ async def test_a_spinning_cell_is_killed_after_the_grace_period(
 async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
     make_kernel: MakeKernel,
 ) -> None:
-    """The ladder must not wait on the channel it is trying to give up on (F2).
+    """The abort ladder must not wait on the channel that it is trying to abandon
+    (F2).
 
-    One background call, a reply too big for the socket buffer, and a cell that
-    then spins: the guest's loop is starved so it drains nothing, the host's
-    write fills the buffer and parks holding `_send_lock`, and every later frame
-    queues behind it. That is the state the stop ladder exists for — and the
-    ladder went through the same lock. `_watch` asked for the cancel frame,
-    blocked on the lock, and never returned to the loop that times the grace, so
-    the escalation to `SIGKILL` was unreachable. `aclose` queued behind it too,
-    which is a kernel that cannot even be shut down.
+    The setup is one background call, a reply too big for the socket buffer, and
+    a cell that then spins. The loop of the guest is starved, so it drains
+    nothing. The write of the host fills the buffer and waits while it holds
+    `_send_lock`, and every later frame queues behind it. That is the state that
+    the abort ladder exists for, and the ladder went through the same lock.
+    `_watch` asked for the cancel frame, blocked on the lock, and never returned
+    to the loop that times the grace, so the escalation to `SIGKILL` could not
+    be reached. `aclose` queued behind it too, so the kernel could not even be
+    shut down.
 
-    The clock now starts before the ask and the ask runs in its own task, so the
-    grace expires on schedule whatever the channel is doing. Under `fail_after`
-    because the regression is a hang: without the fix nothing here ever returns.
+    The clock now starts before the ask, and the ask runs in its own task, so
+    the grace expires on schedule whatever the channel is doing. The test runs
+    under `fail_after` because the regression is a hang: without the fix,
+    nothing here ever returns.
     """
 
     from ph.cancel import CancelToken
 
-    # Comfortably past a unix socket's buffer, so the reply cannot be handed off
-    # in one write and the host is still mid-frame when the cancel lands.
+    # Well past the buffer of a unix socket. The reply therefore cannot be handed
+    # off in one write, and the host is still in the middle of the frame when the
+    # cancel lands.
     huge = "x" * (8 * 1024 * 1024)
 
     async def big(**_arguments: object) -> str:
@@ -320,8 +329,8 @@ async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
     token = CancelToken()
     program = (
         "import asyncio\n"
-        # Issued from a background task, so the cell does not await the reply it
-        # is about to stop reading.
+        # The call is issued from a background task, so the cell does not await
+        # the reply that it is about to stop reading.
         "asyncio.get_running_loop().create_task(tools.big())\n"
         "await asyncio.sleep(0)\n"
         "while True:\n"
@@ -340,7 +349,7 @@ async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
 
     assert result.error is not None
     assert "namespace is gone" in result.error, result.error
-    # And the session survives it, which is the reason the ladder has a last rung.
+    # The session survives, which is the reason why the ladder has a last step.
     revived = await kernel.run("'back'", (), None)
     assert revived.value == "back"
 
@@ -348,22 +357,23 @@ async def test_a_cell_blocked_behind_a_large_reply_is_still_killed(
 async def test_a_namespace_larger_than_one_frame_is_still_snapshotted(
     make_kernel: MakeKernel,
 ) -> None:
-    """The per-variable cap and the per-frame cap have to be the same cap (F3).
+    """The per-variable cap and the per-frame cap must be the same cap (F3).
 
-    `max_snapshot_bytes` bounds each *value* the guest encodes, and the guest put
-    every changed value in one `snapshot` frame — so three variables just under
-    the cap made a frame three times over it. The host refuses an oversized
-    frame, and rightly: a peer writing megabytes with no newline is how a hostile
-    child would try to exhaust the reader (C10). But that made an ordinary
-    namespace indistinguishable from an attack — the channel closed, the model
-    was told the runtime had exited, and the namespace was gone with no mention
-    of a snapshot anywhere in the account.
+    `max_snapshot_bytes` limits each *value* that the guest encodes, and the
+    guest put every changed value in one `snapshot` frame. Three variables just
+    under the cap therefore made a frame three times over it. The host refuses
+    an oversized frame, and that is correct: a peer that writes megabytes with
+    no newline is how a hostile child would try to exhaust the reader (C10). But
+    an ordinary namespace then could not be told from an attack. The channel
+    closed, the model was told that the runtime had exited, and the namespace
+    was gone. Nothing in the account mentioned a snapshot.
 
-    The property is the *ratio* between the two caps, and it is now asserted at
-    whatever `max_snapshot_bytes` the kernel booted with rather than by lowering
-    the host's constant to meet it (M3): `frame_cap` derives the reader's ceiling
-    from the limit, so a deployment that raises one raises the other. The
-    companion below pins that derivation on its own.
+    The property is the *ratio* between the two caps. It is now asserted at
+    whatever `max_snapshot_bytes` the kernel booted with, and not by lowering
+    the constant of the host to meet it (M3). `frame_cap` derives the ceiling of
+    the reader from the limit, so a deployment that raises one raises the other.
+    The companion test below checks that derivation separately:
+    `test_the_readers_ceiling_follows_the_limit_the_kernel_booted_with`.
     """
     kernel = await make_kernel(max_snapshot_bytes=200 * 1024)
 
@@ -372,8 +382,8 @@ async def test_a_namespace_larger_than_one_frame_is_still_snapshotted(
     )
 
     assert result.error is None, result.error
-    # The kernel is still the one that ran the cell: a refused frame closed the
-    # channel, and the next run would have said so.
+    # The kernel is still the one that ran the cell. A refused frame would have
+    # closed the channel, and the next run would have said so.
     revived = await kernel.run("v0 == 'x' * 100_000 and v2 == 'x' * 100_000", (), None)
     assert revived.value is True
     assert RESET_NOTICE not in revived.logs, "the namespace was lost to its own snapshot"
@@ -382,20 +392,20 @@ async def test_a_namespace_larger_than_one_frame_is_still_snapshotted(
 async def test_a_task_a_cell_left_behind_cannot_call_into_the_next_run(
     make_kernel: MakeKernel,
 ) -> None:
-    """A run owns its calls, and the namespace outliving the cell is not the same
-    thing as its tasks outliving it (F4).
+    """A run owns its calls. The namespace outlives the cell, but that does not
+    mean that the tasks of the cell outlive it (F4).
 
-    The guest is persistent, so the loop keeps running between programs: a task
-    the cell started with `asyncio.create_task` and never awaited goes on calling
-    bindings after its run has settled. The host had no way to tell — a `call`
-    frame said which *call* it was, never which *program* — so the stray was
-    served against whichever run was open next. It spent that run's call budget,
-    was recorded under its dispatch id, and had its approval decided for a turn
-    that had nothing to do with it.
+    The guest is persistent, so the loop keeps running between programs. A task
+    that the cell started with `asyncio.create_task` and never awaited continues
+    to call bindings after its run has settled. The host could not tell: a
+    `call` frame said which *call* it was, and never which *program*. The stray
+    call was therefore served against whichever run was open next. It used the
+    call budget of that run, was recorded under its dispatch id, and had its
+    approval decided for a turn that had nothing to do with it.
 
-    The first cell leaves a task looping on a binding; the second cell calls the
-    same binding once. What must reach the second run is its own call and nothing
-    else.
+    The first cell leaves a task that loops on a binding. The second cell calls
+    the same binding one time. Only the call of the second run itself must reach
+    that run.
     """
 
     seen: list[str] = []
@@ -412,10 +422,11 @@ async def test_a_task_a_cell_left_behind_cannot_call_into_the_next_run(
         "async def keep_calling() -> None:\n"
         "    while True:\n"
         "        try:\n"
-        # Swallowing the cancel on purpose: a well-behaved task is ended by the
-        # guest at settle, and this test is about the one that is not. It is what
-        # makes the *host's* refusal the thing under test rather than the guest's
-        # cancellation — and it is the case the run stamp exists for.
+        # The cancel is swallowed on purpose. The guest ends a well-behaved task
+        # at settle, and this test is about a task that is not well-behaved.
+        # Because of that, the thing under test is the refusal of the *host* and
+        # not the cancellation of the guest. It is also the case that the run
+        # stamp exists for.
         "            await tools.note(tag='stray')\n"
         "            await asyncio.sleep(0.01)\n"
         "        except asyncio.CancelledError:\n"
@@ -429,7 +440,7 @@ async def test_a_task_a_cell_left_behind_cannot_call_into_the_next_run(
     assert first.value == "done", first.error
     assert "stray" in seen, "the background task never got going, so this proves nothing"
 
-    # Long enough that a surviving task would have called many times over.
+    # Long enough that a surviving task would have called many times.
     await anyio.sleep(0.2)
     seen.clear()
     second = await kernel.run("await tools.note(tag='mine')", (bindings,), None)
@@ -444,7 +455,7 @@ async def test_a_task_a_cell_left_behind_cannot_call_into_the_next_run(
 async def test_a_cell_that_kills_the_process_costs_the_namespace_not_the_session(
     make_kernel: MakeKernel,
 ) -> None:
-    """D1. The namespace is unrecoverable; saying so is what stops a wasted turn."""
+    """D1. The namespace cannot be recovered. Saying so prevents a wasted turn."""
     kernel = await make_kernel()
     await kernel.run("keep = 'this'", (), None)
     result = await kernel.run("import os\nos._exit(1)", (), None)
@@ -524,12 +535,12 @@ async def test_concurrent_binding_calls_overlap(make_kernel: MakeKernel) -> None
 async def test_a_refusal_ends_the_run_and_the_program_cannot_catch_it(
     make_kernel: MakeKernel,
 ) -> None:
-    """C3, the divergence from dsh that the whole containment argument rests on.
+    """C3, the divergence from dsh that the whole containment argument depends on.
 
-    A program that can `except` a refusal can route around it — retry with a
-    different path, fall back to `subprocess`. So the refusal is not an
-    exception the cell is offered; it ends the run, and the tool call fails with
-    the refusal in it.
+    A program that can `except` a refusal can route around it: it can retry with
+    a different path, or fall back to `subprocess`. The refusal is therefore not
+    an exception that the cell is offered. It ends the run, and the tool call
+    fails with the refusal in it.
     """
 
     async def refused(**_arguments: object) -> NoReturn:
@@ -555,15 +566,17 @@ async def test_a_refusal_ends_the_run_and_the_program_cannot_catch_it(
 async def test_a_refused_cell_is_stopped_before_it_can_write_anyway(
     make_kernel: MakeKernel, tmp_path: Path
 ) -> None:
-    """C3's actual enforcement, which is the host's and not the guest's.
+    """The actual enforcement of C3, which belongs to the host and not to the
+    guest.
 
-    `RunStopped` makes a *well-behaved* cell unwind, and this cell is not one: it
-    swallows `BaseException` and then writes a file with raw `pathlib`, which no
-    waterfall can reach. Reporting the refusal afterwards would be a tool call
-    that failed on paper while the side effect happened anyway — so the host
-    fires the run-scoped abort the plan's C3 row names, and the write never runs.
+    `RunStopped` makes a *well-behaved* cell unwind, and this cell is not one.
+    It swallows `BaseException` and then writes a file with raw `pathlib`, which
+    no waterfall can reach. To report the refusal afterwards would be a tool
+    call that failed on paper while the side effect happened anyway. The host
+    therefore fires the run-scoped abort that the C3 row of the plan names, and
+    the write never runs.
 
-    The `sleep` is the window: without the abort the write lands, and this test
+    The `sleep` is the window. Without the abort the write lands, and this test
     fails by finding the file.
     """
     target = tmp_path / "written-after-the-refusal.txt"
@@ -588,12 +601,12 @@ async def test_a_refused_cell_is_stopped_before_it_can_write_anyway(
             None,
         )
     assert not target.exists(), "the refusal did not stop the program"
-    # And the session survives the abort: only that cell was ended.
+    # The session survives the abort. Only that cell was ended.
     assert (await kernel.run("'still here'", (namespace,), None)).value == "still here"
 
 
 async def test_a_failed_call_is_the_programs_to_handle(make_kernel: MakeKernel) -> None:
-    """C3's other half: a *failure* keeps dsh's semantics and stays catchable."""
+    """The other half of C3: a *failure* keeps the semantics of dsh and can still be caught."""
 
     async def failing(**_arguments: object) -> NoReturn:
         raise ToolCallError("read", "no such file")
@@ -614,15 +627,16 @@ async def test_a_failed_call_is_the_programs_to_handle(make_kernel: MakeKernel) 
 
 
 async def test_an_uncaught_failure_stops_the_calls_after_it(make_kernel: MakeKernel) -> None:
-    """C14 — inside a program, "B needs A" is just `await`.
+    """C14: inside a program, "B needs A" is just `await`.
 
-    The tool pipeline orders calls but never conditions one on another's
-    outcome: an exclusive call is a barrier that runs whether or not the calls
-    before it succeeded. That is left as it is, on purpose — in one step a model
-    cannot feed A's result into B's arguments, so only effect-ordering is at
-    stake, where B after a failed A is often what shows what broke. What makes
-    leaving it right is this: where a model does mean "B only if A succeeded",
-    a program says so, because a failed call raises and nothing after it runs.
+    The tool pipeline orders calls, but it never makes one call conditional on
+    the outcome of another. An exclusive call is a barrier that runs whether or
+    not the calls before it succeeded. That is left as it is, on purpose. In one
+    step, a model cannot feed the result of A into the arguments of B, so only
+    the order of effects is at stake. There, B after a failed A is often what
+    shows what broke. This is what makes that decision correct: where a model
+    does mean "B only if A succeeded", a program says so, because a failed call
+    raises and nothing after it runs.
 
     Sabotage: have a failed dispatch return its message instead of raising, and
     `b` runs against an `a` that never answered.
@@ -673,8 +687,9 @@ async def test_a_binding_is_called_the_way_the_listing_shows_it(
 ) -> None:
     """The SDK listing renders `async def tools.tombstone(sections, reason)`, so
     positional arguments bind in that order. A live model wrote
-    `tools.context_tombstone(['S12'], reason=...)` from the listing and was refused when
-    the proxy took keywords only, losing the step it had to edit in.
+    `tools.context_tombstone(['S12'], reason=...)` from the listing. The proxy
+    took keywords only, so the call was refused, and the model lost the step that
+    it had to edit in.
 
     Sabotage: drop the parameter names from `_declare`, and the call is refused.
     """
@@ -702,7 +717,7 @@ async def test_a_binding_is_called_the_way_the_listing_shows_it(
 async def test_a_call_the_listing_cannot_mean_is_refused_with_it_spelled_out(
     make_kernel: MakeKernel, call: str
 ) -> None:
-    """More positionals than parameters, or one given both ways."""
+    """More positional arguments than parameters, or one parameter given both ways."""
     received: list[dict[str, object]] = []
     namespace = _tombstone(received)
     kernel = await make_kernel(namespaces=(namespace,))
@@ -715,7 +730,7 @@ async def test_a_call_the_listing_cannot_mean_is_refused_with_it_spelled_out(
 
 
 async def test_rlm_rejects_an_unknown_keyword_in_the_cell(make_kernel: MakeKernel) -> None:
-    """Prime-agent's contract: unknown kwargs fail loudly (§6.0)."""
+    """The contract of prime-agent: unknown kwargs fail loudly (§6.0)."""
     namespace = CodeBindingNamespace(
         name="rlm",
         bindings=(
@@ -737,12 +752,12 @@ async def test_rlm_rejects_an_unknown_keyword_in_the_cell(make_kernel: MakeKerne
 async def test_the_child_does_not_inherit_credentials(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The child is the one `scrub_env` was written for.
+    """The child is the one that `scrub_env` was written for.
 
-    Its docstring in `ph.seams.subprocess` says so: "a child runs code the model
+    The docstring of `ph.seams.subprocess` says so: "a child runs code the model
     wrote, so it does not inherit `*KEY*`". A cell that can read `os.environ` can
-    print a provider credential into its own output, which is then logged — and
-    the credential was never the model's to see.
+    print a provider credential into its own output, and the output is then
+    logged. The credential was never for the model to see.
     """
     monkeypatch.setenv("PH_TEST_ANTHROPIC_API_KEY", "sk-secret")
     monkeypatch.setenv("PH_TEST_DB_PASSWORD", "hunter2")
@@ -760,7 +775,7 @@ async def test_the_child_does_not_inherit_credentials(
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
 async def test_a_closed_kernel_leaves_no_zombie(make_kernel: MakeKernel) -> None:
-    """F4: a child that exited while the parent lives and is never reaped."""
+    """F4: a child that exited while the parent lives, and that is never reaped, is a zombie."""
     kernel = await make_kernel()
     pid = kernel._process.pid
     await kernel.run("1", (), None)
@@ -778,11 +793,13 @@ async def test_close_is_idempotent(make_kernel: MakeKernel) -> None:
 async def test_a_closed_kernel_starts_no_guest_for_a_run_that_held_it(
     make_kernel: MakeKernel,
 ) -> None:
-    """K1. A kernel closed for good refuses a run rather than starting a guest.
+    """K1. A kernel that is closed permanently refuses a run and does not start a
+    guest.
 
-    `close_namespace` takes the kernel out of the table and closes it, and a run
-    that already held the reference found `not _alive` and started a guest nothing
-    tracked: out of the table, so no later close reached it.
+    `close_namespace` takes the kernel out of the table and closes it. A run
+    that already held the reference found `not _alive` and started a guest that
+    nothing tracked. The kernel was out of the table, so no later close reached
+    the guest.
 
     Sabotage: drop the `_closed` check from `run`, and a guest is running again.
     """
@@ -797,11 +814,11 @@ async def test_a_closed_kernel_starts_no_guest_for_a_run_that_held_it(
 async def test_a_boot_stopped_from_outside_leaves_no_half_booted_guest(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """K2. A hard stop during boot takes the guest down rather than leaving it live.
+    """K2. A hard stop during boot stops the guest and does not leave it running.
 
-    `_alive` is set before `boot-ack`, so a stop between the two left a guest the
-    next run took for ready: it skipped the start and the restore, and sent its
-    cell to a guest that had not finished booting.
+    `_alive` is set before `boot-ack`. A stop between the two therefore left a
+    guest that the next run treated as ready. The next run skipped the start and
+    the restore, and sent its cell to a guest that had not finished booting.
 
     Sabotage: drop the `except BaseException` around the boot, and the kernel
     reads alive with a guest still there.
@@ -829,11 +846,13 @@ async def test_a_boot_stopped_from_outside_leaves_no_half_booted_guest(
 async def test_a_run_stopped_from_outside_does_not_leave_its_cell_running(
     make_kernel: MakeKernel,
 ) -> None:
-    """K2. A hard stop mid-run ends the guest, so the next run is not refused.
+    """K2. A hard stop in the middle of a run ends the guest, so the next run is
+    not refused.
 
-    A stop through the run's token takes the abort ladder; one from outside — the
-    tool call's task canceled — skipped it, and the guest ran the cell on and
-    answered the next run "a program is already running".
+    A stop through the token of the run goes through the abort ladder. A stop
+    from outside (the task of the tool call was canceled) skipped the ladder.
+    The guest then continued the cell, and answered the next run with "a program
+    is already running".
 
     Sabotage: drop the `except BaseException` around the run, and the next run
     meets the cell still running.
@@ -855,9 +874,9 @@ async def test_a_close_stopped_from_outside_still_kills_and_forgets_the_guest(
 ) -> None:
     """K2. The teardown finishes under a stop: the guest is killed, reaped and forgotten.
 
-    The process is detached from the kernel first, so a stop during the polite
-    shutdown skipped the kill, `_alive = False` and the journal entry's removal,
-    and nothing would come back for the guest.
+    The process is detached from the kernel first. A stop during the polite
+    shutdown therefore skipped the kill, `_alive = False`, and the removal of
+    the journal entry, and nothing would come back for the guest.
 
     Sabotage: drop the shield from `_teardown`, and the guest outlives the close.
     """
@@ -897,11 +916,11 @@ def _process_state(pid: int) -> str | None:
 
 
 def test_the_guest_never_imports_the_harness() -> None:
-    """The process boundary exists so model code cannot reach the harness.
+    """The process boundary exists so that model code cannot reach the harness.
 
-    A guest module importing `ph` would put it back inside — and would also make
-    the managed venv need `ph-core`, which is the dependency the venv exists to
-    avoid.
+    A guest module that imports `ph` would put the harness back within the reach
+    of model code. The managed venv would then also need `ph-core`, which is the
+    dependency that the venv exists to avoid.
     """
     root = Path(__file__).resolve().parents[3] / "ph-runtime-guest" / "src" / "ph_runtime"
     offenders = [
@@ -917,26 +936,28 @@ def test_the_guest_never_imports_the_harness() -> None:
 async def test_a_running_cell_never_interrupts_the_frame_read(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The reason the stop ladder's clock is a sibling task.
+    """The reason why the clock of the abort ladder is a sibling task.
 
-    `_pump` used to sit in a 50 ms `move_on_after` so it could ask
-    between reads whether the caller had canceled. The cost was not one scope
-    per socket read but **one per frame**: `_recv_line` returns straight out of
-    its buffer whenever a frame is already there, and a 64 KiB read of a chatty
-    cell carries many. Measured at 37.5 ms against 13.8 ms over 3,000 `log`
-    frames — 7.9 us each — for a deadline almost never reached.
+    `_pump` used to run in a 50 ms `move_on_after`, so that it could ask between
+    reads whether the caller had canceled. The cost was not one scope for each
+    socket read but **one for each frame**. `_recv_line` returns directly from
+    its buffer whenever a frame is already there, and a 64 KiB read from a cell
+    that prints a lot carries many frames. This was measured at 37.5 ms against
+    13.8 ms over 3,000 `log` frames. That is 7.9 µs for each frame, for a
+    deadline that was almost never reached.
 
-    Counted rather than asserted structurally: "does `_pump` contain a
-    `move_on_after`" is a fact about the source, and what matters is that a run
-    lasting many poll intervals interrupts the read **no** times.
+    The test counts interruptions and does not assert on the structure. "Does
+    `_pump` contain a `move_on_after`" is a fact about the source. What matters
+    is that a run that lasts many poll intervals interrupts the read **no**
+    times.
 
-    **Not a guard against issue 58**, which is what this was first written as.
-    The mechanism there — `_RawSocketMixin._wait_until_readable` registering
-    `f.set_result` as the reader callback and removing the reader in a
-    done-callback a loop iteration later, so a canceled wait can still be
-    fired on a canceled future — belongs to `UNIXSocketStream` and
-    `connect_unix`, i.e. the daemon socket. `_recv_line` calls the *free*
-    `anyio.wait_readable`, a different implementation that catches
+    **This is not a guard against issue 58**, although it was first written as
+    one. The mechanism there belongs to `UNIXSocketStream` and `connect_unix`,
+    that is, to the daemon socket. `_RawSocketMixin._wait_until_readable`
+    registers `f.set_result` as the reader callback, and removes the reader in a
+    done-callback one loop iteration later. A canceled wait can therefore still
+    be fired on a canceled future. `_recv_line` calls the *free*
+    `anyio.wait_readable`, which is a different implementation. It catches
     `InvalidStateError` and removes the reader synchronously inside the
     callback. Canceling it was always safe.
 
@@ -959,14 +980,14 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
     monkeypatch.setattr(anyio, "wait_readable", counting)
 
     kernel = await make_kernel()
-    # Long enough that the old 50 ms poll would have fired many times over.
+    # Long enough that the old 50 ms poll would have fired many times.
     slept = 0.6
     result = await kernel.run(f"import asyncio\nawait asyncio.sleep({slept})\n'done'", (), None)
 
     assert result.value == "done", result.error
-    # The positive control: `canceled == 0` also passes if the patch is never
-    # reached at all, which is what a future move of `_recv_line` onto a stream
-    # would do silently.
+    # The positive control. `canceled == 0` also passes if the patch is never
+    # reached at all. A future move of `_recv_line` onto a stream would cause
+    # that silently.
     assert waits > 0, "the patched readiness wait was never reached; the test proves nothing"
     assert canceled == 0, (
         f"the frame read was interrupted {canceled} times during one run; "
@@ -975,14 +996,15 @@ async def test_a_running_cell_never_interrupts_the_frame_read(
 
 
 def test_a_run_records_how_it_ended_once_and_the_first_writer_wins() -> None:
-    """Three tasks end a run and they race by construction.
+    """Three places end a run, and they race by construction.
 
-    `_watch` can kill while `_pump` is blocked mid-frame, and `_teardown`
-    closing the socket is itself what wakes the pump — so a `done` frame
-    already buffered when the kill landed used to overwrite "the runtime was
-    killed" with the program's own value. Each writer assigned `error` and
-    `settled` directly and only `_on_closed` checked first, which made the
-    outcome depend on three call sites ordering themselves around each other.
+    `_watch` can kill while `_pump` is blocked in the middle of a frame, and the
+    socket close in `_teardown` is itself what wakes `_pump`. A `done` frame
+    that was already buffered when the kill landed therefore used to replace
+    "the runtime was killed" with the value of the program. Each writer assigned
+    `error` and `settled` directly, and only `_on_closed` checked first. The
+    outcome therefore depended on three call sites that had to run in the
+    correct order relative to each other.
 
     Sabotage: drop the `if self.settled: return False` guard and the second
     call's account replaces the first's.
@@ -1001,21 +1023,24 @@ def test_a_run_records_how_it_ended_once_and_the_first_writer_wins() -> None:
 async def test_a_channel_closed_mid_frame_is_reported_as_a_closure(
     make_kernel: MakeKernel,
 ) -> None:
-    """The third way this socket says it is gone, which was not caught.
+    """The third way in which this socket reports that it is gone. It was not
+    caught.
 
-    `sock.send`/`recv` on a closed socket raise `OSError`, and `notify_closing`
-    raises `ClosedResourceError` into a waiter already parked — both handled.
-    But `wait_writable`/`wait_readable` *entered* with a closed socket raise
+    `sock.send` and `sock.recv` on a closed socket raise `OSError`, and
+    `notify_closing` raises `ClosedResourceError` into a waiter that already
+    waits. Both were handled. But `wait_writable` and `wait_readable` that are
+    *entered* with a closed socket raise
     `ValueError("Invalid file descriptor: -1")`, because `close()` sets the
-    fileno to `-1` and the loop refuses to register it. A frame bigger than the
-    socket buffer goes round that loop many times, so a teardown landing between
-    two turns hits exactly it.
+    fileno to `-1` and the loop refuses to register it. A frame that is larger
+    than the socket buffer goes through that wait many times, so a teardown that
+    lands between two turns hits exactly this case.
 
-    Found as a macOS-only CI failure of the test above, where an 8 MB reply is
-    being written while the stop ladder kills the guest. Linux passed, and the
-    difference is buffer sizes and wakeup order rather than anything the code
-    decides — which is why this pins the *shape* with the socket closed
-    deterministically, instead of leaving it to a race that reproduces on one
+    This was found as a CI failure on macOS only, in
+    `test_a_cell_blocked_behind_a_large_reply_is_still_killed`, where an 8 MB
+    reply is being written while the abort ladder kills the guest. Linux passed.
+    The difference is buffer sizes and wakeup order, and not anything that the
+    code decides. This test therefore checks the *shape* with the socket closed
+    deterministically, and does not leave it to a race that reproduces on one
     platform.
     """
 
@@ -1024,8 +1049,8 @@ async def test_a_channel_closed_mid_frame_is_reported_as_a_closure(
     kernel = await make_kernel()
     assert (await kernel.run("1 + 1", (), None)).value == 2
 
-    # Closed underneath both waits, with nothing parked on it: this is the
-    # re-entry case, and `fileno()` is already `-1`.
+    # The socket is closed under both waits, with nothing waiting on it. This is
+    # the case where a wait is entered again, and `fileno()` is already `-1`.
     sock = kernel._sock
     assert sock is not None
     sock.close()
@@ -1035,26 +1060,28 @@ async def test_a_channel_closed_mid_frame_is_reported_as_a_closure(
         with pytest.raises(_CHANNEL_GONE):
             await wait(sock)
 
-    # And the kernel reports it as the channel being gone rather than raising:
-    # a send finds it closed, settles the run, and the session still restarts.
+    # The kernel reports this as a channel that is gone, and does not raise. A
+    # send finds the socket closed and settles the run, and the session still
+    # restarts.
     outcome = await kernel.run("2 + 2", (), None)
     assert outcome.error is not None or outcome.value == 4
     assert (await kernel.run("3 + 3", (), None)).value == 6
 
 
 async def test_a_path_argument_reaches_the_host_as_a_path(make_kernel: MakeKernel) -> None:
-    """F7 — `default=repr` is silently lossy for the two types a cell passes most.
+    """F7: `default=repr` silently loses information for the two types that a
+    cell passes most.
 
     `tools.read(Path("notes.md"))` arrived as the string
-    `"PosixPath('notes.md')"`, and a `datetime` as
-    `"datetime.datetime(2026, 9, 20, 0, 0)"`. Neither is an error anywhere: the
-    tool receives a string where the model wrote a value and either refuses it
-    with a message about a path that does not exist, or uses it.
+    `"PosixPath('notes.md')"`, and a `datetime` arrived as
+    `"datetime.datetime(2026, 9, 20, 0, 0)"`. Neither is an error anywhere. The
+    tool receives a string where the model wrote a value. It either refuses the
+    string with a message about a path that does not exist, or uses it.
 
-    A type with no JSON form still falls back to `repr`, because the guest does
-    not know the tool's schema and refusing an argument the tool would have
-    accepted is the worse error — but `repr` is then the thing that makes the
-    tool's own refusal readable.
+    A type with no JSON form still falls back to `repr`. The guest does not know
+    the schema of the tool, and to refuse an argument that the tool would have
+    accepted is the worse error. In that case, `repr` is what makes the refusal
+    of the tool itself readable.
     """
     seen: list[dict[str, object]] = []
 
@@ -1079,12 +1106,12 @@ async def test_a_path_argument_reaches_the_host_as_a_path(make_kernel: MakeKerne
 
 
 async def test_the_guest_runs_in_a_session_of_its_own(make_kernel: MakeKernel) -> None:
-    """J9 — no controlling terminal for the process that runs model-authored code.
+    """J9: no controlling terminal for the process that runs model-authored code.
 
-    Why that matters is on `_start`'s `open_process` call. Asserted on the guest
-    rather than on the sandbox argv because the property is "every guest is a
-    session leader", which bwrap's `--new-session` gives on one backend of
-    three.
+    The comment on the `open_process` call in `start` says why that matters. The
+    assertion is on the guest and not on the sandbox argv, because the property
+    is "every guest is a session leader". The `--new-session` of bwrap gives
+    that on one backend of three.
 
     Sabotage: drop `start_new_session=True` from `open_process` and the sid is
     the host's.
@@ -1101,11 +1128,13 @@ async def test_the_guest_runs_in_a_session_of_its_own(make_kernel: MakeKernel) -
 async def test_a_subprocess_a_cell_started_dies_with_the_kernel(
     make_kernel: MakeKernel,
 ) -> None:
-    """J9's other half: the session the guest got has to be killed as a group.
+    """The other half of J9: the session that the guest got must be killed as a
+    group.
 
-    Why the two belong together is on `ph.orphans.signal_group`. Measured here
-    on the path that has no other backstop — a clean `aclose`, where the guest
-    exits by itself and only the sweep is left looking.
+    `ph.orphans.signal_group` says why the two belong together. The behavior is
+    measured here on the path that has no other protection: a clean `aclose`,
+    where the guest exits by itself and only the sweep is left to look for what
+    it started.
 
     Sabotage: `process.kill()` in place of `_kill_group` and the grandchild is
     still alive after the kernel is gone.
@@ -1123,9 +1152,9 @@ async def test_a_subprocess_a_cell_started_dies_with_the_kernel(
 
     await kernel.aclose()
 
-    # Polled, not asserted outright: the grandchild is killed inside `aclose`
-    # and lingers for a tick as a zombie awaiting reparenting, which `kill(0)`
-    # still answers `True` for.
+    # This is polled and not asserted at once. The grandchild is killed inside
+    # `aclose`, and stays for a moment as a zombie that waits to be re-parented.
+    # `kill(0)` still answers `True` for a zombie.
     await settled(lambda: not process_alive(grandchild), "the cell's subprocess to be reaped")
 
 
@@ -1135,27 +1164,28 @@ async def test_a_subprocess_a_cell_started_dies_with_the_kernel(
 async def test_a_run_the_guest_will_never_finish_is_repaired_not_waited_on(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """M2 — the host waits for `done` and nothing else was watching.
+    """M2: the host waits for `done`, and nothing else was watching.
 
-    Both rungs of the stop ladder start only because somebody pressed stop, so a
-    run that is never canceled and never settles had no clock at all, and the
-    host waits on that frame with no wall clock of its own.
+    Both steps of the abort ladder start only because somebody pressed stop. A
+    run that is never canceled and never settles therefore had no clock at all,
+    and the host waits for that frame with no wall clock of its own.
 
-    **The remedy is a repair, not a kill.** The probe names the run the host is
-    waiting on, so the guest — which is the only party that knows whether the
-    frame is still coming — settles it through the same `_send_done` every
-    other terminal path takes. The namespace survives, which is the whole point:
-    the predicate establishes that the guest is *alive and healthy*, and killing
-    something on that evidence costs everything it was holding for a fault that
-    is one missing frame.
+    **The remedy is a repair, not a kill.** The probe names the run that the
+    host waits for. The guest is the only party that knows whether the frame is
+    still coming, so the guest settles the run, through the same `_send_done`
+    that every other terminal path takes. The namespace survives, and that is
+    the purpose. The predicate establishes that the guest is *alive and
+    healthy*. To kill a guest on that evidence costs everything that it held,
+    for a fault that is one missing frame.
 
-    **The wedge is staged at the host**, by losing the run's *first* terminal
-    frame. Every input is then what a guest whose `done` never arrived
-    produces: the run unsettled, the loop free, and nothing owed. Only the
-    first — the repair is a `done` too, and a host that dropped every one could
-    not be repaired by anything. Breaking the guest's own teardown would
-    reproduce one cause rather than the shape they share, and those causes
-    leave the run still *owed*, where `_answer_if_owed` already answers.
+    **The stuck run is staged at the host**, by losing the *first* terminal
+    frame of the run. Every input is then what a guest whose `done` never
+    arrived produces: the run is unsettled, the loop is free, and nothing is
+    owed. Only the first frame is lost, because the repair is a `done` too, and
+    nothing could repair a host that dropped every one. To break the teardown of
+    the guest itself would reproduce one cause, and not the shape that the
+    causes share. Those causes also leave the run still *owed*, and
+    `_answer_if_owed` already answers that case.
 
     Sabotage: drop the `_probe` call from `_watch` and this waits out
     `fail_after` instead.
@@ -1179,7 +1209,7 @@ async def test_a_run_the_guest_will_never_finish_is_repaired_not_waited_on(
 
     assert result.error is not None
     assert "ended without settling" in result.error, result.error
-    # The namespace is still there, which a kill would have cost.
+    # The namespace is still there. A kill would have cost it.
     assert (await kernel.run("'alive'", (), None)).value == "alive"
     assert RESET_NOTICE not in (await kernel.run("1", (), None)).logs
 
@@ -1187,20 +1217,21 @@ async def test_a_run_the_guest_will_never_finish_is_repaired_not_waited_on(
 async def test_a_cell_that_starves_the_loop_is_measured_and_not_killed(
     make_kernel: MakeKernel,
 ) -> None:
-    """The reading the probe is *not* allowed to make (M2).
+    """The reading that the probe is *not* allowed to make (M2).
 
-    A cell spinning in straight-line Python starves the reader task that answers
-    a probe — the same starvation that makes `cancel` and `SIGINT` both miss it.
-    That is what a busy cell looks like, and a busy cell is entitled to be busy:
-    `CpuBudget` bounds it, this clock does not. So the probe goes unanswered for
-    longer than `idle_grace` and the run still finishes on its own.
+    A cell that spins in straight-line Python starves the reader task that
+    answers a probe. The same starvation makes `cancel` and `SIGINT` both miss
+    the cell. That is how a busy cell looks, and a busy cell is allowed to be
+    busy: the per-run CPU budget (`cpu_seconds`) limits it, and this clock does
+    not. The probe therefore goes unanswered for much longer than
+    `probe_seconds`, and the run still finishes by itself.
 
-    What the unanswered probe buys is the gauge — `phern doctor` reports the
-    worst round trip and the stalls, which is how a person sees *where* a slow
-    agent's time is going rather than only that it was slow.
+    The benefit of the unanswered probe is the gauge. `phern doctor` reports the
+    worst round trip and the stalls. That is how a person sees *where* the time
+    of a slow agent goes, and not only that the agent was slow.
 
-    Sabotage: escalate on an outstanding probe instead of on `orphan_since` and
-    this cell is killed mid-computation.
+    Sabotage: escalate on an outstanding probe, which `_probe` only counts as a
+    stall, and this cell is killed mid-computation.
     """
     kernel = await make_kernel(probe_seconds=0.05)
 
@@ -1208,14 +1239,15 @@ async def test_a_cell_that_starves_the_loop_is_measured_and_not_killed(
         result = await kernel.run("sum(range(60_000_000))", (), None)
 
     assert result.error is None, result.error
-    # The closed form, not a second `sum(range(...))`: recomputing it here
-    # cost 0.58 s of the test's 1.0 s to assert a number Gauss had.
+    # This is the closed form, not a second `sum(range(...))`. To compute the sum
+    # again here cost 0.58 s of the 1.0 s of the test, to assert a number that
+    # the formula of Gauss gives.
     assert result.value == 59_999_999 * 60_000_000 // 2
     assert kernel.loop_stalls > 0, "a cell that never yielded answered every probe on time"
 
 
 def _count_pings(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Every probe a kernel sends from here on, by its id, still sent for real."""
+    """The id of every probe that a kernel sends from now on. Each probe is still really sent."""
     sent: list[int] = []
     real = Kernel._ping
 
@@ -1230,17 +1262,18 @@ def _count_pings(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 async def test_the_probe_reports_how_far_behind_a_guest_loop_is(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The gauge, on a loop that is *not* starved — the ordinary reading.
+    """The gauge on a loop that is *not* starved, which is the ordinary reading.
 
-    A cell awaiting inside asyncio leaves the reader task free, so every probe is
-    answered promptly. That is the baseline a person needs in order to read the
-    busy case as unusual, which is why this is measured continuously rather than
-    only when something already looks wrong.
+    A cell that awaits inside asyncio leaves the reader task free, so every
+    probe is answered promptly. A person needs that baseline to read the busy
+    case as unusual. That is the reason why the loop is measured continuously,
+    and not only when something already looks wrong.
 
-    **And at the cadence the knob names.** `_watch` ticks twenty times a second;
-    `probe_sent` is cleared by the answer, so gating the next probe on that
-    alone would put a frame each way on every tick — twenty times the traffic
-    `probe_seconds` says it costs, on every open run.
+    **The probes also go out at the interval that the setting names.** `_watch`
+    used to tick twenty times a second. An answer makes the probe idle again. If
+    that alone decided when the next probe goes out, a frame would go each way
+    on every tick. That is twenty times the traffic that `probe_seconds` says it
+    costs, on every open run.
 
     Sabotage: drop the `probed_at` gate from `_probe` and the count is the poll
     rate rather than the probe rate.
@@ -1252,23 +1285,27 @@ async def test_the_probe_reports_how_far_behind_a_guest_loop_is(
     assert kernel.loop_worst is not None, "no probe was answered"
     assert kernel.loop_worst < 0.2, f"an idle loop answered slowly: {kernel.loop_worst}"
     assert kernel.loop_stalls == 0, "an idle loop left a probe unanswered"
-    # A second of cell against a fifth of a second of cadence. Bounded loosely
-    # on both sides: the exact count is the scheduler's, the *order* is the
-    # claim, and the poll rate it must not be is 20/s.
+    # The cell runs for one second, and the probe interval is a fifth of a
+    # second. The count is bounded loosely on both sides. The exact count belongs
+    # to the scheduler, and the claim is the *order* of magnitude. The rate that
+    # it must not be is the old poll rate, 20/s.
     assert 2 <= len(sent) <= 10, f"{len(sent)} probes in a second at probe_seconds=0.2"
 
 
 async def test_an_open_run_wakes_its_clock_once_per_probe(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The stop ladder's clock sleeps until its next question, not on a tick (P12-03).
+    """The clock of the abort ladder sleeps until its next question, and not on a
+    tick (P12-03).
 
-    `_watch` used to wake twenty times a second for the life of every open run and
-    ask `_probe` whether one was due. Now it plans the moment one is, so a second of
-    cell at a fifth of a second of cadence wakes it about five times.
+    `_watch` used to wake twenty times a second for the life of every open run,
+    and ask `_probe` whether a probe was due. Now it plans the moment when one
+    is due. A cell that runs for one second at a probe interval of a fifth of a
+    second therefore wakes it about five times.
 
-    Counted at `_probe`, which the clock calls on every wake while the probe is on,
-    so the count is the wake count whatever the clock's own shape.
+    The count is taken at `_probe`, which the clock calls on every wake while
+    the probe is on. The count is therefore the wake count, whatever the
+    structure of the clock itself.
 
     Sabotage: put a 50 ms `anyio.sleep` back at the top of `_watch`'s loop, and the
     count is the tick rate.
@@ -1292,9 +1329,10 @@ async def test_a_probe_answered_after_a_stall_starts_the_next(
 ) -> None:
     """A stalled probe has no deadline, so its answer is what wakes the clock.
 
-    The cell starves its loop for a while, so the probe outstanding when it began
-    goes unanswered past its interval and is counted as a stall. Then it yields,
-    the answer arrives, and probing has to resume for the rest of the run.
+    The cell starves its loop for some time. The probe that is outstanding when
+    the spin begins therefore goes unanswered past its interval, and is counted
+    as a stall. Then the cell yields, the answer arrives, and probing must
+    resume for the rest of the run.
 
     Sabotage: drop `_move()` from `_ActiveRun.answered`, and the clock sleeps out
     the run once the stall ends; one or two probes go out, not a dozen.
@@ -1319,10 +1357,11 @@ async def test_a_probe_answered_after_a_stall_starts_the_next(
 async def test_with_the_probe_off_a_run_sends_no_probe_and_cancel_still_stops_it(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`probeSeconds: null` turns the probe off, and nothing else with it.
+    """`probeSeconds: null` turns the probe off, and turns off nothing else.
 
-    No probe goes out and the clock has nothing to wake for, but the caller's
-    cancel is an event (`token.wait()`), so it still reaches the cell at once.
+    No probe goes out, and the clock has nothing to wake for. But the cancel of
+    the caller is an event (`token.wait()`), so it still reaches the cell at
+    once.
 
     Sabotage: race only `moved` in `_watch`, not the token, and this cancel waits
     for nothing.
@@ -1354,10 +1393,10 @@ async def test_an_abort_a_refusal_began_still_reaches_the_kill_with_the_probe_of
     """The grace deadline is planned when the abort begins, from any task.
 
     A refused call starts the abort from `_serve_call`, not from the clock. This
-    cell then ignores `SIGINT` and spins, so the cancel frame is never read and the
-    signal does nothing: only the kill at the end of the grace stops it. With the
-    probe off the clock had no deadline at all, so what wakes it to plan the grace
-    is `begin_abort` setting `moved`.
+    cell then ignores `SIGINT` and spins, so the cancel frame is never read and
+    the signal does nothing. Only the kill at the end of the grace stops the
+    cell. With the probe off, the clock had no deadline at all, so `begin_abort`
+    setting `moved` is what wakes it to plan the grace.
 
     Sabotage: drop `_move()` from `begin_abort`, and the clock sleeps on while the
     cell spins.
@@ -1390,8 +1429,8 @@ async def test_an_abort_a_refusal_began_still_reaches_the_kill_with_the_probe_of
 
 
 def test_a_probe_interval_of_zero_is_refused_and_null_turns_it_off() -> None:
-    """Zero is not "as often as possible": the clock would plan a deadline that is
-    always now. `null` is the way to say never."""
+    """Zero does not mean "as often as possible": the clock would plan a deadline
+    that is always now. `null` is the way to say never."""
     assert Config(probe_seconds=None).probe_seconds is None
     with pytest.raises(ValidationError):
         Config(probe_seconds=0)
@@ -1400,18 +1439,21 @@ def test_a_probe_interval_of_zero_is_refused_and_null_turns_it_off() -> None:
 
 
 def test_the_readers_ceiling_follows_the_limit_the_kernel_booted_with() -> None:
-    """M3 — the sizing the constant claimed and nothing enforced.
+    """M3: the sizing that the constant claimed and that nothing enforced.
 
-    `MAX_FRAME_BYTES`'s docstring said it was "sized to hold a `maxSnapshotBytes`
-    payload with base64 and JSON overhead", and at the shipped 16 MiB that was
-    true. It is a claim about a *ratio* between two numbers, one of which a
-    deployment configures — so a profile raising `maxSnapshotBytes` past about a
-    third of the constant made it false, and what that costs is not a rejected
-    frame but a lost namespace: the host refuses the oversized snapshot, closes
-    the channel, and the model is told the runtime exited.
+    The docstring of `MAX_FRAME_BYTES` said that it was "sized to hold a
+    `maxSnapshotBytes` payload with base64 and JSON overhead", and at the
+    shipped 16 MiB that was true. It is a claim about a *ratio* between two
+    numbers, and a deployment configures one of them. A profile that raised
+    `maxSnapshotBytes` past about a third of the constant therefore made the
+    claim false. The cost is not a rejected frame but a lost namespace: the host
+    refuses the oversized snapshot and closes the channel, and the model is told
+    that the runtime exited.
 
-    Asserted on the derivation rather than by round-tripping eighty megabytes,
-    which is what the sibling above used to need a monkeypatch to avoid.
+    The assertion is on the derivation. It does not round-trip eighty megabytes,
+    which the sibling test above
+    (`test_a_namespace_larger_than_one_frame_is_still_snapshotted`) used to need
+    a monkeypatch to avoid.
 
     Sabotage: return `MAX_FRAME_BYTES` unconditionally and the raised limit gets
     a ceiling below its own payload.
@@ -1423,19 +1465,21 @@ def test_the_readers_ceiling_follows_the_limit_the_kernel_booted_with() -> None:
     assert frame_cap(raised) > raised.max_snapshot_bytes * 4 // 3, (
         "a base64 payload at the configured limit would not fit the reader's ceiling"
     )
-    # And the floor still holds underneath a deployment that lowers the limit.
+    # The floor still holds for a deployment that lowers the limit.
     assert frame_cap(KernelLimits(max_snapshot_bytes=1024)) == MAX_FRAME_BYTES
 
 
 async def test_the_guest_reads_with_the_hosts_frame_cap(
     make_kernel: MakeKernel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F8 — both readers from one expression, handed over at spawn.
+    """F8: one expression gives the limit to both readers, and it is passed at
+    spawn.
 
-    The host's ceiling followed `maxSnapshotBytes` while the guest's stayed at a
-    fixed 64 MiB, so a raised limit lost the namespace on restore. `start` puts
-    `frame_cap` in the child's environment, the way the descriptor crosses —
-    asserted on a real spawn, which the guest then boots from.
+    The ceiling of the host followed `maxSnapshotBytes` while the ceiling of the
+    guest stayed at a fixed 64 MiB, so a raised limit lost the namespace on
+    restore. `start` puts `frame_cap` in the environment of the child, in the
+    same way that the descriptor crosses. The assertion is on a real spawn,
+    which the guest then boots from.
 
     Sabotage: drop the `FRAME_BYTES_ENV` entry from `start`'s environment and
     this finds none.
@@ -1449,8 +1493,8 @@ async def test_the_guest_reads_with_the_hosts_frame_cap(
     monkeypatch.setattr("ph_rlm.kernel.manager.scrub_env", recording)
     raised = 256 * 1024 * 1024
 
-    # `start` raises unless the guest answers `boot`, so returning is the proof
-    # that it came up reading with the number it was handed.
+    # `start` raises unless the guest answers `boot`. A return therefore proves
+    # that the guest started and reads with the number that it was given.
     await make_kernel(max_snapshot_bytes=raised)
 
     assert handed[FRAME_BYTES_ENV] == str(frame_cap(KernelLimits(max_snapshot_bytes=raised)))
@@ -1460,31 +1504,34 @@ async def test_the_guest_reads_with_the_hosts_frame_cap(
 async def test_a_finished_cell_cannot_leave_a_thread_burning_a_core(
     make_kernel: MakeKernel,
 ) -> None:
-    """M1 — the budget was switched off rather than down, and nothing re-armed it.
+    """M1: the budget was turned off and not lowered, and nothing armed it again.
 
-    `relax_cpu_budget` disarms at the first `SIGXCPU`, which it must: the limit
-    is cumulative and Linux re-delivers every CPU-second, so a second signal
-    lands in the guest's teardown and costs the `done` frame. What that left is
-    the gap this closes. A `to_thread` worker reaches neither cooperative route
-    — a cancel does not reach a thread, and the raise route only fires where the
-    cell is — so the run reported `cpu`, the worker carried on, and with the
-    budget off no second signal was ever coming. A core, until the session ended.
+    `relax_cpu_budget` disarms at the first `SIGXCPU`, and it must. The limit is
+    cumulative and Linux delivers the signal again every CPU-second, so a second
+    signal lands in the teardown of the guest and costs the `done` frame. That
+    left the gap that this change closes. A `to_thread` worker is reached by
+    neither cooperative route: a cancel does not reach a thread, and the raise
+    route fires only where the cell is. The run therefore reported `cpu`, and
+    the worker continued. With the budget off, no second signal ever came. The
+    worker used a core until the session ended.
 
-    A standing `idle_cpu_seconds` is armed the moment a run stops owning the
-    process, and a breach with no run open ends the runtime: nothing legitimate
-    spends it, because a background thread a cell left on purpose is *waiting*
-    and waiting costs no CPU.
+    A standing `idle_cpu_seconds` is armed at the moment that a run stops owning
+    the process, and a breach with no run open ends the runtime. Nothing
+    legitimate uses that budget, because a background thread that a cell left on
+    purpose is *waiting*, and waiting costs no CPU.
 
-    The namespace is gone afterwards, which is the honest price and is asserted
-    — it was already holding a thread nobody could stop. The guest's reason
-    reaches the model on the way out, through the stderr the host captures.
+    The namespace is gone afterwards. That is the real cost, and the test
+    asserts it. The namespace already held a thread that nobody could stop. The
+    reason that the guest gives reaches the model on the way out, through the
+    stderr that the host captures.
 
     Sabotage: drop the `arm_cpu_budget` from `_send_done` and this waits out
     `fail_after` with the thread still running.
     """
     kernel = await make_kernel(cpu_seconds=30, idle_cpu_seconds=1)
 
-    # Finishes immediately; the worker it starts is not reachable by any cancel.
+    # The cell finishes immediately. No cancel can reach the worker that it
+    # starts.
     left = await kernel.run(
         "import threading\n"
         "def burn():\n"
@@ -1503,22 +1550,23 @@ async def test_a_finished_cell_cannot_leave_a_thread_burning_a_core(
             "the runtime to end itself over the runaway",
         )
 
-    # The next cell meets the death, and the guest's own sentence rides out with
-    # it: the stderr the host captured is what tells a person *why* the runtime
-    # went, rather than leaving them with an unexplained exit.
+    # The next cell finds the dead runtime, and its logs carry the sentence that
+    # the guest wrote. The stderr that the host captured tells a person *why* the
+    # runtime ended. Without it, the person would see an unexplained exit.
     met = await kernel.run("'alive'", (), None)
     assert met.error is not None
     assert "burning CPU" in met.logs, met.logs
 
-    # And the one after that is a fresh namespace, said out loud.
+    # The cell after that gets a fresh namespace, and its logs say so.
     revived = await kernel.run("'alive'", (), None)
     assert revived.value == "alive"
     assert RESET_NOTICE in revived.logs, "the namespace went and nobody said so"
 
 
 async def test_capped_output_ends_between_characters(make_kernel: MakeKernel) -> None:
-    """The cap counts bytes and is cut between characters, in the guest's print
-    and in the host's pipe alike — never inside a family, never into U+FFFD.
+    """The cap counts bytes, and the cut falls between characters, in the print
+    stream of the guest and in the pipe drain of the host alike. The cut is never
+    inside a family and never produces U+FFFD.
 
     Sabotage: slice by index in the guest's `write` again and the kept output
     ends in the first members of a family.
@@ -1532,9 +1580,10 @@ async def test_capped_output_ends_between_characters(make_kernel: MakeKernel) ->
 
 
 async def test_a_character_split_between_two_writes_is_joined(make_kernel: MakeKernel) -> None:
-    """What a cell's own subprocess writes reaches the host's pipe in pieces, and
-    a character can be split between two of them. One decoder for the stream
-    joins it; decoding each piece by itself made it two U+FFFDs."""
+    """What the subprocess of a cell writes reaches the pipe of the host in
+    pieces, and a character can be split between two of them. One decoder for
+    the stream joins the character. Decoding each piece separately made it two
+    U+FFFDs."""
     kernel = await make_kernel()
     cell = (
         "import os, time\n"
@@ -1547,10 +1596,11 @@ async def test_a_character_split_between_two_writes_is_joined(make_kernel: MakeK
 
 
 async def test_a_run_reports_every_byte_its_prints_dropped(make_kernel: MakeKernel) -> None:
-    """The guest's print stream marks where it was cut, with no number, and
-    counts every write after — then reports the total on the `done` frame it
-    sends anyway, the first moment the whole of it is known. Counted at the cut,
-    it was only the write that crossed it.
+    """The print stream of the guest marks where it was cut, with no number, and
+    counts every write after the cut. It then reports the total on the `done`
+    frame that it sends in any case, which is the first moment when the whole
+    total is known. When the count was taken at the cut, it held only the write
+    that crossed the cap.
 
     Sabotage: count only the crossing write, as the marker used to, and the
     hundred prints after it go missing from the total.
@@ -1568,9 +1618,9 @@ async def test_a_run_reports_every_byte_its_prints_dropped(make_kernel: MakeKern
 
 
 async def test_a_run_reports_every_byte_its_pipes_dropped(make_kernel: MakeKernel) -> None:
-    """What a cell's own subprocesses write reaches the host's pipe drain, which
-    keeps reading past the cap — so the child never blocks — and counts what it
-    skips into the same total.
+    """What the subprocesses of a cell write reaches the pipe drain of the host.
+    The drain keeps reading past the cap, so that the child never blocks, and
+    counts what it skips into the same total.
 
     Sabotage: drop the count from the skip in `_drain` and the total is only the
     chunk that crossed the cap.

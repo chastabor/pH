@@ -19,7 +19,7 @@ phern --profile rlm-stable --provider llama --model <model> --mode tui
 The package registers the `stabilize` **bundle**
 (`src/ph_stabilize/bundle.yaml`). A bundle is a named list of rows that a
 profile can layer. `phern` composes this bundle through the `ph.bundles`
-entry-point group and does not depend on this distribution.
+entry-point group, and its module `ph_app` does not import this package.
 
 **Every profile that `phern` offers layers this bundle**, `base` included. Each
 profile layers it as an *optional* bundle: an install without this distribution

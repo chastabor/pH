@@ -1,4 +1,4 @@
-"""Every service the RLM bundle provides, as a typed key — for `ph.keys`'s reason.
+"""Each service that the RLM bundle provides, as a typed key. `ph.keys` gives the reason.
 
 @module ph_rlm.keys
 """

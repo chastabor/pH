@@ -1,14 +1,18 @@
 """Python skills (P3-18): the half of a skill that only a cell can use.
 
-The row's gate is one sentence — *a skill's `run()` is callable in a cell* — and
-it spans three layers built at different times: the format (now
-`ph.seams.skills`, tested there), the venv's editable install (P3-07), and the
-guest's `wrap_skill_module` (P3-08), which until P3-18 had no producer. The last
-test drives the whole path against a real kernel.
+The gate of the row is one sentence: *the `run()` of a skill is callable in a
+cell*. It spans three layers that were built at different times:
 
-What is left here is what is only true in Code Mode. P4-13 moved the reader, the
-catalog and the `skill` tool into the seam, so this file no longer re-tests the
-frontmatter rules — it tests that a skill directory which is *also* an
+* The format (now `ph.seams.skills`, tested there).
+* The editable install of the venv (P3-07).
+* The `wrap_skill_module` of the guest (P3-08), which had no producer until
+  P3-18.
+
+The last test drives the whole path against a real kernel.
+
+What remains here is what is true only in Code Mode. P4-13 moved the reader, the
+catalog and the `skill` tool into the seam, so this file no longer tests the
+frontmatter rules again. It tests that a skill directory that is *also* an
 installable package reaches the kernel, and that the catalog says so.
 """
 
@@ -45,9 +49,9 @@ def write_skill(
 ) -> Path:
     """One skill directory. `package=True` makes it importable.
 
-    The `SKILL.md` half is `ph.testing`'s, so the two packages that test against
-    this format cannot come to disagree about what a valid one looks like; the
-    package half is this row's whole subject and stays here.
+    The `SKILL.md` half comes from `ph.testing`, so the two packages that test
+    against this format cannot disagree about what a valid file looks like. The
+    package half is the whole subject of this row and stays here.
     """
     directory = write_skill_md(root, name, description=description)
     if package:
@@ -97,8 +101,9 @@ def test_a_documentation_skill_has_nothing_to_install(tmp_path: Path) -> None:
 
 
 def test_a_package_skill_carries_its_import_name(tmp_path: Path) -> None:
-    """Read from `pyproject.toml`, not guessed: `acme-websearch` imports as
-    `acme_websearch`, which is the normal case rather than the odd one."""
+    """The name is read from `pyproject.toml`, not guessed. `acme-websearch`
+    imports as `acme_websearch`, which is the normal case and not the unusual
+    one."""
     write_skill(tmp_path, "acme-websearch", package=True)
 
     (skill,) = discover_skills([str(tmp_path)])
@@ -115,7 +120,7 @@ def test_a_package_skill_carries_its_import_name(tmp_path: Path) -> None:
 async def test_the_row_registers_the_catalog_and_feeds_the_runtime(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The two lists are two: a requirement spec to install, a module to import."""
+    """There are two lists: a requirement spec to install, and a module to import."""
     write_skill(tmp_path, "acme-websearch", package=True)
     write_skill(tmp_path, "note-taking")
     ctx = await mount(HOST_RUNTIME_ROW, row([tmp_path]))
@@ -139,11 +144,12 @@ async def test_the_row_registers_the_catalog_and_feeds_the_runtime(
 
 
 async def test_what_a_row_gave_the_runtime_goes_with_the_row() -> None:
-    """A row takes back the skills it added to the runtime when it unmounts.
+    """A row takes back the skills that it added to the runtime when it unmounts.
 
-    The row appended its requirements and modules to tuples the runtime keeps, and
-    took nothing back: a row mounted again added them a second time, and one let
-    go left its packages for every later kernel to install and import.
+    The row used to append its requirements and modules to tuples that the
+    runtime keeps, and it took nothing back. A row that was mounted again added
+    them a second time, and a row that was let go left its packages for every
+    later kernel to install and import.
 
     Sabotage: drop the take-back from `give_to_runtime`, and the first row's skills
     stay after it goes.
@@ -170,8 +176,8 @@ async def test_the_catalog_reaches_the_prompt_without_the_bodies(
     assembly = await ctx.require(SYSTEM_PROMPT).assemble(agent.ctx, agent=agent)
     prompt = render_prompt(assembly)
 
-    # One catalog, `skills-progressive`'s, with this row's hint attached to the
-    # skill rather than a second section of its own.
+    # There is one catalog, the catalog of `skills-progressive`. The hint of this
+    # row is attached to the skill, and the row has no second section of its own.
     assert "**acme-websearch** — search the web for a query" in prompt
     assert "await acme_websearch(...)" in prompt
     assert "Instructions here." not in prompt, "a skill body reached the prompt"
@@ -189,14 +195,15 @@ async def test_no_paths_means_no_row(mount: MountProfile) -> None:
 async def test_a_skills_run_is_callable_in_a_cell(
     mounted_runtime: MountedRuntime, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The row's gate, end to end on a real kernel.
+    """The gate of the row, end to end on a real kernel.
 
-    The host interpreter can already import the package once it is on `sys.path`,
-    so this drives discovery → boot frame → `wrap_skill_module` without building
-    a venv (which would shell out to `uv` and reach the network). What it proves
-    is the wiring the venv path shares: the *names* reach the guest and come back
-    callable, and `run()` is reachable by calling the module itself — the §6.8
-    convention prime-agent established.
+    The host interpreter can already import the package when it is on
+    `sys.path`. The test therefore drives discovery → boot frame →
+    `wrap_skill_module` without building a venv, which would run `uv` and reach
+    the network. The test proves the wiring that the venv path shares: the
+    *names* reach the guest and come back callable, and `run()` is reachable by a
+    call of the module itself. That is the §6.8 convention that prime-agent
+    established.
     """
     write_skill(
         tmp_path,
@@ -236,9 +243,9 @@ async def test_a_skill_that_does_not_import_says_so(
     assert result.is_error is False
     assert "unavailable skill broken" in result.value["value"]
 
-    # Calling it raises *inside the cell*, so the traceback is the cell's result
-    # rather than a tool failure — a skill that did not import is the
-    # deployment's problem to fix, not a refusal the model should route around.
+    # A call raises *inside the cell*, so the traceback is the result of the cell
+    # and not a tool failure. A skill that did not import is a problem for the
+    # deployment to fix. It is not a refusal that the model should work around.
     called = await run_python_cell(ctx, "broken()", agent=agent, session=session, call_id="c2")
     rendered = "".join(block.text for block in called.content if hasattr(block, "text"))
     assert "is unavailable" in rendered

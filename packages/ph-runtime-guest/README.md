@@ -182,10 +182,11 @@ for the full row table.
 ## Limitations, and deliberate choices
 
 - **The frames are written twice, and this package imports nothing from the
-  host.** The twin is `ph_rlm.kernel.protocol`. Four constants are declared one
+  host.** The twin is `ph_rlm.kernel.protocol`. Five constants are declared one
   time, here, and the host imports them: `PROTOCOL_VERSION`, `PROTOCOL_FD`,
-  `FD_ENV`, and `NAMESPACE_ENV`. `packages/ph-rlm/tests/test_protocol_mirror.py`
-  keeps the rest equal. It checks that the host imports those four constants. It
+  `FD_ENV`, `FRAME_BYTES_ENV`, and `NAMESPACE_ENV`.
+  `packages/ph-rlm/tests/test_protocol_mirror.py` keeps the rest equal. It
+  checks that the host imports those five constants. It
   compares the required and optional field set of every frame, and it compares
   the truncation marker byte for byte. **That test is the contract.** The frame
   tables have no shared module to fall back on.

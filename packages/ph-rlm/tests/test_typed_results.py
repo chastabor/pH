@@ -1,11 +1,19 @@
 """A child that owes its parent a value in a set shape (typed child results, B1-B3).
 
-The gate: a categorizing child returns a value that matches its `output`, through
-`submit_result` or as a reply that is the JSON object itself; a value that does not match
-is corrected; and a child that returns none, after one reminder, fails with its text
-kept. Around it: where the shape comes from (the spawn's own, else its skills'), where
-the value goes (the child's own log, its state, its roster row and the notice its parent
-is handed), and that the return tool is the child's alone.
+Gates:
+
+- A categorizing child returns a value that matches its `output`, through
+  `submit_result` or as a reply that is the JSON object itself.
+- A value that does not match is corrected.
+- A child that returns no value, after one reminder, fails with its text kept.
+
+The other tests cover the behavior around the gates:
+
+- Where the shape comes from: the shape of the spawn itself, else the shape of
+  its skills.
+- Where the value goes: the log of the child, its state, its roster row and the
+  notice that its parent is handed.
+- That the return tool belongs to the child alone.
 """
 
 from __future__ import annotations
@@ -54,8 +62,9 @@ Step: TypeAlias = str | tuple[str, dict[str, Any]]
 
 
 def _replies(*steps: Step) -> ReplayAdapter:
-    """A child's model: one scripted reply per request, and `REPLAY_EXHAUSTED` past the
-    last, so a child that asks again where it should have stopped is caught at once."""
+    """The model of a child: one scripted reply per request, and `REPLAY_EXHAUSTED`
+    after the last reply. A child that asks again where it should have stopped is
+    then caught at once."""
     return ReplayAdapter(
         steps=[
             RecordedStep(
@@ -112,9 +121,10 @@ def _returned(ctx: Context, run: SubagentRun) -> list[JsonObject]:
 
 
 async def test_a_child_returns_its_value_through_its_tool(mount: MountProfile) -> None:
-    """The gate's first half. A valid call ends the child's turn, so it asks nothing
-    more of its model, and the value reaches every reader: the result a waiter gets,
-    the child's own log, its state and roster row, and the notice its parent is handed.
+    """The first half of the gate. A valid call ends the turn of the child, so the
+    child asks nothing more of its model. The value reaches every reader: the
+    result that a waiter gets, the log of the child, its state and roster row,
+    and the notice that its parent is handed.
 
     Sabotage: leave `conclude_turn` out of the tool, and the child asks its model again;
     drop `value` from the ending, the fold or the notice, and that reader goes without.
@@ -137,9 +147,9 @@ async def test_a_child_returns_its_value_through_its_tool(mount: MountProfile) -
 async def test_a_value_that_does_not_match_is_corrected_in_the_same_turn(
     mount: MountProfile,
 ) -> None:
-    """A bad call is a tool error naming what is wrong, as any tool's arguments are, and
-    the model's next step fixes it. Sabotage: record the value unchecked, and `chore`
-    is returned."""
+    """A bad call is a tool error that names what is wrong, as for the arguments
+    of any tool. The next step of the model fixes it. Sabotage: record the value
+    unchecked, and `chore` is returned."""
     ctx, parent, script = await _parent(
         mount, (RESULT_TOOL, {"kind": "chore"}), (RESULT_TOOL, {"kind": "feature"})
     )
@@ -153,9 +163,9 @@ async def test_a_value_that_does_not_match_is_corrected_in_the_same_turn(
 
 
 async def test_a_reply_that_is_the_json_object_is_the_value(mount: MountProfile) -> None:
-    """A JSON value is text in the end: a child that answers with the object itself,
-    fenced or not, has returned it. Sabotage: count only `submit_result`, and this
-    child is reminded and then fails."""
+    """A JSON value is text in the end. A child that answers with the object
+    itself, fenced or not, has returned the value. Sabotage: count only
+    `submit_result`, and this child is reminded and then fails."""
     ctx, parent, script = await _parent(mount, '```json\n{"kind": "feature"}\n```')
 
     run = await _spawn(ctx, parent, output=KIND)
@@ -170,9 +180,10 @@ async def test_a_reply_that_is_the_json_object_is_the_value(mount: MountProfile)
 async def test_a_child_that_returns_no_value_fails_with_its_text_kept(
     mount: MountProfile,
 ) -> None:
-    """The gate's second half: the value is a contract the parent may depend on, so a
-    child with none is a failure, not prose with a note. It is reminded once first, and
-    its text is kept for the parent to weigh.
+    """The second half of the gate. The value is a contract that the parent may
+    depend on, so a child with no value is a failure, not prose with a note. The
+    child is first reminded one time, and its text is kept for the parent to
+    weigh.
 
     Sabotage: end it `done`, or send no reminder, or remind it without end.
     """
@@ -251,8 +262,9 @@ async def test_skills_that_declare_different_outputs_are_refused(mount: MountPro
 async def test_an_output_ph_cannot_check_is_refused(
     mount: MountProfile, output: dict[str, Any], said: str
 ) -> None:
-    """A schema pH would half-check is refused rather than trusted. Sabotage: skip
-    `object_schema_problems` for a spawn's own output, and it is admitted."""
+    """A schema that pH would only half-check is refused and not trusted.
+    Sabotage: skip `object_schema_problems` for a spawn's own output, and it is
+    admitted."""
     ctx, parent, _script = await _parent(mount)
 
     with pytest.raises(SubagentSpawnError, match=said):
@@ -264,8 +276,8 @@ async def test_an_output_ph_cannot_check_is_refused(
 async def test_a_spawn_s_output_that_may_not_constrain_is_warned_about(
     mount: MountProfile, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The same warning a skill's gets when it loads, at the spawn that names its own.
-    Sabotage: warn on the skill path alone."""
+    """A spawn that names its own output gets the same warning that the output of
+    a skill gets when the skill loads. Sabotage: warn on the skill path alone."""
     ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "x"}))
 
     with caplog.at_level("WARNING", logger="ph.seams.subagents"):
@@ -279,9 +291,9 @@ async def test_a_spawn_s_output_that_may_not_constrain_is_warned_about(
 
 
 async def test_only_a_child_that_owes_a_value_is_offered_the_tool(mount: MountProfile) -> None:
-    """Registered on the child's own scope: its parent has no such tool, and nor does
-    a sibling that owes nothing. Sabotage: register it on the mount, and every agent
-    has it."""
+    """The tool is registered on the scope of the child itself. Its parent has no
+    such tool, and neither does a sibling that owes nothing. Sabotage: register it
+    on the mount, and every agent has it."""
     ctx, parent, script = await _parent(mount, "plain answer")
 
     run = await _spawn(ctx, parent)
@@ -292,9 +304,10 @@ async def test_only_a_child_that_owes_a_value_is_offered_the_tool(mount: MountPr
 
 
 async def test_a_parent_s_return_tool_is_not_something_it_holds(mount: MountProfile) -> None:
-    """A child's own child does not inherit its parent's way of answering, so a value
-    it returned would reach nobody. Sabotage: drop the filter in `held_by`, and the
-    tool is among what the parent could hand on."""
+    """The child of a child does not inherit the return tool of its parent,
+    because a value that it returned through that tool would reach nobody.
+    Sabotage: drop the filter in `held_by`, and the tool is among what the parent
+    could hand on."""
     ctx, parent, _script = await _parent(mount)
     ctx.require(TOOLS).register(simple_tool(RESULT_TOOL), scope=parent.ctx)
 
@@ -315,9 +328,9 @@ async def _wait(ctx: Context, parent: AgentDriver, child_id: str) -> Any:  # noq
 
 
 async def test_a_parent_waits_for_its_child_s_value(mount: MountProfile) -> None:
-    """The one wait there is, for a step that needs the value: it hands back what the
-    child returned, checked. Sabotage: answer with the child's text, and the value is
-    lost."""
+    """This is the only wait, for a step that needs the value. It returns the
+    checked value that the child returned. Sabotage: answer with the child's
+    text, and the value is lost."""
     ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "bug"}))
     run = await _spawn(ctx, parent, output=KIND)
 
@@ -330,8 +343,8 @@ async def test_a_parent_waits_for_its_child_s_value(mount: MountProfile) -> None
 async def test_a_child_settled_before_the_wait_is_answered_from_its_log(
     mount: MountProfile,
 ) -> None:
-    """A child this process no longer holds, as after a restart, is answered from its
-    own log. Sabotage: refuse a child with no live run."""
+    """A child that this process no longer holds, as after a restart, is answered
+    from its own log. Sabotage: refuse a child with no live run."""
     ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "feature"}))
     run = await _spawn(ctx, parent, output=KIND)
     await _settled(ctx, run)
@@ -356,8 +369,8 @@ async def test_a_wait_for_a_child_that_failed_fails_with_its_text_kept(
 
 
 async def test_an_agent_cannot_wait_on_a_child_not_its_own(mount: MountProfile) -> None:
-    """Another agent's live child is not yours to wait on, nor is an id no child has.
-    Sabotage: look the run up without asking whose child it is."""
+    """An agent cannot wait on the live child of another agent, or on an id that
+    no child has. Sabotage: look the run up without asking whose child it is."""
     ctx, parent, _script = await _parent(mount, (RESULT_TOOL, {"kind": "bug"}))
     run = await _spawn(ctx, parent, output=KIND)
     stranger = ctx.require(AGENTS).create(

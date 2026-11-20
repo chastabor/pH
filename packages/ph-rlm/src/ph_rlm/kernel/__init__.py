@@ -1,6 +1,7 @@
-"""pH's own CPython code runtime: the fd-3 protocol and the host that drives it.
+"""The CPython code runtime that pH owns: the fd-3 protocol and the host that
+drives it.
 
-`ph_runtime` (a separate distribution) is the other half, and it lives in a
+`ph_runtime` (a separate distribution) is the other half. It lives in a
 different venv on purpose.
 
 @module ph_rlm.kernel

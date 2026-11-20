@@ -1,13 +1,14 @@
-# ph-rlm: Prime Agent's design as plugins, over ph-base.
+# ph-rlm: the design of prime-agent as plugins, over ph-base.
 #
-# The `rlm` profile is base + tui + this. Every row here is a listener on a seam
-# that already exists; the only core change the bundle needs is the one the
-# `code_runtime` seam already carries — `namespace` and `persistence` (C1).
+# The `rlm` profile is the `tui` profile plus this bundle. Every row here is a
+# listener on a seam that already exists. The bundle needs one core change, and
+# the `code_runtime` seam already carries it: `namespace` and `persistence` (C1).
 
 # --- Code Mode --------------------------------------------------------------
-# Opt-in in `ph-base`, on here: the RLM model writes Python, so the transport
-# and its bindings are the whole surface it sees. `tools.mode: code` is what
-# makes a native tool call refuse with the SDK route back (C6).
+# Code Mode is opt-in in `ph-base` and on here. The RLM model writes Python, so
+# the transport and its bindings are the whole surface that it sees. With
+# `tools.mode: code`, a native tool call fails with a refusal that points back
+# to the SDK route (C6).
 - id: tools
   config:
     mode: code
@@ -19,25 +20,25 @@
     maxSubagentSpawnsPerRun: 32
     maxParallelSubCalls: 10
 
-# The model-facing half of Code Mode: the transport is presented as `python`,
-# described in pH's own words, with prime-agent's ordering of a result's four
-# sections. `run_code` stays the reserved internal name — a profile renames the
-# transport, it does not replace it (P3-09).
+# The model-facing half of Code Mode. The transport is presented as `python` and
+# described in the words of pH, with the order that prime-agent gives the four
+# sections of a result. `run_code` stays the reserved internal name: a profile
+# renames the transport and does not replace it (P3-09).
 - id: rlm-presentation
   name: rlm-presentation
 
 # --- the runtime ------------------------------------------------------------
-# pH's own CPython subprocess, fd 3 as the framed channel, one child per agent.
-# `persistence: namespace` is admissible only because the provider promises to
-# emit `kernel/snapshot` events, and the seam checks that promise when it
-# registers (D6) — cross-call state invisible to the log is exactly why dsh
-# withheld a persistent kernel.
+# The CPython subprocess of pH itself, with fd 3 as the framed channel and one
+# child per agent. `persistence: namespace` is admissible only because the
+# provider promises to emit `kernel/snapshot` events. The seam checks that
+# promise when the provider registers (D6). Cross-call state that the log cannot
+# see is the reason why dsh withheld a persistent kernel.
 - id: code-runtime-python
   name: code-runtime-python
   config:
     # `managed` builds $PH_CACHE/runtime-venv: ph-runtime-guest, dill, and the
-    # Python skills. Nothing else, because everything in it is reachable by
-    # model code.
+    # Python skills. It holds nothing else, because model code can reach
+    # everything in it.
     python: managed
     cpuSeconds: 30
     addressSpaceBytes: 2147483648
@@ -46,20 +47,24 @@
     maxSnapshotBytes: 16777216
 
 # --- delegation ------------------------------------------------------------
-# `rlm()` as a `ctx.subagents` provider: admission is logged and the handle
+# `rlm()` as a `ctx.subagents` provider. Admission is logged and the handle
 # returns before the child answers, so a parent can fan out and keep working
-# (P3-11). The roster the parent reads back is the fold over these events, not a
-# side table, so it survives restart and compaction by construction.
-# E4 note: a child gets `read` unless it asks for `write`, and that default is
-# the seam's (`SubagentRequest.access`) rather than a row knob — until
-# `ctx.workspace` lands (Phase 4, D21) a `write` request is recorded and
-# downgraded with a reason code, because a guarantee nothing enforces must not
-# be granted, and a row knob that could not change that would be a lie.
-# What this host can carry, across every root — the other half of the per-parent
-# figure below, and here rather than in `ph-core` because this is the bundle that
-# produces `subagent` jobs at all. `phern daemon --max-concurrent-children` overrides
-# it. Eight rather than four so two parents fanning out fully is the ordinary
-# case and not a queue; a starting point, not a measurement.
+# (P3-11). The roster that the parent reads back is the fold over these events,
+# not a side table, so it survives a restart and a compaction by construction.
+#
+# E4 note: a child gets `read` unless it asks for `write`. That default belongs
+# to the seam (`SubagentRequest.access`) and is not a row setting. `ctx.workspace`
+# (Phase 4, D21) decides what the child is granted: see `containment` below. In
+# a profile with no workspace row, a `write` request is recorded and downgraded
+# with a reason code, because a guarantee that nothing enforces must not be
+# granted. A row setting could not change that, so it would be a false promise.
+#
+# The `jobs` row sets what this host can carry, across every root. It is the
+# other half of the per-parent figure below. It is here and not in `ph-core`
+# because this is the bundle that produces `subagent` jobs at all.
+# `phern daemon --max-concurrent-children` overrides it. The value is eight and
+# not four, so that two parents that fan out fully are the ordinary case and not
+# a queue. It is a starting point, not a measurement.
 - id: jobs
   config:
     concurrency:
@@ -69,22 +74,23 @@
   name: rlm-subagent-provider
   config:
     maxDepth: 2
-    # How many of one parent's children run at once; the rest queue in
-    # admission order rather than being refused. A deployment number, not a
-    # row default: the row says `null` (no cap) so a profile that never chose is
-    # not silently serialized. Four is a starting point, not a measurement.
+    # How many children of one parent run at the same time. The rest queue in
+    # admission order and are not refused. This is a deployment number, not a
+    # row default. The row says `null` (no cap), so that a profile that never
+    # chose is not serialized without notice. Four is a starting point, not a
+    # measurement.
     maxConcurrent: 4
 
-# The model-facing half: `rlm.run(...)` inside a cell is a governed dispatch,
-# not a comm-channel RPC — so a policy row can deny or ask on spawning, and C4's
-# spawn budget counts it (P3-10).
+# The model-facing half. `rlm.run(...)` inside a cell is a governed dispatch, not
+# a comm-channel RPC. A policy row can therefore deny or ask on spawning, and the
+# spawn budget of C4 counts it (P3-10).
 - id: rlm-bindings
   name: rlm-bindings
 
-# Agent-to-agent messages (P3-12). The nuclear-family boundary is a *guard* —
-# deny-only, last, and not re-permittable by any later listener (C7) — while the
-# rate limit is backpressure the tool body raises, because ending a whole cell
-# over four messages in a second is not what a rate limit means.
+# Agent-to-agent messages (P3-12). The nuclear-family boundary is a *guard*: it
+# is deny-only, it runs last, and no later listener can permit what it denied
+# (C7). The rate limit is backpressure that the tool body raises, because a rate
+# limit does not mean that a whole cell ends over four messages in a second.
 - id: rlm-messaging
   name: rlm-messaging
   config:
@@ -93,74 +99,78 @@
     rateCapacity: 3
     rateRefillSeconds: 1.0
 
-# The doctrine (P3-14). Sections after `tools:sdk`, because they refer to the
-# surface it has just described — and the volatile facts (depth, cwd, family,
-# workspace tier) are a `context()` snapshot rather than a cached section, or
-# every turn that changed one would re-bill the whole prefix (A12).
+# The doctrine (P3-14). Its sections come after `tools:sdk`, because they refer
+# to the surface that `tools:sdk` has just described. The volatile facts (depth,
+# cwd, family, workspace tier) are a `context()` snapshot and not a cached
+# section. In a cached section, every turn that changed one fact would bill the
+# whole prefix again (A12).
 - id: rlm-prompt
   name: rlm-prompt
 
-# The Continual Harness (P3-16, D14): state is a fold over `harness/refined`
-# rather than a file, so a fork inherits the harness as of its boundary and a
-# rollback is derivable from the event that made the change. `/refine` is a
-# command, not a tool — it is something the human asks for.
+# The Continual Harness (P3-16, D14). Its state is a fold over `harness/refined`
+# and not a file. A fork therefore inherits the harness as of its boundary, and
+# a rollback can be derived from the event that made the change. `/refine` is a
+# command, not a tool, because the user is the one who asks for it.
 - id: rlm-harness
   name: rlm-harness
 
-# I6's live example (P6-01). `harness_state.json` is written for humans and
-# nothing reads it back, which is exactly the arrangement that lets a projection
-# drift unnoticed — so the invariant is checked rather than assumed.
+# The live example of I6 (P6-01). `harness_state.json` is written for humans and
+# nothing reads it back. That arrangement lets a projection drift without
+# notice, so the invariant is checked and not assumed.
 - id: rlm-harness-invariant
   name: rlm-harness-invariant
 
-# Capability-layer skills (P3-18): `SKILL.md` for the catalog, an installable
-# package for the kernel. The knowledge layer (`/refine`) may point at these and
-# may not create them — I7, and the reason the two share a word, not a mechanism.
-# No `paths` means no skills, so the row costs nothing until a deployment
-# configures one.
+# Capability-layer skills (P3-18): `SKILL.md` for the catalog, and an installable
+# package for the kernel. The knowledge layer (`/refine`) may point at these
+# skills and may not create them. That is I7, and it is the reason why the two
+# layers share a word and not a mechanism. No `paths` means no skills, so the
+# row costs nothing until a deployment configures one.
 - id: rlm-skills-python
   name: rlm-skills-python
 
-# `subagent-task` stands down here. Both delegation shapes are real — one call
-# and one answer, or a handle collected later — but this bundle *is* the second
-# one: `rlm_run` admits a child that replies by agent message, with a roster and
-# an inbox built around that. Offering a blocking twin beside it would put two
-# ways to do one thing in the same prompt, and the model would have to guess
-# which of them the rest of the tools were designed for.
+# `subagent-task` is disabled here. Both delegation shapes are real: one call
+# and one answer, or a handle that is collected later. This bundle *is* the
+# second shape. `rlm_run` admits a child that replies by agent message, and the
+# roster and the inbox are built around that. A blocking twin beside it would
+# put two ways to do one thing in the same prompt, and the model would have to
+# guess which one the other tools were designed for.
 - id: subagent-task
   disabled: true
 
-# "Prompt-as-a-variable" (P3-17, Q4): a corpus the model queries through
-# `await tools.context_search(...)` — bindings, so each query is its own governed
-# dispatch and one oversized result can be offloaded without its siblings.
-# Disabled here and opt-in in `rlm-stable`: C3 gave the model governed
-# `read`/`grep`/`glob`, which demoted this from a headline feature to a
-# specialist one for non-file corpora. A row with no `sources` stands down anyway.
+# "Prompt-as-a-variable" (P3-17, Q4): a corpus that the model queries through
+# `await tools.context_search(...)`. The queries are bindings, so each query is
+# its own governed dispatch, and one oversized result can be offloaded without
+# its siblings. The row is disabled here and opt-in in `rlm-stable`. C3 gave the
+# model governed `read`/`grep`/`glob`, which reduced this row from a headline
+# feature to a specialist feature for non-file corpora. A row with no `sources`
+# stands down anyway.
 - id: rlm-context-loader
   name: rlm-context-loader
   disabled: true
 
-# The row that makes `persistence: namespace` true rather than declared (D17).
-# Mounted with the runtime, not optionally: the seam takes the provider's promise
-# at registration, and these events are the promise being kept.
+# The row that makes `persistence: namespace` true and not only declared (D17).
+# It is mounted with the runtime and is not optional. The seam takes the promise
+# of the provider at registration, and these events keep that promise.
 - id: rlm-kernel-snapshot
   name: rlm-kernel-snapshot
   config:
     inlineBlobMax: 65536
 
 # The containment ladder for an RLM session (P4-11, §4.8). The *root* agent
-# stays `advisory`: a person running `rlm` is working in the directory they
-# opened, and moving their agent to a checkout elsewhere is a surprise a
-# deployment should have to ask for. Children go to `worktree`, because eight of
-# them writing one tree concurrently is the fan-out hazard the tier exists for —
-# and the parent then reviews a diff instead of trusting sibling writes (E2).
+# stays `advisory`. A user who runs `rlm` works in the directory that they
+# opened, and to move their agent to a checkout elsewhere is a surprise that a
+# deployment must ask for. Children go to `worktree`, because eight children
+# that write one tree at the same time are the fan-out hazard that the tier
+# exists for. The parent then reviews a diff and does not have to trust sibling
+# writes (E2).
 - id: containment
   config:
     tier: advisory
     child_tier: worktree
 
-# The rungs themselves. Layered here rather than in `ph-base` because they cost
-# a checkout per agent, and inert until `containment` above asks for them.
+# The rungs themselves. They are layered here and not in `ph-base` because they
+# cost a checkout per agent. They are inert until `containment` above asks for
+# them.
 - id: workspace-git-worktree
   name: workspace-git-worktree
 

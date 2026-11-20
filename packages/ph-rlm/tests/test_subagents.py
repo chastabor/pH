@@ -1,48 +1,53 @@
 """Delegation: admission, the depth gate, and what the parent is told (P3-11).
 
-The load-bearing claim is **non-blocking admission**: `start()` returns once the
-child is admitted, not once it has answered. Everything else here is about the
-parent being able to act on that handle — a child's state is read from its own
-log, a silent child is announced, what a child spent is counted where it spent it,
-a revoked child leaves a tombstone.
+The main claim is **non-blocking admission**: `start()` returns when the child
+is admitted, not when it has answered. Everything else here is about how the
+parent can act on that handle:
+
+- The state of a child is read from its own log.
+- A silent child is announced.
+- What a child spent is counted where the child spent it.
+- A revoked child leaves a tombstone.
 
 ## Each session owns its log (Phase 11)
 
-Every record about a child — its admission, each start, each wait, its ending and
-its tombstone — is in the **child's own** log, and nothing about it is written to
-its parent's. So these tests read a child's story from the child (`_log_of`,
-`_state`), and the ones about durability ask the child's store, not the parent's.
+Every record about a child is in the log of **the child itself**: its admission,
+each start, each wait, its ending and its tombstone. Nothing about the child is
+written to the log of its parent. These tests therefore read the records of a
+child from the child (`_log_of`, `_state`). The tests about durability ask the
+store for the log of the child, not for the log of the parent.
 
-The parent used to keep a roster of its children in its own log, and every
-durability rule in this file existed to keep that second account in step with the
-first: the parent flushed before a child's gate opened (S2), before a restart
-(S10), after the child's own log (F1), and a resume copied the answers a crash had
-left only in the child's log back into the parent's (L5). With one account there
-is nothing to keep in step, and each rule is about one log.
-`test_a_parents_log_holds_no_record_of_its_child` is what keeps it that way.
+The parent used to keep a roster of its children in its own log. Every
+durability rule in this file existed to keep that second account in step with
+the first. The parent flushed before the gate of a child opened (S2), before a
+restart (S10), and after the log of the child (F1). A resume copied the answers
+that a crash had left only in the log of the child back into the log of the
+parent (L5). With one account there is nothing to keep in step, and each rule is
+about one log. `test_a_parents_log_holds_no_record_of_its_child` keeps it that
+way.
 
-## A child's spend never was a correction to its parent's context
+## The spend of a child was never a correction to the context of its parent
 
-`TokenMeter.last_usage` folds only `assistant/message` in the log it is *given*,
-and a child's `assistant/message` events are in the **child's** log — so the
-parent's context measurement never included them and there is nothing to
-subtract. The mirror this package once wrote into the parent's log
-(`subagent/usage-attributed`) was additive, for readers, and those readers — a
-goal's budget, the retry ladder, the TUI panel — read the child's own answers now
-(`ChildState.tokens`).
+`TokenMeter.last_usage` folds only the `assistant/message` events of the log
+that it is *given*, and the `assistant/message` events of a child are in the log
+of **the child**. The context measurement of the parent therefore never included
+them, and there is nothing to subtract. This package used to write a mirror into
+the log of the parent (`subagent/usage-attributed`). The mirror was additive and
+was for readers: the budget of a goal, the retry ladder and the TUI panel. Those
+readers now read the answers of the child itself (`ChildState.tokens`).
 
-Worth keeping written down because the false version was load-bearing-sounding:
-it implied a fan-out of eight would otherwise read as context pressure on the
-parent and trigger a compaction it does not need. It would not, and no code path
-depends on a parent-side record to prevent it.
+This is written down because the false version sounded important. It implied
+that a fan-out of eight would otherwise read as context pressure on the parent
+and trigger a compaction that the parent does not need. It would not, and no
+code path depends on a record in the log of the parent to prevent it.
 
-## Why the parent check sits above `agents.create` in `rehydrate`
+## Why the parent check is above `agents.create` in `rehydrate`
 
-Below it, a rehydration with no live parent built an agent and a scope, failed, and
-left both behind: **an orphan under the registry root holding the deployment-wide
-ceiling that nothing would ever dispose**. The parent owns the drive job *and*,
-since P6-27, the scope the child nests in — so a missing parent is a refusal rather
-than a degradation.
+With the check below `agents.create`, a rehydration with no live parent built an
+agent and a scope, failed, and left both behind: **an orphan under the registry
+root that held the deployment-wide ceiling and that nothing would ever
+dispose**. The parent owns the drive job *and*, since P6-27, the scope that the
+child nests in. A missing parent is therefore a refusal and not a degradation.
 """
 
 from __future__ import annotations
@@ -176,33 +181,37 @@ async def _spawn(
 
 
 def _log_of(ctx: Context, run: SubagentRun) -> list[SessionEvent]:
-    """A child's own log: its live session's events, else what its store holds.
+    """The log of one child: the events of its live session, or else what the
+    store holds.
 
-    The live one while this process has the child open, since that is what its doors
-    write. The stored one for a child this process let go — one a resume sweep ended
-    without readmitting it, whose log it opened, wrote, flushed and closed again — for
-    which the disk is the only copy left.
+    The live session is used while this process has the child open, because the
+    record functions of the seam write to it. The stored log is used for a child
+    that this process let go. An example is a child that a resume sweep ended
+    and did not readmit: the sweep opened its log, wrote it, flushed it and
+    closed it again. For such a child, the disk holds the only copy.
     """
     live = ctx.require(SESSIONS).get(run.session_id)
     return list(live.events) if live is not None else stored_events(ctx, run.session_id)
 
 
 def _state(ctx: Context, run: SubagentRun) -> ChildState:
-    """One child as its own log tells it, through the service every reader asks — the
-    prompt, the roster tool, the resume sweep and the budgets alike."""
+    """The state of one child as its own log gives it. The state is read through
+    the service that every reader asks: the prompt, the roster tool, the resume
+    sweep and the budgets."""
     return not_none(ctx.require(SUBAGENTS).state(run.session_id), f"the child {run.id}")
 
 
 def _stored_state(ctx: Context, run: SubagentRun) -> ChildState:
-    """One child as its **store** holds it: what a resume would be handed, and so what a
-    durability rule is about."""
+    """The state of one child as the **store** holds it. A resume would receive
+    this state, so a durability rule is about this state."""
     header, events = ctx.require(SESSION_PERSISTENCE).read(run.session_id)
     return child_state_of(run.session_id, header, events)
 
 
 def _statuses(ctx: Context, run: SubagentRun, field: str = "status") -> list[str]:
-    """Every status this child reached, in order — or another `field` of the same
-    records. Its own log's, which is the only place a status is written."""
+    """Every status that this child reached, in order, or another `field` of the
+    same records. The records come from its own log, which is the only place
+    where a status is written."""
     return [str(event.data.get(field)) for event in _log_of(ctx, run) if event.type == STATUS]
 
 
@@ -217,7 +226,7 @@ def _teardowns(parent: AgentHandle) -> list[str]:
 
 
 def _about_children(session: Session) -> list[str]:
-    """The `subagent/*` records in a parent's own log — none, by design."""
+    """The `subagent/*` records in the log of a parent. By design there are none."""
     return [event.type for event in session.events if event.type.startswith("subagent/")]
 
 
@@ -228,22 +237,27 @@ def _about_children(session: Session) -> list[str]:
 async def test_a_parent_that_goes_away_mid_admission_refuses_the_child(
     delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch, step: str
 ) -> None:
-    """A spawn whose parent's scope is disposed under one of its awaits is refused.
+    """A spawn is refused when the scope of its parent is disposed during one of
+    its awaits.
 
-    It escaped as a raw `InactiveScopeError` from whichever registration met the
-    dead scope first — a workspace effect on the child's scope, the release effect or
-    the job on the parent's — carrying no spawn code, and a child it had got as far
-    as starting was left open with nothing that would ever end it. Now it is a
-    `SubagentSpawnError`, and what was built is released: its session let go while
-    it is being built, tombstoned in its own log once its drive exists. Either way
-    the seam never writes its admission, so its log names no child, and nothing
-    reads as a live child of the parent.
+    The failure used to escape as a raw `InactiveScopeError` from the first
+    registration that met the dead scope: a workspace effect on the scope of the
+    child, or the release effect or the job on the scope of the parent. The
+    error carried no spawn code. A child that the spawn had already started was
+    left open, and nothing would ever end it.
 
-    Sabotage: drop either `except InactiveScopeError` in `_admit`.
+    Now the failure is a `SubagentSpawnError`, and what was built is released.
+    While the child is being built, its session is let go. After its drive
+    exists, the child is tombstoned in its own log. In both cases the seam never
+    writes the admission, so the log names no child, and nothing reads as a live
+    child of the parent.
+
+    Sabotage: in `RlmChildProvider._admit`, drop the `except BaseException`
+    around `_workspace` or the `except InactiveScopeError`.
     """
     ctx, session, parent = await delegating()
-    # Two awaits in building the child: its workspace, and the job that drives it,
-    # which registers on the parent's scope.
+    # The build of the child has two awaits: its workspace, and the job that
+    # drives it. The job registers on the scope of the parent.
     owner, name = (
         (RlmChildProvider, "_workspace")
         if step == "building-its-workspace"
@@ -277,13 +291,14 @@ async def test_a_parent_that_goes_away_mid_admission_refuses_the_child(
 
 
 async def test_admission_returns_before_the_child_answers(delegating: MountedRuntime) -> None:
-    """The property the whole design exists for: a parent fans out and keeps
-    working, instead of blocking on each child in turn."""
+    """The property that the design exists for: a parent fans out and continues
+    to work. It does not block on each child in turn."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
 
-    # Admitted, not finished: the record of it existing is written — in its own log,
-    # and not its parent's — and nothing has reported on it yet.
+    # Admitted, not finished. The record that the child exists is written in its
+    # own log and not in the log of its parent. Nothing has reported on the child
+    # yet.
     own = _log_of(ctx, run)
     assert [event.type for event in own if event.type.startswith("subagent/")] == [ADMITTED]
     (admitted,) = [event for event in own if event.type == ADMITTED]
@@ -301,13 +316,14 @@ async def test_admission_returns_before_the_child_answers(delegating: MountedRun
 
 
 async def test_the_admission_is_logged_before_any_status(delegating: MountedRuntime) -> None:
-    """The child's drive is gated on its admission (`SubagentRun.ready`), so every
-    status the drive writes follows the admission in the child's own log.
+    """The drive of the child waits for its admission (`SubagentRun.ready`).
+    Every status that the drive writes therefore follows the admission in the
+    log of the child.
 
-    The fold no longer needs the order — a log with statuses and no admission is not a
-    child, and every reader skips it — but a drive that ran ahead of its admission
-    would be a child working before anything recorded it existed, which is S2's
-    failure seen from the other side."""
+    The fold no longer needs the order: a log with statuses and no admission is
+    not a child, and every reader skips it. But a drive that ran ahead of its
+    admission would be a child that works before any record says that it exists.
+    That is the failure of S2, seen from the other side."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent)
     await settle_background(ctx)
@@ -320,22 +336,25 @@ async def test_the_admission_is_logged_before_any_status(delegating: MountedRunt
 async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
     delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S2 — the admission is the one record a resume finds a child by.
+    """S2: the admission is the one record by which a resume finds a child.
 
-    It is in the child's own log, and the seam flushes that log before it opens the
-    child's gate: a crash any time after the child's first step leaves a log on disk
-    that says what the child was asked, by whom and under which ceiling — which is
-    what the store lists a parent's children by (`descendants_of`) and the sweep
-    readmits them from. It used to ride the parent's log in memory, while the child's
-    own flushes never wrote its parent, so a crash mid-run left a child with a log and
-    a tree that nothing on disk named.
+    The admission is in the log of the child, and the seam flushes that log
+    before it opens the gate of the child. A crash at any time after the first
+    step of the child therefore leaves a log on disk that says what the child
+    was asked, by whom, and under which ceiling. The store lists the children of
+    a parent by that record (`descendants_of`), and the sweep readmits them from
+    it. The admission used to be held in memory in the log of the parent, and
+    the flushes of the child never wrote the log of its parent. A crash in the
+    middle of a run therefore left a child with a log and a tree that nothing on
+    disk named.
 
-    Asked at the gate, not at the model: the child's first model request flushes its
-    log anyway, so by then the question is moot. The drive's first act after the gate
-    is its `running` record, so the store is read there.
+    The test asks at the gate, not at the model. The first model request of the
+    child flushes its log anyway, so at that point the question no longer
+    matters. The first act of the drive after the gate is its `running` record,
+    so the test reads the store there.
 
-    Sabotage: drop the child's flush from `SubagentService._admit`, and the stored
-    log is empty when the child starts.
+    Sabotage: drop the flush of the child from `SubagentService._admit`, and the
+    stored log is empty when the child starts.
     """
     ctx, _session, parent = await delegating()
     seen: list[list[str]] = []
@@ -358,22 +377,23 @@ async def test_the_admission_is_on_disk_before_the_child_takes_a_step(
 async def test_a_child_whose_admission_cannot_be_written_is_not_started(
     delegating: MountedRuntime, gate: ModelGate
 ) -> None:
-    """Fail-closed, as a durable intent is: no admission on disk, no child.
+    """Fail-closed, like a durable intent: no admission on disk means no child.
 
-    The refusal reaches the caller, the child never reaches the model, and it is
-    ended in its own log — so nothing holds the parent out of passivation for a child
-    that never ran. And not revoked: a refusal is not a deletion, and the release
-    that tombstoned it said `parent-teardown` of a parent that was still there.
+    The refusal reaches the caller, the child never reaches the model, and the
+    child is ended in its own log. Nothing therefore keeps the parent out of
+    passivation for a child that never ran. The child is not revoked, because a
+    refusal is not a deletion. The release that used to tombstone it said
+    `parent-teardown` about a parent that was still there.
 
     Sabotage: open the gate whether or not the write worked, and the child runs.
-    Point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`, and it is
-    deleted.
+    Point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`, and the
+    child is deleted.
     """
     ctx, session, parent = await delegating()
 
     def refuse(target: Session) -> None:
-        # The child's log, which is the one the admission is written to: its id is
-        # minted inside the spawn, and its header names the parent.
+        # The log of the child is the log that the admission is written to. Its
+        # id is created inside the spawn, and its header names the parent.
         if target.header.delegating_parent == session.id:
             raise OSError("the disk is full")
 
@@ -392,17 +412,19 @@ async def test_a_child_whose_admission_cannot_be_written_is_not_started(
 async def test_an_interrupted_spawn_is_answered_with_the_handle_it_admitted(
     delegating: MountedRuntime,
 ) -> None:
-    """S2 — an `rlm.run` a crash cut short is found among its parent's children by its
-    call.
+    """S2: an `rlm.run` that a crash cut short is found among the children of its
+    parent by its call.
 
-    Its whole value is the admission handle, and the admission is on the child's disk
-    before the child runs — carrying the call's id — so a resume can show the program
-    the handle it would have had, rather than "outcome unknown", on which a model
-    spawns the same child beside the one the resume has already put back to work. No
-    admission under the call is a spawn that never happened.
+    The whole value of an `rlm.run` is the admission handle. The admission is on
+    disk in the log of the child before the child runs, and it carries the id of
+    the call. A resume can therefore show the program the handle that it would
+    have had. The alternative is "outcome unknown", and on that answer a model
+    spawns the same child again beside the one that the resume has already put
+    back to work. If no admission exists under the call, the spawn never
+    happened.
 
-    Sabotage: drop `call_id` from the request `run_child` builds, and the admitted
-    child is not found.
+    Sabotage: drop `call_id` from the request that `run_child` builds, and the
+    admitted child is not found.
     """
     ctx, session, parent = await delegating(dict(BINDINGS_ROW))
     arguments = {"prompt": "scout the repo"}
@@ -451,7 +473,7 @@ async def test_the_child_gets_the_task_labeled_as_the_parents(delegating: Mounte
 
 
 async def test_the_depth_gate_names_both_numbers(delegating: MountedRuntime) -> None:
-    """Prime Agent's wording, so a model that has seen it need not re-learn it."""
+    """Prime-agent's wording, so a model that has seen it need not re-learn it."""
     ctx, session, parent = await delegating(maxDepth=0)
     with pytest.raises(SubagentSpawnError, match=r"RLM_DEPTH=0, RLM_MAX_DEPTH=0"):
         await _spawn(ctx, parent)
@@ -488,9 +510,10 @@ async def test_a_sibling_name_collision_is_refused(delegating: MountedRuntime) -
 
 
 async def test_an_unroutable_provider_is_refused_at_admission(delegating: MountedRuntime) -> None:
-    """No adapter, no child, refused where the route is chosen (`choose`). Nothing is
-    substituted — a child answering on a model the parent did not choose is a
-    result the parent cannot interpret."""
+    """No adapter means no child. The spawn is refused where the route is chosen
+    (`choose`). Nothing is substituted, because a child that answers on a model
+    that the parent did not choose gives a result that the parent cannot
+    interpret."""
     ctx, _session, parent = await delegating()
     with pytest.raises(SubagentSpawnError, match='no adapter here serves "nonexistent"'):
         await _spawn(ctx, parent, choice=ModelChoice(provider="nonexistent", model="m1"))
@@ -499,17 +522,17 @@ async def test_an_unroutable_provider_is_refused_at_admission(delegating: Mounte
 async def test_the_default_shapes_the_request_and_the_tier_answers_it(
     delegating: MountedRuntime,
 ) -> None:
-    """E4 and E3 together, at the `advisory` tier — which is the shipped default.
+    """E4 and E3 together, at the `advisory` tier, which is the shipped default.
 
-    The default is about the *request*: an omitted `access` asks for `read`, and
-    that is what makes a child research-shaped no matter what the tier does with
-    it. What comes back is the tier's answer, and at `advisory` the answer to
-    both requests is the same shared checkout, because **nothing here can make a
-    repository read-only** (§4.8's table says exactly this, and calls the row
-    "not read-only"). So `granted` says `write` for a `read` request, and the
-    pair — requested beside granted — is the honest record. Claiming `read`
-    would be a promise nothing keeps, which is the one thing this field must
-    never do.
+    The default is about the *request*. An omitted `access` asks for `read`, and
+    that makes a child suited to research whatever the tier does with the
+    request. What comes back is the answer of the tier. At `advisory` the answer
+    to both requests is the same shared checkout, because **nothing here can
+    make a repository read-only**. (The table in §4.8 says exactly this, and
+    calls the row "not read-only".) So `granted` says `write` for a `read`
+    request, and the pair of requested and granted is the correct record. A
+    claim of `read` would be a promise that nothing keeps, and this field must
+    never make such a promise.
     """
     ctx, session, parent = await delegating()
     default = await _spawn(ctx, parent, "read some code")
@@ -524,9 +547,9 @@ async def test_the_default_shapes_the_request_and_the_tier_answers_it(
         run_id: not_none(state.admission)
         for run_id, state in ctx.require(SUBAGENTS).children(session.id).items()
     }
-    # Nothing was *narrowed*, so there is no downgrade to report: the widening a
-    # `read` request meets at this tier is visible in the pair itself, and the
-    # child is told plainly by its own workspace prompt line.
+    # Nothing was *narrowed*, so there is no downgrade to report. The widening
+    # that a `read` request gets at this tier is visible in the pair itself, and
+    # the workspace line in the prompt of the child states it plainly.
     assert asked.downgrade_reason is None
     assert default.downgrade_reason is None
     assert rows[default.id].downgrade_reason is None
@@ -536,16 +559,17 @@ async def test_the_default_shapes_the_request_and_the_tier_answers_it(
 async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
     delegating: MountedRuntime, tmp_path: Path
 ) -> None:
-    """E3, through the spawn path: the same request, a tier that can answer it.
+    """E3, through the spawn path: the same request, with a tier that can answer it.
 
-    `worktree-ephemeral` is what `access="read"` buys where a tier exists — the
-    child writes freely and **merges nothing**, so what it was granted *of the
-    project* is `read`. That is the seam's own reading of `repo_writable` applied
-    one level up, and the reason `granted` is not copied from the request.
+    Where a tier exists, `access="read"` gets `worktree-ephemeral`. The child
+    writes freely and **merges nothing**, so what it was granted *of the
+    project* is `read`. That is how the seam itself reads `repo_writable`,
+    applied one level up, and it is the reason that `granted` is not copied from
+    the request.
 
-    Branching from the *parent's* root rather than the process's is the other
-    half: it is what puts a fan-out on sibling branches instead of one shared
-    checkout (E2).
+    The other half is that the branch starts from the root of the *parent* and
+    not from the root of the process. That puts a fan-out on sibling branches
+    and not in one shared checkout (E2).
     """
     ctx, _session, parent = await delegating()
     parent_root = tmp_path / "parent-tree"
@@ -564,9 +588,9 @@ async def test_a_read_child_gets_an_isolated_checkout_where_a_tier_can_give_one(
 async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: MountProfile) -> None:
     """The conservative claim, and the only case that still downgrades.
 
-    With no seam at all nothing can enforce a writable repo, so nothing promises
-    one — and the reason travels as a *code*, not a sentence, because a durable
-    log has to stay parseable and prose in an event goes stale silently.
+    With no seam at all, nothing can enforce a writable repo, so nothing promises
+    one. The reason is recorded as a *code* and not as a sentence, because a
+    durable log must stay parseable and prose in an event goes stale silently.
     """
     ctx = await mount(
         dict(PROVIDER_ROW),
@@ -588,12 +612,13 @@ async def test_a_profile_with_no_workspace_row_refuses_to_promise_one(mount: Mou
 
 
 def _notices(session: Session) -> list[str]:
-    """Notices delivered to the parent's inbox but not yet claimed by a step.
+    """The notices that were delivered to the inbox of the parent but that no
+    step has claimed yet.
 
-    `inject` is deliberately non-waking, so the notice lands as a splice and
-    becomes a `user/message` at the parent's next step — which is what "replies
-    arrive on later turns" means. Reading the splice is reading the moment of
-    delivery.
+    The seam delivers a notice with `steer` (`_deliver_notice`). The notice
+    arrives as a splice and becomes a `user/message` at the next step of the
+    parent. That is the meaning of "replies arrive on later turns". To read the
+    splice is to read the moment of delivery.
     """
     return [
         repr(event.data)
@@ -636,10 +661,12 @@ async def test_the_notice_reaches_the_parents_context_on_its_next_step(
 async def test_a_child_that_replied_is_not_announced_as_silent(delegating: MountedRuntime) -> None:
     """The reply is the notice, so the parent is not told the same thing twice.
 
-    The reply is written into the child's log before it runs, which is the only way to
-    fix the ordering: a fake-adapter child settles inside a real send's own await.
+    The test writes the reply into the log of the child before the child runs.
+    That is the only way to fix the order, because a child on the fake adapter
+    settles inside the await of a real send.
 
-    Sabotage: decide the notice from anything but the child's own log, and it fires.
+    Sabotage: decide the notice from anything but the log of the child itself,
+    and the notice is sent.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "say something")
@@ -647,13 +674,14 @@ async def test_a_child_that_replied_is_not_announced_as_silent(delegating: Mount
     await settle_background(ctx)
 
     assert _notices(session) == [], "a child that replied was announced as silent"
-    # The status record still lands: only the redundant notice is suppressed.
+    # The status record is still written. Only the redundant notice is suppressed.
     assert _statuses(ctx, run)[-1] == "done"
 
 
 async def test_the_child_status_reaches_its_own_log(delegating: MountedRuntime) -> None:
-    """Each start and the ending are the child's records, in its log; the parent's
-    log hears of the child only as a notice in its inbox."""
+    """Each start and the ending are records of the child, in its own log. The
+    log of the parent learns of the child only from a notice in the inbox of the
+    parent."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
     await settle_background(ctx)
@@ -667,23 +695,26 @@ async def test_the_child_status_reaches_its_own_log(delegating: MountedRuntime) 
 async def test_a_childs_outcome_is_on_disk_before_its_parent_is_told(
     delegating: MountedRuntime,
 ) -> None:
-    """F1. The parent hears a child finished — the notice in its inbox, the result
-    its waiters are handed — only once the child's own log on disk holds the ending,
-    and the answer before it.
+    """F1. The parent is told that a child finished only after the log of the
+    child on disk holds the ending, and the answer before the ending. The parent
+    is told in two ways: the notice in its inbox, and the result that its
+    waiters receive.
 
-    Nothing used to flush a child after its last model request — its last barrier
-    comes *before* that request, and a parent's flush walks ancestors, never
-    children — so every child log on disk ended before its answer while the parent
-    was told "done" with a preview of it. Repair then closed the child's turn as
-    interrupted on the next open, and readmitted it to do the work again. The rule is
-    one log's now: `record_ended` writes the ending and flushes the child before the
-    drive tells anyone.
+    Nothing used to flush a child after its last model request. The last barrier
+    of a child comes *before* that request, and the flush of a parent walks
+    ancestors and never children. Every child log on disk therefore ended before
+    the answer, while the parent was told "done" with a preview of that answer.
+    On the next open, repair closed the turn of the child as interrupted and
+    readmitted the child to do the work again. The rule now concerns one log:
+    `record_ended` writes the ending and flushes the child before the drive
+    tells anyone.
 
-    Asked of the store at the moment the notice lands in the parent's log, through
-    the Protocol: what it would hand a resume, not what is in memory.
+    The test asks the store at the moment that the notice arrives in the log of
+    the parent. It asks through the Protocol, so the answer is what the store
+    would give a resume, not what is in memory.
 
-    Sabotage: drop the flush from `ph.seams.subagents.record_ended`, and the child's
-    stored log is missing its ending when the parent is told.
+    Sabotage: drop the flush from `ph.seams.subagents.record_ended`, and the
+    stored log of the child lacks its ending when the parent is told.
     """
     ctx, session, parent = await delegating()
     children: list[SubagentRun] = []
@@ -703,8 +734,9 @@ async def test_a_childs_outcome_is_on_disk_before_its_parent_is_told(
     ending = next(
         i for i, event in enumerate(held) if event.type == STATUS and event.data["status"] == "done"
     )
-    # Everything up to and including the ending — the answer among it. What follows
-    # it (the withdrawn workspace mark) is the child's own business, not the news.
+    # Everything up to and including the ending, which includes the answer. What
+    # follows the ending (the withdrawn workspace mark) concerns only the child
+    # and is not part of what the parent is told.
     assert [event.seq for event in stored[: ending + 1]] == [
         event.seq for event in held[: ending + 1]
     ], "the parent was told before the child's disk held its answer and its ending"
@@ -712,24 +744,25 @@ async def test_a_childs_outcome_is_on_disk_before_its_parent_is_told(
 
 
 async def test_a_waiter_can_still_block_on_completion(delegating: MountedRuntime) -> None:
-    """The generic `task` contract: the answer is reachable, just never the thing
-    admission hands back."""
+    """The generic `task` contract: the answer can be reached, but admission
+    never returns it."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent)
     assert run.result is not None
     outcome = await run.result()
     assert outcome.status == "done"
-    # The answer is reachable — just never what admission handed back.
+    # The answer can be reached, but admission did not return it.
     assert outcome.answer == "ok"
 
 
 async def test_a_childs_spend_is_counted_from_its_own_answers(
     delegating: MountedRuntime,
 ) -> None:
-    """What a child spent is read where it spent it: the `usage` on its own
-    `assistant/message`s, which a goal's budget (`delegated_tokens`) and the panel
-    add up. Nothing is copied into the parent's log for them to read — a copy that
-    could lag the child's own after a crash, and had to be caught up on every resume.
+    """What a child spent is read where the child spent it: the `usage` on its
+    own `assistant/message` events. The budget of a goal (`delegated_tokens`)
+    and the panel add those up. Nothing is copied into the log of the parent for
+    them to read. Such a copy could lag behind the log of the child after a
+    crash, and every resume had to bring it up to date.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent)
@@ -747,9 +780,10 @@ async def test_a_childs_spend_is_counted_from_its_own_answers(
 
 
 async def test_the_children_are_read_from_their_own_logs(delegating: MountedRuntime) -> None:
-    """P3-13 by construction: no side table, so restart and compaction are free.
-    A parent's children are whatever logs name it, each folded on its own — the
-    service's cached fold equals a fresh fold of the child's log (I6)."""
+    """P3-13 by construction: there is no side table, so restart and compaction
+    cost nothing. The children of a parent are the logs that name it, and each
+    log is folded on its own. The cached fold of the service equals a fresh fold
+    of the log of the child (I6)."""
     ctx, session, parent = await delegating()
     first = await _spawn(ctx, parent, "one", name="alpha")
     second = await _spawn(ctx, parent, "two", name="beta")
@@ -766,11 +800,13 @@ async def test_the_children_are_read_from_their_own_logs(delegating: MountedRunt
 async def test_deleting_a_child_leaves_a_tombstone(
     delegating: MountedRuntime, gate: ModelGate
 ) -> None:
-    """The transcript stays on disk, so the revocation must be findable — in the
-    child's own log, which alone then tells its whole story.
+    """The transcript stays on disk, so a reader must be able to find the
+    revocation. It is in the log of the child, and that log alone then holds the
+    whole record of the child.
 
-    Held at the model, so it is revoked while it works: the delete reads the parent's
-    stored children off the event loop first, and an unheld child answers meanwhile.
+    The child is held at the model, so it is revoked while it works. The delete
+    first reads the stored children of the parent off the event loop, and a
+    child that is not held answers in that time.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "doomed")
@@ -780,8 +816,9 @@ async def test_deleting_a_child_leaves_a_tombstone(
 
     assert await subagents.delete(session, run.id, reason="user") is True
     assert subagents.get(run.id) is None
-    # Its revocation went with it, rather than staying on the parent's scope until
-    # the parent ends: one per deleted child, for as long as a root lives.
+    # The revocation of the child went with it. It did not stay on the scope of
+    # the parent until the parent ends. Otherwise one revocation would stay for
+    # each deleted child, for as long as a root lives.
     assert _teardowns(parent) == []
     # Deleting twice is not an error, and does not double-tombstone.
     assert await subagents.delete(session, run.id, reason="again") is False
@@ -794,18 +831,18 @@ async def test_deleting_a_child_leaves_a_tombstone(
     state = _state(ctx, run)
     assert state.deleted is True
     assert state.deleted_reason == "user"
-    # A revoked child has a terminal state, not merely an absence — a panel that
-    # knew only `deleted` could not say whether it had ever run.
+    # A revoked child has a terminal state and is not merely absent. A panel
+    # that knew only `deleted` could not say whether the child had ever run.
     assert state.status == "canceled"
-    # And it lands with the tombstone (S14): apart, a flush between them left a
-    # child canceled and not deleted.
+    # The status is written in the same batch as the tombstone (S14). When they
+    # were apart, a flush between them left a child canceled and not deleted.
     canceled = next(
         event for event in own if event.type == STATUS and event.data.get("status") == "canceled"
     )
     assert canceled.batch is not None and canceled.batch == tombstones[0].batch
-    # On its disk before anything was let go.
+    # On disk before anything was let go.
     assert _stored_state(ctx, run).deleted is True
-    # The child's log is still there — a tombstone is not a deletion.
+    # The log of the child still exists: a tombstone is not a deletion.
     assert ctx.require(SESSIONS).get(run.session_id) is not None
     assert _about_children(session) == []
 
@@ -813,18 +850,18 @@ async def test_deleting_a_child_leaves_a_tombstone(
 async def test_a_child_deleted_as_it_is_admitted_stays_revoked(
     delegating: MountedRuntime,
 ) -> None:
-    """Deleted before its drive took a step, with nothing holding it: the release
-    writes the tombstone and waits for the child's disk, and the drive comes through
-    its gate inside that wait, before the release has marked the child finished. It
-    wrote `running`, ran an agent whose task the cancel had taken, wrote `done`, and
-    told the parent that the child it had just deleted "completed without sending a
-    reply".
+    """The child is deleted before its drive took a step, and nothing holds it.
 
-    Sabotage: drop the `_tombstoned` check from `record_started` and the `child_is_live`
-    check from `record_ended`, and the statuses are `canceled`, `running`, `done`, with
-    the notice delivered. Have
-    the drive carry on past a refused start, and whoever awaits the child is told
-    `done`.
+    The release writes the tombstone and waits for the disk. The drive comes
+    through its gate during that wait, before the release has marked the child
+    finished. The drive used to write `running`, run an agent whose task the
+    cancel had taken, write `done`, and tell the parent that the child it had
+    just deleted "completed without sending a reply".
+
+    Sabotage: drop the `_tombstoned` check from `record_started` and the
+    `child_is_live` check from `record_ended`, and the statuses are `canceled`,
+    `running`, `done`, with the notice delivered. Make the drive continue past a
+    refused start, and whoever awaits the child is told `done`.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "doomed")
@@ -842,14 +879,18 @@ async def test_a_child_deleted_as_it_is_admitted_stays_revoked(
 async def test_a_failure_after_a_child_finished_does_not_end_it_again(
     delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A child is ended once. Something that raised after its `done` was written — the
-    mark on its tree withdrawn, here — reached the drive's failure path, which wrote
-    `error` over the `done` with a notice of its own: the parent was told the child
-    finished and then that it failed, and whoever awaited it was handed the failure.
-    The door refuses the second ending, and the waiter is handed what the log holds.
+    """A child is ended one time.
 
-    Sabotage: drop the `child_is_live` check from `record_ended`, and the statuses end
-    `done`, `error`, with two notices.
+    Something that raised after the `done` of the child was written used to
+    reach the failure path of the drive. Here that something is the withdrawal
+    of the mark on its tree. The failure path wrote `error` over the `done`,
+    with a notice of its own. The parent was told that the child finished and
+    then that it failed, and whoever awaited the child received the failure.
+    Now `record_ended` refuses the second ending, and the waiter receives what
+    the log holds.
+
+    Sabotage: drop the `child_is_live` check from `record_ended`, and the
+    statuses end `done`, `error`, with two notices.
     """
     monkeypatch.setattr(
         RlmChildProvider, "_withdraw", raising(RuntimeError("the mark could not be withdrawn"))
@@ -864,19 +905,24 @@ async def test_a_failure_after_a_child_finished_does_not_end_it_again(
 
 
 async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRuntime) -> None:
-    """The one-writer gate (Phase 11). A child's whole life — spawned, answered,
-    woken and answered again, deleted — is written in its own log and not its
-    parent's: the parent's log gains no `subagent/*` record, nothing reaches it but
-    the notices delivered to its own inbox, and it is never flushed on the child's
-    account.
+    """The one-writer gate (Phase 11).
 
-    One writer per log is one writer per lock. Every door a child's drive called used
-    to take the parent's `Session`, so each child appended to its parent's log and
-    sometimes flushed it — a writer the parent's lease never saw, and a second account
-    of the child that every durability rule then had to keep in step with the first.
+    The whole life of a child is written in its own log and not in the log of
+    its parent: spawned, answered, woken and answered again, deleted. The log of
+    the parent gains no `subagent/*` record. Nothing reaches it except the
+    notices that are delivered to the inbox of the parent, and it is never
+    flushed because of the child.
 
-    Sabotage: have a door write the parent's log as well as the child's — the roster
-    this replaced — and the parent's log holds a `subagent/*` record.
+    One writer per log is one writer per lock. Every record function that the
+    drive of a child called used to take the `Session` of the parent. Each child
+    therefore appended to the log of its parent and sometimes flushed it. That
+    was a writer that the lease of the parent never saw. It was also a second
+    account of the child, which every durability rule then had to keep in step
+    with the first.
+
+    Sabotage: make a record function write the log of the parent as well as the
+    log of the child, as the roster that this design replaced did, and the log
+    of the parent holds a `subagent/*` record.
     """
     ctx, session, parent = await delegating()
     before = session.seq
@@ -894,7 +940,7 @@ async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRun
     await settle_background(ctx)
     assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user")
 
-    # The child's own log tells the whole story…
+    # The log of the child holds the whole record…
     assert [event.type for event in _log_of(ctx, run) if event.type.startswith("subagent/")] == [
         ADMITTED,
         STATUS,
@@ -905,7 +951,7 @@ async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRun
     ]
     assert _statuses(ctx, run) == ["running", "done", "running", "done"]
     assert _stored_state(ctx, run).deleted, "on the child's disk"
-    # …and the parent's tells none of it.
+    # …and the log of the parent holds none of it.
     appended = {event.type for event in session.events if event.seq >= before}
     assert appended <= {"agent/inbox/spliced"}, f"the child wrote its parent's log: {appended}"
     assert len(_notices(session)) == 2, "each answer was announced to the parent's inbox"
@@ -915,8 +961,9 @@ async def test_a_parents_log_holds_no_record_of_its_child(delegating: MountedRun
 
 
 async def test_a_settled_child_releases_its_agent_scope(delegating: MountedRuntime) -> None:
-    """A child's scope owns its kernel subprocess, so holding it leaks a CPython
-    per delegation. The terminal result survives the release."""
+    """The scope of a child owns its kernel subprocess, so a scope that is kept
+    leaks one CPython subprocess for each delegation. The terminal result
+    survives the release."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "finish and go")
     await settle_background(ctx)
@@ -928,8 +975,8 @@ async def test_a_settled_child_releases_its_agent_scope(delegating: MountedRunti
 
 
 async def test_disposing_the_parent_unwinds_its_children(delegating: MountedRuntime) -> None:
-    """I2: a child is an artifact of the parent's scope, so it is released by the
-    same unwinding rather than by someone remembering to."""
+    """I2: a child is an artifact of the scope of its parent. The same unwinding
+    therefore releases it, and nobody has to remember to release it."""
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "outlive me")
 
@@ -941,10 +988,11 @@ async def test_disposing_the_parent_unwinds_its_children(delegating: MountedRunt
 
 
 async def test_every_record_of_a_child_is_required_reading(delegating: MountedRuntime) -> None:
-    """No build may skip one. An admission never could — skipping it shows the
-    parent the wrong family — and a status no longer may either: the retry ladder
-    counts starts from it, so a reader that skipped one would miscount the ladder or
-    bring back a child that ended."""
+    """No build may skip a record of a child. A build could never skip an
+    admission, because that shows the parent the wrong family. A build may no
+    longer skip a status either. The retry ladder counts starts from the status
+    records, so a reader that skipped one would miscount the ladder or bring
+    back a child that had ended."""
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent)
     await settle_background(ctx)
@@ -961,7 +1009,8 @@ async def test_every_record_of_a_child_is_required_reading(delegating: MountedRu
 
 
 def test_the_family_reach_rule_is_the_nuclear_family() -> None:
-    """C7's rule, in the seam so the guard (P3-12) and the roster cannot disagree."""
+    """The rule of C7. It is in the seam so that the guard (P3-12) and the roster
+    cannot disagree."""
 
     def reach(sender: tuple[str | None, str], target: tuple[str | None, str]) -> bool:
         return family_reach(
@@ -978,8 +1027,8 @@ def test_the_family_reach_rule_is_the_nuclear_family() -> None:
     assert reach(child, nephew) is True, "a direct child of its own"
     assert reach(nephew, parent) is False, "a grandparent is out of reach"
     assert reach(nephew, sibling) is False, "an uncle is out of reach"
-    # Roots are siblings of each other, which is what makes two top-level
-    # agents in one deployment able to talk.
+    # Roots are siblings of each other. That lets two top-level agents in one
+    # deployment talk to each other.
     assert reach((None, "root-a"), (None, "root-b")) is True
 
 
@@ -988,7 +1037,7 @@ def test_a_default_name_describes_the_task_and_stays_unique() -> None:
     assert name.startswith("subagent-review-the-authentication-")
     assert name.endswith("-abcdef12")
     assert default_child_name("x", "abcdef12", taken=[name]) != name
-    # An unslugifiable prompt still yields an addressable name.
+    # A prompt that cannot be made into a slug still gives an addressable name.
     assert default_child_name("!!!", "abcdef12") == "subagent-task-abcdef12"
 
 
@@ -998,10 +1047,11 @@ def test_a_default_name_describes_the_task_and_stays_unique() -> None:
 async def test_a_real_child_is_narrowed_by_its_spawn(delegating: MountedRuntime) -> None:
     """P4-13b through the provider that actually ships it.
 
-    The seam refuses what the parent does not hold and the provider applies the
-    narrowing, so this is the half a unit test of `apply_grant` cannot reach: a
-    child agent created by `agents.create` — whose scope is the parent's
-    *sibling* — really does end up with the subset.
+    The seam refuses what the parent does not hold, and it applies the narrowing
+    to the scope that the provider returns. This test therefore covers the half
+    that a unit test of `Grant.apply` cannot reach: a child agent whose scope
+    `agents.create` nested inside the scope of its parent really does end with
+    the subset.
     """
     ctx, _session, parent = await delegating()
     for name in ("review", "deploy"):
@@ -1017,7 +1067,7 @@ async def test_a_real_child_is_narrowed_by_its_spawn(delegating: MountedRuntime)
     assert [one.name for one in ctx.require(SKILLS).list(child_scope)] == ["review"]
     assert "read" in ctx.require(TOOLS).view(child_scope).visible
     assert "write" not in ctx.require(TOOLS).view(child_scope).visible
-    # The parent kept everything, which is what makes this narrowing.
+    # The parent kept everything, so this is a narrowing.
     assert "write" in ctx.require(TOOLS).view(parent.ctx).visible
 
 
@@ -1031,14 +1081,15 @@ async def test_a_real_spawn_cannot_widen(delegating: MountedRuntime) -> None:
 
 
 async def test_a_rehydrated_child_is_narrowed_again(delegating: MountedRuntime) -> None:
-    """The hole this row nearly shipped, and the reason the seam owns the ceiling.
+    """The defect that this row nearly shipped, and the reason that the seam owns
+    the ceiling.
 
-    Settlement disposes the child's scope, and the filters bounding it are
-    effects of that scope — so they go too. `rehydrate` then builds a **fresh**
-    scope from the retained options, and narrowed nothing: a child that outlived
-    its own restriction came back holding the whole deployment, which is exactly
-    what the ruling forbids and is reachable from a public method on the
-    shipping provider.
+    Settlement disposes the scope of the child. The filters that bound the child
+    are effects of that scope, so they are disposed too. `rehydrate` then builds
+    a **fresh** scope from the retained options. It used to narrow nothing, so a
+    child that outlived its own restriction came back with the whole deployment.
+    That is exactly what the ruling forbids, and a public method on the shipped
+    provider could reach it.
     """
     ctx, _session, parent = await delegating()
     for name in ("review", "deploy"):
@@ -1067,10 +1118,11 @@ async def _tiered_child(
     *,
     access: str = "read",
 ) -> Any:  # noqa: ANN401
-    """A child under a tier that hands out worktrees, `read` by default.
+    """A child under a tier that gives out worktrees, with `read` access by
+    default.
 
-    `access` is a parameter rather than a second copy of the setup: the write
-    case differs from the read case in exactly that word, and the two had already
+    `access` is a parameter so that the setup is not copied. The write case
+    differs from the read case in exactly that word. The two copies had already
     drifted apart on `mkdir(exist_ok=)` and on whether the provider was given a
     root.
     """
@@ -1095,12 +1147,12 @@ async def test_a_child_is_retained_from_the_moment_its_tree_exists(
 ) -> None:
     """Retain-by-default, and why it cannot be retain-on-failure (P6-28).
 
-    The window to mark a workspace closes with the child's scope, and the
-    outcomes that most need the evidence are the ones that close it first: on the
-    `parent-teardown` path the worktree is released *before* `_release` runs,
-    which that method's own docstring states in its own terms. So there is
-    nowhere to put "retain when it fails" — the mark has to exist from the moment
-    the tree does, and a clean finish withdraws it.
+    The time in which a workspace can be marked ends with the scope of the
+    child. The outcomes that most need the evidence are the ones that end it
+    first. On the `parent-teardown` path the worktree is released *before*
+    `_release` runs, as the docstring of that method states. No place therefore
+    exists to put "retain when it fails". The mark must exist from the moment
+    that the tree exists, and a clean finish withdraws it.
     """
     ctx, _session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "get canceled")
@@ -1115,23 +1167,23 @@ async def test_a_child_is_retained_from_the_moment_its_tree_exists(
 async def test_a_clean_child_leaves_nothing_behind(
     delegating: MountedRuntime, tmp_path: Path
 ) -> None:
-    """The other half, and the one that keeps the kind's promise.
+    """The other half, which keeps the promise of the kind.
 
     Without the withdrawal, retain-by-default would invert `worktree-ephemeral`
-    for *every* outcome rather than for the ones that produce evidence — which
-    is the trade the row forbids, since it buys a checkout per delegation and
-    saves nothing anyone will read.
+    for *every* outcome and not only for the outcomes that produce evidence. The
+    row forbids that trade, because it costs one checkout for each delegation
+    and keeps nothing that anyone will read.
     """
     ctx, _session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "finish and go")
     await settle_background(ctx)
 
     assert _marks(ctx, run) == ["the child has not settled cleanly", ""]
-    # The *closing* half is what the disposal policy reads, and the reason is
-    # gone from it. Asserted rather than `outcome`, because this tier is a stub
-    # with no `release` and so keeps every tree — under the real `worktree`
-    # provider this checkout is discarded and there is no survivor at all, which
-    # is precisely the promise the withdrawal restores.
+    # The disposal policy reads the *closing* half, and the reason is gone from
+    # it. The test asserts the reason and not a particular `outcome`, because
+    # this tier is a stub with no `release` and therefore keeps every tree.
+    # Under the real `worktree` provider this checkout is discarded and no
+    # survivor exists. That is exactly the promise that the withdrawal restores.
     (record,) = workspace_survivors(
         not_none(ctx.require(SESSIONS).get(run.session_id), "the child session")
     )
@@ -1142,11 +1194,12 @@ async def test_a_clean_child_leaves_nothing_behind(
 async def test_a_canceled_child_keeps_its_evidence(
     delegating: MountedRuntime, tmp_path: Path
 ) -> None:
-    """The case the row was written for, through the path that cannot mark.
+    """The case that the row was written for, through the path that cannot mark.
 
-    `parent-teardown` disposes the child's scope before the settle handler runs,
-    so the retention this asserts is one nothing on that path could have set. It
-    is there because it was taken at acquire and never withdrawn.
+    `parent-teardown` disposes the scope of the child before the settle handler
+    runs. Nothing on that path could therefore have set the retention that this
+    test asserts. The retention is present because it was taken at acquire and
+    never withdrawn.
     """
     ctx, _session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "outlive me")
@@ -1161,11 +1214,12 @@ async def test_a_canceled_child_keeps_its_evidence(
 
 
 async def test_a_write_child_is_not_retained(delegating: MountedRuntime, tmp_path: Path) -> None:
-    """Only the kind that discards, because only that kind can lose evidence.
+    """Only the kind that discards is retained, because only that kind can lose
+    evidence.
 
-    An ordinary `worktree` already keeps a dirty tree for review and a committed
-    branch survives release regardless, so retaining those would grow the pile
-    without saving anything from it.
+    An ordinary `worktree` already keeps a dirty tree for review, and a
+    committed branch survives release in any case. To retain those would add to
+    the kept trees and save nothing.
     """
     ctx, _session, parent = await delegating()
 
@@ -1177,13 +1231,14 @@ async def test_a_write_child_is_not_retained(delegating: MountedRuntime, tmp_pat
 async def test_a_failed_child_tells_its_parent_where_the_tree_is(
     delegating: MountedRuntime, tmp_path: Path
 ) -> None:
-    """Retention keeps the checkout; this is what stops it being evidence nobody
-    can find.
+    """Retention keeps the checkout. This notice makes sure that someone can find
+    that evidence.
 
-    A child's workspace events are in the *child's* log, so a parent told only
-    "it failed" is left diagnosing from a transcript — the sentence the row opens
-    with. Read from the log rather than from the seam, so the same notice is
-    true on a path where the child's scope has already gone.
+    The workspace events of a child are in the log of the *child*. A parent that
+    is told only "it failed" must diagnose from a transcript, which is the
+    sentence that the row opens with. The location is read from the log and not
+    from the seam, so the same notice is true on a path where the scope of the
+    child is already gone.
     """
     ctx, session, parent = await delegating()
     run = await _tiered_child(ctx, parent, tmp_path, "fail please")
@@ -1209,11 +1264,11 @@ def _breaks(agent: Any) -> None:  # noqa: ANN401
 async def test_a_child_with_no_tree_is_announced_without_naming_one(
     delegating: MountedRuntime,
 ) -> None:
-    """Silence rather than a fabricated path.
+    """The notice names no path when there is none. It does not invent one.
 
-    A profile with no tier, a `shared` workspace, a child whose tree really was
-    discarded — a notice that named a directory for every failure would be
-    naming ones that are not there.
+    The cases are a profile with no tier, a `shared` workspace, and a child
+    whose tree really was discarded. A notice that named a directory for every
+    failure would name directories that do not exist.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "fail with no workspace")
@@ -1231,8 +1286,8 @@ async def test_a_child_with_no_tree_is_announced_without_naming_one(
 async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
     delegating: MountedRuntime, gate: ModelGate
 ) -> None:
-    """`maxConcurrent` is a queue: the parent gets every child it asked for, one
-    slot at a time, in admission order — and never a refusal."""
+    """`maxConcurrent` is a queue. The parent gets every child that it asked for,
+    one slot at a time, in admission order. It never gets a refusal."""
     ctx, session, parent = await delegating(maxConcurrent=1)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
@@ -1256,19 +1311,20 @@ async def test_a_full_parent_queues_the_next_child_until_a_slot_frees(
 async def test_a_child_that_failed_frees_its_slot(
     delegating: MountedRuntime, gate: ModelGate, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The queue cannot wedge on a failure: the provider's `error` path releases
-    the slot exactly as `done` does.
+    """A failure cannot block the queue: the `error` path of the provider
+    releases the slot exactly as `done` does.
 
-    The failure is the child's *run* raising — the provider's own error path —
-    rather than a model call failing, which the agent loop contains as a turn that
-    ended in error and the provider records as `done`.
+    The failure here is that the *run* of the child raises, which is the error
+    path of the provider itself. It is not a failed model call. The agent loop
+    contains a failed model call as a turn that ended in error, and the provider
+    records that as `done`.
     """
     original_run = ReactLoopAgent.run
     failed: list[str] = []
 
     async def run(self: Any) -> None:  # noqa: ANN401
-        # The parent is never run in this test, so the first `run()` is the first
-        # child's; every later one is genuine.
+        # The parent is never run in this test, so the first `run()` is that of
+        # the first child. Every later call runs the original.
         if not failed:
             failed.append(self.id)
             raise RuntimeError("the child fell over")
@@ -1291,8 +1347,8 @@ async def test_a_child_that_failed_frees_its_slot(
 async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
     delegating: MountedRuntime, gate: ModelGate
 ) -> None:
-    """A child revoked before it ran is canceled where it waits, and the slot it
-    never held is not leaked — the next child still gets it."""
+    """A child that is revoked before it ran is canceled where it waits. The slot
+    that it never held is not leaked: the next child still gets it."""
     ctx, session, parent = await delegating(maxConcurrent=1)
     first = await _spawn(ctx, parent, "first")
     second = await _spawn(ctx, parent, "second")
@@ -1314,27 +1370,31 @@ async def test_deleting_a_queued_child_stops_its_wait_and_takes_no_slot(
 
 
 async def _persisted(ctx: Context, session: Session) -> None:
-    """Put the parent's own log on disk, with the harness holding still, so a restart
-    has a root to resume.
+    """Put the log of the parent on disk while the harness does nothing else, so
+    that a restart has a root to resume.
 
-    Only the parent's: each child's log is on its disk by its own barriers — the
-    admission's flush before its gate opened, the checkpoint before each model
-    request — and flushing a child here would put on disk what a crash might not
-    have. A flush and nothing else. The first harness is parked at the model for the
-    whole of these tests; draining here instead would wait on the very child that is
-    meant to be caught mid-flight. `_restart` reads a snapshot of what is on disk, so
-    nothing the first harness does afterwards reaches the second.
+    Only the log of the parent is flushed. The log of each child reaches disk
+    through its own barriers: the flush of the admission before its gate opened,
+    and the checkpoint before each model request. To flush a child here would
+    put on disk what a crash might not have put there.
+
+    This is a flush and nothing else. The first harness waits at the model for
+    the whole of these tests. To drain here would wait for the very child that
+    the test means to catch in the middle of its turn. `_restart` reads a
+    snapshot of what is on disk, so nothing that the first harness does
+    afterwards reaches the second.
     """
     await ctx.require(SESSIONS).flush(session)
 
 
 RETRIES = 3
-"""This suite's own ladder bound.
+"""The ladder bound of this suite.
 
-Stated here rather than imported: `resume_children` takes the limit because it is
-the *host's* policy, and a test that reached into `ph-app` for the daemon's
-number would be asserting against a value it does not control — and coupling
-`ph-rlm`'s tests to a package they do not depend on.
+The bound is stated here and not imported. `resume_children` takes the limit as
+an argument because the limit is the policy of the *host*. A test that read the
+number of the daemon from `phern` would assert against a value that it does not
+control. It would also couple the tests of `ph-rlm` to a package that they do
+not depend on.
 """
 
 
@@ -1347,24 +1407,28 @@ async def _restart(
     rows: tuple[dict[str, Any], ...] = (),
     prepare: Callable[[Context], None] | None = None,
 ) -> Any:  # noqa: ANN401
-    """A second harness resuming one root from its log, as a restarted process would.
+    """A second harness that resumes one root from its log, as a restarted
+    process would.
 
-    What a daemon restart *is* from the seam's side: a fresh mount, nothing in
-    memory, and a session that has to come off disk. `resume_children` is the
-    call `Supervisor` makes at the same point, against the same agent.
+    This is what a daemon restart *is* from the side of the seam: a fresh mount,
+    nothing in memory, and a session that must be read from disk.
+    `resume_children` is the call that `Supervisor` makes at the same point,
+    against the same agent.
 
-    **Over a snapshot of the logs, not the live files** (`logs_after_a_crash`): the
-    sessions directory as `_persisted` left it, since the first harness is still
-    alive, parked, and holding its children's leases.
+    **The harness runs over a snapshot of the logs, not the live files**
+    (`logs_after_a_crash`). The snapshot is the sessions directory as
+    `_persisted` left it. The first harness is still alive, waits at the model,
+    and holds the leases of its children.
 
     `skills` is what the *deployment* still provides. It is a parameter because
-    a readmit re-derives the child's ceiling against what the parent holds now,
-    not against what it held then — so a skill this deployment no longer mounts
-    is a child refused rather than one quietly readmitted without it.
+    a readmit derives the ceiling of the child again from what the parent holds
+    now, not from what it held then. A child whose skill this deployment no
+    longer mounts is therefore refused. It is not quietly readmitted without
+    that skill.
 
-    `rows` are the restarted deployment's own beside those: a `models` row, say. And
-    `prepare` sets it up before anything is resumed, as a daemon's profile would be: a
-    route of its own, say.
+    `rows` are further rows of the restarted deployment, for example a `models`
+    row. `prepare` sets up the deployment before anything is resumed, as the
+    profile of a daemon would, for example with a route of its own.
     """
     ctx = await mount(
         dict(PROVIDER_ROW, config={"maxConcurrent": concurrent}),
@@ -1384,13 +1448,14 @@ async def _restart(
 async def test_a_live_childs_log_refuses_a_second_opener(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """L2. A child's log is a session of its own, openable by its id — `phern -p
-    --session <child>`, a daemon's `session/new` naming it — so while this harness
-    drives the child, a second opener is refused as it would be for a root (I-5),
-    rather than made a second writer on one log.
+    """L2. The log of a child is a session of its own, and a caller can open it
+    by its id: `phern -p --session <child>`, or a `session/new` to a daemon that
+    names it. While this harness drives the child, a second opener is therefore
+    refused, as it would be for a root (I-5). It does not become a second writer
+    on one log.
 
-    Sabotage: open the child with `resume_session` or `sessions.create` directly in
-    `_child_session`, and the second open is granted.
+    Sabotage: open the child with `resume_session` or `sessions.create` directly
+    in `_child_session`, and the second open is granted.
     """
     ctx, _session, parent = await delegating()
     child = await _spawn(ctx, parent, "first")
@@ -1404,16 +1469,18 @@ async def test_a_live_childs_log_refuses_a_second_opener(
 async def test_a_queued_child_is_re_driven_after_a_restart(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """The work was described in the child's log and running nowhere (P5-04).
+    """The work was described in the log of the child and was running nowhere
+    (P5-04).
 
     A child that never reached its first turn has claimed nothing and spent
-    nothing, so the next harness runs it for the first time — under its original
-    id, so the parent gains no second child it never asked for.
+    nothing, so the next harness runs it for the first time. It runs under its
+    original id, so the parent does not gain a second child that it never asked
+    for.
 
-    Reaching the model is the proof of "re-driven": the gate counts arrivals, and
-    the readmitted child is the only one the second harness can run. Its log keeps
-    the one admission it was rebuilt from. Sabotage: have `_readmit_one` pass
-    `record=True`, and the readmission writes a second.
+    The proof of "re-driven" is that the readmitted child starts to run under
+    the second harness: its log gains a `running` record. Its log keeps the one
+    admission that it was rebuilt from. Sabotage: make `_readmit_one` pass
+    `record=True`, and the readmission writes a second admission.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     await _spawn(ctx, parent, "first")
@@ -1422,8 +1489,9 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
     assert _statuses(ctx, second) == ["queued"]
     await _persisted(ctx, session)
 
-    # Room for both, so which one this asserts about is not a race: the
-    # interrupted sibling is on the ladder and comes back too.
+    # There is room for both children, so a race does not decide which child
+    # this test asserts about. The interrupted sibling is on the ladder and
+    # comes back too.
     revived_ctx, revived, _parent = await _restart(mount, session.id, concurrent=2)
 
     assert second.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}, (
@@ -1446,14 +1514,15 @@ async def test_a_queued_child_is_re_driven_after_a_restart(
 async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presented(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """The ladder, and the thing that makes it a real attempt rather than a lie.
+    """The ladder, and what makes a restart a real attempt and not a false
+    report of one.
 
-    Starting a turn *claims* the task from the inbox and the claim is a logged
-    splice, so a resumed child that was simply driven again would find an empty
-    inbox, end at step zero and report `completed` for work it never did —
-    P5-04's finding at the root. Re-presenting the task is the fix, and saying
-    the turn was cut short is what stops the transcript reading as one
-    instruction given twice.
+    The start of a turn *claims* the task from the inbox, and the claim is a
+    logged splice. A resumed child that was only driven again would therefore
+    find an empty inbox, end at step zero, and report `completed` for work that
+    it never did. That is what P5-04 found at the root. The fix is to present
+    the task again. The note that the turn was cut short stops the transcript
+    from reading as one instruction given twice.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     interrupted = await _spawn(ctx, parent, "only")
@@ -1465,9 +1534,9 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
 
     assert interrupted.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
     assert child_is_live(_state(revived_ctx, interrupted)), "a child owed a turn is live"
-    # The count follows the restart's own `running` record, which a detached
-    # drive job writes a moment later — so this waits for the fact rather than
-    # reading the child's state before it exists.
+    # The count follows the `running` record of the restart itself. A detached
+    # drive job writes that record a moment later, so this waits for the fact
+    # and does not read the state of the child before the record exists.
     await settled(
         lambda: restarts_since_progress(_state(revived_ctx, interrupted)) == 1,
         "the restart to be counted",
@@ -1490,13 +1559,14 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
 async def test_a_child_that_replied_before_a_restart_is_not_announced_as_silent(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """Whether a child replied was a flag on its in-memory `_Child`, and a readmitted
-    child is a new one: a child that answered its parent, was caught by a restart and
-    then finished was announced as having finished without a reply. The reply is in
-    the child's own log, which comes back with it.
+    """Whether a child replied used to be a flag on its in-memory `_Child`, and a
+    readmitted child gets a new `_Child`. A child that answered its parent, was
+    caught by a restart and then finished was therefore announced as finished
+    without a reply. The reply is in the log of the child itself, which comes
+    back with the child.
 
-    Sabotage: decide the notice from anything the readmitted `_Child` holds in memory,
-    and it is announced as silent.
+    Sabotage: decide the notice from anything that the readmitted `_Child` holds
+    in memory, and the child is announced as silent.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     run = await _spawn(ctx, parent, "only")
@@ -1518,17 +1588,20 @@ async def test_a_child_that_replied_before_a_restart_is_not_announced_as_silent(
 async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_them(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """S1 — a clean stop tombstoned every child, so a restart brought none back.
+    """S1: a clean stop used to tombstone every child, so a restart brought none
+    back.
 
-    A daemon stopping, or a root remounted on a new profile, unwinds the parent's
-    scope, and each child's release wrote `canceled` and `subagent/deleted` as it
-    went: `resume_children` skips a deleted child, so an ordinary restart abandoned
-    every delegation in flight. The mount going away now suspends its children —
-    `queued`, saying why, in each child's own log, and no tombstone — and the next
-    mount readmits them.
+    A daemon that stops, or a root that is remounted on a new profile, unwinds
+    the scope of the parent. The release of each child used to write `canceled`
+    and `subagent/deleted` during that unwind. `resume_children` skips a deleted
+    child, so an ordinary restart abandoned every delegation that was in
+    progress. A mount that goes away now suspends its children. Each child gets
+    a `queued` record with the reason in its own log, and no tombstone, and the
+    next mount readmits it.
 
-    Sabotage: drop the `suspend` disposer from `apply`, and the release raises on
-    the way down and writes nothing, so the restart reads the child as crashed.
+    Sabotage: drop the `suspend` disposer from `apply`, and the release raises
+    during the unwind and writes nothing, so the restart reads the child as
+    crashed.
     """
     ctx, session, parent = await delegating()
     working = await _spawn(ctx, parent, "keep going")
@@ -1548,14 +1621,15 @@ async def test_a_mount_that_unwinds_suspends_its_children_rather_than_revoking_t
 async def test_a_suspended_child_keeps_what_was_queued_for_it(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """A child coming back comes back to its inbox, not an empty one.
+    """A child that comes back finds its inbox as it was, not an empty one.
 
-    `suspend` stops the child's agent keeping its inbox, where a revocation clears
-    it — so a message steered to a working child and not yet taken is still pending
-    when the next mount readmits it.
+    `suspend` stops the agent of the child and keeps its inbox, where a
+    revocation clears the inbox. A message that was steered to a working child
+    and not yet taken is therefore still pending when the next mount readmits
+    the child.
 
-    Sabotage: cancel the agent in `suspend` without `keep_inbox`, and the message is
-    canceled in the child's log.
+    Sabotage: cancel the agent in `suspend` without `keep_inbox`, and the
+    message is canceled in the log of the child.
     """
     ctx, _session, parent = await delegating()
     working = await _spawn(ctx, parent, "keep going")
@@ -1581,12 +1655,13 @@ async def test_a_child_suspended_before_its_first_step_is_handed_its_task_once(
 ) -> None:
     """A child that never took a step still has its task, in its own log.
 
-    The inbox gives up a batch only in the step that records it (S3), so a child
-    queued behind a sibling when its mount unwound comes back with the task still
-    pending — and presenting it again on readmit handed it the same work twice.
+    The inbox releases a batch only in the step that records it (S3). A child
+    that was queued behind a sibling when its mount unwound therefore comes back
+    with the task still pending. To present the task again on readmit gave the
+    child the same work twice.
 
-    Sabotage: present the task in `_admit` whatever the inbox holds, and the
-    child's log inserts it twice.
+    Sabotage: present the task in `_admit` whatever the inbox holds, and the log
+    of the child inserts it twice.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     await _spawn(ctx, parent, "first")
@@ -1612,12 +1687,12 @@ async def test_a_settled_child_is_not_canceled_when_its_parent_goes(
 ) -> None:
     """A child that finished keeps its ending.
 
-    Its parent's teardown released it with `canceled`, written over the `done` its
-    drive had recorded, so every finished child read as a revoked one once its
-    parent was gone.
+    The teardown of its parent used to release it with `canceled`, written over
+    the `done` that its drive had recorded. Every finished child therefore read
+    as a revoked child after its parent was gone.
 
-    Sabotage: write `canceled` in `_release` whatever the child's result, and the
-    child's log says canceled.
+    Sabotage: write `canceled` in `_tombstone` (`ph.seams.subagents`) whatever
+    the status of the child, and the log of the child says canceled.
     """
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "finish first")
@@ -1636,20 +1711,21 @@ async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
     mount: MountProfile,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S10 — the ladder counts `running{cause: resumed}`, so that record is on the
-    child's own disk before the attempt it counts.
+    """S10: the ladder counts `running{cause: resumed}`, so that record is on
+    disk in the log of the child before the attempt that it counts.
 
-    A restart that reached only memory before the child took the daemon down again
-    was never counted: a crash loop never advanced the count on disk, and the ladder
-    never gave up. It used to ride the parent's log, which nothing flushed between
-    readmitting a child and the child working.
+    A restart that reached only memory before the child took the daemon down
+    again was never counted. A crash loop never advanced the count on disk, and
+    the ladder never gave up. The record used to be in the log of the parent,
+    which nothing flushed between the readmission of a child and the work of
+    that child.
 
-    Asked as the attempt starts — the drive's call into the child's run — rather
-    than at the model: the child's first model request flushes its log anyway, so by
-    then the question is moot.
+    The test asks as the attempt starts, which is the call of the drive into the
+    run of the child, and not at the model. The first model request of the child
+    flushes its log anyway, so at that point the question no longer matters.
 
-    Sabotage: drop the flush from `ph.seams.subagents.record_started`, and the stored
-    child has no restart when its attempt begins.
+    Sabotage: drop the flush from `ph.seams.subagents.record_started`, and the
+    stored child has no restart when its attempt begins.
     """
     ctx, session, parent = await delegating()
     interrupted = await _spawn(ctx, parent, "only")
@@ -1660,8 +1736,9 @@ async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
     original = ReactLoopAgent.run
 
     async def watched(self: ReactLoopAgent) -> None:
-        # The first harness's child is already inside its own `run`, and the revived
-        # parent is never run, so the one call this sees is the resumed child's.
+        # The child of the first harness is already inside its own `run`, and
+        # the revived parent is never run. The one call that this sees is
+        # therefore the call of the resumed child.
         if self.id == interrupted.session_id:
             seen.append(restarts_since_progress(_stored_state(revived[0], interrupted)))
         await original(self)
@@ -1674,12 +1751,12 @@ async def test_a_restart_is_on_disk_before_the_attempt_it_counts(
 
 
 async def _resumed(ctx: Context, run: SubagentRun, times: int) -> None:
-    """Record `times` restarts in the child's own log, the way a restart actually
-    records one, and put them on its disk as the door does.
+    """Record `times` restarts in the log of the child, in the way that a restart
+    really records one, and put them on disk as `record_started` does.
 
-    The real facts rather than a seeded count: the ladder folds `running` records
-    carrying `cause: resumed`, so a test that wrote an `attempts` number would be
-    asserting against a field production no longer has.
+    These are the real facts and not a seeded count. The ladder folds `running`
+    records that carry `cause: resumed`, so a test that wrote an `attempts`
+    number would assert against a field that production no longer has.
     """
     child = not_none(ctx.require(SESSIONS).get(run.session_id))
     for _ in range(times):
@@ -1706,8 +1783,9 @@ async def test_the_ladder_gives_up_and_says_so(
 ) -> None:
     """Three restarts with nothing achieved between them is not bad luck.
 
-    Re-driving forever would spend a parent's budget on a transcript nobody
-    reads, which is the failure the root's own ladder is bounded to avoid.
+    To drive the child again forever would spend the budget of a parent on a
+    transcript that nobody reads. The ladder of the root itself has a bound to
+    avoid the same failure.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     spent = await _stalled(ctx, parent, gate, restarts=RETRIES)
@@ -1722,7 +1800,8 @@ async def test_the_ladder_gives_up_and_says_so(
     assert state.detail == exhausted_detail(RETRIES)
     assert str(RETRIES) in state.detail, "the sentence names the bound it hit"
     assert not child_is_live(state), "a root cannot be passivated while this reads live"
-    # Ended in its own log, on its own disk — the one place the next start will look.
+    # Ended in its own log, on disk, which is the one place where the next start
+    # will look.
     assert _stored_state(revived_ctx, spent).status == "error"
     assert _about_children(revived) == []
 
@@ -1730,12 +1809,13 @@ async def test_the_ladder_gives_up_and_says_so(
 async def test_progress_since_the_last_restart_clears_the_ladder(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """A child stopped, working an hour, then stopped again met two incidents.
+    """A child that was stopped, worked for an hour, and was stopped again met
+    two separate incidents.
 
-    Without a reset the ladder counts a lifetime's interruptions rather than
-    consecutive ones, and fails work that was going fine. The same setup as the
-    test above plus one fact: the child gave a model answer, in its own log, which is
-    something a turn that did nothing cannot produce.
+    Without a reset, the ladder counts every interruption in the life of the
+    child and not only consecutive ones, and it fails work that was going well.
+    The setup is that of the test above plus one fact: the child gave a model
+    answer, in its own log. A turn that did nothing cannot produce that.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     moved = await _stalled(ctx, parent, gate, restarts=RETRIES)
@@ -1749,9 +1829,10 @@ async def test_progress_since_the_last_restart_clears_the_ladder(
 
     assert child_is_live(_state(revived_ctx, moved)), "a child that got somewhere is owed more"
     assert moved.id in {run.id for run in revived_ctx.require(SUBAGENTS).list()}
-    # **The restart is still recorded as one**, counting up from the answer.
-    # Derived from the ladder instead, this readmit would look like a first run,
-    # write no `resumed`, and the ladder would never count it again.
+    # **The restart is still recorded as a restart**, and the count starts again
+    # from the answer. If the readmit took its count from the ladder, it would
+    # look like a first run and write no `resumed`, and the ladder would never
+    # count it again.
     await settled(
         lambda: restarts_since_progress(_state(revived_ctx, moved)) == 1,
         "the restart to be counted from a cleared ladder",
@@ -1762,11 +1843,12 @@ CHILD_ANSWER_USAGE = {"inputTokens": 120, "outputTokens": 30}
 
 
 async def _answered_on_its_own_disk(ctx: Context, run: SubagentRun) -> SessionEvent:
-    """The child answers, and its own log reaches its disk.
+    """The child answers, and its own log reaches disk.
 
-    What its checkpoint does before its next request, while a parent waiting on it
-    makes no request and writes nothing. The answer's `usage` is the whole record of
-    what it spent: nothing is copied anywhere else.
+    This is what the checkpoint of the child does before its next request. In
+    that time a parent that waits for the child makes no request and writes
+    nothing. The `usage` of the answer is the whole record of what the child
+    spent: nothing is copied anywhere else.
     """
     child = not_none(ctx.require(SESSIONS).get(run.session_id))
     payload = {**assistant_payload("found it", "a1"), "usage": CHILD_ANSWER_USAGE}
@@ -1779,22 +1861,26 @@ async def _answered_on_its_own_disk(ctx: Context, run: SubagentRun) -> SessionEv
 async def test_a_crash_after_an_answer_is_counted_exactly(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile, parent_written: str
 ) -> None:
-    """L5, fixed by construction. A child answers, only the child's log is written,
-    and the mount restarts: the ladder forgives the restarts before the answer, and
-    the budget counts what the answer spent — once — with no catch-up step.
+    """L5, fixed by construction. A child answers, only the log of the child is
+    written, and the mount restarts. The ladder forgives the restarts before the
+    answer, and the budget counts what the answer spent, one time, with no
+    catch-up step.
 
-    Two decisions read a child's answers. The ladder takes an answer as progress, so
-    a child whose answer a restart could not see read as stuck, and after `RETRIES`
-    restarts was failed as exhausted while it was getting somewhere. A goal's budget
-    counts what the answer spent. Both used to read a copy of each answer mirrored
-    into the parent's log, which a crash could leave behind the child's own — so a
-    resume had to copy the missing answers back, and not copy one twice when the
-    parent's log had reached disk after it. Both read the child's own log now, which
-    is where the answer is, whenever the parent's log was last written.
+    Two decisions read the answers of a child. The ladder takes an answer as
+    progress. A child whose answer a restart could not see therefore read as
+    stuck, and after `RETRIES` restarts it was failed as exhausted while it was
+    making progress. The budget of a goal counts what the answer spent.
 
-    Sabotage: have the fold skip `assistant/message`, as a reader of anything but the
-    child's own answers would, and the child is failed as exhausted with nothing
-    counted.
+    Both decisions used to read a copy of each answer that was mirrored into the
+    log of the parent. A crash could leave that copy behind the log of the
+    child. A resume therefore had to copy the missing answers back, and it had
+    to avoid a second copy of an answer when the log of the parent had reached
+    disk after it. Both decisions now read the log of the child itself, which is
+    where the answer is, whenever the log of the parent was last written.
+
+    Sabotage: make the fold skip `assistant/message`, as a reader of anything
+    but the answers of the child itself would, and the child is failed as
+    exhausted with nothing counted.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     moved = await _stalled(ctx, parent, gate, restarts=RETRIES)
@@ -1838,20 +1924,23 @@ async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
     mount: MountProfile,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L5b. A readmitted child's own children are swept the way the root's are.
+    """L5b. The children of a readmitted child are swept in the way that the
+    children of the root are.
 
     `RLM_MAX_DEPTH` lets a child delegate, and its children name *it* as their
-    parent. The resume swept the root's children alone, so a grandchild caught
-    mid-turn stayed `running` with nothing driving it, readmitted or failed, and its
-    parent's model was told it was still working.
+    parent. The resume used to sweep only the children of the root. A grandchild
+    that was caught in the middle of a turn therefore stayed `running`. Nothing
+    drove it, readmitted it or failed it, and the model of its parent was told
+    that it was still working.
 
-    **Before the child's first step** (`SubagentRun.ready`): the grandchild is
-    readmitted ahead of the child's new attempt, so the children the child's first
-    request is built from are the swept ones.
+    **The sweep runs before the first step of the child**
+    (`SubagentRun.ready`). The grandchild is readmitted ahead of the new attempt
+    of the child, so the first request of the child is built from the swept
+    children.
 
-    Sabotage: drop `_sweep_readmitted` from `_readmit_children` and the grandchild
-    is never readmitted; open a readmitted child's gate at admission and its new
-    attempt starts ahead of the sweep.
+    Sabotage: drop `_sweep_readmitted` from `_resume` and the grandchild is
+    never readmitted. Open the gate of a readmitted child at admission and its
+    new attempt starts ahead of the sweep.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     middle, leaf = await _grandchild(ctx, parent, gate)
@@ -1882,7 +1971,8 @@ async def test_a_grandchild_the_restart_interrupted_is_put_back_to_work_too(
 
 
 GRANDCHILD_KEY = "PH_L5B_GRANDCHILD_KEY"
-"""What the `keyed` route's adapter resolves at its edge, and the environment lacks."""
+"""The name of the credential that the adapter of the `keyed` route resolves at
+its edge, and that the environment lacks."""
 
 
 def _keyed(ctx: Context) -> None:
@@ -1899,15 +1989,17 @@ async def test_a_grandchild_held_for_its_key_is_released_when_the_key_arrives(
     mount: MountProfile,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """L5b, the credential half. A grandchild waiting for a name is released by it.
+    """L5b, the credential half. A grandchild that waits for a credential name is
+    released when that name arrives.
 
-    The nested sweep holds a grandchild whose route names a credential the restarted
-    deployment lacks, in the grandchild's own log (T5) — the hold a session waiting on
-    its own route writes. `readmit_waiting` asked only the root's children when the
+    The nested sweep holds a grandchild whose route names a credential that the
+    restarted deployment lacks. The hold is in the log of the grandchild itself
+    (T5), and it is the hold that a session writes when it waits on its own
+    route. `readmit_waiting` used to ask only the children of the root when the
     name arrived, so that hold was never released.
 
-    Sabotage: stop `readmit_waiting` descending into live children, and the grandchild
-    stays held with its key supplied.
+    Sabotage: stop `readmit_waiting` from descending into live children, and the
+    grandchild stays held although its key is supplied.
     """
     monkeypatch.delenv(GRANDCHILD_KEY, raising=False)
     ctx, session, parent = await delegating(maxConcurrent=1)
@@ -1937,23 +2029,26 @@ async def test_two_sweeps_of_one_parent_readmit_a_child_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """S1. Sweeps of one parent take turns, so a child is readmitted by one of them.
+    """S1. Sweeps of one parent take turns, so only one of them readmits a child.
 
-    `_resume` read `state.run_id in self._runs`, then awaited before `_admit` wrote
-    the entry, so two sweeps that overlapped both readmitted the child: the loser's
-    `open_child_log` failed on the live session, and its `except Exception` ended
-    the winner's child — a false failure in its log, with its own children revoked
-    for good. Two `credentials/store` requests in a row are two such sweeps.
+    `_resume` used to read `state.run_id in self._runs` and then await before
+    `_admit` wrote the entry. Two sweeps that overlapped therefore both
+    readmitted the child. The `open_child_log` of the losing sweep failed on the
+    live session, and its `except Exception` ended the child of the winning
+    sweep. That put a false failure in the log of the child and revoked the
+    children of that child permanently. Two `credentials/store` requests in a
+    row are two such sweeps.
 
-    The second waits for the first and reads the state it left, so a credential
-    that arrived meanwhile is not missed.
+    The second sweep waits for the first and reads the state that the first
+    left, so a credential that arrived in that time is not missed.
 
-    Here the loser's hold write meets the log the winner holds (`SessionForkError`),
-    and its attempt to end the child fails too, so the child survives by the order
-    two writes happened to land in. The attempt is what is asserted.
+    In this test the hold write of the losing sweep meets the log that the
+    winning sweep holds (`SessionForkError`), and its attempt to end the child
+    fails too. The child therefore survives only because of the order in which
+    two writes happened to arrive. The test asserts on the attempt.
 
-    Sabotage: drop the per-parent lock from `readmit_waiting`, and the second sweep
-    tries to end the child.
+    Sabotage: drop the per-parent lock from `readmit_waiting`, and the second
+    sweep tries to end the child.
     """
     monkeypatch.delenv(GRANDCHILD_KEY, raising=False)
     ctx, session, parent = await delegating(maxConcurrent=1)
@@ -1967,10 +2062,11 @@ async def test_two_sweeps_of_one_parent_readmit_a_child_once(
     revived_ctx.require(CREDENTIALS).provide_value(GRANDCHILD_KEY, "supplied")
     seam = revived_ctx.require(SUBAGENTS)
     revived: list[str] = []
-    # The first sweep is held inside the provider, between its check of `_runs` and
-    # its admission, until the second has readmitted the child — the window two
-    # overlapping sweeps share. Bounded, because one sweep at a time never makes
-    # the second call this waits for.
+    # The first sweep is held inside the provider, between its check of `_runs`
+    # and its admission, until the second sweep has readmitted the child. That
+    # is the window that two overlapping sweeps share. The hold has a time
+    # limit, because sweeps that run one at a time never make the second call
+    # that this waits for.
     original = RlmChildProvider.readmit
     calls: list[str] = []
     second_done = anyio.Event()
@@ -2006,11 +2102,12 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
 ) -> None:
     """§6.5 across a power cut, which is why the narrowing is in the record.
 
-    The ceiling is re-derived from the admission, so a child admitted with one
-    skill does not return holding every skill its parent has. Rebuilt from the
-    run alone it would, and nothing would have said so. Its writable directories
-    too (S7b, item 3). Sabotage: drop `paths` from `_request_of`, and the child
-    comes back binding its parent's.
+    The ceiling is derived again from the admission, so a child that was
+    admitted with one skill does not return with every skill that its parent
+    has. A child that was rebuilt from the run alone would, and nothing would
+    have reported it. The same applies to its writable directories (S7b, item
+    3). Sabotage: drop `paths` from `_request_of`, and the child comes back
+    bound to the writable directories of its parent.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     ctx.require(SKILLS).register(skill("review"))
@@ -2024,8 +2121,8 @@ async def test_a_readmitted_child_does_not_come_back_wider_than_it_was_admitted(
 
     revived_ctx, _revived, _parent = await _restart(mount, session.id, skills=("review", "audit"))
 
-    # Read back off the child's own log as the restart found it, which is the only
-    # copy a restart has.
+    # Read from the log of the child as the restart found it, which is the only
+    # copy that a restart has.
     admitted = next(
         event.data for event in _log_of(revived_ctx, narrowed) if event.type == ADMITTED
     )
@@ -2047,12 +2144,13 @@ def _sorting(ctx: Context) -> None:
 async def test_a_model_set_up_since_reaches_a_readmitted_child(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """A child runs on its parent's model only until the person sets up the one its
-    skill names, and a restart is when that reaches a child already at work: its route
-    is worked out again, so it comes back on `classify`.
+    """A child runs on the model of its parent only until the user sets up the
+    model that its skill names. A restart is when that change reaches a child
+    that is already at work: its route is worked out again, so it comes back on
+    `classify`.
 
-    Sabotage: read the route back from the admission in `_request_of`, and it comes back
-    on its parent's `fake-1`, still falling back.
+    Sabotage: read the route back from the admission in `_request_of`, and the
+    child comes back on `fake-1`, the model of its parent, and still falls back.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     _sorting(ctx)
@@ -2075,11 +2173,13 @@ async def test_a_model_set_up_since_reaches_a_readmitted_child(
 async def test_a_readmitted_child_whose_model_is_gone_runs_on_its_parent_s_and_says_so(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """The other way round: listed at its spawn, gone at its restart. Ending it would
-    throw its work away over a setting, so it runs on its parent's route, and the run
-    its readmission hands back says so, as a spawn's does.
+    """The opposite case: the model was listed at the spawn and is gone at the
+    restart. To end the child would discard its work because of a setting. So
+    the child runs on the route of its parent, and the run that its readmission
+    returns says so, as the run of a spawn does.
 
-    Sabotage: drop the stamp in `_readmit_one`, and the readmitted run says nothing.
+    Sabotage: drop the `model_fallback` stamp in `SubagentService._admit`, and
+    the readmitted run says nothing.
     """
     ctx, session, parent = await delegating(dict(MODELS_ROW), maxConcurrent=1)
     _sorting(ctx)
@@ -2099,20 +2199,23 @@ async def test_a_readmitted_child_whose_model_is_gone_runs_on_its_parent_s_and_s
 async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """A `queued` row nothing will pick up is worse than an honest failure.
+    """A `queued` child that nothing will pick up is worse than a reported
+    failure.
 
-    It reads as live, so the root can never be passivated, and the parent waits
-    on a slot no one will ever give it. Deciding where the capability probe
-    answers is what stops the sweep writing a status it cannot honor — here the
-    next harness mounts no subagent provider at all.
+    The child reads as live, so the root can never be passivated, and the parent
+    waits for a slot that nobody will ever give it. The sweep decides at the
+    point where the capability probe answers, and that stops it from writing a
+    status that it cannot honor. In this test the next harness mounts no
+    subagent provider at all.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     orphan = await _spawn(ctx, parent, "only")
     await settled(lambda: gate.arrived == 1, "the child to reach the model")
     await _persisted(ctx, session)
 
-    # Over a snapshot, as `_restart` is: ending the child means claiming its log,
-    # which the first harness — alive, and parked at the model — still holds.
+    # This runs over a snapshot, as `_restart` does. To end the child, the
+    # harness must claim its log, and the first harness still holds that log: it
+    # is alive and waits at the model.
     bare = await mount({"id": "session-persistence", "config": {"root": str(logs_after_a_crash())}})
     revived = await resume_stored(bare, session.id)
     await bare.require(SUBAGENTS).resume_children(
@@ -2129,19 +2232,21 @@ async def test_a_child_no_provider_can_resume_is_settled_not_left_queued(
 async def test_a_child_the_ceiling_now_refuses_is_settled_rather_than_skipped(
     delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
 ) -> None:
-    """K4 — a readmit that *raises* used to be logged and then dropped.
+    """K4: a readmit that *raises* used to be logged and then dropped.
 
-    A readmit re-derives the ceiling from the admission record against what the
-    parent holds **now**, so a deployment that stopped mounting a skill refuses
-    the child that was narrowed to it. That refusal is correct — the sibling test
-    above is why the narrowing is logged at all. What was wrong is what followed:
-    the exception was logged and the loop moved on, leaving the row `queued`,
-    which `child_is_live` reads as waiting for a slot. The parent then waits for
-    a child nothing will ever drive, and the root can never be passivated.
+    A readmit derives the ceiling again from the admission record, against what
+    the parent holds **now**. A deployment that stopped mounting a skill
+    therefore refuses the child that was narrowed to that skill. That refusal is
+    correct, and the sibling test above is why the narrowing is logged at all.
+    What followed was wrong. The exception was logged and the loop moved on. The
+    child stayed `queued`, which `child_is_live` reads as waiting for a slot.
+    The parent then waited for a child that nothing would ever drive, and the
+    root could never be passivated.
 
-    Distinct from the no-provider case below it: there the sweep *decides* it
-    cannot recover the child, here a readmit it fully intended threw on the way.
-    The two reached the log differently and only one of them reached it at all.
+    This case is distinct from the no-provider case above it. There the sweep
+    *decides* that it cannot recover the child. Here a readmit that the sweep
+    fully intended raised partway. The two cases reached the log differently,
+    and only one of them reached it at all.
     """
     ctx, session, parent = await delegating(maxConcurrent=1)
     ctx.require(SKILLS).register(skill("review"))
@@ -2166,21 +2271,24 @@ async def test_a_readmission_the_seam_refuses_is_ended_and_not_revoked(
     mount: MountProfile,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A child the seam refuses at readmission is ended, saying why, its parent is
-    told once, and it is not revoked.
+    """A child that the seam refuses at readmission is ended with the reason. Its
+    parent is told one time, and the child is not revoked.
 
-    The refusal released it through the provider's revocation, which tombstoned it
-    `parent-teardown` for a parent that was still there. Worse, its notice then rode
-    a deleted child, and the sweep that brings a parent back delivers no deleted
-    child's notice, so a crash before the parent's next write lost it for good. Not
-    deleted, the child is one that sweep delivers again (`test_child_logs`).
+    The refusal used to release the child through the revocation of the
+    provider, which tombstoned it `parent-teardown` for a parent that was still
+    there. Worse, the notice was then attached to a deleted child. The sweep
+    that brings a parent back delivers no notice of a deleted child, so a crash
+    before the next write of the parent lost the notice permanently. A child
+    that is not deleted is one whose notice that sweep delivers again
+    (`test_child_logs`).
 
-    Its revocation is dropped from the parent's scope unrun (`Releaser.drop`), so
-    nothing is left there to revoke it later.
+    The revocation of the child is dropped from the scope of the parent without
+    being run (`Releaser.drop`), so nothing is left there to revoke the child
+    later.
 
-    Sabotage: point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`, and the
-    child is deleted, `parent-teardown`. Skip the drop in `_take`, and the parent's
-    scope still holds the revocation.
+    Sabotage: point `run.dispose` back at `_release(run_id, PARENT_TEARDOWN)`,
+    and the child is deleted, `parent-teardown`. Skip the drop in `_stop`, which
+    `_take` calls, and the scope of the parent still holds the revocation.
     """
     ctx, session, parent = await delegating()
     run = await _spawn(ctx, parent, "refused next time")
@@ -2208,12 +2316,14 @@ async def test_a_readmission_the_seam_refuses_is_ended_and_not_revoked(
 async def test_a_re_addressed_child_comes_back_to_its_own_work(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A second question reaches the child that answered the first, tree and all.
+    """A second question reaches the child that answered the first, with its
+    tree.
 
-    Disposal commits the checkout to the child's branch before removing it, and
-    `_add` attaches an existing branch rather than resetting it — so the same run
-    id resolves to the same branch, and re-acquiring restores what the child did.
-    Nothing arranges that here; what was missing is that `rehydrate` never asked.
+    Disposal commits the checkout to the branch of the child before it removes
+    the checkout, and `_add` attaches an existing branch and does not reset it.
+    The same run id therefore resolves to the same branch, and a second acquire
+    restores what the child did. Nothing here arranges that. What was missing
+    was that `rehydrate` never asked for the workspace.
     """
     ctx = await mount(*WORKTREE_ROWS, PROVIDER_ROW)
     base = await git_repo(ctx, tmp_path / "repo")
@@ -2245,11 +2355,12 @@ async def test_a_re_addressed_child_comes_back_to_its_own_work(
 async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The containment half. A child admitted `read` comes back ephemeral.
+    """The containment half. A child that was admitted with `read` comes back
+    ephemeral.
 
-    Its access is read from the admission, not from the caller re-addressing it,
-    so nothing about being asked a second question can widen what the first was
-    allowed to keep.
+    Its access is read from the admission, not from the caller that addresses it
+    again. A second question therefore cannot widen what the first was allowed
+    to keep.
     """
     ctx = await mount(*WORKTREE_ROWS, PROVIDER_ROW)
     base = await git_repo(ctx, tmp_path / "repo")
@@ -2275,15 +2386,18 @@ async def test_a_re_addressed_child_is_no_wider_than_it_was_admitted(
 async def test_a_rehydration_that_is_stopped_leaves_the_child_wakeable(
     delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S4. A rehydration that fails or is stopped after its agent is made ends that agent.
+    """S4. A rehydration that fails or is stopped after its agent is made ends
+    that agent.
 
-    `child.agent` was set before the runtime and the drive were, so one stopped in
-    between — a kernel cancels a binding call when its cell settles, so a cell
-    stopped mid-send is enough — left an agent nothing drove: every later wake
-    answered "already running" and every later send landed in an inbox nobody read.
+    `child.agent` was set before the runtime and the drive were set up. A
+    rehydration that was stopped between those steps left an agent that nothing
+    drove. A kernel cancels a binding call when its cell settles, so a cell that
+    is stopped in the middle of a send is enough to cause this. Every later wake
+    then answered "already running", and every later send went into an inbox
+    that nobody read.
 
-    Sabotage: drop the `except BaseException` from `rehydrate`, and the second wake
-    is refused.
+    Sabotage: drop the `except BaseException` from `rehydrate`, and the second
+    wake is refused.
     """
     ctx, _session, parent = await delegating()
     run = await _spawn(ctx, parent, "answer twice")
@@ -2312,14 +2426,16 @@ async def test_a_rehydration_that_is_stopped_leaves_the_child_wakeable(
 async def test_a_spawn_stopped_while_its_workspace_is_taken_leaves_no_agent(
     delegating: MountedRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """S5. The rlm build ends what it made on every way out, not on a gone parent alone.
+    """S5. The rlm build ends what it made on every exit path, not only when the
+    parent is gone.
 
-    `_admit` let go of the child's session when the parent went away under the
-    workspace's acquire, and of nothing when the spawn was stopped there instead: the
-    agent and its open session stayed until the parent's scope went.
+    `_admit` used to let go of the session of the child when the parent went
+    away during the acquire of the workspace. When the spawn was stopped there
+    instead, it let go of nothing: the agent and its open session stayed until
+    the scope of the parent went.
 
-    Sabotage: catch `InactiveScopeError` alone around `_workspace` again, and the
-    child's agent is still registered.
+    Sabotage: catch only `InactiveScopeError` around `_workspace` again, and the
+    agent of the child is still registered.
     """
     ctx, _session, parent = await delegating()
     taking = anyio.Event()

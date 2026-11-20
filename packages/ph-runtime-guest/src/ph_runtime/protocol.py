@@ -3,7 +3,7 @@
 **This module is written twice on purpose, but only in part, and the difference
 matters.** Its twin is `ph_rlm.kernel.protocol`.
 
-The four constants below are declared *here*, and the host **imports** them. This
+The five constants below are declared *here*, and the host **imports** them. This
 is the only direction that is possible. The guest runs in
 `$PH_CACHE/runtime-venv` with almost nothing installed. If the guest imported the
 host package, the harness would be inside the process boundary that exists to

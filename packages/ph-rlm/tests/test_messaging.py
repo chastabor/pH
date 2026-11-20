@@ -1,10 +1,10 @@
 """Agent-to-agent messages, and the boundary on them (P3-12, C7/C8).
 
-The load-bearing claim is the asymmetry: the **family boundary** is a monotonic
-guard that no later listener can re-permit and whose denial ends the run, while
-the **rate limit** is a failure the program handles. Both were one check inside a
-comm handler in prime-agent; separating them is what makes the first
-unroutable-around and the second survivable.
+The claim that everything depends on is the asymmetry. The **family boundary** is
+a monotonic guard. No later listener can permit what it denied, and its denial
+ends the run. The **rate limit** is a failure that the program handles. Both were
+one check inside a comm handler in prime-agent. Because they are separate, the
+first cannot be routed around and the second can be survived.
 """
 
 from __future__ import annotations
@@ -104,9 +104,9 @@ async def _siblings(
 ) -> tuple[Any, Any, Any, Any]:
     """Two root agents, which the reach rule makes siblings of each other.
 
-    Used for the limit tests because they must not race a child's completion:
-    a spawned child settles at an unpredictable await point and injects a notice
-    into its parent's inbox, which is itself pending input.
+    The limit tests use them because those tests must not race the completion of
+    a child. A spawned child settles at an unpredictable await point and puts a
+    notice into the inbox of its parent, and that notice is itself pending input.
     """
     ctx, first_session, first = await family_ctx(**config)
     second_session = ctx.require(SESSIONS).create("other-root")
@@ -123,8 +123,8 @@ _CALLS = itertools.count(1)
 
 
 async def _send(ctx: Context, sender: Any, session: Session, **arguments: Any) -> Any:  # noqa: ANN401
-    """One send, as its own call: a relayed message's id is derived from the call
-    (`relay_message_id`), and a call is never made twice."""
+    """One send, as its own call. The id of a relayed message is derived from the
+    call (`relay_message_id`), and a call is never made twice."""
     call_id = f"send-{next(_CALLS)}"
     return await run_tool(ctx, SEND_TOOL, arguments, agent=sender, session=session, call_id=call_id)
 
@@ -133,8 +133,8 @@ async def _send(ctx: Context, sender: Any, session: Session, **arguments: Any) -
 
 
 def test_the_reach_rule_and_its_enumeration_are_one_implementation() -> None:
-    """`reachable_family` is derived from `family_reach`, so the guard that
-    refuses a send and the roster that offers one cannot disagree."""
+    """`reachable_family` is derived from `family_reach`. The guard that refuses a
+    send and the roster that offers one therefore cannot disagree."""
 
     class _Header:
         def __init__(self, parent: str | None) -> None:
@@ -158,8 +158,8 @@ def test_the_reach_rule_and_its_enumeration_are_one_implementation() -> None:
         "b": "sibling",
         "grandchild": "child",
     }
-    # No grandparent, no uncle — and the enumeration agrees with the predicate
-    # for every pair, which is the property that matters.
+    # No grandparent and no uncle. The enumeration agrees with the predicate for
+    # every pair, and that is the property that matters.
     for one in sessions:
         reach = reachable_family(sessions, one.id)
         for two in sessions:
@@ -173,11 +173,12 @@ def test_the_reach_rule_and_its_enumeration_are_one_implementation() -> None:
 
 
 def test_a_forked_root_is_a_root_and_not_a_child_of_its_source() -> None:
-    """A fork names the log it continues in `parent_session`, as a child names the
-    agent that spawned it. Read as a parent, it made a forked root its source's child:
-    reaching the source as its parent and the source's children as its siblings, and
-    out of reach of the other roots. Sabotage: read `parent_session` in
-    `reachable_family` again, and the fork's family is its source's."""
+    """A fork names the log that it continues in `parent_session`, as a child names
+    the agent that spawned it. When that field was read as a parent, a forked root
+    became a child of its source. It reached the source as its parent and the
+    children of the source as its siblings, and it was out of reach of the other
+    roots. Sabotage: read `parent_session` in `reachable_family` again, and the
+    fork's family is its source's."""
     sessions = [
         Session("root", header=SessionHeader(id="root", created_at=1)),
         Session(
@@ -201,12 +202,12 @@ def test_a_forked_root_is_a_root_and_not_a_child_of_its_source() -> None:
 async def test_a_forked_root_has_no_parent_and_its_siblings_are_the_roots(
     family_ctx: MountedRuntime,
 ) -> None:
-    """Live, and on resume. A forked root sends to the root it was cut from as a
-    sibling, and to no parent; after a crash the sibling send is found in that root's
-    log, because the roots are where a root's siblings are — and the source's send to
-    the branch is found in the branch's. Sabotage: read `parent_session` in
-    `messaging.candidates` again, and one of the two delivered sends reads as never
-    made or unknown."""
+    """Live, and on resume. A forked root sends to the root that it was cut from
+    as a sibling, and to no parent. After a crash the sibling send is found in the
+    log of that root, because the siblings of a root are the roots. The send from
+    the source to the branch is found in the log of the branch. Sabotage: read
+    `parent_session` in `messaging.candidates` again, and one of the two delivered
+    sends reads as never made or unknown."""
     ctx, session, root = await family_ctx()
     branch = ctx.require(SESSIONS).fork(session, child_session_id="branch")
     sender = ctx.require(AGENTS).create(branch, FAKE_OPTIONS)
@@ -219,7 +220,8 @@ async def test_a_forked_root_has_no_parent_and_its_siblings_are_the_roots(
     assert 'no family member has the role "parent"' in orphaned.error.message
     assert sent.is_error is False
     assert isinstance(await _reconciled(ctx, branch, "call-1", arguments), tuple)
-    # And the other way: the branch is one of the roots its source's sends can reach.
+    # And the other way: the branch is one of the roots that a send from its
+    # source can reach.
     back = {"message": "to the branch", "receiver_role": "sibling"}
     assert (await run_tool(ctx, SEND_TOOL, back, agent=root, session=session)).is_error is False
     assert isinstance(await _reconciled(ctx, session, "call-1", back), tuple)
@@ -246,8 +248,8 @@ async def test_a_child_reaches_its_parent(family_ctx: MountedRuntime) -> None:
 
 
 async def test_the_message_reaches_the_target_verbatim(family_ctx: MountedRuntime) -> None:
-    """Framing is the sender's; a harness that rewrote the body would make the
-    log stop saying what the target actually read."""
+    """The framing belongs to the sender. A harness that rewrote the body would
+    make the log stop saying what the target actually read."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
@@ -270,18 +272,20 @@ async def test_the_message_reaches_the_target_verbatim(family_ctx: MountedRuntim
 async def test_a_message_is_on_the_receivers_disk_before_the_sender_is_told(
     family_ctx: MountedRuntime,
 ) -> None:
-    """L6. The receiver's record of a message is written before `send` returns.
+    """L6. The record of a message in the log of the receiver is written before
+    `send` returns.
 
-    `steer` records the message in the receiver's log, in memory, and the sender's
-    receipt goes into the sender's log, and each used to reach disk at its own
-    agent's next flush. A receiver in the middle of a long tool call flushes last,
-    so a crash could leave the sender's log saying `delivered` and the receiver's
-    saying nothing: a message lost without anyone being told. With the receiver
-    written first, the worst a crash leaves is the sender's call unresolved, which
-    repair reports as outcome unknown.
+    `steer` records the message in the log of the receiver, in memory. The receipt
+    goes into the log of the sender. Each used to reach disk at the next flush of
+    its own agent. A receiver in the middle of a long tool call flushes last. A
+    crash could therefore leave the log of the sender saying `delivered` and the
+    log of the receiver saying nothing: a message lost, and nobody told. With the
+    receiver written first, the worst that a crash leaves is the call of the
+    sender unresolved, and repair reports that as outcome unknown.
 
-    Asked of the store as `send` returns, through the Protocol: what a resume of the
-    receiver would be handed. Siblings, so no child's completion flushes anything.
+    The test asks the store as `send` returns, through the Protocol. The answer is
+    what a resume of the receiver would be given. The agents are siblings, so no
+    completion of a child flushes anything.
 
     Sabotage: drop the write after `steer` and the receiver's stored log has no
     splice when the sender holds its receipt.
@@ -307,12 +311,13 @@ async def _reconciled(
 async def test_a_send_is_found_in_its_receivers_log_or_ruled_out(
     family_ctx: MountedRuntime,
 ) -> None:
-    """L6b. The send answers for its own call from the receiver's log.
+    """L6b. The send answers for its own call from the log of the receiver.
 
-    The message's id is derived from the call, so after a crash the tool can look for
-    it where it would be. Found, the model is shown a receipt instead of being told to
-    decide whether to send again. Absent from every log the send could have reached,
-    the send did not happen.
+    The id of the message is derived from the call, so after a crash the tool can
+    look for the message where it would be. When the message is found, the model
+    is shown a receipt and is not told to decide whether to send again. When the
+    message is absent from every log that the send could have reached, the send
+    did not happen.
 
     Sabotage: mint the message id with `new_message_id` again and the delivered
     message is not found.
@@ -336,8 +341,9 @@ async def test_a_send_is_found_in_its_receivers_log_or_ruled_out(
 async def test_a_roots_send_to_a_sibling_can_be_found_but_not_ruled_out(
     family_ctx: MountedRuntime,
 ) -> None:
-    """L6b. A root's siblings are the other roots, which only the live ones stand for
-    after a restart, so a message missing from them may be in a root not yet resumed.
+    """L6b. The siblings of a root are the other roots. After a restart only the
+    live roots stand for them, so a message that is missing from the live roots
+    may be in a root that is not yet resumed.
 
     Sabotage: treat the live roots as every root and the absent send reads not done.
     """
@@ -355,13 +361,14 @@ async def test_a_send_a_crashed_cell_made_is_reported_delivered_after_a_restart(
 ) -> None:
     """L6b, end to end: a program that sent a message and was then interrupted.
 
-    Under Code Mode the send is a dispatch inside the cell, so the model reads only
-    the cell's result, which used to say its outcome was unknown. The receiver's log
-    holds the message (L6), so on resume the cell's result says the send happened,
-    and the model need not send it twice.
+    Under Code Mode the send is a dispatch inside the cell, so the model reads
+    only the result of the cell. That result used to say that the outcome of the
+    cell was unknown. The log of the receiver holds the message (L6). On resume
+    the result of the cell therefore says that the send happened, and the model
+    does not need to send the message twice.
 
-    Resumed by a fresh deployment over a snapshot of the logs, as a restarted daemon
-    would resume it: the first one still holds the leases.
+    A fresh deployment resumes the session over a snapshot of the logs, as a
+    restarted daemon would resume it. The first deployment still holds the leases.
     """
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
@@ -386,8 +393,8 @@ async def test_a_send_a_crashed_cell_made_is_reported_delivered_after_a_restart(
 
 
 async def test_siblings_reach_each_other(family_ctx: MountedRuntime) -> None:
-    """Two roots are siblings under the rule, which is what lets two top-level
-    agents in one deployment talk."""
+    """Two roots are siblings under the rule. That lets two top-level agents in
+    one deployment talk."""
     ctx, session, sender, target = await _siblings(family_ctx)
     ok = await _send(ctx, sender, session, message="halves", receiver_role="sibling")
     assert ok.is_error is False
@@ -398,10 +405,10 @@ async def test_siblings_reach_each_other(family_ctx: MountedRuntime) -> None:
 async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -> None:
     """P3-13: a completed child stays addressable, and a send is the trigger.
 
-    Settlement releases the agent — which is what holds an inbox — but the
-    child's session and its log survive it, and its log is its whole record. So
-    addressing the child rehydrates it rather than telling the sender to go read a
-    transcript.
+    Settlement releases the agent, and the agent is what holds an inbox. The
+    session and the log of the child survive, and the log is the whole record of
+    the child. So a send to the child rehydrates it, and the sender is not told
+    to go and read a transcript.
     """
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
@@ -413,21 +420,23 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
     )
     assert result.is_error is False
     assert result.value["receiverId"] == run.session_id
-    # Checked before draining: the woken child settles again once its job runs.
+    # Checked before draining, because the woken child settles again when its job
+    # runs.
     assert ctx.require(AGENTS).get(run.session_id) is not None, "the child was not woken"
 
     await settle_background(ctx)
-    # The child's log says it was *woken*, distinctly from a child still on its
-    # first task, so a parent reading its children can tell the two apart.
+    # The log of the child says that it was *woken*. That is distinct from a child
+    # that is still on its first task, so a parent that reads its children can
+    # tell the two apart.
     records = [
         event.data
         for event in not_none(ctx.require(SESSIONS).get(run.session_id)).events
         if event.type == "subagent/status"
     ]
     assert [record["status"] for record in records] == ["running", "done", "running", "done"]
-    # `running` with a *cause*, not a `rehydrated` status: a child's state folds
-    # status last-write-wins, so a woken child that is working must still read as
-    # running to anything that branches on it.
+    # `running` with a *cause*, not a `rehydrated` status. The state of a child
+    # folds status as last-write-wins, so a woken child that is working must
+    # still read as running to anything that branches on the status.
     assert [record.get("cause") for record in records] == [None, None, "rehydrated", None]
     assert not [event for event in session.events if event.type.startswith("subagent/")], (
         "the wake was recorded in the parent's log"
@@ -437,11 +446,12 @@ async def test_addressing_a_settled_child_wakes_it(family_ctx: MountedRuntime) -
 async def test_a_child_woken_and_stopped_mid_question_is_suspended(
     family_ctx: MountedRuntime, gate: ModelGate
 ) -> None:
-    """A woken child holds no answer until it gives one. It held its answer to the
-    question before, so a mount going away while it worked on the next read it as
-    settled: no `queued` written, and its log left `running`, which the next start
-    counts as a crash on the child's retry ladder. And a waiter on the new question
-    could be handed the old answer.
+    """A woken child holds no answer until it gives one. It used to keep its
+    answer to the question before. A mount that went away while the child worked
+    on the next question then read the child as settled. No `queued` was written,
+    and the log of the child was left `running`, which the next start counts as a
+    crash on the retry ladder of the child. A waiter on the new question could
+    also be handed the old answer.
 
     Sabotage: drop `child.result = None` from `RlmChildProvider.rehydrate`, and the
     woken child's last status is `running`.
@@ -464,10 +474,12 @@ async def test_a_child_woken_and_stopped_mid_question_is_suspended(
 
 
 async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) -> None:
-    """A drive job is an effect of the delegation, released when the child settles.
+    """A drive job is an effect of the delegation. It is released when the child
+    settles.
 
-    Every message to a settled child wakes it, and each wake starts a job. Without
-    an owner that is one permanent table entry per message; with one it is none.
+    Every message to a settled child wakes it, and each wake starts a job.
+    Without an owner, that is one permanent table entry for each message. With an
+    owner, it is none.
     """
     ctx, session, parent = await family_ctx(rateCapacity=99)
     await _spawn(ctx, parent, "scout")
@@ -489,7 +501,7 @@ async def test_repeated_wakes_do_not_accrete_jobs(family_ctx: MountedRuntime) ->
 
 
 async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: MountedRuntime) -> None:
-    """The other half: work still in flight when its owner goes is canceled."""
+    """The other half: work that is still running when its owner goes is canceled."""
     ctx, _session, parent = await family_ctx()
     await _spawn(ctx, parent, "scout")
     running = [job for job in ctx.require(JOBS).list() if job.kind == "subagent"]
@@ -501,15 +513,15 @@ async def test_disposing_the_parent_abandons_a_running_drive(family_ctx: Mounted
 
 
 async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime) -> None:
-    """The tombstone in the child's log is the record that its parent revoked it;
-    waking one behind that record would make the record false."""
+    """The tombstone in the log of the child is the record that its parent revoked
+    it. To wake a child behind that record would make the record false."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     await settle_background(ctx)
     assert await ctx.require(SUBAGENTS).delete(session, run.id, reason="user") is True
 
-    # Both doors: the service refuses because `forget()` dropped the run, and the
-    # provider refuses because `_release` dropped the child.
+    # Both entry points refuse. The service refuses because `forget()` dropped
+    # the run, and the provider refuses because `_release` dropped the child.
     assert await ctx.require(SUBAGENTS).rehydrate(run.id) is False
     assert await ctx.require(RLM_CHILDREN).rehydrate(run.id) is False
 
@@ -526,18 +538,20 @@ async def test_a_revoked_child_is_not_quietly_revived(family_ctx: MountedRuntime
 async def test_a_send_outside_the_family_is_refused_by_a_guard(
     family_ctx: MountedRuntime, gate: ModelGate
 ) -> None:
-    """C7: the guard is deny-only and runs last, so nothing re-permits it.
+    """C7: the guard can only deny and it runs last, so nothing permits the send
+    again.
 
-    The child is held at its model call while its own child is spawned. Left to run,
-    the fake model let it finish its turn and be released mid-spawn, and the spawn was
-    refused because its parent had gone."""
+    The child is held at its model call while its own child is spawned. When the
+    child was left to run, the fake model let it finish its turn and be released
+    in the middle of the spawn. The spawn was then refused because its parent was
+    gone."""
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
     grandchild = await _spawn(ctx, child, "recon")
 
-    # A permissive row that allows everything cannot re-permit it: a guard runs
-    # after every waterfall listener and a denial is final (B2).
+    # A permissive row that allows everything cannot permit the send again. A
+    # guard runs after every waterfall listener, and a denial is final (B2).
     ctx.on("tools/pre-execute", lambda _execution, _next: Allow())
 
     # The parent reaching its *grandchild*: one generation too far.
@@ -552,8 +566,8 @@ async def test_a_send_outside_the_family_is_refused_by_a_guard(
     assert result.is_error is True
     assert result.error.kind == "denied", "the boundary must deny, not merely fail"
     assert OUT_OF_REACH in result.error.message or "no child is named" in result.error.message
-    # And the grandchild exists and is reachable from its own parent, so the
-    # refusal is about the boundary rather than about a missing agent.
+    # The grandchild exists and its own parent can reach it. So the refusal is
+    # about the boundary and not about a missing agent.
     assert ctx.require(SESSIONS).get(grandchild.session_id) is not None
 
 
@@ -590,11 +604,11 @@ async def test_an_oversized_message_is_refused_with_the_alternative(
 
 
 async def test_the_rate_limit_fails_rather_than_denies(family_ctx: MountedRuntime) -> None:
-    """C8, and the deliberate deviation: backpressure is the program's to handle.
+    """C8, and the deliberate deviation: the program handles backpressure.
 
-    A *denial* would end the whole cell under C3, which is not what four messages
-    in one second should cost. The distinction is visible in `error.kind`, which
-    is exactly what Code Mode branches on.
+    A *denial* would end the whole cell under C3. Four messages in one second
+    should not cost that much. The difference shows in `error.kind`, which is
+    exactly what Code Mode branches on.
     """
     ctx, session, sender, _target = await _siblings(
         family_ctx, rateCapacity=2, rateRefillSeconds=1000.0, maxPending=99
@@ -631,13 +645,14 @@ async def test_a_target_at_the_pending_cap_refuses_more(family_ctx: MountedRunti
 async def test_a_childs_send_to_its_parent_is_read_from_its_own_log(
     family_ctx: MountedRuntime,
 ) -> None:
-    """What decides the "finished without replying" notice, read where the send is
-    recorded: the child's own log, as the batch records every call it runs.
+    """This decides the "finished without replying" notice. It is read where the
+    send is recorded: the log of the child, where the batch records every call
+    that it runs.
 
-    Asserted on the fold rather than on the notice's absence: a child driven by the
-    fake adapter settles inside the send's own await, so whether the notice has been
-    written already is a race — and `test_subagents.py` covers what the provider does
-    with the answer, where the ordering is controllable.
+    The test asserts on the fold and not on the absence of the notice. A child
+    that the fake adapter drives settles inside the await of the send itself, so
+    whether the notice is already written is a race. `test_subagents.py` covers
+    what the provider does with the answer, where the order can be controlled.
 
     Sabotage: have `settle_of` lose a result's call id, and the reply is not seen.
     """
@@ -659,7 +674,8 @@ async def test_a_childs_send_to_its_parent_is_read_from_its_own_log(
 
 
 def _native(child: Session, *, role: FamilyRole = "parent", failed: bool = False) -> None:
-    """A send as a native call records one: the model's arguments, then its result."""
+    """A send as a native call records it: the arguments of the model, then the
+    result."""
     arguments = json.dumps({"message": "hi", "receiver_role": role})
     call = log_event(
         child, "tool/call", {"callId": "n1", "name": SEND_TOOL, "arguments": arguments}
@@ -703,9 +719,10 @@ def _started(child: Session, *, cause: StatusCause) -> None:
 def test_what_counts_as_a_reply_to_the_parent(
     steps: list[Callable[[Session], None]], replied: bool
 ) -> None:
-    """A send counts once it addressed the parent and settled without an error, since
-    the child was last handed a task. A rehydration hands it a new one, so the reply
-    to the old one no longer answers; a restart carries on the task it had.
+    """A send counts when it addressed the parent and settled without an error
+    since the child was last handed a task. A rehydration hands the child a new
+    task, so the reply to the old task no longer answers. A restart continues the
+    task that the child had.
 
     Sabotage: count every settled send, and the one to a sibling reads as a reply;
     begin the count again at a resumed start, and the reply before the restart is lost.
@@ -726,8 +743,9 @@ async def test_observe_is_bounded_by_the_same_reach_rule(
     ctx, session, parent = await family_ctx()
     run = await _spawn(ctx, parent, "scout")
     child = _agent(ctx, run)
-    # Held while its own child is spawned under it, which a child that had finished
-    # and been released would refuse; let go once both exist.
+    # The child is held while its own child is spawned under it. A child that had
+    # finished and been released would refuse the spawn. The gate lets go after
+    # both exist.
     grandchild = await _spawn(ctx, child, "recon")
     gate.release_all()
     await settle_background(ctx)
@@ -739,8 +757,8 @@ async def test_observe_is_bounded_by_the_same_reach_rule(
     assert seen.value["role"] == "child"
     assert any("task from parent" in row["text"] for row in seen.value["messages"])
 
-    # A grandchild is out of reach — two *roots* would be siblings under the
-    # rule, so the unreachable case has to be a generation away.
+    # A grandchild is out of reach. Two *roots* would be siblings under the rule,
+    # so the unreachable case has to be a generation away.
     refused = await run_tool(
         ctx,
         OBSERVE_GET_TOOL,
@@ -789,10 +807,11 @@ def test_the_received_rendering_is_prime_agents() -> None:
 
 
 async def test_a_rate_limit_lets_go_of_an_agent_that_has_gone() -> None:
-    """The buckets naming an agent go with it, whichever side of a pair it was.
+    """The buckets that name an agent go with it, whichever side of a pair it was.
 
-    One bucket per sender and target, made on the first send and never taken out:
-    a long-lived root that delegates kept one per child it ever wrote to.
+    There is one bucket for each sender and target. It is made on the first send
+    and was never removed. A long-lived root that delegates kept one bucket for
+    each child that it ever wrote to.
 
     Sabotage: leave `forget` empty, and the pairs are still held.
     """

@@ -1,40 +1,41 @@
-"""`rlm-context-loader` — a queryable corpus, off by default (P3-17, Q4).
+"""`rlm-context-loader`: a queryable corpus, off by default (P3-17, Q4).
 
-The companion plan calls this "prompt-as-a-variable": a large body of text the
-agent should be able to consult without any of it entering the prompt. Prime
-Agent does not implement it. Four decisions make this pH's version rather than
-that sketch, and the first two are why the row is small.
+The companion plan calls this "prompt-as-a-variable": a large body of text that
+the agent should be able to consult without any of it entering the prompt. Prime
+Agent does not implement it. Four decisions make this the version of pH and not
+that sketch. The first two are the reason that the row is small.
 
 **Access is a binding, not a namespace variable** (C2/C5, Q4). A bare
-`context.search(...)` over a variable in the kernel produces no `call` frame:
-results reach the model as merged cell stdout, capped by `max_log_bytes` and
-never offloaded, with no per-query provenance. Registered *tools* — reached as
+`context.search(...)` over a variable in the kernel produces no `call` frame.
+Its results reach the model as merged cell stdout, capped by `max_log_bytes` and
+never offloaded, with no provenance for each query. Registered *tools* give both
+offloading and provenance. A cell reaches them as
 `await tools.context_search(...)`, because Code Mode builds the `tools` namespace
-from the registry — give both: each query settles as its own
-`tool/code-dispatch` pair, so `tools/post-execute` can replace one oversized
-result with a preview and a spill locator while its siblings pass through
-untouched. That is §6a's pattern one level up, and it is the whole argument for
-the binding form.
+from the registry. Each query settles as its own `tool/code-dispatch` pair. So
+`tools/post-execute` can replace one oversized result with a preview and a spill
+locator, while the other results pass through untouched. That is the pattern of
+§6a one level up, and it is the whole argument for the binding form.
 
-**The prompt gets metadata, never content.** Names, line and byte counts, and
-how to query. A corpus large enough to be worth loading is large enough that
-putting any of it in the prompt defeats the purpose.
+**The prompt gets metadata, never content.** It gets names, line and character
+counts, and how to query. A corpus that is large enough to be worth loading is
+large enough that putting any of it in the prompt defeats the purpose.
 
 **The corpus is a recipe, not a snapshot** (D17, Q4). It is built from *declared*
-sources, so what is durable is `{loader, sources, digest}` — recorded on
-`context/loaded` — and a later session re-resolves it. A matching digest is
-silent; a changed one tells the model the corpus was rebuilt; a missing source
-says so. The plan files this under `kernel/snapshot {kind: "recipe"}`, and that
-is the right home for a *kernel variable* the harness built; this corpus never
-enters the kernel, precisely because access is a binding — so recording it as a
-namespace variable would describe a namespace that does not contain it. Same
-mechanism, honest event.
+sources, so the durable part is `{loader, sources, digest}`, which is recorded on
+`context/loaded`. A later session resolves the sources again. A matching digest
+is silent. A changed digest tells the model that the corpus was rebuilt. A
+missing source is reported. The plan files this under
+`kernel/snapshot {kind: "recipe"}`. That is the right place for a *kernel
+variable* that the harness built. This corpus never enters the kernel, precisely
+because access is a binding. To record it as a namespace variable would describe
+a namespace that does not contain it. The mechanism is the same, and the event
+is accurate.
 
-**Below a threshold it stands down.** `min_chars` exists because a corpus small
-enough to read with `tools.read` should be read with `tools.read`: C3 gave the
-model governed, logged, individually offloadable file access, which is what
-demoted this row from a headline feature to a specialist one for non-file
-corpora and repeated queries over one fixed set.
+**Below a threshold the row stands down.** `min_chars` exists because a corpus
+that is small enough to read with `tools.read` should be read with `tools.read`.
+C3 gave the model governed, logged, individually offloadable file access. That
+demoted this row from a headline feature to a specialist feature, for corpora
+that are not files and for repeated queries over one fixed set.
 
 @module ph_rlm.context_loader
 """
@@ -95,18 +96,20 @@ ORDER_CONTEXT = ORDER_TOOL_GUIDANCE + 40
 model how to reach it."""
 
 MAX_MATCHES = 200
-"""The ceiling on one query's `limit`. The offload seam can spill a large
-result, but nothing should build an unbounded one first."""
+"""The ceiling on the `limit` of one query. The offload seam can spill a large
+result, but nothing should build an unbounded result first."""
 
 
 class ContextSource(WireModel):
-    """One declared source. `path` may be a glob; `text` is literal."""
+    """One declared source. A `path` source may be a glob. A `text` source is
+    literal text."""
 
     kind: Literal["path", "text"] = "path"
     value: str
     name: str = ""
-    """What to call a `text` source in the manifest. Ignored for paths, which are
-    named by their own relative path."""
+    """The name of a `text` source in the manifest. A `path` source ignores it and
+    is named by its own path, relative to the workspace root when the file is
+    under that root."""
 
 
 class Config(WireModel):
@@ -115,10 +118,10 @@ class Config(WireModel):
     corpus: str = "context"
     sources: list[ContextSource] = Field(default_factory=list)
     min_chars: int = 0
-    """Below this the row stands down entirely — no tools, no prompt section.
-
-    `0` loads whatever is configured; the `rlm-stable` profile sets 200 000, the
-    threshold Q4 settled on, so a small corpus behaves conventionally."""
+    """The size in characters below which the row stands down entirely, with no
+    tools and no prompt section. `0` loads whatever is configured. The
+    `rlm-stable` profile sets 200 000, the threshold that Q4 settled on, so that a
+    small corpus behaves conventionally."""
     max_matches: int = MAX_MATCHES
     """The most matches one `context_search` call may return, however large the
     model sets `limit`."""
@@ -126,11 +129,11 @@ class Config(WireModel):
 
 @dataclass(frozen=True, slots=True)
 class Document:
-    """One document, with its line starts precomputed.
+    """One document, with its line starts computed in advance.
 
-    Offsets rather than a tuple of lines: a corpus worth this row is large, and
-    splitting it would hold every line as its own string for the life of the
-    process. A line is a slice of `text`.
+    The class keeps offsets and not a tuple of lines. A corpus that is worth this
+    row is large, and a split would hold every line as its own string for the
+    life of the process. A line is a slice of `text`.
     """
 
     name: str
@@ -139,7 +142,7 @@ class Document:
 
     @staticmethod
     def of(name: str, text: str) -> Document:
-        # `str.find` scans in C; enumerating half a gigabyte of characters in
+        # `str.find` scans in C. To enumerate half a gigabyte of characters in
         # the interpreter blocked mount readiness for tens of seconds.
         starts = [0]
         position = text.find("\n")
@@ -147,7 +150,7 @@ class Document:
             starts.append(position + 1)
             position = text.find("\n", position + 1)
         if len(starts) > 1 and starts[-1] == len(text):
-            # A trailing newline ends the last line; it does not begin another.
+            # A trailing newline ends the last line. It does not begin another.
             starts.pop()
         return Document(name=name, text=text, starts=tuple(starts))
 
@@ -166,7 +169,7 @@ class Document:
         return self.text[self.starts[number - 1] : self._end_of(number)]
 
     def lines(self, first: int, last: int) -> str:
-        """1-based inclusive line range, clamped — a match on line 1 asks for 0."""
+        """A 1-based inclusive line range, clamped. A match on line 1 asks for 0."""
         first = max(1, first)
         last = min(self.line_count, last)
         if first > last:
@@ -185,7 +188,8 @@ class Match(WireModel):
 class SearchValue(WireModel):
     matches: list[Match] = Field(default_factory=list)
     truncated: bool = False
-    """More matched than `limit` allowed back — the model can narrow the query."""
+    """More lines matched than `limit` allowed back. The model can narrow the
+    query."""
 
 
 class ChunkValue(WireModel):
@@ -204,8 +208,9 @@ class HeadValue(WireModel):
 class Corpus:
     """A resolved corpus: the documents, and how it was reached.
 
-    Frozen but not slotted, so `cached_property` has a `__dict__` to land in —
-    there is one corpus per mount, and the joined view below is the whole cost.
+    The class is frozen but has no slots, so that `cached_property` has a
+    `__dict__` to store into. There is one corpus per mount, and the joined view
+    below is the whole cost.
     """
 
     name: str
@@ -226,14 +231,14 @@ class Corpus:
         return next((one for one in self.documents if one.name == name), None)
 
     def search(self, query: str, *, limit: int, context_lines: int, regex: bool) -> SearchValue:
-        """Lines matching `query`, with `context_lines` either side.
+        """The lines that match `query`, with `context_lines` on either side.
 
-        The scan is the regex engine's — `finditer` over each document's whole
-        text, `re.MULTILINE` so `^`/`$` keep their per-line meaning — and a hit
-        maps back to its line by bisecting the offsets, so Python-level work is
-        per *match*, not per line of a possibly enormous corpus. At most `limit`
-        matches are ever built; one more matching line sets `truncated` and
-        stops.
+        The regex engine does the scan. `finditer` runs over the whole text of
+        each document, with `re.MULTILINE` so that `^` and `$` keep their
+        per-line meaning. A hit maps back to its line by bisecting the offsets.
+        The work at Python level is therefore per *match*, not per line of a
+        corpus that may be enormous. At most `limit` matches are ever built. One
+        more matching line sets `truncated` and stops the scan.
         """
         try:
             pattern = re.compile(query if regex else re.escape(query), re.IGNORECASE | re.MULTILINE)
@@ -260,9 +265,10 @@ class Corpus:
 
     def _pages(self, size: int) -> list[str]:
         """The joined corpus in pages of at most `size` bytes, cut between
-        characters (`ph.characters.pieces`). Worked out once for each size a
-        model asks for, so a walk of the pages is a lookup per page. Sliced by
-        index, "bytes" counted code points, and a page could end inside one."""
+        characters (`ph.characters.pieces`). The pages are computed one time for
+        each size that a model asks for, so a walk of the pages is one lookup for
+        each page. When the text was sliced by index, "bytes" counted code
+        points, and a page could end inside a character."""
         found = self._paged.get(size)
         if found is None:
             found = self._paged[size] = pieces(self._joined.text, size, in_bytes=True)
@@ -275,12 +281,12 @@ class Corpus:
 
     @cached_property
     def _joined(self) -> Document:
-        """Every document as one pageable text, headed by its name.
+        """Every document as one pageable text, each headed by its name.
 
-        Built once, lazily: `chunk` slices it through the offsets `Document`
-        already keeps, so paging a large corpus is arithmetic per call rather than a
-        fresh join and re-split of the whole corpus on every page of a walk that
-        exists to visit all of it.
+        The text is built one time, lazily. `chunk` slices it through the offsets
+        that `Document` already keeps. To page a large corpus is then arithmetic
+        for each call. The alternative is a fresh join and a new split of the
+        whole corpus on every page of a walk that exists to visit all of it.
         """
         return Document.of(
             self.name,
@@ -288,11 +294,12 @@ class Corpus:
         )
 
     def chunk(self, *, by: Literal["lines", "bytes"], size: int, index: int) -> ChunkValue:
-        """One chunk of the whole corpus, documents in declared order.
+        """One chunk of the whole corpus, with the documents in declared order.
 
-        Paging rather than one big read: the model asks for chunk `n` of `total`,
-        so a walk of the corpus is a sequence of governed dispatches it can stop.
-        An index past the end is clamped, so paging cannot fail into an error.
+        The corpus is paged and not returned in one big read. The model asks for
+        chunk `n` of `total`, so a walk of the corpus is a sequence of governed
+        dispatches that the model can stop. An index past the end is clamped, so
+        paging cannot end in an error.
         """
         joined = self._joined
         if by == "bytes":
@@ -308,12 +315,13 @@ class Corpus:
 
 
 def _resolve(root: Path, name: str, sources: list[ContextSource]) -> Corpus:
-    """Blocking: read every declared source, and digest what was actually found.
+    """Read every declared source, and digest what was actually found. This call
+    blocks.
 
-    The digest covers the *resolved* set — path, size and mtime for a file, the
-    content hash for a blob — so a source edited between sessions changes it and
-    the model is told the corpus was rebuilt (Q4) rather than quietly querying
-    something else.
+    The digest covers the *resolved* set: the path, size and mtime for a file,
+    and the content hash for a `text` source. A source that was edited between
+    sessions therefore changes the digest, and the model is told that the corpus
+    was rebuilt (Q4). Otherwise the model would quietly query something else.
     """
     documents: list[Document] = []
     missing: list[str] = []
@@ -326,16 +334,23 @@ def _resolve(root: Path, name: str, sources: list[ContextSource]) -> Corpus:
                 f"text:{document_name}:{hashlib.sha256(source.value.encode()).hexdigest()}\n".encode()
             )
             continue
+        # A relative source is resolved against `root`, and never against the
+        # working directory of the process. A daemon does not run in the
+        # workspace, so a file of the same name beside the process was read in
+        # place of the file in the workspace.
         candidate = Path(source.value).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
         if candidate.is_file():
             found = [candidate]
         else:
             # `Path.glob` refuses an absolute pattern, and a configured source is
             # as likely to be `/srv/corpus/*.md` as `docs/**/*.md`. The stdlib
-            # module takes both; relative patterns resolve against the cwd.
-            pattern = str(candidate) if candidate.is_absolute() else str(root / source.value)
+            # `glob` module takes both.
             found = sorted(
-                path for raw in iglob(pattern, recursive=True) if (path := Path(raw)).is_file()
+                path
+                for raw in iglob(str(candidate), recursive=True)
+                if (path := Path(raw)).is_file()
             )
         if not found:
             missing.append(source.value)
@@ -400,15 +415,17 @@ class ContextService:
 
     corpus: Corpus
     _notes: SessionTable[str] = field(default_factory=SessionTable)
-    """Per session id: the note settled at first announce. The log stays the
-    durable answer — a resume re-reads it through `session.latest` — this only
-    stops every prompt assembly from re-asking a question whose answer cannot
-    change while this mount lives. Gone with the session."""
+    """For each session: the note that the first announce settled. The log stays
+    the durable answer, and a resume reads it again through `session.latest`.
+    This table only stops every prompt assembly from asking again a question
+    whose answer cannot change while this mount lives. An entry goes with its
+    session."""
     _rendered: dict[str, str] = field(default_factory=dict)
-    """Per note: the rendered manifest, which is otherwise rebuilt every step."""
+    """For each note: the rendered manifest, which would otherwise be rebuilt on
+    every step."""
 
     def manifest(self, session: Session | None) -> str:
-        """The prompt section's text: the manifest, plus whatever is news."""
+        """The text of the prompt section: the manifest, plus anything that is new."""
         note = self.announce(session)
         cached = self._rendered.get(note)
         if cached is None:
@@ -416,12 +433,13 @@ class ContextService:
         return cached
 
     def announce(self, session: Session | None) -> str:
-        """Record the recipe for this session, once, and return the note.
+        """Record the recipe for this session, one time, and return the note.
 
-        Appended on first prompt assembly rather than at mount, because that is
-        when the corpus becomes model-visible — and I3 says model-visible means
-        logged. Idempotent against the log itself, not a flag, so a resumed
-        session re-announces only when the digest actually moved.
+        The record is appended on the first prompt assembly and not at mount.
+        That is when the corpus becomes visible to the model, and I3 says that
+        model-visible means logged. The check for an earlier record is against
+        the log itself and not against a flag, so a resumed session announces
+        again only when the digest actually changed.
         """
         if session is None:
             return ""
@@ -434,9 +452,9 @@ class ContextService:
 
         note = ""
         if previous is not None:
-            # Rebuilt: the sources moved under a session that had already been
-            # told about them. Anything is better than the model finding the
-            # corpus answering differently and reading it as its own mistake.
+            # Rebuilt: the sources changed under a session that had already been
+            # told about them. Any note is better than a model that finds the
+            # corpus answering differently and reads that as its own mistake.
             note = (
                 f"`{self.corpus.name}` was rebuilt from changed sources; earlier answers in "
                 "this conversation may have come from different content."
@@ -446,8 +464,8 @@ class ContextService:
                 f"Some of `{self.corpus.name}`'s sources are unavailable — "
                 f"{', '.join(self.corpus.missing)} could not be read."
             )
-        # The recipe alone: `{loader, sources, digest}` plus what was said about
-        # it. The manifest's counts stay derivable and off the wire.
+        # Only the recipe is recorded: `{loader, sources, digest}`, plus the note
+        # about it. The counts in the manifest stay derivable and off the wire.
         _LOG.append(
             session,
             LOADED,
@@ -511,23 +529,24 @@ def _render_head(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
 async def apply(ctx: Context, config: Config) -> None:
     """Resolve the corpus, register the three queries, describe it in the prompt.
 
-    Resolved at mount, blocking in a worker thread: the row is opt-in, and the
-    `min_chars` decision — whether to offer the tools at all — cannot be made
-    without knowing what the sources hold.
+    The corpus is resolved at mount, in a worker thread because the read blocks.
+    The row is opt-in, and the `min_chars` decision (whether to offer the tools
+    at all) cannot be made without knowing what the sources hold.
     """
     tools = ctx.require(TOOLS)
     if not config.sources:
         log.debug("ph_rlm.context_loader: no sources configured; standing down")
         return
-    # The workspace root the fs seam resolved, so relative sources and document
-    # names agree with the paths `tools.read`/`grep`/`glob` accept — a deployment
-    # that configures `fs-local`'s root would otherwise get a corpus resolved
-    # against pH's process cwd while every other file tool looks elsewhere.
+    # This is the workspace root that the fs seam resolved, so relative sources
+    # and document names agree with the paths that `tools.read`/`grep`/`glob`
+    # accept. Otherwise a deployment that configures the root of `fs-local` would
+    # get a corpus resolved against the process cwd of pH, while every other file
+    # tool looks elsewhere.
     root = Path(getattr(ctx.get(FS), "root", Path.cwd()))
     corpus = await anyio.to_thread.run_sync(_resolve, root, config.corpus, config.sources)
     if corpus.chars < config.min_chars:
-        # Below the threshold the model is better served by `tools.read` and
-        # `tools.grep`: governed, logged, offloadable, and already mounted.
+        # Below the threshold, `tools.read` and `tools.grep` serve the model
+        # better. They are governed, logged, offloadable, and already mounted.
         log.info(
             "ph_rlm.context_loader: %s characters is under min_chars=%s; standing down",
             corpus.chars,
@@ -600,11 +619,12 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
     def section(request: AssembleContext) -> str:
-        """Metadata only, and the recipe recorded on first sight (I3).
+        """Metadata only. The recipe is recorded the first time that the section
+        is assembled (I3).
 
-        A cached `section` rather than a `context()`: the corpus is resolved once
-        at mount, so this text is fixed for the life of the session and belongs
-        in the stable prefix (A12).
+        This is a cached `section` and not a `context()`. The corpus is resolved
+        one time at mount, so this text is fixed for the life of the session and
+        belongs in the stable prefix (A12).
         """
         return service.manifest(request.session)
 

@@ -1,27 +1,28 @@
-"""The Continual Harness state: a fold over events, at two scopes (P3-16, D14).
+"""The state of the Continual Harness: a fold over events, at two scopes (P3-16, D14).
 
-Prime Agent keeps this in a JSON file it reads and writes. pH keeps it as a
-**fold over an append-only log**, and that single change is what buys three
-properties the file could not express:
+Prime-agent keeps this state in a JSON file that it reads and writes. pH keeps
+it as a **fold over an append-only log**. That one change gives three properties
+that the file could not express:
 
-* **Fork and resume come free.** `ctx.sessions.fork(source, boundary)` folds only
-  the `harness/*` events at or before the boundary, so a fork inherits the
-  harness as it was *then*. A file hands every fork the parent's latest.
-* **Rollback is derivable.** Each apply records its own before/after snapshots,
-  so the inverse of a refinement is a function of its event (H6) rather than a
-  second file someone has to keep.
-* **There is one writer and no reload rule.** A file read by the host and written
-  by the model needs an mtime guard and a conflict policy; a log has neither.
+* **Fork and resume need no extra work.** `ctx.sessions.fork(source, boundary)`
+  folds only the `harness/*` events at or before the boundary, so a fork
+  inherits the harness as it was *then*. A file gives every fork the latest
+  state of the parent.
+* **Rollback is derivable.** Each apply records its own before and after
+  snapshots. The inverse of a refinement is therefore a function of its event
+  (H6), and not a second file that someone must keep.
+* **There is one writer and no reload rule.** A file that the host reads and the
+  model writes needs an mtime guard and a conflict policy. A log needs neither.
 
-**Two scopes, one shape.** Local state folds this session's own events. Global
-state folds `$PH_HOME/harness/events.jsonl` — its own append-only log with the
-same records, so "state is a fold over an append-only log" holds at both scopes
-rather than putting a file back one level up.
+**Two scopes, one shape.** Local state folds the events of this session. Global
+state folds `$PH_HOME/harness/events.jsonl`, which is a separate append-only log
+with the same records. So "state is a fold over an append-only log" holds at
+both scopes, and the global scope does not bring a file back one level up.
 
-**One event type, not two.** The plan describes folding `harness/refined` and
-`harness/rolled-back`; a rollback is an inverse proposal *applied*, and the
+**One event type, not two.** The plan describes a fold of `harness/refined` and
+`harness/rolled-back`. A rollback is an inverse that is *applied*, and the
 refined record already carries `rollbackOf`. Two types would mean two fold cases
-that have to agree about one operation.
+that must agree about one operation.
 
 @module ph_rlm.harness.state
 """
@@ -71,21 +72,21 @@ HarnessScope: TypeAlias = Literal["local", "global"]
 HarnessKind: TypeAlias = Literal["note", "procedure", "skill"]
 """What a refinement may write.
 
-A closed set, and deliberately none of them a capability: a `note` is something
-learned, a `procedure` is how to do something with what already exists, and a
-`skill` *points at* installed capability. `/refine` writing procedure and never
-capability is invariant I7 — the reason skills and the harness share a word but
-not a mechanism (Q13)."""
+The set is closed, and on purpose no kind is a capability. A `note` is something
+learned. A `procedure` is how to do something with what already exists. A
+`skill` *points at* installed capability. Invariant I7 says that `/refine`
+writes procedure and never capability. That is why skills and the harness share
+a word but not a mechanism (Q13)."""
 
 KINDS: tuple[HarnessKind, ...] = get_args(HarnessKind)
-"""The kinds in rendering order — derived from the type, so a renderer cannot
-enumerate a kind the fold does not hold."""
+"""The kinds in rendering order. The tuple is derived from the type, so a
+renderer cannot list a kind that the fold does not hold."""
 
 RESERVED_IDS: frozenset[str] = frozenset({"base_system_prompt"})
-"""Ids a refinement may not touch (H5).
+"""Ids that a refinement may not touch (H5).
 
-The doctrine is not the harness's to rewrite. Prime Agent learned this one the
-hard way; the validator refuses the id with its wording."""
+The harness may not rewrite the doctrine. Prime-agent learned this rule by
+experience. The validator refuses the id with the wording of prime-agent."""
 
 
 class HarnessReference(WireModel):
@@ -98,9 +99,9 @@ class HarnessReference(WireModel):
     def probe(self) -> str:
         """A program that fails unless this reference resolves.
 
-        Run in the *runtime the model actually uses* rather than checked against
-        this process: an entry is only true if the kernel can reach it. One
-        statement, which binds nothing.
+        The program runs in the *runtime that the model uses*. It is not checked
+        against this process, because an entry is true only if the kernel can
+        reach it. The program is one statement, and it binds nothing.
         """
         return (
             f"assert callable(getattr(__import__('importlib').import_module({self.module!r}), "
@@ -122,9 +123,10 @@ class HarnessEntry(WireModel):
     call_pattern: str | None = None
     """How the model should invoke what this entry describes (H2).
 
-    Rendered by the validator, never accepted from a proposal: a refinement that
-    could write its own call pattern could steer the model onto the ungoverned
-    raw-namespace path, which is the whole thing C2 exists to close."""
+    The service renders this text (`HarnessService.render_call_pattern`) and
+    never accepts it from a proposal. A refinement that could write its own call
+    pattern could steer the model onto the ungoverned raw-namespace path, and C2
+    exists to close that path."""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -152,7 +154,7 @@ class RefinementProposal(WireModel):
 
 
 class AppliedEdit(WireModel):
-    """One applied change, with the snapshots rollback is derived from (H6)."""
+    """One applied change, with the snapshots that rollback is derived from (H6)."""
 
     action: Literal["create", "update", "delete"]
     kind: HarnessKind
@@ -169,21 +171,24 @@ class RefinementRecord(WireModel):
     summary: str
     rationale: str = ""
     expected_outcome: str = ""
-    """With `rationale`: the planner's stated case, recorded so the event
-    carries the proposal that produced it and not only its effects."""
+    """With `rationale`, the stated case of the planner. Both are recorded so
+    that the event carries the proposal that produced it and not only its
+    effects."""
     applied_edits: list[AppliedEdit] = Field(default_factory=list)
     rollback_of: str | None = None
     rejected: list[str] = Field(default_factory=list)
-    """Edits refused by validation, with the reason — recorded on the event so a
-    rejection is auditable rather than a silent no-op (H1)."""
+    """The edits that validation refused, each with the reason. They are
+    recorded on the event so that a rejection can be audited and is not a silent
+    no-op (H1)."""
     approved_in: str | None = None
     """For a global refinement, the session whose log holds the approval that
-    allowed it: its `approval/decided` carries this record's `refine_id` as
-    `callId` (L4). `None` for a local one, whose record is in its session."""
+    allowed it. The `approval/decided` event of that session carries the
+    `refine_id` of this record as `callId` (L4). The value is `None` for a local
+    refinement, whose record is in its session."""
 
 
 class HarnessState(WireModel):
-    """The folded state: entries by kind, and what got it here."""
+    """The folded state: the entries by kind, and the refinements that produced them."""
 
     schema_version: int = 1
     entries: dict[str, dict[str, HarnessEntry]] = Field(default_factory=dict)
@@ -197,10 +202,10 @@ class HarnessState(WireModel):
         return [self.entries[kind][key] for key in sorted(self.entries.get(kind, {}))]
 
     def merged_with(self, other: HarnessState) -> HarnessState:
-        """This state layered over `other` — local over global.
+        """This state layered over `other`: local over global.
 
-        A local entry shadows a global one of the same kind and id, because the
-        session that learned something specific should not be overruled by a
+        A local entry shadows a global entry of the same kind and id. The
+        session that learned something specific must not be overruled by a
         deployment-wide note.
         """
         entries: dict[str, dict[str, HarnessEntry]] = {
@@ -212,12 +217,12 @@ class HarnessState(WireModel):
 
 
 def entry_label(entry: HarnessEntry, detail: str = "") -> str:
-    """`[scope:id] title (vN)` — one identity for every rendering of an entry.
+    """`[scope:id] title (vN)`: one identity for every rendering of an entry.
 
-    Shared because the planner tells the model to edit "using its exact id"
-    against one rendering while the prompt section shows another; an id format
-    that drifted between them would have the model editing entries that do not
-    exist.
+    The label is shared because the planner tells the model to use the exact id
+    of an entry, and the model reads that id in one rendering while the prompt
+    section shows another. If the id format differed between the two, the model
+    would edit entries that do not exist.
     """
     return f"[{entry.scope}:{entry.id}] {entry.title} (v{entry.version}{detail})"
 
@@ -245,20 +250,20 @@ def _fold_into(state: HarnessState, payloads: Iterable[Mapping[str, Any]]) -> Ha
         try:
             record = RefinementRecord.model_validate(payload)
         except Exception:
-            # A record this build cannot read is skipped rather than fatal: the
-            # type is ignorable, and refusing the whole harness because one
-            # refinement came from a newer pH would lose the rest of it.
+            # A record that this build cannot read is skipped and is not fatal.
+            # If one refinement from a newer pH made the fold refuse the whole
+            # harness, the rest of the harness would be lost.
             continue
         _apply_record(state, record)
     return state
 
 
 def fold_events(events: Iterable[Mapping[str, Any]]) -> HarnessState:
-    """The state a sequence of refinement payloads folds to.
+    """The state that a sequence of refinement payloads folds to.
 
-    Takes payloads rather than `SessionEvent`s, because the global scope's
-    records come off a JSONL file and must fold through the same code — two
-    implementations of one fold is the disagreement A11 forbids.
+    The function takes payloads and not `SessionEvent`s. The records of the
+    global scope come from a JSONL file and must fold through the same code. Two
+    implementations of one fold are the disagreement that A11 forbids.
     """
     return _fold_into(HarnessState(), events)
 
@@ -269,12 +274,12 @@ def fold_session(session: Session) -> HarnessState:
 
 
 def extend_session(state: HarnessState, session: Session, from_seq: int) -> HarnessState:
-    """`fold_session`, resumed from an already-folded prefix.
+    """`fold_session`, resumed from a prefix that is already folded.
 
-    The contract `SessionFoldCache` requires: extending the fold of a prefix
-    equals folding the whole log. Almost every appended event is a chunk, so the
-    scan of the new slice usually finds nothing and hands back the same state
-    object — which is also what lets `HarnessService.state` treat identity as
+    This is the contract that `SessionFoldCache` requires: extending the fold of
+    a prefix equals folding the whole log. Almost every appended event is a
+    chunk, so the scan of the new slice usually finds nothing and returns the
+    same state object. That also lets `HarnessService.state` treat identity as
     "nothing changed". When the slice does hold refinements, the fold runs on a
     copy, so a holder of the previous value keeps what it read.
     """
@@ -289,23 +294,24 @@ def extend_session(state: HarnessState, session: Session, from_seq: int) -> Harn
 
 
 def read_global_events(directory: Path) -> list[dict[str, Any]]:
-    """The global log's payloads, in order. A missing log is an empty harness.
+    """The payloads of the global log, in order. A missing log is an empty harness.
 
-    `read_records` carries the tolerance and the reason for it: a torn last line
-    is a crash mid-append, and the refinements before it are still sound. The
-    orphan journal is the same shape and now shares the rule rather than
-    restating it.
+    `read_records` holds the tolerance and the reason for it: a torn last line
+    is a crash in the middle of an append, and the refinements before it are
+    still sound. The orphan journal has the same shape, and it now shares the
+    rule and does not restate it.
     """
     return list(read_records(directory / GLOBAL_LOG_NAME))
 
 
 def local_fold_cache() -> SessionFoldCache[HarnessState]:
-    """The per-session cache the prompt reads through.
+    """The per-session cache that the prompt reads through.
 
-    The fold is O(log) and the prompt asks for it every model step — and
-    `session.seq` bumps on every event, chunks included, so the key alone would
-    miss on nearly every read. `extend_session` is what makes that miss cheap:
-    one scan of the new slice instead of a refold of the whole log, with
-    `fold_session` staying a pure function a fork slice or stored log can use.
+    The cost of the fold grows with the length of the log, and the prompt asks
+    for the fold on every model step. `session.seq` increases on every event,
+    chunks included, so the key alone would miss on nearly every read.
+    `extend_session` makes that miss cheap: one scan of the new slice, and not a
+    new fold of the whole log. `fold_session` stays a pure function that a fork
+    slice or a stored log can use.
     """
     return SessionFoldCache(fold_session, extend=extend_session)

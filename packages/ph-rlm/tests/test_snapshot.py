@@ -1,34 +1,37 @@
 """The persistent namespace, in the log (D17).
 
-dsh withheld a persistent Python REPL for one stated reason — *"cross-call state
-would be invisible to the log"* — and the seam admits one only from a provider
-that promised, at registration, to keep it visible (D6). These are the tests that
-the promise is kept, and that keeping it has the properties the promise implies:
-a fork sees the namespace as of its boundary, an unchanged variable costs
-nothing, and a blob that cannot be trusted is not unpickled.
+dsh withheld a persistent Python REPL for one stated reason: *"cross-call state
+would be invisible to the log"*. The seam admits one only from a provider that
+promised, at registration, to keep that state visible (D6). These tests check
+that the promise is kept, and that keeping it has the properties that the promise
+implies:
+
+- A fork sees the namespace as of its boundary.
+- An unchanged variable costs nothing.
+- A blob that cannot be trusted is not unpickled.
 
 ## Why the guest tries the C pickler before `dill`
 
-`dill.Pickler` subclasses `pickle._Pickler`, the **pure-Python** one, so a large
-container is serialized in Python bytecode: a **1M-element list measured 463 ms
-per cell against 6.8 ms for `pickle`**. The digest comparison alone saves the
-*send* and not the serialization, which runs after every cell for every name — so
-the pickler choice is on the hot path even when nothing is emitted.
+`dill.Pickler` subclasses `pickle._Pickler`, the **pure-Python** pickler, so it
+serializes a large container in Python bytecode. A **1M-element list measured
+463 ms per cell against 6.8 ms for `pickle`**. The digest comparison alone saves
+the *send* and not the serialization, which runs after every cell for every name.
+So the choice of pickler is on the hot path even when nothing is emitted.
 
-**An over-cap variable stops at the cap.** The pickler writes into a sink that
-raises once it passes `max_value_bytes`, so the 200 MiB DataFrame in the module's
-own example costs **16 MiB of work per cell rather than 200**, and reports
+**A variable over the cap stops at the cap.** The pickler writes into a sink that
+raises when it passes `max_value_bytes`. The 200 MiB DataFrame in the example of
+the module therefore costs **16 MiB of work per cell and not 200**, and reports
 `too-large` either way.
 
-## Two passes the snapshot path does not make
+## Two passes that the snapshot path does not make
 
-**The payload is decoded once, host side.** It used to be base64-decoded for the
-tag, decoded again to write the blob, and hashed a third time to derive the path —
-**35 ms of the 64 ms a 16 MiB variable cost**, spent re-deriving what was already
-in hand.
+**The host decodes the payload one time.** The payload used to be base64-decoded
+for the tag, decoded again to write the blob, and hashed a third time to derive
+the path. That was **35 ms of the 64 ms that a 16 MiB variable cost**, spent on
+recomputing what was already available.
 
-**Base64 happens only once the record is known to be going out**, guest side:
-encoding a **10 MiB payload that turns out to be unchanged measured 11 ms per
+**The guest encodes to base64 only when the record is certain to go out.** To
+encode a **10 MiB payload that turns out to be unchanged measured 11 ms per
 cell**.
 """
 
@@ -89,28 +92,29 @@ async def test_a_variable_becomes_a_snapshot_event(mounted_runtime: MountedRunti
 
 
 async def test_the_records_are_ignorable(mounted_runtime: MountedRuntime) -> None:
-    """A different build may skip them without misreading the session.
+    """A different build may skip them and still read the session correctly.
 
-    They describe state, not conversation, so an older pH reading this log should
-    not refuse it outright — which is what an unknown *required* type does.
+    They describe state, not conversation. An older pH that reads this log should
+    therefore not refuse it outright, which is what an unknown *required* type
+    causes.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "answer = 42", agent=agent, session=session)
     kernel_events = [event for event in session.events if event.type.startswith("kernel/")]
     assert kernel_events
     assert all(event.ignorable for event in kernel_events)
-    # Stamped from the type, not passed per call, so no two call sites can
-    # disagree about one type — and conversation events stay required.
+    # The flag is stamped from the type and not passed on each call, so no two
+    # call sites can disagree about one type. Conversation events stay required.
     assert {"kernel/snapshot", "kernel/restored"} <= IGNORABLE_SESSION_EVENT_TYPES
     conversation = [event for event in session.events if event.type == "turn/start"]
     assert all(not event.ignorable for event in conversation)
 
 
 async def test_an_unchanged_variable_costs_nothing(mounted_runtime: MountedRuntime) -> None:
-    """Per-variable digesting is what keeps growth linear rather than quadratic.
+    """The digest of each variable is what keeps growth linear and not quadratic.
 
-    Snapshotting the namespace as one blob would re-append `kept` on every cell
-    that touched anything at all.
+    A snapshot of the namespace as one blob would append `kept` again on every
+    cell that changed anything.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "kept = list(range(100))", agent=agent, session=session, call_id="c1")
@@ -122,10 +126,10 @@ async def test_an_unchanged_variable_costs_nothing(mounted_runtime: MountedRunti
 
 
 async def test_a_deleted_variable_is_cleared_not_forgotten(mounted_runtime: MountedRuntime) -> None:
-    """A restore must *say* the name is gone.
+    """A restore must *say* that the name is gone.
 
-    A model that finds a name undefined mid-session reads it as its own bug and
-    spends a turn working around it.
+    A model that finds a name undefined in the middle of a session reads that as
+    its own bug, and uses a turn to work around it.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "temporary = 'here'", agent=agent, session=session, call_id="c1")
@@ -141,14 +145,15 @@ async def test_a_deleted_variable_is_cleared_not_forgotten(mounted_runtime: Moun
 async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: MountedRuntime) -> None:
     """The resume path: a fresh child, the same namespace.
 
-    The closed kernel's close leaves the agent's scope with it, so the scope holds one
-    for the kernel it has. Sabotage: skip the drop in `close_namespace`, and it holds
-    two, the first of which finds nothing when the agent goes."""
+    When a kernel is closed, its close leaves the scope of the agent with it. So
+    the scope holds one close, for the kernel that it has. Sabotage: skip the drop
+    in `close_namespace`, and it holds two, the first of which finds nothing when
+    the agent goes."""
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "carried = {'over': [1, 2, 3]}", agent=agent, session=session, call_id="c1")
 
-    # Close the child the way disposal would, then run again: a new kernel for
-    # the same namespace has to be handed the state the log remembers.
+    # Close the child the way disposal would, then run again. A new kernel for
+    # the same namespace must be given the state that the log remembers.
     runtime = ctx.require(PYTHON_RUNTIME)
     await runtime.close_namespace(agent.id)
 
@@ -164,11 +169,11 @@ async def test_a_new_kernel_gets_the_namespace_back(mounted_runtime: MountedRunt
 async def test_no_kernel_is_built_for_an_agent_that_is_gone(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """A kernel's close is an effect of its agent's scope, so an agent that went
-    while the kernel was being built has nowhere to put one. The build is refused
-    and the table is left as it was. Built anyway, the kernel had no owner: its
-    guest ran until the row unmounted, and an agent brought back under the same id
-    ran its cells in it.
+    """The close of a kernel is an effect of the scope of its agent. An agent that
+    went while the kernel was being built therefore has nowhere to put the close.
+    The build is refused and the table is left as it was. When the kernel was
+    built anyway, it had no owner. Its guest ran until the row unmounted, and an
+    agent that was brought back under the same id ran its cells in that kernel.
 
     Sabotage: answer `None` for an agent that is gone, and the kernel is in the table.
     """
@@ -184,10 +189,10 @@ async def test_no_kernel_is_built_for_an_agent_that_is_gone(
 
 
 async def test_a_snapshot_policy_goes_with_its_row(mounted_runtime: MountedRuntime) -> None:
-    """The row takes its policy back off the runtime as it unmounts.
+    """The row takes its policy back from the runtime as it unmounts.
 
-    The row set `runtime.snapshots` and nothing took it back: a row let go left the
-    runtime recording into a policy whose row was gone.
+    The row set `runtime.snapshots` and nothing took it back. A row that was let
+    go left the runtime recording into a policy whose row was gone.
 
     Sabotage: drop the take-back from the row, and the policy outlives it.
     """
@@ -202,11 +207,12 @@ async def test_a_snapshot_policy_goes_with_its_row(mounted_runtime: MountedRunti
 async def test_a_crash_does_not_silently_reconstitute_the_namespace(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """After `os._exit`, the model was told the namespace is empty. It must be.
+    """After `os._exit`, the model was told that the namespace is empty. It must
+    be empty.
 
-    Restoring half of it behind the model's back would be worse than the empty
-    namespace the reset notice announces — the model would see some names and not
-    others with no way to tell which.
+    To restore half of it without telling the model would be worse than the empty
+    namespace that the reset notice announces. The model would see some names and
+    not others, with no way to tell which.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "before = 'crash'", agent=agent, session=session, call_id="c1")
@@ -221,9 +227,9 @@ async def test_a_tag_from_another_session_is_refused(
     """`dill.loads` on arbitrary bytes executes arbitrary code.
 
     So a payload whose tag does not verify is not unpickled. This is provenance,
-    not secrecy: anyone who can write the log can write the tag, and what it
-    actually prevents is a blob restored into the wrong session or a half-written
-    file read as sound.
+    not secrecy. Anyone who can write the log can write the tag. What the tag
+    actually prevents is a blob restored into the wrong session, or a
+    half-written file read as sound.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     policy: KernelSnapshotPolicy = ctx.require(KERNEL_SNAPSHOTS)
@@ -233,8 +239,8 @@ async def test_a_tag_from_another_session_is_refused(
     [record] = list(fold_namespace(session, agent.id).values())
     assert await policy._payload(session, record) is not None
 
-    # Under a different session id the same bytes do not, so nothing is handed
-    # back to be unpickled.
+    # Under a different session id the same bytes do not verify, so nothing is
+    # returned to be unpickled.
     forged = ctx.require(SESSIONS).create("someone-else")
     assert await policy._payload(forged, record) is None
 
@@ -252,8 +258,8 @@ async def test_a_large_payload_goes_to_spill_and_the_event_names_it(
     [record] = [record for record in _snapshots(session) if record["var"] == "big"]
     assert "blob" not in record, "the payload is not inline"
     assert record["locator"]
-    # The event names the locator the store derived before the write, so this
-    # asserts the derived path is the real one.
+    # The event names the locator that the store derived before the write, so
+    # this asserts that the derived path is the real one.
     assert Path(record["locator"]).exists()
     assert Path(record["locator"]).stat().st_size == record["bytes"]
 
@@ -271,11 +277,11 @@ async def test_a_spilled_variable_still_restores(mounted_runtime: MountedRuntime
 async def test_a_blob_that_is_gone_is_reported_rather_than_dropped(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """S11 — a missing blob was skipped, so it was neither restored nor failed.
+    """S11: a missing blob was skipped, so it was neither restored nor failed.
 
-    And with nothing restored, no `kernel/restored` was written at all: the variable
-    was undefined after a restart with no notice. Now it is named as failed, even
-    when it was the only one.
+    With nothing restored, no `kernel/restored` was written at all. The variable
+    was undefined after a restart, with no notice. Now it is named as failed,
+    even when it was the only variable.
 
     Sabotage: skip unreadable payloads silently in `materialize` again, and nothing
     records the loss.
@@ -299,11 +305,12 @@ async def test_a_blob_that_is_gone_is_reported_rather_than_dropped(
 async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """S11 — the record named a blob the store had refused.
+    """S11: the record named a blob that the store had refused.
 
-    Written after the record, a blob that failed to write left a `snap` pointing at
-    nothing. Written first now, so the refusal is known before anything is recorded,
-    and the record says the value is gone.
+    When the blob was written after the record, a blob that failed to write left
+    a `snap` that pointed at nothing. The blob is now written first, so the
+    refusal is known before anything is recorded, and the record says that the
+    value is gone.
 
     Sabotage: record the `snap` whether or not the blob was written, and the record
     names a file that is not there.
@@ -320,11 +327,12 @@ async def test_a_blob_the_store_cannot_take_is_recorded_as_cleared(
 
 
 def _kernel_locators(session: Any) -> set[str]:  # noqa: ANN401
-    """The spill locators this log's `kernel/snapshot` events still name.
+    """The spill locators that the `kernel/snapshot` events of this log still name.
 
-    `Mapping`, not `dict`: a frozen payload is a `MappingProxyType`, and a `dict`
-    test here read every live event as having no record — the trap `ph_app.wire`
-    exists to name, met once more while writing this helper.
+    The check is for `Mapping`, not `dict`. A frozen payload is a
+    `MappingProxyType`, and a `dict` test here read every live event as having no
+    record. That is the trap that `ph_app.wire` exists to name, and this helper
+    met it one more time.
     """
     return {
         record["locator"]
@@ -354,9 +362,9 @@ async def test_unreferenced_blobs_are_swept(mounted_runtime: MountedRuntime) -> 
 async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: MountedRuntime) -> None:
     """The namespaces to visit come from the same log as the locators to keep.
 
-    Sweeping every namespace the process had seen against *one* session's
-    reference set deleted the other sessions' blobs: for them the set was empty,
-    so everything they owned looked unreferenced.
+    A sweep of every namespace that the process had seen, against the reference
+    set of *one* session, deleted the blobs of the other sessions. For them the
+    set was empty, so everything that they owned looked unreferenced.
     """
     ctx, session, agent = await mounted_runtime(
         session_id="kernel-state", snapshot_config={"inlineBlobMax": 256}
@@ -372,7 +380,7 @@ async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: Moun
     theirs = _kernel_locators(other_session)
     assert theirs and theirs != ours
 
-    # Opening either session must not collect the other's blobs.
+    # To open either session must not collect the blobs of the other session.
     assert await ctx.require(SPILL_STORE).sweep_session(other_session) == []
     assert all(Path(locator).exists() for locator in ours | theirs)
 
@@ -383,10 +391,10 @@ async def test_a_sweep_leaves_another_sessions_blobs_alone(mounted_runtime: Moun
 async def test_the_fold_reconstructs_the_namespace_as_of_a_boundary(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """What a side file could not express, and the reason D17 chose events.
+    """What a side file could not express, and the reason that D17 chose events.
 
-    A fork inherits the namespace *as it was then*; a side file would hand every
-    fork the parent's latest.
+    A fork inherits the namespace *as it was then*. A side file would give every
+    fork the latest namespace of the parent.
     """
     ctx, session, agent = await mounted_runtime(session_id="kernel-state")
     await run_cell(ctx, "first = 1", agent=agent, session=session, call_id="c1")
@@ -394,7 +402,7 @@ async def test_the_fold_reconstructs_the_namespace_as_of_a_boundary(
     await run_cell(ctx, "second = 2", agent=agent, session=session, call_id="c2")
 
     assert set(fold_namespace(session, agent.id)) == {"first", "second"}
-    # The prefix of the log a fork at `boundary` would carry.
+    # The prefix of the log that a fork at `boundary` would carry.
     assert set(fold_namespace(prefix_of(session, boundary), agent.id)) == {"first"}
 
 
@@ -416,18 +424,18 @@ async def test_a_namespace_only_sees_its_own_records(mounted_runtime: MountedRun
 
 
 # ------------------------------------------------------- surviving a summary --
-# G10. Compaction rewrites a *surface*; a REPL is not on one, so a namespace
-# crosses a summary untouched. The risk is not that the state is lost — it is
-# that the model is told the conversation was summarized and concludes its
-# variables went with it, then spends the next cell recomputing a DataFrame it
-# still has.
+# G10. Compaction rewrites a *surface*. A REPL is not on a surface, so a
+# namespace crosses a summary untouched. The risk is not that the state is lost.
+# The risk is that the model is told that the conversation was summarized, and
+# concludes that its variables went too. It then spends the next cell on
+# recomputing a DataFrame that it still has.
 
 
 async def test_the_note_names_the_variables_the_kernel_still_holds(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """Read from the same fold `materialize` restores from, so what a summary
-    promises and what a restart delivers cannot disagree."""
+    """The note is read from the same fold that `materialize` restores from. What
+    a summary promises and what a restart delivers therefore cannot disagree."""
     ctx, session, agent = await mounted_runtime(session_id="live-variables")
     await run_cell(ctx, "frame = list(range(64))\nlabel = 'x'", agent=agent, session=session)
 
@@ -441,8 +449,8 @@ async def test_the_note_names_the_variables_the_kernel_still_holds(
 async def test_a_variable_that_is_gone_is_not_promised(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """The failure worth guarding: a note is a *claim* the model will act on, so
-    a name the fold has cleared must not appear in it."""
+    """The failure to guard against. A note is a *claim* that the model will act
+    on, so a name that the fold has cleared must not appear in it."""
     ctx, session, agent = await mounted_runtime(session_id="cleared")
     await run_cell(ctx, "temporary = 1", agent=agent, session=session)
     await run_cell(ctx, "del temporary", agent=agent, session=session, call_id="call-2")
@@ -451,8 +459,8 @@ async def test_a_variable_that_is_gone_is_not_promised(
 
 
 async def test_an_empty_namespace_contributes_no_note(mounted_runtime: MountedRuntime) -> None:
-    """Empty means absent — a session that has run no cell spends no prompt on a
-    paragraph saying its kernel holds nothing."""
+    """Empty means absent. A session that has run no cell spends no prompt on a
+    paragraph that says its kernel holds nothing."""
     _ctx, session, _agent = await mounted_runtime(session_id="nothing-yet")
     assert render_live_variables(session) == ""
 
@@ -460,12 +468,12 @@ async def test_an_empty_namespace_contributes_no_note(mounted_runtime: MountedRu
 async def test_the_note_is_registered_on_the_compaction_seam(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """The wiring, which is `ctx.inject` rather than this row's own `inject`.
+    """The wiring, which is `ctx.inject` and not the `inject` list of this row.
 
-    Deliberately: the compaction seam is a nice-to-have here, and a deployment
-    that dropped the compaction row must not thereby lose kernel snapshots. The
-    inverse is what this asserts — with the seam present (it ships in `ph-base`),
-    the note is there for whatever engine a profile layers on top.
+    This is deliberate. The compaction seam is a nice-to-have here, and a
+    deployment that dropped the compaction row must not lose kernel snapshots
+    because of it. This test asserts the inverse. With the seam present (it ships
+    in `ph-base`), the note is there for whatever engine a profile layers on top.
     """
     ctx, session, agent = await mounted_runtime(session_id="wired")
     await run_cell(ctx, "answer = 42", agent=agent, session=session)
@@ -480,12 +488,12 @@ async def test_the_namespace_outlives_a_compaction_of_the_conversation(
 ) -> None:
     """ "Runtime state itself is untouched" (G10), with a real kernel.
 
-    The replacement is hand-built here because what is under test is the
-    *kernel's independence from the surface*, not the engine that writes one —
-    `ph-stabilize` owns that half and tests it against its own gates. Shadowing
-    every message the conversation had is the strongest form of the question:
-    the cell after it still sees the variable, because a surface rewrite appends
-    events and never speaks to the runtime.
+    The replacement is built by hand here, because the test is about the
+    *independence of the kernel from the surface* and not about the engine that
+    writes a surface. `ph-stabilize` owns that half and tests it against its own
+    gates. To shadow every message that the conversation had is the strongest
+    form of the question. The cell after it still sees the variable, because a
+    surface rewrite appends events and never speaks to the runtime.
     """
     ctx, session, agent = await mounted_runtime(session_id="survives")
     log_event(session, "user/message", user_payload("build the frame"), SurfaceIntent("append"))
@@ -513,20 +521,22 @@ async def test_the_namespace_outlives_a_compaction_of_the_conversation(
 async def test_a_namespace_is_restored_one_variable_to_a_frame(
     mounted_runtime: MountedRuntime,
 ) -> None:
-    """O3 — F3's defect survived in mirror image on the direction it did not reach.
+    """O3: the defect of F3 survived, mirrored, in the direction that F3 did not
+    reach.
 
-    `maxSnapshotBytes` bounds each snapshotted *value*, and F3 split the way
-    back so one frame carries one of them. The way *in* still carried the whole
-    namespace in a single `restore`, bounded by nothing — and this direction is
-    the worse of the two: the guest reads with a fixed limit it cannot size from
-    a `boot` frame it has not read yet, so an over-limit line is a `ValueError`
-    in its reader, `receive` answers `None`, and the guest exits. The namespace
-    is lost on the way back in, which is what restoring it was for.
+    `maxSnapshotBytes` limits each snapshotted *value*, and F3 split the way back
+    so that one frame carries one value. The way *in* still carried the whole
+    namespace in a single `restore`, with no limit. This direction is the worse
+    of the two. The guest reads with a fixed limit, which it cannot size from a
+    `boot` frame that it has not read yet. A line over the limit is therefore a
+    `ValueError` in its reader, `receive` answers `None`, and the guest exits.
+    The namespace is lost on the way back in, and to bring it back was the
+    purpose of the restore.
 
-    Three variables each near the per-variable cap: one frame each is fine,
-    one frame for all three is three times the cap. The count is asserted as
-    well as the outcome — a host that sent one frame and got away with it on a
-    small namespace would pass on the values alone.
+    Three variables are each near the cap for one variable. One frame for each
+    is fine, and one frame for all three is three times the cap. The test
+    asserts the count as well as the outcome. A host that sent one frame and
+    succeeded on a small namespace would pass on the values alone.
 
     Sabotage: send a single `RestoreFrame` with every variable and the frame
     count is 1.

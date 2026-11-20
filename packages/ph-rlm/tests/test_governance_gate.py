@@ -1,33 +1,37 @@
 """The governance gate (P3-21): C1-C4 and C7, against the **shipped** profile.
 
-Every claim here has unit tests elsewhere. This module exists because those mount
-hand-picked rows, and the claim the containment argument rests on is about the
-profile a user gets: *one cell is one tool call, but forty writes are forty
-governance evaluations.* If these fail, the fold did not land — the plan's own
-wording, and the reason this is a named module.
+Every claim here has unit tests elsewhere. Those unit tests mount hand-picked
+rows. The claim that the containment argument depends on is about the profile
+that a user gets: *one cell is one tool call, but forty writes are forty
+governance evaluations.* If these tests fail, the fold did not land. That is the
+wording of the plan, and it is the reason that this is a named module.
 
-So everything mounts `ph-base` + `rlm/bundle.yaml` through the loader
-(`shipped_profile`) and runs real cells in a real kernel.
+Every test therefore mounts `ph-base` + `headless` + the `rlm` bundle
+(`ph_rlm/bundle.yaml`) through the loader (`shipped_profile`) and runs real
+cells in a real kernel.
 
-**Two claims name Phase 4 consumers.** (b)'s `ToolCallLimit` and (c)'s spill
-policy are Phase 4 rows. What Phase 3 owes is the *boundary* they attach to, so
-(b) uses a shipped counter that already counts it and (c) mounts a listener on
-the seam the real row will use. Both are marked at the assertion.
+**Two claims name Phase 4 consumers.** `ToolCallLimit` in (b) and the spill
+policy in (c) are Phase 4 rows. Phase 3 owes the *boundary* that they attach
+to. So (b) uses a shipped counter that already counts that boundary, and (c)
+mounts a listener on the seam that the real row uses. Both are marked at the
+assertion.
 
-**One Phase 4 caveat the gate records rather than tests.** `permissions-fs` is
-what makes an `fs/write-intent` veto load-bearing; until it ships, (a) asserts the
-interception and that the veto is a *denial*, which is what Phase 3 owes.
+**The gate records one Phase 4 caveat and does not test it.** `permissions-fs`
+is the row that gives an `fs/write-intent` veto a real policy to enforce. It
+ships in `ph-stabilize` and is not in the profile that this gate mounts. So (a)
+asserts the interception and that the veto is a *denial*, which is what Phase 3
+owes.
 
 ## Why a denial aborts the run and does not merely reply
 
-Recorded, answered, *and* aborted — only the third actually enforces C3.
+A denial is recorded, answered, *and* aborted. Only the abort enforces C3.
 
-The reply makes a well-behaved cell raise `RunStopped` and unwind. But a cell is
-not obliged to behave: **`except BaseException: pass` followed by
-`Path(...).write_text(...)` completed the write**, and the run then "failed"
-afterwards — the tool call reported a refusal the program had already routed
-around. Raw Python is not reachable by any waterfall, so the only thing that can
-stop it is ending the process's turn.
+The reply makes a well-behaved cell raise `RunStopped` and unwind. But a cell
+does not have to behave well. **`except BaseException: pass` followed by
+`Path(...).write_text(...)` completed the write.** The run then "failed"
+afterwards: the tool call reported a refusal that the program had already
+bypassed. No waterfall can reach raw Python, so the only thing that can stop it
+is to end the turn of the process.
 """
 
 from __future__ import annotations
@@ -56,12 +60,13 @@ pytestmark = pytest.mark.anyio
 async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
     shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
-    """C1: the cell's write goes through the seam, not around it.
+    """C1: the write of the cell goes through the seam, not around it.
 
-    `fs/write-intent` fires *before* the bytes land — the difference between a
-    gate and a report, and precisely what prime-agent's `edit` skill could not
-    offer because it emitted its diff after writing. Asserted by *vetoing*: if
-    the interception were after the write, the file would exist anyway.
+    `fs/write-intent` fires *before* the bytes are written. That is the
+    difference between a gate and a report. The `edit` skill of prime-agent
+    could not offer it, because that skill emitted its diff after it wrote. The
+    test asserts this with a *veto*: if the interception came after the write,
+    the file would exist anyway.
     """
     ctx, session, agent = await shipped_profile()
     target = tmp_path / "gate-intercepted.txt"
@@ -81,12 +86,12 @@ async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
 
     assert intents == [str(target)], "the write did not pass through fs/write-intent"
     assert not target.exists(), "the veto came after the bytes — a report, not a gate"
-    # And it went through the pipeline as one governed dispatch, not as a raw side
-    # effect the harness only heard about afterwards.
+    # The write went through the pipeline as one governed dispatch. It was not a
+    # raw side effect that the harness learned about afterwards.
     assert dispatch_names(session) == ["write"]
-    # The seam's veto reaches the run as a *denial*, so C3 applies to it too and a
-    # consumer can tell policy from a fault. `FsDenied` had to become a
-    # `HarnessError` for this to hold.
+    # The veto of the seam reaches the run as a *denial*. C3 therefore applies to
+    # it too, and a consumer can tell a policy refusal from a fault. `FsDenied`
+    # had to become a `HarnessError` for this to hold.
     assert result.is_error is True
     assert result.error.kind == "denied"
     assert "the gate vetoed this write" in result.error.message
@@ -95,18 +100,18 @@ async def test_a_a_governed_write_is_intercepted_before_it_touches_disk(
 async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
     shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
-    """C3, and the one deliberate divergence from dsh.
+    """C3, and the one deliberate difference from dsh.
 
-    A program that could `except` a refusal can route around it. So a *denial*
-    settles the whole run: the cell's `except BaseException` does not get to
-    report success, and the outcome reaches a consumer as `denied` rather than as
-    an indistinguishable failure.
+    A program that can `except` a refusal can bypass it. A *denial* therefore
+    settles the whole run. The `except BaseException` of the cell cannot report
+    success, and a consumer receives the outcome as `denied`, which it can tell
+    apart from any other failure.
 
-    The `sleep` is the window the abort ladder needs — `Kernel.cancel_grace` owns
-    what that ladder can and cannot preempt.
+    The `sleep` is the window that the abort ladder needs. The docstring of
+    `Kernel.cancel_grace` states what that ladder can and cannot preempt.
     """
-    # A short grace so the assertion is about the ladder rather than about racing
-    # the shipped default with the cell's own sleep.
+    # The grace is short so that the assertion tests the ladder. With the shipped
+    # default, the test would race that default against the sleep of the cell.
     ctx, session, agent = await shipped_profile(
         {"code-runtime-python": {"cancelGraceSeconds": 0.5}}
     )
@@ -133,13 +138,13 @@ async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
         session=session,
     )
     assert result.is_error is True
-    # `denied`, not `failed`: a refused cell must be distinguishable from one that
-    # timed out. This gate is what found the kind being collapsed to a bool.
+    # `denied`, not `failed`: a consumer must be able to tell a refused cell from
+    # one that timed out. This gate found that the kind was collapsed to a bool.
     assert result.error.kind == "denied"
     assert "does not allow writes" in result.error.message
     assert result.value is None, "the cell reported a value past a refusal"
     assert not target.exists(), "a pre-execute denial reached the tool body"
-    # The abort caught the cell at the `sleep`, so the routing-around never ran.
+    # The abort stopped the cell at the `sleep`, so the bypass never ran.
     assert not routed.exists(), "the program caught a refusal and routed around it"
 
 
@@ -149,12 +154,13 @@ async def test_a_a_denied_dispatch_ends_the_run_uncatchably(
 async def test_b_three_binding_calls_are_three_governed_evaluations(
     shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
-    """C2: the number prime-agent's single tool made invisible.
+    """C2: the number that the single tool of prime-agent made invisible.
 
-    A *shipped* counter rather than a stand-in for `ToolCallLimit`: the dispatch
-    budget already counts exactly the boundary Phase 4 will count, so setting it
-    to 3 and issuing a fourth proves the boundary is per dispatch without this
-    test authoring the policy it checks.
+    The test uses a *shipped* counter and not a stand-in for `ToolCallLimit`.
+    The dispatch budget already counts exactly the boundary that the Phase 4
+    limit counts. The test sets the budget to 3 and issues a fourth dispatch.
+    That proves that the boundary is per dispatch, and the test does not have to
+    write the policy that it checks.
     """
     ctx, session, agent = await shipped_profile({"tools-code-mode": {"maxDispatchesPerRun": 3}})
     result = await run_python_cell(
@@ -167,7 +173,7 @@ async def test_b_three_binding_calls_are_three_governed_evaluations(
     assert result.is_error is False
     assert result.value["value"] == 3
 
-    # Three governed evaluations, three durable pairs — not one of each.
+    # Three governed evaluations and three durable pairs, not one of each.
     assert dispatch_names(session) == ["glob", "glob", "glob"]
     assert len(settled_dispatches(session)) == 3
 
@@ -189,22 +195,24 @@ async def test_b_three_binding_calls_are_three_governed_evaluations(
 async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
     shipped_profile: ShippedProfile, tmp_path: Path
 ) -> None:
-    """C5: offload is per dispatch, so one big read does not melt the others.
+    """C5: offload is per dispatch, so one big read does not affect the others.
 
-    On `tools/post-execute`, which is where the Phase 4 spill row attaches and the
-    only seam that changes what the *program* receives — `tools/code-dispatch-log`
-    reshapes the durable record alone, so a listener there would leave the cell
-    holding the full bytes and prove nothing about the model's context.
+    The listener is on `tools/post-execute`. The Phase 4 spill row attaches
+    there, and it is the only seam that changes what the *program* receives.
+    `tools/code-dispatch-log` reshapes only the durable record. A listener there
+    would leave the full bytes in the cell and would prove nothing about the
+    context of the model.
 
-    The stand-in replaces the *value*, because that is what `bridge.call` hands
-    back to the program. This docstring used to record the shape a real row would
-    have to solve — an `Accept(has_value=True)` re-renders content through the
-    tool's own output schema, so a generic policy cannot invent a replacement
-    value without knowing the tool — and D10 settled it by giving up the premise:
-    a spill policy never needed to invent one. It spills the *render* and passes
-    the value through, because the program already holds the object and only the
-    render costs context. What this still asserts is Phase 3's own half: the
-    boundary is per dispatch and one dispatch can be reshaped alone.
+    The stand-in replaces the *value*, because the value is what `bridge.call`
+    returns to the program. This docstring used to record a problem that a real
+    row would have to solve. An `Accept(has_value=True)` re-renders content
+    through the output schema of the tool, so a generic policy cannot invent a
+    replacement value without knowledge of the tool. D10 settled the problem by
+    dropping the premise: a spill policy never needed to invent a value. It
+    spills the *render* and passes the value through, because the program
+    already holds the object and only the render costs context. This test still
+    asserts the Phase 3 half: the boundary is per dispatch, and one dispatch can
+    be reshaped alone.
     """
     ctx, session, agent = await shipped_profile()
     big_path, small_path = tmp_path / "gate-big.txt", tmp_path / "gate-small.txt"
@@ -236,12 +244,13 @@ async def test_c_one_oversized_dispatch_is_offloaded_without_its_siblings(
         session=session,
     )
     assert result.is_error is False
-    # What the *program* saw: the big read replaced, its sibling intact. That is
-    # the fact C5 is about — an oversized result must not cost its neighbors.
+    # What the *program* saw: the big read was replaced and its sibling was
+    # intact. That is the fact that C5 is about: an oversized result must not
+    # cost its neighbors.
     assert result.value["value"] == ["[spilled]", "small"]
     assert dispatch_names(session) == ["read", "read"]
-    # And the seam fired per dispatch rather than once for the cell, which is the
-    # boundary the Phase 4 row needs to exist.
+    # The seam fired for each dispatch, and not only one time for the cell. That
+    # is the boundary that the Phase 4 row needs.
     assert seen == ["read", "read", "python"]
 
 
@@ -253,19 +262,20 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(
 ) -> None:
     """C7: the family boundary is a monotonic guard, not a policy listener.
 
-    Guards run *last* and are deny-only, so there is no ordering in which a
-    permissive row lets a send out of the family. The row mounted here allows
-    everything and still cannot.
+    Guards run *last* and can only deny. No ordering therefore exists in which a
+    permissive row lets a send out of the family. The listener that this test
+    mounts allows everything, and the send is still refused.
 
-    The target is a **grandchild** — genuinely one generation too far. Two roots
-    would be siblings under the rule, and a parent with no children refuses for the wrong
-    reason, so neither would exercise the boundary.
+    The target is a **grandchild**, which is exactly one generation too far. Two
+    roots would be siblings under the rule, and a parent with no children
+    refuses for the wrong reason. Neither case would exercise the boundary.
 
-    **The children are held on their first model call** (`gate`), so the family is
-    still there when the send is refused. A child whose fake model answers at once
-    settles at an unpredictable await point, and one that settled while the
-    grandchild was being admitted under it tore the grandchild's scope down
-    mid-admission — which a real child, spawning from its own running turn, cannot.
+    **The children are held on their first model call** (`gate`), so the family
+    still exists when the send is refused. A child whose fake model answers at
+    once settles at an unpredictable await point. A child that settled while the
+    grandchild was being admitted under it tore down the scope of the grandchild
+    in the middle of the admission. A real child cannot do that, because it
+    spawns from its own running turn.
     """
     ctx, session, parent = await shipped_profile()
     child_run = await ctx.require(SUBAGENTS).start(
@@ -280,8 +290,9 @@ async def test_d_a_non_family_send_cannot_be_re_permitted(
 
     ctx.on("tools/pre-execute", lambda _execution, _next: Allow())
 
-    # From a cell, because under this profile that is the only way the model can
-    # reach a tool at all (C6) — a native call is refused before policy runs.
+    # The send comes from a cell. Under this profile a cell is the only way that
+    # the model can reach a tool (C6): a native call is refused before policy
+    # runs.
     result = await run_python_cell(
         ctx,
         "await agent_message.send(message='hello', receiver_role='child', receiver_name='recon')",
@@ -301,8 +312,9 @@ async def test_e_a_runaway_cell_fails_at_its_budget(
 ) -> None:
     """C4: one approved cell is still one decision.
 
-    Without a per-cell cap, a single approval buys unbounded governed calls — the
-    exact leverage a single-tool surface hands a model.
+    Without a cap for each cell, a single approval permits an unlimited number
+    of governed calls. That is exactly the leverage that a single-tool surface
+    gives a model.
     """
     ctx, session, agent = await shipped_profile({"tools-code-mode": {"maxDispatchesPerRun": 4}})
     result = await run_python_cell(
@@ -324,17 +336,17 @@ async def test_e_a_runaway_cell_fails_at_its_budget(
 async def test_the_shipped_profile_still_refuses_a_native_tool_call(
     shipped_profile: ShippedProfile,
 ) -> None:
-    """C6, and the gate's own foundation, as one observable property.
+    """C6, and the foundation of the gate itself, as one observable property.
 
-    Every test above reaches tools *through* the transport, so none would notice
-    if the profile stopped being Code Mode at all: `tools.mode: code` is a config
-    patch with no `name`, and flipping it to `native` removes C6 while leaving all
-    five behavioral tests green.
+    Every test above reaches tools *through* the transport. None of them would
+    notice if the profile stopped being Code Mode. `tools.mode: code` is a
+    config patch with no `name`. A change of that value to `native` removes C6
+    and leaves all six behavioral tests green.
 
-    Asserted as a property of the mounted profile rather than as a list of row
-    names — this one call fails if the mode changed, if the transport was renamed,
-    or if `rlm-presentation` left the bundle, and it needs no inventory to go
-    stale when a row is renamed.
+    The test asserts a property of the mounted profile, not a list of row names.
+    This one call fails if the mode changed, if the transport was renamed, or if
+    `rlm-presentation` left the bundle. It needs no inventory that can go stale
+    when a row is renamed.
     """
     ctx, session, agent = await shipped_profile()
     result = await run_tool(

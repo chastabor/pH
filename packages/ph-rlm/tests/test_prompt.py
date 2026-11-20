@@ -1,18 +1,19 @@
-"""The RLM doctrine: what it says, what it withholds, and where it lives (P3-14).
+"""The RLM doctrine: what it says, what it withholds, and where it is placed (P3-14).
 
-Two properties are worth more than the wording. **The delegation section is
-conditional on the surface actually being there**, so the prompt cannot advertise
-a call the agent would be denied. And **the volatile facts are a `context()`, not
-a cached section**, so a turn that changes the depth or the family does not
-re-bill the whole prefix (A12).
+Two properties matter more than the wording:
+
+* **The delegation section depends on the surface being there**, so the prompt
+  cannot advertise a call that the agent would be denied.
+* **The volatile facts are a `context()`, not a cached section**, so a turn that
+  changes the depth or the family does not bill the whole prefix again (A12).
 
 ## Why the doctrine carries no call listing
 
-Prime Agent's doctrine carried an "RLM-native call contract" paragraph, and a
-first draft of `rlm-prompt` carried a bullet list of the five delegation calls.
-Both existed because prime-agent had no generated listing. `tools:sdk` *is* that
-listing, built from the registry, so prose beside it is a second description of
-one surface — with the hand-written copy going stale first.
+The doctrine of prime-agent carried an "RLM-native call contract" paragraph, and
+a first draft of `rlm-prompt` carried a bullet list of the five delegation
+calls. Both existed because prime-agent had no generated listing. `tools:sdk`
+*is* that listing, built from the registry. Prose beside it is a second
+description of one surface, and the hand-written copy goes stale first.
 """
 
 from __future__ import annotations
@@ -39,10 +40,10 @@ pytestmark = pytest.mark.anyio
 
 @pytest.fixture
 def prompted(mounted_runtime: MountedRuntime) -> Callable[..., Any]:
-    """The real transport plus the doctrine, optionally plus delegation.
+    """The real transport plus the doctrine, and optionally the delegation rows.
 
-    `extra_rows` is *additive*, so a test that wants a config patch passes only
-    the patch and cannot silently drop the default rows.
+    `extra_rows` is *additive*. A test that wants a config patch passes only the
+    patch, and cannot drop the default rows by accident.
     """
 
     async def build(
@@ -73,7 +74,7 @@ async def _prompt(ctx: Context, agent: AgentDriver) -> str:
 
 
 async def _snapshot(ctx: Context, agent: AgentDriver) -> str:
-    """The snapshot exactly as the driver builds it — same joiner, same text."""
+    """The snapshot exactly as the driver builds it: the same joiner and the same text."""
     return join_context_sections(render_context_sections(await _assemble(ctx, agent)))
 
 
@@ -85,34 +86,35 @@ async def test_the_doctrine_names_the_one_callable_and_the_kernel(prompted: Moun
     text = await _prompt(ctx, agent)
 
     assert DOCTRINE.strip() in text
-    # The transport's *presented* name. What the interpreter is and is not is the
-    # tool's own description (`test_presentation.py`); the doctrine used to say it
-    # too — and before that to promise `%%bash` shell cells the guest refuses (P3-22).
+    # The *presented* name of the transport. What the interpreter is and is not
+    # belongs to the description of the tool itself (`test_presentation.py`). The
+    # doctrine used to say it too. Before that, the doctrine promised `%%bash`
+    # shell cells, which the guest refuses (P3-22).
     assert f"`{PYTHON}`" in DOCTRINE
     assert "%%bash" not in DOCTRINE
     assert "IPython" not in DOCTRINE, "the doctrine re-describes the runtime"
 
 
 async def test_the_doctrine_does_not_re_describe_the_sdk_surface(prompted: MountedRuntime) -> None:
-    """Prime Agent's "RLM-native call contract" paragraph is dropped on purpose.
+    """The "RLM-native call contract" paragraph of prime-agent is dropped on purpose.
 
-    It existed because prime-agent had no generated listing; `tools:sdk` *is*
-    one, so keeping the prose would be two descriptions of one surface with the
-    hand-written one going stale first.
+    It existed because prime-agent had no generated listing. `tools:sdk` *is* a
+    generated listing. To keep the prose would give two descriptions of one
+    surface, and the hand-written one would go stale first.
     """
     ctx, _session, agent = await prompted()
     text = await _prompt(ctx, agent)
 
     assert "call_skill" not in text
     assert "RLM-native call contract" not in text
-    # And nothing re-lists the calls the SDK block already renders.
+    # Nothing lists again the calls that the SDK block already renders.
     assert "async def tools." in text
     for call in ("rlm.list_subagents()", "agent_observe.get(", "rlm.delete_subagent("):
         assert call not in DELEGATION, f"{call} is described twice"
 
 
 async def test_the_doctrine_comes_after_the_sdk_block(prompted: MountedRuntime) -> None:
-    """It refers to "the SDK block above", so the order is load-bearing."""
+    """The doctrine refers to "the SDK block above", so the order matters."""
     ctx, _session, agent = await prompted()
     text = await _prompt(ctx, agent)
     assert text.index("async def tools.") < text.index("# Writing code to solve tasks")
@@ -129,8 +131,9 @@ async def test_the_delegation_section_states_the_non_blocking_rule(
     text = await _prompt(ctx, agent)
 
     assert DELEGATION.strip() in text
-    # The rules the generated listing cannot state, checked against the constant
-    # so a reflow of the prose cannot break a test about semantics.
+    # The rules that the generated listing cannot state. They are checked against
+    # the constant, so that a reflow of the prose cannot break a test about
+    # semantics.
     assert "returns immediately" in DELEGATION
     assert "time.sleep()" in DELEGATION
     assert "access" in DELEGATION and '"read"' in DELEGATION
@@ -144,15 +147,16 @@ async def test_no_delegation_section_without_the_namespace(prompted: MountedRunt
     assert DOCTRINE.strip() in text, "the doctrine still applies"
     assert "# Delegating to child agents" not in text
     assert "rlm.run" not in text
-    # And it is *absent* from the assembly rather than present-and-empty, so a
-    # consumer enumerating section names does not see a phantom.
+    # The section is *absent* from the assembly, not present and empty. A
+    # consumer that enumerates section names therefore does not see a section
+    # with no content.
     names = [name for name, _body in (await _assemble(ctx, agent)).sections]
     assert "rlm:delegation" not in names
     assert "rlm:doctrine" in names
 
 
 async def test_a_child_is_told_it_is_a_child(prompted: MountedRuntime) -> None:
-    """Depth > 0 gets the reply instruction; a root does not."""
+    """An agent at depth > 0 gets the reply instruction. A root does not."""
     ctx, _session, parent = await prompted()
     assert CHILD_DOCTRINE.strip() not in await _prompt(ctx, parent)
 
@@ -170,7 +174,7 @@ async def test_a_child_is_told_it_is_a_child(prompted: MountedRuntime) -> None:
 
 
 async def test_the_volatile_facts_are_a_context_not_a_section(prompted: MountedRuntime) -> None:
-    """A12: depth, cwd and family move between turns, so they must not sit in the
+    """A12: depth, cwd and family change between turns, so they must not be in the
     cached prefix."""
     ctx, session, agent = await prompted()
     prompt = await _prompt(ctx, agent)
@@ -183,10 +187,10 @@ async def test_the_volatile_facts_are_a_context_not_a_section(prompted: MountedR
 
 
 async def test_the_snapshot_says_no_workspace_has_been_acquired(prompted: MountedRuntime) -> None:
-    """A child told nothing about its workspace attempts writes and reads the
-    failures as its own bug — which is the failure this line exists to prevent,
-    so it ships saying what is true now: the seam is mounted (P4-07) but nothing
-    acquires until the agent lifecycle does (P4-08)."""
+    """A child that is told nothing about its workspace attempts writes and reads
+    the failures as its own bug. This line exists to prevent that failure, so it
+    states what is true now: the seam is mounted (P4-07), but nothing acquires a
+    workspace until the agent lifecycle does (P4-08)."""
     ctx, _session, agent = await prompted()
     snapshot = await _snapshot(ctx, agent)
 
@@ -197,14 +201,15 @@ async def test_the_snapshot_says_no_workspace_has_been_acquired(prompted: Mounte
 async def test_an_acquired_workspace_replaces_the_none_acquired_line(
     prompted: MountedRuntime,
 ) -> None:
-    """The line is reached by *asking the seam for this agent*, so acquiring one
-    changes the answer.
+    """The line is reached by *asking the seam for this agent*, so an acquired
+    workspace changes the answer.
 
-    An asserted absence would keep telling every agent nothing was acquired after
-    something was — and this test would have defended the falsehood. It asks
-    `ctx.workspace.of(agent.id)` rather than reading `ctx.workspace` as if the
-    provision were itself a workspace, which is what the first draft did and what
-    would have started describing the seam object the day it was mounted.
+    An asserted absence would keep telling every agent that nothing was acquired
+    after something was, and this test would have defended the false statement.
+    The code asks `ctx.workspace.of(agent.id)`. It does not read `ctx.workspace`
+    as if the provision were itself a workspace. The first draft did that, and it
+    would have started to describe the seam object on the day that the seam was
+    mounted.
     """
     ctx, _session, agent = await prompted()
     await ctx.require(WORKSPACE).acquire(
@@ -214,8 +219,8 @@ async def test_an_acquired_workspace_replaces_the_none_acquired_line(
 
     assert WORKSPACE_LINE not in snapshot
     assert "Workspace: /repo (writable, shared)" in snapshot
-    # The scratch line is not decoration: it is the only place a child whose repo
-    # is read-only is told where it *may* write.
+    # The scratch line has a function. It is the only place that tells a child
+    # with a read-only repo where it *may* write.
     assert "Writable scratch: " in snapshot
 
 
@@ -237,7 +242,7 @@ async def test_the_snapshot_lists_the_family_and_the_children(prompted: MountedR
 
 
 async def test_a_child_at_the_depth_limit_is_told_so(prompted: MountedRuntime) -> None:
-    """Reading a depth without the limit is how a model spends a turn on a denial."""
+    """A model that reads a depth without the limit spends a turn on a denial."""
     ctx, _session, parent = await prompted(
         extra_rows=[{"id": "rlm-subagent-provider", "config": {"maxDepth": 1}}]
     )

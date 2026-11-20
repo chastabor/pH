@@ -1,17 +1,17 @@
-"""P6-01's gate — a hand-edited `harness_state.json` trips the invariant (I6, A11).
+"""The gate of P6-01: a hand-edited `harness_state.json` trips the invariant (I6, A11).
 
-This is the row's named gate, and the projection is the right thing to aim it at
+This is the named gate of the row. The projection is the right target for it,
 because it is the one file in pH that **nothing reads back**. `write_projection`
-says so in one line: written for humans. A file with no reader is a file whose
-drift nothing can notice, which makes it both the safest projection to have and
-the only one where an invariant is doing work rather than restating a type.
+says so in one line: written for humans. Nothing can notice the drift of a file
+that has no reader. That makes it the safest projection to have. It is also the
+only one where an invariant does real work and does not restate a type.
 
-**The two drifts it catches are different failures wearing one shape.** A file
-that fell behind its fold is a person reading a stale account of what the agent
-learned. A file somebody *wrote* is worse: the deployment now has two carriers
-for one fact (A11), and the log has quietly stopped being the source of truth
-(I6). Neither announces itself, and the second looks exactly like the first until
-someone forks a session and the two disagree.
+**The two drifts that it catches are different failures that look the same.** A
+file that fell behind its fold means that a person reads a stale account of what
+the agent learned. A file that somebody *wrote* is worse. The deployment then
+has two carriers for one fact (A11), and the log has quietly stopped being the
+source of truth (I6). Neither failure announces itself. The second looks exactly
+like the first until someone forks a session and the two disagree.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ pytestmark = pytest.mark.anyio
 
 
 async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any, Any]:
-    """A session whose harness has one entry and a written projection, its agent, and
-    where the projection is."""
+    """A session whose harness has one entry and a written projection, the agent
+    of the session, and the path of the projection."""
     ctx, session, agent = await harnessed(INVARIANT_ROW)
     await ctx.require(HARNESS).apply(
         RefinementProposal(summary="one", edits=[note_edit("thing")]), agent=agent
@@ -44,10 +44,11 @@ async def _refined(harnessed: Harnessed) -> tuple[Any, Any, Any, Any]:
 async def test_a_hand_edited_projection_trips_the_invariant(harnessed: Harnessed) -> None:
     """The gate. Somebody edited the file, and the harness noticed.
 
-    Edited rather than deleted, because deletion is the *benign* case this must
-    not confuse with drift: an absent projection loses nothing, since the state is
-    the log. What an edit means is that something now believes the file is state
-    — and the next fold will silently overwrite whatever it believed.
+    The file is edited and not deleted, because deletion is the *benign* case
+    that this must not confuse with drift. An absent projection loses nothing,
+    because the state is the log. An edit means that something now believes
+    that the file is state, and the next fold will silently overwrite whatever
+    it believed.
     """
     ctx, _session, _agent, path = await _refined(harnessed)
 
@@ -66,18 +67,18 @@ async def test_a_hand_edited_projection_trips_the_invariant(harnessed: Harnessed
 async def test_a_second_refinement_leaves_the_projection_equal_to_the_fold(
     harnessed: Harnessed,
 ) -> None:
-    """The other drift, and the path that has to keep not producing it.
+    """The other drift, and the path that must keep not producing it.
 
-    A stale projection is what a path that changes the state and forgets to
-    re-project leaves behind, and it is the drift that happens without anybody
-    meaning it — no hand edit, no second writer, just a fold that moved. So the
-    property worth holding is on `apply` rather than on the file: every path that
-    moves the fold re-projects, and the invariant is what says so afterwards
-    instead of a reader having to trust it.
+    A path that changes the state and forgets to project again leaves a stale
+    projection behind. This is the drift that happens without anybody intending
+    it: no hand edit, no second writer, only a fold that moved. So the property
+    to hold is on `apply` and not on the file. Every path that moves the fold
+    projects again. The invariant reports that afterwards, so a reader does not
+    have to trust it.
 
-    Two refinements rather than one, because the first writes a projection where
-    there was none — a path could pass that by creating the file and still never
-    update one.
+    The test uses two refinements and not one, because the first writes a
+    projection where there was none. A path could pass that test by creating
+    the file and still never update one.
     """
     ctx, session, agent, _path = await _refined(harnessed)
 
@@ -94,11 +95,13 @@ async def test_a_second_refinement_leaves_the_projection_equal_to_the_fold(
 async def test_a_missing_projection_is_not_a_violation(harnessed: Harnessed) -> None:
     """Absence is not drift, and reporting it as drift would ruin the signal.
 
-    Nothing requires a session to have projected — `write_projection` is called
-    where a human might look, not on every refinement — so a deployment that
-    simply never wrote one would report a violation on every `phern doctor`. An
-    alarm that fires loudest where the feature is used least is one people learn
-    to ignore, which costs the alarm that matters.
+    Nothing requires a session to have projected. `HarnessService._commit`
+    calls `write_projection` when it records a refinement or a rollback, so a
+    session that has never refined has no file. If a missing file were drift, a
+    deployment that never wrote one would report a violation on every
+    `phern doctor`. An alarm that fires loudest where the feature is used least
+    is an alarm that people learn to ignore, and then the alarm that matters is
+    lost.
     """
     ctx, session, _agent, path = await _refined(harnessed)
     path.unlink()
