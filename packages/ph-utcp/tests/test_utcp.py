@@ -1,22 +1,27 @@
-"""`utcp` — a manual's tools are pH tools, and their commands run where pH's do.
+"""`utcp`: the tools of a manual are pH tools, and their commands run where pH's run.
 
-Gates: *a session calls a manual's tool and the command runs in the agent's
-workspace; under a sandbox backend it cannot write outside that workspace and the
-paths its manual names; a manual whose discovery fails leaves the mount up, and
-says so in three places.*
+Gates:
 
-## Why a provider written here
+* A session calls a tool of a manual, and the command runs in the workspace of
+  the agent.
+* Under a sandbox backend, the command cannot write outside that workspace and
+  the paths that its manual names.
+* A manual whose discovery fails leaves the mount up, and the failure is
+  reported in three places.
 
-The row is generic over manuals, so it is tested against one that is nothing but
-a manual: a script that prints a manual and answers three tools. It reports what
-it *sees* — its working directory, the variables it was given, whether a write
-landed — because those are this row's claims, and a tool that merely worked
-would prove none of them.
+## Why the provider is written here
 
-## Why the fixture's manual is hand-written JSON
+The row works with any manual. It is therefore tested against a provider that is
+only a manual: a script that prints a manual and answers its tools. The script
+reports what it *sees*: its working directory, the variables it was given, and
+whether a write succeeded. Those are the claims of this row. A tool that only
+worked would prove none of them.
 
-It is what a provider in any language would publish. Building it with
-`ph.toolcli` would test the row against the one manual shape pH itself writes.
+## Why the manual of the fixture is hand-written JSON
+
+Hand-written JSON is what a provider in any language would publish. A manual
+built with `ph.toolcli` would test the row against only the one manual shape
+that pH itself writes.
 """
 
 from __future__ import annotations
@@ -172,8 +177,8 @@ elif sys.argv[2] == "slow":
 
 
 def _provider(tmp_path: Path) -> Path:
-    """The provider script, outside the workspace: a tool is installed somewhere,
-    and it is not in the tree it works on."""
+    """Write the provider script outside the workspace. A tool is installed in
+    some other place, not in the tree that it works on."""
     home = tmp_path.parent / f"{tmp_path.name}-provider"
     home.mkdir(exist_ok=True)
     script = home / "provider.py"
@@ -220,8 +225,9 @@ async def test_a_manuals_tools_are_registered_with_the_manuals_own_schemas(
 
 
 async def test_a_call_runs_in_the_agents_workspace(mount: MountProfile, tmp_path: Path) -> None:
-    """**The gate.** The UTCP library would start the command in the harness's own
-    working directory; a tool that indexes "the project" would index pH's."""
+    """**The gate.** The UTCP library would start the command in the working
+    directory of the harness. A tool that indexes "the project" would then index
+    pH's own directory."""
     ctx = await mount(_row(_manual(tmp_path)))
 
     result = await run_tool(ctx, "fx_echo", {"text": "hi", "times": 2}, agent=new_agent(ctx))
@@ -234,8 +240,9 @@ async def test_a_call_runs_in_the_agents_workspace(mount: MountProfile, tmp_path
 async def test_arguments_are_held_to_the_manuals_schema_before_anything_runs(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A raw-schema tool owns its validation. Without it a wrong type reaches the
-    shell as text and the tool answers whatever it makes of it."""
+    """A raw-schema tool is responsible for its own validation. Without
+    validation, a value of the wrong type reaches the shell as text, and the tool
+    answers with whatever it makes of that text."""
     ctx = await mount(_row(_manual(tmp_path)))
     agent = new_agent(ctx)
 
@@ -251,8 +258,9 @@ async def test_arguments_are_held_to_the_manuals_schema_before_anything_runs(
 async def test_the_command_sees_the_scrubbed_environment_narrowed_by_its_template(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A template names what it inherits, and it inherits from what the
-    *deployment* gives a child — so naming a credential does not fetch one."""
+    """A template names the variables that it inherits. It inherits them from the
+    environment that the *deployment* gives a child process. Naming a credential
+    therefore does not get one."""
     monkeypatch.setenv("FX_VISIBLE", "seen")
     monkeypatch.setenv("FX_UNNAMED", "not asked for")
     monkeypatch.setenv("FX_API_KEY", "a credential")
@@ -271,9 +279,9 @@ async def test_the_command_sees_the_scrubbed_environment_narrowed_by_its_templat
 async def test_an_answer_outside_the_declared_shape_is_the_error_it_usually_is(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The `cli` protocol ignores exit codes and returns stderr as the result, so a
-    failed tool that declares an object answers with a sentence. The model needs
-    the sentence."""
+    """The `cli` protocol ignores exit codes and returns stderr as the result. A
+    failed tool that declares an object therefore answers with a sentence. The
+    model needs that sentence."""
     ctx = await mount(_row(_manual(tmp_path)))
 
     result = await run_tool(
@@ -303,8 +311,8 @@ async def test_a_command_that_runs_past_its_budget_is_stopped_and_said(
 async def test_an_enveloped_tool_reads_as_it_would_registered_here(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The value is the envelope's value, the content is the tool's own rendering,
-    and the tool takes its bare name."""
+    """The value is the value of the envelope, the content is the tool's own
+    rendering, and the tool has its bare name."""
     ctx = await mount(_row(_manual(tmp_path, envelope=True, names="bare")))
 
     result = await run_tool(ctx, "wrapped", {}, agent=new_agent(ctx))
@@ -317,9 +325,10 @@ async def test_an_enveloped_tool_reads_as_it_would_registered_here(
 async def test_a_post_execute_row_edits_the_tools_own_text_and_its_edit_stands(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The envelope's text is the content from the dispatch on, so a row that adds
-    to it — ph-clm's receipt, offload's preview — works on what the model reads.
-    Applied afterwards instead, the text replaced whatever those rows wrote."""
+    """The text of the envelope is the content from the dispatch onward. A row
+    that adds to the content, such as the receipt of ph-clm or the preview of
+    offload, therefore works on what the model reads. When the text was applied
+    after those rows instead, it replaced whatever they wrote."""
     from ph.tools import Accept
 
     ctx = await mount(_row(_manual(tmp_path, envelope=True, names="bare")))
@@ -350,8 +359,8 @@ async def test_an_envelopes_failure_keeps_its_code(mount: MountProfile, tmp_path
 async def test_a_tool_that_promised_an_envelope_and_sent_none_is_refused(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`envelope` is stated rather than detected, so a broken promise is an error
-    and not a value that happens to lack an `ok`."""
+    """`envelope` is stated, not detected. A broken promise is therefore an error,
+    and not a value that happens to have no `ok` key."""
     ctx = await mount(_row(_manual(tmp_path, envelope=True, names="bare")))
 
     result = await run_tool(ctx, "wrapped", {"mode": "bare"}, agent=new_agent(ctx))
@@ -368,8 +377,8 @@ async def test_a_manual_that_cannot_be_discovered_leaves_the_mount_up(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """**The gate.** A provider that is down is a missing capability. The manual
-    that answered still works, and the one that did not is named in the state,
-    in `phern doctor` and in the prompt."""
+    that answered still works. The manual that did not answer is named in the
+    state, in `phern doctor`, and in the prompt."""
     broken = {
         "template": {
             "name": "gone",
@@ -406,8 +415,9 @@ async def test_nothing_is_said_to_the_model_when_every_manual_answered(
 async def test_a_protocol_the_deployment_did_not_allow_is_not_run(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`cli` runs through pH's doors; anything else runs inside the harness
-    process. Allowing that is a line a deployment writes."""
+    """`cli` runs through the pH shell service and its sandbox. Every other
+    protocol runs inside the harness process. A deployment allows that with a
+    line in its config."""
     remote = {"template": {"name": "remote", "call_template_type": "http", "url": "http://x"}}
     ctx = await mount(_row(remote))
 
@@ -420,9 +430,9 @@ async def test_a_protocol_the_deployment_did_not_allow_is_not_run(
 async def test_another_row_can_add_a_manual_and_takes_it_back_when_it_unmounts(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A package that publishes its own manual adds it from a row of its own. The
-    manual is that row's: its tools and its state leave with the row's scope, and
-    the name can then be added again."""
+    """A package that publishes its own manual adds it from its own row. The
+    manual belongs to that row. Its tools and its state are removed with the
+    scope of the row, and the name can then be added again."""
     ctx = await mount(_row())
     seam = ctx.require(UTCP)
     row = ctx.scope("a-row-with-a-manual")
@@ -431,7 +441,8 @@ async def test_another_row_can_add_a_manual_and_takes_it_back_when_it_unmounts(
     assert first.available
     assert "fx_echo" in ctx.require(TOOLS).names(scope=row)
 
-    # Held already: nothing is discovered twice, and the state is the one there is.
+    # The name is already held. Nothing is discovered twice, and the add returns
+    # the existing state.
     assert await seam.add(Manual.model_validate(_manual(tmp_path)), scope=row) is first
 
     await row.dispose()
@@ -445,10 +456,11 @@ async def test_another_row_can_add_a_manual_and_takes_it_back_when_it_unmounts(
 async def test_a_failed_add_takes_nothing_from_the_add_that_replaced_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A name whose add gave no tools can be added again, from anywhere, and is
-    then the second add's alone. The first add's teardown stayed on its scope
-    and, when that scope went, took the client's record of the manual: the tools
-    stayed listed and every call of one failed."""
+    """A name whose add gave no tools can be added again, from any scope. The name
+    then belongs to the second add only. Before the fix, the teardown of the
+    first add stayed on its scope. When that scope ended, the teardown removed
+    the client's record of the manual. The tools stayed listed, and every call of
+    a tool failed."""
     ctx = await mount(_row())
     seam = ctx.require(UTCP)
     row = ctx.scope("a-row-whose-manual-fails")
@@ -471,10 +483,11 @@ async def test_a_failed_add_takes_nothing_from_the_add_that_replaced_it(
 async def test_a_forgotten_manual_is_warmed_again_when_it_comes_back(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Forgetting a manual cancels the runs it started, so that they were started
-    goes with them: the manual added again starts its eager run again. And what
-    would have taken the mark back as its agent went is dropped from the agent
-    (Holdings rule 3), not left to run against a mark that is gone.
+    """Forgetting a manual cancels the runs that it started, so the marks that
+    record those runs are removed too. A manual that is added again starts its
+    eager run again. The take-back that would have removed the mark when its
+    agent ended is dropped from the agent (Holdings rule 3). It is not left to
+    run against a mark that no longer exists.
 
     Sabotage: pop the mark in `forget` without `drop()`, and its take-back stays.
     """
@@ -502,17 +515,20 @@ async def test_a_forgotten_manual_is_warmed_again_when_it_comes_back(
 async def test_under_a_sandbox_a_command_writes_only_what_the_session_and_its_manual_allow(
     mount: MountProfile, tmp_path: Path, mode: str, workspace_is_writable: bool
 ) -> None:
-    """**The gate.** A UTCP tool is bounded as `bash` is: the workspace when the
-    session's posture allows writing it, and never a path nobody named.
+    """**The gate.** A UTCP tool has the same limits as `bash`. It can write the
+    workspace when the sandbox mode of the session allows that, and it can never
+    write a path that nobody named.
 
-    **Read-only bars the workspace, and not a tool's working state.** The
-    manual's `state` directory is in the agent's scratch, and `writable` names
-    what agents share; both hold in a read-only session, because the sandbox
-    reads a policy's extra paths under either mode. That is what lets an index be
-    built for an agent that may not touch the tree it is indexing.
+    **A read-only session protects the workspace, not the working state of a
+    tool.** The `state` directory of the manual is in the scratch directory of
+    the agent, and `writable` names what agents share. Both stay writable in a
+    read-only session, because the sandbox reads the extra paths of a policy in
+    either mode. This lets a tool build an index for an agent that may not change
+    the tree that the tool indexes.
 
-    And no grant reopens the tree: one inside the workspace is refused, so there
-    the session's posture decides, as it does for every other file of it.
+    No grant makes the tree writable again. A grant inside the workspace is
+    refused. The sandbox mode of the session then decides for that path, as it
+    does for every other file in the tree.
     """
     granted = tmp_path.parent / f"{tmp_path.name}-granted"
     refused = tmp_path.parent / f"{tmp_path.name}-refused"
@@ -527,8 +543,8 @@ async def test_under_a_sandbox_a_command_writes_only_what_the_session_and_its_ma
     if not ctx.require(SANDBOX).available:
         pytest.skip(f"no enforcing sandbox backend: {report_section(ctx, 'Local confinement')}")
     agent = new_agent(ctx)
-    # What the lifecycle row does when a loop starts an agent. Without a workspace
-    # there is no boundary to enforce, and `ctx.shell` confines nothing.
+    # Do what the lifecycle row does when a loop starts an agent. Without a
+    # workspace there is no boundary to enforce, and `ctx.shell` confines nothing.
     await ctx.require(WORKSPACE).acquire(
         session_id=session_of(agent).id, agent_id=agent.id, base=tmp_path
     )
@@ -552,18 +568,20 @@ async def test_under_a_sandbox_a_command_writes_only_what_the_session_and_its_ma
     scratch = scratch_of(ctx, session_of(agent).id, agent)
     assert Path(kept.value["kept"]).parent == scratch / "fx"
     assert Path(kept.value["kept"]).exists()
-    # And its temporary files, which under read-only have nowhere else to go:
-    # `/tmp` is not writable, and this workspace has no redirection of its own.
+    # Its temporary files go in the scratch directory too. In a read-only session
+    # they have no other place: `/tmp` is not writable, and this workspace has no
+    # redirection of its own.
     assert Path(kept.value["temporary"]).parent == scratch
 
 
 async def test_a_manuals_state_is_a_directory_of_the_calling_agents_scratch(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """One manual, and each agent's calls are told that agent's own directory: so
-    two agents never share state, and the same agent — the same session and agent
-    ids, which is what a restart gives it — is told the same one again. A manual
-    that names no state is told nothing."""
+    """There is one manual, and the calls of each agent get that agent's own
+    directory. Two agents therefore never share state. The same agent gets the
+    same directory again. "The same agent" means the same session id and agent
+    id, which is what a restart gives it. A manual that names no state gets no
+    directory."""
     ctx = await mount(_row(_manual(tmp_path, state="fx-state"), _manual(tmp_path, name="bare")))
     one, other = new_agent(ctx), new_agent(ctx)
 
@@ -581,9 +599,10 @@ async def test_a_manuals_state_is_a_directory_of_the_calling_agents_scratch(
 async def test_a_grant_that_overlaps_the_workspace_is_refused_and_said(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Inside the tree, the tree itself, or a directory that contains it: each
-    would make the repository writable in a session whose person said it is not.
-    The manual keeps its tools; the grant is left out, and `phern doctor` says so."""
+    """A grant can be inside the tree, be the tree itself, or be a directory that
+    contains the tree. Each would make the repository writable in a session that
+    the user made read-only. The manual keeps its tools. The grant is left out,
+    and `phern doctor` reports it."""
     apart = tmp_path.parent / f"{tmp_path.name}-apart"
     grants = [str(tmp_path / "sub"), str(tmp_path), str(tmp_path.parent), str(apart)]
     ctx = await mount(_row(_manual(tmp_path, writable=grants)))
@@ -600,8 +619,9 @@ async def test_a_grant_that_overlaps_the_workspace_is_refused_and_said(
 async def test_an_argument_left_out_is_not_logged_as_an_error(
     mount: MountProfile, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The library logs every placeholder with no argument at ERROR, which is every
-    optional field a model omits, on every call."""
+    """The library logs each placeholder that has no argument at ERROR. A model
+    leaves out optional fields on every call, so the library logs this on every
+    call."""
     ctx = await mount(_row(_manual(tmp_path)))
 
     with caplog.at_level("WARNING"):
@@ -615,10 +635,10 @@ async def test_an_argument_left_out_is_not_logged_as_an_error(
 
 
 def test_importing_the_row_leaves_the_process_logging_alone() -> None:
-    """`utcp` calls `logging.basicConfig(level=INFO)` on import. In a process with
-    no handler yet that installs one on stderr, for everything, on behalf of a
-    library a row happened to mount. A fresh interpreter, because this one has
-    handlers of pytest's."""
+    """`utcp` calls `logging.basicConfig(level=INFO)` at import. In a process with
+    no handler yet, that call installs a stderr handler for everything, only
+    because a row mounted a library. The test uses a fresh interpreter, because
+    this process already has pytest's handlers."""
     probe = (
         "import logging, ph_utcp; root = logging.getLogger(); "
         "print(len(root.handlers), root.level, logging.getLogger('utcp_cli').level)"
@@ -633,8 +653,9 @@ def test_importing_the_row_leaves_the_process_logging_alone() -> None:
 
 
 async def test_a_plain_client_in_the_same_process_is_not_affected(tmp_path: Path) -> None:
-    """The protocol this row installs is process-wide, because the library's
-    registry is. Outside one of this row's calls it is the library's own."""
+    """The protocol that this row installs is process-wide, because the library's
+    registry is process-wide. Outside a call of this row, it behaves as the
+    library's own protocol."""
     from ph_utcp._library import UtcpClient, install
 
     install()

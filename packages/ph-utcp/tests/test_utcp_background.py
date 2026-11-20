@@ -1,19 +1,22 @@
-"""`utcp` — a tool whose work is long, run in the background and read from stderr.
+"""`utcp`: a tool whose work is long runs in the background and reports on stderr.
 
-Gates: *the footer moves and the agent is told, from the command's stderr alone;
-a run that fails, and one that dies with no last word, are each said; a run
-nobody asked for that changed nothing is not news; a call during a run answers
-what the command says while another run holds its work, and starts no second
-run.*
+Gates:
+
+* The footer updates and the agent gets a note, from the stderr of the command
+  only.
+* A run that fails, and a run that dies with no last line, are each reported.
+* A run that nobody requested and that changed nothing produces no note.
+* A call during a run answers with what the command says while another run
+  holds its work, and starts no second run.
 
 ## The provider
 
-A script that speaks what `ph.toolcli`'s `call` speaks to a caller that runs it
-directly: `call <tool> --progress --args-json <object>` reports JSONL on stderr
-and prints one envelope, and `--wait 0` answers at once when another run holds
-the work. The "lock" is a marker file, and a run started with `mode: "held"`
-waits for a second file before it goes on — so a test decides when a run ends
-instead of racing one.
+The provider is a script that behaves as the `call` command of `ph.toolcli`
+behaves for a caller that runs it directly. `call <tool> --progress --args-json
+<object>` reports JSON Lines on stderr and prints one envelope. `--wait 0`
+answers immediately when another run holds the work. The "lock" is a marker
+file. A run started with `mode: "held"` waits for a second file before it
+continues. A test therefore decides when a run ends, and does not race the run.
 """
 
 from __future__ import annotations
@@ -140,9 +143,9 @@ def _row(
     wait_s: float = 30.0,
     program: str | None = None,
 ) -> dict[str, Any]:
-    """The `utcp` row with the provider's manual, its `build` in the background
-    — run by `program` when one is named, as a manual that names the wrong one
-    would be."""
+    """The `utcp` row with the manual of the provider, and its `build` tool in the
+    background. When `program` is given, that program runs the background
+    command. This is what happens when a manual names the wrong program."""
     home = _home(tmp_path)
     home.mkdir(exist_ok=True)
     script = home / "provider.py"
@@ -173,7 +176,7 @@ def _home(tmp_path: Path) -> Path:
 
 
 def _started(tmp_path: Path) -> list[str]:
-    """The runs that did the work, by the mode each was asked with."""
+    """The runs that did the work, as the mode that each run was given."""
     runs = _home(tmp_path) / "runs"
     return runs.read_text(encoding="utf-8").split() if runs.exists() else []
 
@@ -193,11 +196,12 @@ def _notes(agent: Any) -> list[str]:  # noqa: ANN401
 async def test_a_call_that_its_run_outlasts_is_answered_and_the_agent_told_when_it_ends(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** The call starts the run and waits `wait_s` for it. Past
-    that it answers what the command says while a run holds its work, with how
-    far the run has got — which only this row knows, having read it from the
-    run's stderr — and the footer says the same. When the run ends the agent is
-    told, with the run's own words, by a note that waits for its next step."""
+    """**The gate.** The call starts the run and waits `wait_s` for it. After that
+    time, the call answers with what the command says while a run holds its work.
+    The answer includes the progress of the run. Only this row knows the
+    progress, because it read it from the stderr of the run. The footer shows the
+    same progress. When the run ends, the agent gets a note with the run's own
+    words. The note waits for the next step of the agent."""
     ctx = await mount(_row(tmp_path, wait_s=0.5))
     agent = new_agent(ctx)
     utcp = ctx.require(UTCP)
@@ -225,12 +229,13 @@ async def test_a_call_that_its_run_outlasts_is_answered_and_the_agent_told_when_
 async def test_a_run_whose_job_is_canceled_before_it_starts_is_not_left_to_join(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """S6. A run its job never reached is ended, and taken off the table.
+    """S6. A run that its job never reached is ended and removed from the table.
 
-    The run was registered before its job started, so a later call would join it
-    rather than start a second, and it was ended only inside the job's body: a job
-    canceled before that body ran left a run whose `ended` never set, which every
-    later call joined, waited out `wait_s` on, and no run was started again.
+    The run was registered before its job started, so that a later call joins it
+    and does not start a second run. The run was ended only inside the job body.
+    A job that was canceled before the body ran left a run whose `ended` was
+    never set. Every later call joined that run and waited for `wait_s`, and no
+    new run was started.
 
     Sabotage: end the runs in the body alone, and the run is still on the table.
     """
@@ -250,8 +255,9 @@ async def test_a_run_whose_job_is_canceled_before_it_starts_is_not_left_to_join(
 async def test_a_run_that_ends_within_the_wait_answers_the_call_and_nobody_is_told_twice(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The ordinary case: the run is short, the call answers with the run's own
-    result as any call would, and there is no note — its caller has the counts."""
+    """The ordinary case. The run is short, and the call answers with the result
+    of the run, as any call does. There is no note, because the caller already
+    has the counts."""
     ctx = await mount(_row(tmp_path))
     agent = new_agent(ctx)
 
@@ -266,8 +272,9 @@ async def test_a_run_that_ends_within_the_wait_answers_the_call_and_nobody_is_to
 async def test_a_run_that_fails_is_said_in_the_tools_own_words(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A caller that waited gets the failure as the tool raised it. An agent
-    whose run nobody waited for is told the same sentence, from the last line."""
+    """A caller that waited gets the failure as the tool raised it. An agent whose
+    run nobody waited for gets a note with the same sentence, taken from the last
+    line."""
     ctx = await mount(_row(tmp_path, eager=True))
     agent = new_agent(ctx)
 
@@ -290,10 +297,10 @@ async def test_a_run_that_fails_is_said_in_the_tools_own_words(
 async def test_a_run_that_dies_without_a_last_line_is_said_as_that(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** A command killed, out of memory or crashed below Python
-    writes no last line and prints no envelope. The stream ending is the
-    signal: the agent is told the run stopped, with the exit code, how far it
-    had got and the last thing it wrote."""
+    """**The gate.** A command that was killed, ran out of memory, or crashed
+    below Python writes no last line and prints no envelope. The end of the
+    stream is the signal. The agent gets a note that the run stopped, with the
+    exit code, the progress of the run, and the last line that it wrote."""
     ctx = await mount(_row(tmp_path, wait_s=0.2))
     agent = new_agent(ctx)
     utcp = ctx.require(UTCP)
@@ -312,10 +319,11 @@ async def test_a_run_that_dies_without_a_last_line_is_said_as_that(
 async def test_a_run_that_found_its_work_held_by_another_tells_a_waiting_agent_so(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A run that waited behind another run — one of another root, a person's
-    command — and did nothing is not "finished". An agent answered "still
-    going" is told the run did not happen and to call again; the other run's
-    end is not this row's to report."""
+    """A run can wait behind another run, such as a run of another root or a
+    command that a person started, and then do nothing. Such a run is not
+    "finished". An agent that got the "still going" answer gets a note that the
+    run did not happen and that it should call again. This row does not report
+    the end of the other run."""
     ctx = await mount(_row(tmp_path, wait_s=0.3))
     agent = new_agent(ctx)
     (_home(tmp_path) / "held").touch()
@@ -334,10 +342,11 @@ async def test_a_run_that_found_its_work_held_by_another_tells_a_waiting_agent_s
 async def test_a_run_whose_command_cannot_be_started_is_said_and_not_lost(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** A command that never runs — a program that is not there, a
-    sandbox that refuses it — writes no stderr and leaves no result, so nothing
-    the run reports can say so. Started unasked before the first step, it is
-    said to the agent with why; asked for by a call, the call fails with it."""
+    """**The gate.** A command can fail to run at all: the program is missing, or
+    the sandbox refuses it. It then writes no stderr and leaves no result, so
+    nothing that the run reports can give the reason. If the run was started
+    without a request before the first step, the agent gets a note with the
+    reason. If a call requested the run, the call fails with the reason."""
     missing = str(tmp_path.parent / "no-such-program")
     ctx = await mount(_row(tmp_path, eager=True, program=missing))
     agent, caller = new_agent(ctx), new_agent(ctx)
@@ -358,10 +367,11 @@ async def test_a_run_whose_command_cannot_be_started_is_said_and_not_lost(
 async def test_a_root_agents_first_step_starts_the_run_and_only_a_change_is_news(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Unasked, before the first step, and once: an index is being built before
-    anything asks for it. The agent is told when that changed something. A run
-    that found everything current — every restart of a session over a tree that
-    has not moved — says nothing."""
+    """The run starts without a request, before the first step, and one time
+    only. An index is then in progress before a call asks for it. The agent gets
+    a note when the run changed something. A run that found everything current
+    sends nothing. That is the case for every restart of a session over a tree
+    that has not changed."""
     ctx = await mount(_row(tmp_path, eager=True))
     agent, utcp = new_agent(ctx), ctx.require(UTCP)
 
@@ -382,8 +392,9 @@ async def test_a_root_agents_first_step_starts_the_run_and_only_a_change_is_news
 
 
 async def test_a_warm_mark_goes_with_its_agent(mount: MountProfile, tmp_path: Path) -> None:
-    """The mark that a tree was warmed is its owner's: kept past the agent, the set
-    held one per root agent the process ever stepped.
+    """The mark that a tree was warmed belongs to the owner of the tree. When the
+    mark was kept after the agent ended, the set held one mark for every root
+    agent that the process ever stepped.
 
     Sabotage: drop the disposer in `_warm`, and the mark outlives the agent.
     """
@@ -412,8 +423,9 @@ async def test_a_manual_with_eager_off_starts_nothing_until_its_tool_is_called(
 async def test_another_tool_of_the_manual_is_an_ordinary_call_during_a_run(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A search during an indexing run: called as any tool is, answered by the
-    command — which knows a run holds its work — with the count added here."""
+    """A search during an indexing run. The search is called as any tool is. The
+    command answers, and it knows that a run holds its work. This row adds the
+    count."""
     ctx = await mount(_row(tmp_path, wait_s=0.3))
     agent = new_agent(ctx)
     await run_tool(ctx, "fx_build", {"mode": "held"}, agent=agent)

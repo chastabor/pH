@@ -1,82 +1,95 @@
-"""`utcp` — tools published as UTCP manuals, as tools a pH agent can call.
+"""`utcp`: use tools published as UTCP manuals as tools a pH agent can call.
 
-One row. Its config lists manuals — each a UTCP *manual call template*, the
-object any UTCP harness registers — and another row can add one at mount through
-`ctx.utcp.add`. For each manual the row runs discovery, and every tool the manual
-names becomes a registered pH tool: in the prompt, through the pipeline, in the
-log, and in Code Mode's listing like any other.
+This package has one row. The config of the row lists manuals. Each manual is a
+UTCP *manual call template*, which is the object that any UTCP harness
+registers. Another row can also add a manual at mount through `ctx.utcp.add`.
+The row runs discovery for each manual. Each tool that the manual names then
+becomes a registered pH tool. Like any other tool, it appears in the prompt,
+goes through the tool pipeline, is recorded in the log, and is listed in Code
+Mode.
 
 ## A UTCP tool sees what its agent sees
 
-A `cli` tool's command is started by `ctx.shell` for the agent making the call
-(`_library.PhCliProtocol`): in that agent's workspace, under that agent's
-sandbox, ended by the call's own cancellation. So a UTCP tool is bounded the way
-`bash` is bounded — by the sandbox, and not by `permissions-fs`, which governs
-calls through `ctx.fs` and says so of itself. A manual whose tool keeps state
-outside the workspace names those paths in `writable`, or under confinement the
-tool cannot write them.
+`ctx.shell` starts the command of a `cli` tool for the agent that makes the call
+(`_library.PhCliProtocol`). The command runs in the workspace of that agent and
+under its sandbox. If the call is canceled, the command stops. A UTCP tool
+therefore has the same limits as `bash`. The sandbox sets those limits.
+`permissions-fs` does not, because it applies to calls through `ctx.fs`, as its
+own documentation says. If a tool keeps state outside the workspace, its manual
+names those paths in `writable`. Without that grant, a confined tool cannot
+write them.
 
-## Read-only bars the workspace, not a tool's working state
+## A read-only session protects the workspace, not the working state of a tool
 
-A tool that builds something *about* a tree — an index, a graph — changes no
-file of it. A manual names a directory for that (`state`), and each call is told
-where it is for the agent making it: `$PH_TOOL_STATE`, a directory of that
-agent's scratch. The scratch is writable under every sandbox mode and the
-workspace only under `workspace-write`, so the tool works in a read-only session
-and cannot write the repository there; and it is per session and agent, so an
-agent that restarts finds what it built. `writable` is for what agents share — a
-grammar cache, a model's weights — and a grant that overlaps the workspace is
-refused (`ph.seams.sandbox.grants_apart`), so no manual reopens the tree. A
-confined command's temporary files go in the scratch too (`TMPDIR`, set by the
-shell seam), for the same reason.
+Some tools build data about a tree, such as an index or a graph. A tree is the
+directory of project files that a tool works on. Such a tool changes no file in
+the tree. A manual names a directory for that data (`state`). For each call, the
+row tells the command where that directory is for the calling agent:
+`$PH_TOOL_STATE`, a directory in the scratch directory of that agent. The
+scratch directory is writable in every sandbox mode. The workspace is writable
+only in `workspace-write`. The tool therefore works in a read-only session, and
+it cannot write the repository there. Each session and agent has its own scratch
+directory, so an agent that restarts finds what it built. `writable` is for data
+that agents share, such as a grammar cache or model weights. The row refuses a
+grant that overlaps the workspace (`ph.seams.sandbox.grants_apart`), so no
+manual can make the tree writable again. The temporary files of a confined
+command also go in the scratch directory (`TMPDIR`, set by the shell seam), for
+the same reason.
 
-## A run in the background, for a tool whose work is long
+## Background runs, for a tool whose work is long
 
-Every call is one command; nothing stays up. A manual can name tools whose work
-is long (`Manual.background`) — an indexing run — and the row then starts such a
-tool itself, as every command is started: by `ctx.shell`, for the agent whose
-tree it is about, in its workspace and under its sandbox. It is a job of that
-agent's (`ctx.jobs`), so it ends when the agent does and when the manual's row
+Each call is one command. No process stays running between calls. A manual can
+name tools whose work is long (`Manual.background`), such as an indexing run.
+The row then starts the command of such a tool itself. One such execution is a
+*background run*. The row starts it as it starts every command: through
+`ctx.shell`, for the agent that owns the tree the run works on, in the workspace
+of that agent and under its sandbox. The run is a job of that agent
+(`ctx.jobs`). It stops when the agent ends, and when the row of the manual
 unmounts.
 
-The command is run with `--progress` (`ph.toolcli`), and reports on its stderr:
-JSONL, a line as it goes and one last line. That stream is everything the row
-knows of the run. The footer says how far it has got; when it ends the agent it
-works for is told, with a note that waits for that agent's next step and starts
-no turn; and a stream that ends with no last line is a run that died, and is
-said as that.
+The row runs the command with `--progress` (`ph.toolcli`). The command reports
+on its stderr in JSON Lines: one line at a time while it works, and one last
+line. This stream is the only information the row has about the run. The footer
+shows the progress of the run. When the run ends, the row tells the agent that
+the run works for. It uses a note that waits for the next step of that agent and
+does not start a turn. If the stream ends with no last line, the run died, and
+the note says so.
 
-A run is started unasked before a root agent's first step, so an index is being
-built before anything asks for it, and by a call of the tool. That call waits
-`wait_s` for the run it started and answers with the run's own result; past
-that it answers what the command says while another run holds its work —
-`state: indexing` — and the run goes on.
+The row starts a run without a request before the first step of a root agent, so
+an index is in progress before a call asks for it. A call of the tool also
+starts a run. That call waits up to `wait_s` for the run that it started, and
+answers with the result of the run. After `wait_s`, it answers with what the
+command says while another run holds its work: `state: indexing`. The run
+continues.
 
-**One run a tree at a time, not one an agent.** A child builds its own only when
-it has a tree it writes for keeps — a worktree, an overlay. One that works in
-its parent's checkout, or was granted only to read the project, shares its
-parent's state (`UtcpSeam.owner_of`): the index is of the tree, and a copy for
-every child of a read-only fan-out would be the same documents embedded again.
+**One background run for each tree at a time, not one for each agent.** A child
+agent builds its own state only when it has a tree that it writes to
+permanently: a worktree or an overlay. A child that works in the checkout of its
+parent, or that can only read the project, shares the state of its parent
+(`UtcpSeam.owner_of`). The index describes the tree. A copy for each child of a
+read-only fan-out would embed the same documents again.
 
-## What UTCP cannot say, the row's config says
+## The row config says what UTCP cannot say
 
-A manual carries a name, a description and two schemas. It has no word for "two
-of these may overlap" or "this changes nothing", and pH's scheduler and policy
-rows read exactly those. Each defaults to the careful answer — not safe to
-overlap, has effects — and a manual's `tools` table states otherwise per tool.
+A manual gives a name, a description, and two schemas. It cannot say "two calls
+of this tool may overlap" or "this tool changes nothing". The scheduler and the
+policy rows of pH read exactly those two facts. Each defaults to the careful
+answer: calls cannot overlap, and a call has effects. The `tools` table of a
+manual can state otherwise for each tool.
 
 ## A missing provider is a missing capability, not a failed start
 
-A manual whose discovery fails — the command is not installed, the endpoint is
-down, the protocol is not one this deployment allows — is **skipped**: a warning
-in the log, a line in `phern doctor`, and a note in the system prompt so the
-model is not left guessing why a skill names a tool it cannot find. The mount
-goes ahead with the manuals that answered.
+Discovery of a manual can fail: the command is not installed, the endpoint is
+down, or this deployment does not allow the protocol. The row then **skips** the
+manual. It writes a warning to the log, `phern doctor` shows a line, and the
+system prompt gets a note. The note tells the model why a skill names a tool
+that it cannot find. The mount continues with the manuals whose discovery
+succeeded.
 
-## Not stored
+## No credential is stored
 
-A template's `${VAR}` references are resolved by the UTCP client from the
-environment when a call is made. Nothing this row holds is a credential.
+A template can contain `${VAR}` references. The UTCP client resolves them from
+the environment when a call is made. This row holds no credential.
 
 @module ph_utcp
 """
@@ -151,7 +164,7 @@ __all__ = [
 ]
 
 BUNDLE = Path(__file__).parent / "bundle.yaml"
-"""This distribution's profile layer, for the `ph.bundles` group."""
+"""The profile layer of this distribution, for the `ph.bundles` group."""
 
 log = logging.getLogger("ph_utcp")
 
@@ -161,18 +174,20 @@ UTCP_BAD_ANSWER = "UTCP_BAD_ANSWER"
 
 _NOT_A_WORD = re.compile(r"\W")
 _CLIP = 600
-"""How much of an answer that was not what the tool declared is quoted back."""
+"""The length limit for quoting back an answer that did not match what the tool
+declared."""
 
 _STRAY_LINES = 5
-"""How many lines of a run's stderr that were not progress are kept: the last
-words of a command that died."""
+"""The number of stderr lines of a run, other than progress lines, that are
+kept. They are the last output of a command that died."""
 
 
 # ------------------------------------------------------------------- config ----
 
 
 class ToolView(WireModel):
-    """How a front end draws one tool's card: a title over one salient argument."""
+    """How a front end draws the card of one tool: a title above one important
+    argument."""
 
     card: CardKind = "generic"
     title: str
@@ -180,7 +195,7 @@ class ToolView(WireModel):
 
 
 class ToolTraits(WireModel):
-    """What a manual cannot say about one of its tools. Every default is the
+    """The facts about one tool that a manual cannot give. Each default is the
     careful answer."""
 
     concurrency_safe: bool = False
@@ -188,112 +203,122 @@ class ToolTraits(WireModel):
     effect_free: bool = False
     """A call changes nothing."""
     self_limits: bool = False
-    """The tool bounds its own output and offers a way to page."""
+    """The tool limits its own output and offers a way to page through it."""
     arguments_disposable: bool = False
-    """The arguments are a payload delivered, not something the model refers back to."""
+    """The arguments are a payload to deliver. The model does not refer back to them."""
     timeout_ms: int | None = None
-    """This tool's budget, over the row's."""
+    """The time limit for this tool. It overrides the limit of the row."""
     view: ToolView | None = None
 
 
 class Background(WireModel):
-    """A manual's tools whose work is long, run where the session can watch:
-    `ph.toolcli`'s `call --progress`.
+    """The tools of a manual whose work is long. The row runs them where the
+    session can monitor them, with the `call --progress` command of `ph.toolcli`.
 
-    The row adds a tool's name, `--progress` and `--args-json` to `command` and
-    reads the run's progress from its stderr; the state directory it is told as
-    each call is, in `$PH_TOOL_STATE`."""
+    The row adds the tool name, `--progress`, and `--args-json` to `command`. It
+    reads the progress of the run from stderr. The command gets the state
+    directory in `$PH_TOOL_STATE`, as each call does."""
 
     command: list[str]
     """The command, up to and including `call`."""
     label: str
-    """What the footer and the completion note call a run: `text index`."""
+    """The name of a run in the footer and in the completion note: `text index`."""
     tools: list[str]
-    """The tools that run this way, by their own names: an index tool."""
+    """The tools that run this way, by their own names. An index tool is one."""
     eager: bool = True
-    """Run each of `tools` once for a root agent before that agent's first step,
-    with no arguments — so an index is being built before anything asks for it.
-    A child that works in a tree of its own gets a run at its first call: a
-    throwaway worktree may never ask."""
+    """Run each of the `tools` one time for a root agent, with no arguments,
+    before the first step of that agent. An index is then in progress before a
+    call asks for it. A child agent that works in its own tree gets a run at its
+    first call instead, because a temporary worktree may never call the tool."""
     wait_s: float = 5.0
-    """How long a call waits for the run it started before answering that the
-    run goes on."""
+    """How long a call waits for the run that it started. After this time, the
+    call answers that the run continues."""
 
 
 class Manual(WireModel):
-    """One UTCP manual, and how pH runs what it names."""
+    """One UTCP manual, and how pH runs the tools that it names."""
 
     template: dict[str, Any]
-    """The manual call template, as any UTCP harness would register it. Its `name`
-    is the manual's name."""
+    """The manual call template, as any UTCP harness registers it. Its `name` is
+    the name of the manual."""
     names: Literal["prefixed", "bare"] = "prefixed"
-    """How its tools are named in pH. `prefixed` is `<manual>_<tool>`, which cannot
-    collide with a tool pH or another manual registers. `bare` is the tool's own
-    name, for a manual that is the only source of those tools."""
+    """How pH names the tools of the manual. `prefixed` gives `<manual>_<tool>`,
+    which cannot collide with a tool that pH or another manual registers. `bare`
+    gives the tool's own name. Use `bare` for a manual that is the only source of
+    those tools."""
     envelope: bool = False
-    """The tool answers `{ok, value, text, error}` — `ph.toolcli`'s envelope.
+    """The tool answers with `{ok, value, text, error}`, the envelope of
+    `ph.toolcli`.
 
-    Then the pH tool's value is the envelope's `value`, its content is the
-    envelope's `text`, and a failure is raised with the envelope's code: the tool
-    reads to an agent exactly as it would registered in-process. Stated rather
-    than detected, because an object with an `ok` key is not a promise."""
+    The value of the pH tool is then the `value` of the envelope, and its content
+    is the `text` of the envelope. A failure is raised with the code from the
+    envelope. The tool then looks the same to an agent as a tool registered
+    in-process. The manual must state this setting. The row does not detect an
+    envelope, because an object with an `ok` key is not always an envelope."""
     state: str = Field("", pattern=r"^([A-Za-z0-9][A-Za-z0-9._-]*)?$")
-    """A directory name for this manual's working state, or empty for none.
+    """A directory name for the working state of this manual, or empty for none.
 
-    Each call's command is then told `$PH_TOOL_STATE=<the calling agent's
-    scratch>/<state>`: writable under every sandbox mode, apart from the
-    workspace, and the same directory for the same agent after a restart. One
-    name, not a path — where it goes is the agent's, and not the manual's to say."""
+    For each call, the row then sets `$PH_TOOL_STATE=<the calling agent's
+    scratch directory>/<state>` on the command. That directory is writable in
+    every sandbox mode, is separate from the workspace, and is the same directory
+    for the same agent after a restart. The value is one name, not a path. The
+    agent decides where the directory goes, not the manual."""
     writable: list[str] = Field(default_factory=list)
-    """Paths outside the workspace this manual's commands may write: what agents
-    share. Honored under every sandbox mode; one that overlaps the workspace is
-    refused."""
+    """Paths outside the workspace that the commands of this manual may write.
+    They are for data that agents share. A grant applies in every sandbox mode.
+    The row refuses a path that overlaps the workspace."""
     env: dict[str, str] = Field(default_factory=dict)
-    """Variables set on this manual's commands, over what its templates say."""
+    """Variables set on the commands of this manual. They override the values in
+    its templates."""
     pass_env: list[str] = Field(default_factory=list)
-    """Variables this manual's commands are handed from the harness's own
-    environment, by name — a credential.
+    """The names of variables that the row passes to the commands of this manual
+    from the harness's own environment. Use this for a credential.
 
-    A command's environment starts as the deployment's scrubbed one, which drops
-    every variable whose name looks like a credential, and a template cannot
-    name its way past that. This is how a deployment says one may pass: named in
-    a profile, read each time a command is started, and held nowhere."""
+    The environment of a command starts as the scrubbed environment of the
+    deployment. The scrub removes every variable whose name looks like a
+    credential, and a template cannot get such a variable by naming it. This
+    setting is how a deployment lets one pass. The name is in a profile. The row
+    reads the value each time it starts a command, and stores it nowhere."""
     background: Background | None = None
     """The tools of this manual that run in the background, or none."""
     tools: dict[str, ToolTraits] = Field(default_factory=dict)
-    """Per tool, by the tool's own name."""
+    """The traits of each tool, keyed by the tool's own name."""
 
 
 class Config(WireModel):
-    """Row config for `utcp`."""
+    """The row config for `utcp`."""
 
     manuals: list[Manual] = Field(default_factory=list)
     protocols: list[str] = Field(default_factory=lambda: ["cli"])
-    """The call template types a manual may use.
+    """The call template types that a manual may use.
 
-    `cli` alone by default, because it is the one this row runs through pH's own
-    doors. Another type — `http`, `mcp` — runs inside the harness process, by the
-    UTCP library's own client, outside the sandbox and its egress rules; naming
-    it here is how a deployment says it means that."""
+    The default is `cli` only. `cli` is the only type whose commands this row
+    runs through the pH shell service and its sandbox. Other types, such as
+    `http` and `mcp`, run inside the harness process. The client of the UTCP
+    library runs them, outside the sandbox and its egress rules. A deployment
+    names such a type here to accept that."""
     timeout_ms: int = 120_000
-    """How long one call's command may run, unless the tool's own entry says."""
+    """How long the command of one call may run, unless the tool's own entry sets
+    a limit."""
     discovery_timeout_ms: int = 60_000
-    """How long a manual's discovery command may run."""
+    """How long the discovery command of a manual may run."""
 
 
 # --------------------------------------------------------------------- seam ----
 
 
 UTCP: ServiceKey[UtcpSeam] = ServiceKey("utcp")
-"""The UTCP manuals this mount holds, and the door another row adds one through."""
+"""The UTCP manuals that this mount holds, and the service through which another
+row adds a manual."""
 
 
 @dataclass(frozen=True, slots=True)
 class ManualState:
-    """What became of one manual: the tools it gave, or why it gave none."""
+    """The result of adding one manual: the tools that it gave, or why it gave
+    none."""
 
     tools: tuple[str, ...] = ()
-    """The pH names registered."""
+    """The pH names that were registered."""
     problems: tuple[str, ...] = ()
     """Why the manual, or one of its tools, is not available."""
 
@@ -302,8 +327,8 @@ class ManualState:
         return bool(self.tools)
 
     def said(self) -> str:
-        """The tools, as a row's `phern doctor` line says them, and why any are
-        missing."""
+        """The text for a row's line in `phern doctor`: the tools, and why any
+        are missing."""
         if self.available and not self.problems:
             return f"{', '.join(self.tools)} (through UTCP)"
         reasons = "; ".join(self.problems) or "the manual named no tools"
@@ -311,8 +336,8 @@ class ManualState:
 
 
 def command_said(program: str, verb: str, result: ShellResult) -> str:
-    """What a manual's own command said, for a person: its output, or that it
-    failed and how."""
+    """The output of a manual's own command, as text for a person. If the command
+    failed, the text says so and gives the exit code."""
     said = result.stdout.strip() or result.stderr.strip()
     if result.exit_code != 0:
         return f"{program} {verb} failed (exit {result.exit_code}): {said}"
@@ -321,35 +346,37 @@ def command_said(program: str, verb: str, result: ShellResult) -> str:
 
 @dataclass(slots=True)
 class _Run:
-    """One background run: whose tree it works on, what it was asked, how far
-    it has got and how it ended."""
+    """One background run: the owner of the tree that it works on, the request,
+    its progress, and how it ended."""
 
     name: str
-    """The manual whose tool it runs."""
+    """The manual whose tool this run executes."""
     background: Background
     owner: AgentHandle
     tool: str
     arguments: JsonObject
     job: Job | None = None
     progress: Progress | None = None
-    """The last line of its report (`ph.toolcli.Progress`)."""
+    """The latest line of its report (`ph.toolcli.Progress`)."""
     stray: deque[str] = field(default_factory=lambda: deque(maxlen=_STRAY_LINES))
-    """The last lines of its stderr that were not progress."""
+    """The last stderr lines that were not progress lines."""
     result: ShellResult | None = None
     error: Exception | None = None
-    """Why its command could not be started, when it could not: no result, and
-    no line on its stderr, to say so. The error itself, so a refusal keeps its
-    own code."""
+    """Why the command could not be started, if it could not. The run then has no
+    result, and no stderr line gives the reason. The field holds the error
+    itself, so that a refusal keeps its own code."""
     ended: anyio.Event = field(default_factory=anyio.Event)
     waiting: int = 0
-    """Calls waiting to answer with this run's result. One that is still waiting
-    when it ends takes the result, and nobody is told more."""
+    """The number of calls that wait to answer with the result of this run. A
+    call that still waits when the run ends takes the result, and the row sends
+    no note."""
     owed: bool = False
-    """A call was answered "still going": its agent is owed word of the end."""
+    """A call got the "still going" answer. The row owes the agent of that call a
+    note when the run ends."""
 
     @property
     def last(self) -> Progress | None:
-        """The run's last line, when it wrote one."""
+        """The final line of the run, if the run wrote one."""
         progress = self.progress
         return progress if progress is not None and progress.state != "working" else None
 
@@ -361,37 +388,45 @@ class UtcpSeam:
     ctx: Context
     config: Config
     client: Any
-    """The UTCP client. `Any` because the library ships no types."""
+    """The UTCP client. The type is `Any` because the library ships no types."""
     states: dict[str, ManualState] = field(default_factory=dict)
     _forgets: dict[str, Releaser] = field(default_factory=dict)
-    """Each held state's `forget`, on the scope that added it. Dropped unrun when
-    another add replaces the state, so a name has one teardown: its holder's."""
+    """The `forget` of each held state, registered on the scope that added the
+    state. When another add replaces the state, the old `forget` is dropped
+    without running. Each name then has one teardown, which belongs to its
+    current holder."""
     manuals: dict[str, Manual] = field(default_factory=dict)
-    """The manuals that gave tools, by name — what a run is started from."""
+    """The manuals that gave tools, by name. The row starts a run from these."""
     runs: dict[tuple[str, str], _Run] = field(default_factory=dict)
-    """The run going for each tree, by manual and the id of the tree's owner."""
+    """The run in progress for each tree, keyed by manual and by the id of the
+    owner of the tree."""
     warmed: dict[tuple[str, str], Releaser] = field(default_factory=dict)
-    """The trees, by manual and owner, whose tools have been run unasked once, each
-    with what takes the mark back as its owner goes (`_warm`). Once: the next step
-    would only index the tree again for nobody. A manual that goes takes its marks
-    and drops what would have taken them back (`add`'s `forget`)."""
+    """The trees whose tools the row has already run one time without a request,
+    keyed by manual and owner. Each value takes the mark back when its owner ends
+    (`_warm`). The row does this one time only, because at the next step it would
+    index the tree again for no caller. When a manual is removed, its marks are
+    removed, and the values that would have taken them back are dropped (the
+    `forget` in `add`)."""
 
     # ----------------------------------------------------------- registering --
 
     async def add(self, manual: Manual, *, scope: Context | None = None) -> ManualState:
-        """Discover `manual` and register its tools on `scope`. Never raises for a
-        manual that cannot be reached: the state says why, and so does the log.
+        """Discover `manual` and register its tools on `scope`. This method never
+        raises for a manual that cannot be reached. The state gives the reason,
+        and so does the log.
 
-        `scope` is who the manual belongs to, so a row that adds its own gets its
-        tools unregistered, and the manual forgotten, when it unmounts. Adding a
-        name that is already held and gave tools changes nothing and answers with
-        the state there is — the tools are registered, and a second discovery
-        would only find the registry refusing each of them by name.
+        `scope` is the owner of the manual. When a row adds its own manual and
+        then unmounts, the tools are unregistered and the manual is forgotten. If
+        the name is already held and gave tools, this method changes nothing and
+        returns the existing state. The tools are already registered, and a
+        second discovery would only make the registry refuse each tool by name.
 
-        A name held with no tools is discovered again, and the name is then this
-        add's: the earlier add's teardown is dropped from its scope unrun. Left
-        there, it took the client's record of the manual when that scope went,
-        and every call of the tools this add registered failed from then on.
+        If the name is held with no tools, the manual is discovered again. The
+        name then belongs to this add, and the teardown of the earlier add is
+        dropped from its scope without running. Before this rule, the earlier
+        teardown stayed on its scope. When that scope ended, the teardown removed
+        the client's record of the manual, and every later call of the tools from
+        this add failed.
         """
         name = _NOT_A_WORD.sub("_", as_str(manual.template.get("name")))
         if not name:
@@ -411,10 +446,11 @@ class UtcpSeam:
             state = ManualState(tools=state.tools, problems=(*state.problems, *said))
 
         async def forget() -> None:
-            """What the owning scope's unwinding takes back: the state, so the name
-            can be added again, the runs it started and that they were started,
-            and the client's own record of the manual. Only ever the holder's: an
-            add that replaces the state drops this."""
+            """Undo this add when the owning scope unwinds. This removes the state,
+            so that the name can be added again. It removes the runs that the
+            manual started and the marks that record them. It removes the client's
+            own record of the manual. Only the current holder runs this. An add
+            that replaces the state drops it without running it."""
             del self.states[name]
             del self._forgets[name]
             self.manuals.pop(name, None)
@@ -429,9 +465,10 @@ class UtcpSeam:
             except Exception:
                 log.debug("ph_utcp: %s was not deregistered", name, exc_info=True)
 
-        # The teardown first, and nothing that suspends from here to the return:
-        # a scope that is down refuses before the name is held, and no other add
-        # can come between the state and the teardown that takes it back.
+        # Register the teardown first, and do not suspend between here and the
+        # return. A scope that is already down then refuses before the name is
+        # held. No other add can run between the write of the state and the
+        # registration of the teardown that removes it.
         holding = (scope or self.ctx).add_disposer(forget, label=f"utcp-manual({name})")
         replaced = self._forgets.pop(name, None)
         if replaced is not None:
@@ -492,8 +529,9 @@ class UtcpSeam:
         owner: AgentHandle | None = None,
         signal: Cancellation | None = None,
     ) -> Call:
-        """How one of `manual`'s commands runs for `agent`, whose tree's owner is
-        `owner`: asked once by the caller, because each of these needs it."""
+        """Build the `Call` for one command of `manual`, run for `agent`. `owner`
+        is the owner of the agent's tree. The caller finds the owner one time and
+        passes it, because each helper here needs it."""
         env, writable = self._surroundings(manual, agent, owner)
         return Call(
             shell=self.ctx.require(SHELL),
@@ -508,13 +546,15 @@ class UtcpSeam:
     def _surroundings(
         self, manual: Manual, agent: AgentHandle | None, owner: AgentHandle | None
     ) -> tuple[dict[str, str], tuple[str, ...]]:
-        """What a command of this manual run for `agent` is given: its variables,
-        and the paths outside the workspace it may write. One derivation, for a
-        tool call, a run in the background and a person's provisioning command."""
+        """The variables that a command of this manual gets when it runs for
+        `agent`, and the paths outside the workspace that it may write. A tool
+        call, a background run, and a provisioning command that a person runs all
+        use this one derivation."""
         env = dict(manual.env)
         for name in manual.pass_env:
-            # From the harness's own environment and not the scrubbed one, which
-            # is the point: read now, set on this one command, kept nowhere.
+            # Read from the harness's own environment, not the scrubbed one. That
+            # is the purpose of `pass_env`: the value is read now, set on this one
+            # command, and stored nowhere.
             value = os.environ.get(name)
             if value:
                 env[name] = value
@@ -524,19 +564,22 @@ class UtcpSeam:
             env[STATE_ENV] = str(state)
             held = workspace_of(self.ctx, agent)
             if held is not None and not state.is_relative_to(held.scratch):
-                # Its tree's owner's state, and not in its own scratch: granted.
+                # The state belongs to the owner of the tree, and it is not in
+                # this agent's own scratch directory. Grant write access to it.
                 writable.append(str(state))
         return env, tuple(writable)
 
     def _tree(self, manual: Manual, agent: AgentHandle | None, owner: AgentHandle | None) -> Path:
-        """Where `manual`'s command runs for `agent`: the tree its state is about —
-        the owner's — for a manual that keeps state, and the agent's own root for
-        one that does not.
+        """The directory where a command of `manual` runs for `agent`. For a
+        manual that keeps state, this is the tree that the state describes, which
+        is the tree of `owner`. For a manual that keeps no state, it is the
+        agent's own root.
 
-        The working directory is how a command is told its tree (`ph.toolcli`'s
-        default `--root`), so a child that shares its parent's index works on its
-        parent's tree rather than indexing its own empty directory into that
-        index and sweeping every document out as gone."""
+        The working directory is how a command learns its tree (the default
+        `--root` of `ph.toolcli`). A child that shares the index of its parent
+        must therefore work on the tree of its parent. If it ran in its own empty
+        directory, it would index that directory into the shared index and remove
+        every document as gone."""
         fs = self.ctx.require(FS)
         return fs.root_for(owner if manual.state else agent)
 
@@ -551,9 +594,10 @@ class UtcpSeam:
         signal: Cancellation | None,
         on_stderr_line: Callable[[str], None] | None = None,
     ) -> Awaitable[ShellResult]:
-        """Run one of `manual`'s `ph.toolcli` commands for `agent` this row starts
-        itself, rather than through the UTCP client: in the tree, under the
-        sandbox, with the variables and grants a call of its tools is given."""
+        """Run one `ph.toolcli` command of `manual` for `agent`. The row starts
+        this command itself and does not use the UTCP client. The command runs in
+        the tree, under the sandbox, with the variables and grants that a call of
+        the manual's tools gets."""
         env, writable = self._surroundings(manual, agent, owner)
         inherited = manual.template.get("inherit_env_vars")
         return self.ctx.require(SHELL).run_argv(
@@ -571,12 +615,13 @@ class UtcpSeam:
     def run_command(
         self, manual: Manual, argv: Sequence[str], agent: AgentHandle | None, *, timeout_ms: int
     ) -> Awaitable[ShellResult]:
-        """Run one of `manual`'s own commands for `agent`, as a person asked —
-        `install`, `status` — with what a call of its tools is given: the
-        variables, the state directory, the tree.
+        """Run one of the manual's own commands for `agent`, at the request of a
+        person. Examples are `install` and `status`. The command gets what a call
+        of the manual's tools gets: the variables, the state directory, and the
+        tree.
 
-        Unconfined, as a provisioning command a person types is: `install` needs
-        the network, and nobody's model chose it."""
+        The command is not confined, like any provisioning command that a person
+        types. `install` needs the network, and no model chose the command."""
         owner = None if agent is None else self.owner_of(agent)
         env, _ = self._surroundings(manual, agent, owner)
         return self.ctx.require(SHELL).run_argv(
@@ -587,26 +632,27 @@ class UtcpSeam:
         )
 
     def owner_of(self, agent: AgentHandle) -> AgentHandle:
-        """The agent whose tree `agent`'s tools are about: itself, or the nearest
-        ancestor whose tree it shares.
+        """The agent that owns the tree that `agent`'s tools work on: the agent
+        itself, or the nearest ancestor whose tree it shares.
 
-        What a tool builds about a tree belongs to the tree, so the question is
-        whether a child has a tree of its own to build about:
+        The data that a tool builds about a tree belongs to the tree. The question
+        is therefore whether a child has its own tree to build data about:
 
-        * **It works in its parent's checkout** (`shared`, the same root). One
-          tree, so one index and one run at a time.
-        * **It was granted only to read the project** — `readonly-scratch`, whose
-          root is an empty directory beside a repository it cannot write, and the
-          two ephemeral kinds, whose writes reach nobody. It has nothing of its
-          own worth indexing, and a fan-out of such children is the case this
-          rule is for: they ask their parent's index, and none of them embeds a
-          document or holds a model.
-        * **It has a tree it writes for keeps** — a `worktree`, an `overlay`. Its
-          files diverge from its parent's, so it is the owner of that tree and
-          builds its own.
+        * **The child works in the checkout of its parent** (`shared`, the same
+          root). There is one tree, so there is one index and one run at a time.
+        * **The child can only read the project.** This is `readonly-scratch`,
+          whose root is an empty directory beside a repository that it cannot
+          write, and the two ephemeral kinds, whose writes reach nobody. Such a
+          child has nothing of its own to index. A fan-out of such children is
+          the case that this rule exists for. The children query the index of
+          their parent, and none of them embeds a document or holds a model.
+        * **The child has a tree that it writes to permanently** (a `worktree` or
+          an `overlay`). Its files diverge from the files of its parent, so the
+          child owns that tree and builds its own data.
 
-        `project_access` is the seam's own reading of a kind, the one a spawn
-        records as what the child was granted."""
+        `project_access` is the workspace seam's own classification of a
+        workspace kind. A spawn records its result as the access that the child
+        was granted."""
         own = workspace_of(self.ctx, agent)
         while own is not None:
             parent = self._parent(agent)
@@ -619,21 +665,24 @@ class UtcpSeam:
         return agent
 
     def _parent(self, agent: AgentHandle) -> AgentHandle | None:
-        """The agent that delegated to `agent`, if it is a sub-agent and that
-        agent is still here. An agent's id is its session's."""
+        """The agent that delegated to `agent`, if `agent` is a sub-agent and the
+        delegating agent still exists. The id of an agent is the id of its
+        session."""
         session = agent.session
         wanted = None if session is None else session.header.delegating_parent
         registry = self.ctx.get(AGENTS)
         return None if wanted is None or registry is None else registry.get(wanted)
 
     def _state(self, manual: Manual, owner: AgentHandle | None) -> Path | None:
-        """The directory `manual` named, in `owner`'s scratch.
+        """The directory that `manual` named, in the scratch directory of `owner`.
 
-        `None` when the manual names none, and when there is no agent to have a
-        scratch — discovery, or a call made for the deployment. The command then
-        uses its own default, and nothing confines it: `ctx.shell` confines a
-        command only for an agent that holds a workspace, and that agent has a
-        scratch. The directory is the command's to make; the scratch is there."""
+        Returns `None` when the manual names no directory. Also returns `None`
+        when no agent exists to have a scratch directory: during discovery, or
+        for a call made for the deployment. The command then uses its own
+        default, and nothing confines it. `ctx.shell` confines a command only for
+        an agent that holds a workspace, and such an agent has a scratch
+        directory. The command creates the state directory itself. The scratch
+        directory already exists."""
         if not manual.state or owner is None:
             return None
         session = owner.session
@@ -651,14 +700,14 @@ class UtcpSeam:
         owner: AgentHandle,
         asked: Sequence[tuple[str, JsonObject]],
     ) -> _Run | None:
-        """Start `asked` — tools of `manual` and their arguments — one after the
-        other in the background, for `owner`'s tree. The first run, or `None`
-        when there is nothing to start one with: no job runner, or the manual
-        names no background.
+        """Start `asked` in the background, one after the other, for the tree of
+        `owner`. `asked` holds tools of `manual` and their arguments. Returns the
+        first run. Returns `None` when a run cannot be started: there is no job
+        runner, or the manual names no background.
 
-        Never raises: a run in the background is how a long call is made
-        bearable, and a call that could have been made in the ordinary way must
-        not fail for want of it.
+        This method never raises. A background run exists to make a long call
+        tolerable. A call that could have run in the ordinary way must not fail
+        because a background run is not available.
         """
         background = manual.background
         jobs = self.ctx.get(JOBS)
@@ -675,23 +724,24 @@ class UtcpSeam:
             )
             for tool, arguments in asked
         ]
-        # Before the job starts, so a call that arrives meanwhile joins this run
-        # rather than starting a second.
+        # Put the run on the table before the job starts. A call that arrives in
+        # the meantime then joins this run and does not start a second run.
         self.runs[key] = runs[0]
         try:
             job = await jobs.start(
                 kind="utcp-run",
                 label=f"{background.label} for {owner.id}",
                 run=partial(self._running, manual, runs),
-                # The owner's: the run ends when the agent whose tree it works
-                # on does. Stopped as well when the manual's row unmounts.
+                # Use the owner's scope. The run then ends when the agent that
+                # owns the tree ends. It also stops when the manual's row unmounts.
                 scope=owner.ctx,
                 on_settled=lambda _job: self._unreached(runs),
             )
         except Exception:
             log.warning("ph_utcp: no %s run was started", name, exc_info=True)
-            # Ended as well as taken off: a call that joined it meanwhile asks the
-            # command itself rather than waiting out `wait_s` on a run never started.
+            # Take the run off the table and also mark it ended. A call that
+            # joined it in the meantime then asks the command itself, and does
+            # not wait for `wait_s` on a run that never started.
             self._take_off(runs[0])
             return None
         for run in runs:
@@ -699,8 +749,9 @@ class UtcpSeam:
         return runs[0]
 
     async def _running(self, manual: Manual, runs: Sequence[_Run], job: Job) -> None:
-        """One job's life: each run's command in turn, for its tree's owner, with
-        its progress read from stderr as it is written."""
+        """The body of one job. It runs the command of each run in turn, for the
+        owner of its tree, and reads the progress from stderr as the command
+        writes it."""
         for run in runs:
             owner = run.owner
             key = (run.name, owner.id)
@@ -712,65 +763,76 @@ class UtcpSeam:
                     [*argv, "--args-json", dumps(run.arguments)],
                     agent=owner,
                     owner=owner,
-                    # No limit: a run is as long as its work, and its job ends it.
+                    # No time limit. A run takes as long as its work takes, and
+                    # its job ends it.
                     timeout_ms=None,
                     signal=job.token,
                     on_stderr_line=partial(_read_line, run),
                 )
             except Exception as error:
-                # Its command never ran — a sandbox that refused it, a program
-                # that is not there — so nothing on its stderr will say so.
+                # The command never ran. For example, the sandbox refused it or
+                # the program is missing. No stderr line will give the reason.
                 run.error = error
                 log.warning("ph_utcp: the %s could not be run", run.background.label, exc_info=True)
                 raise
             finally:
                 self._take_off(run)
-                # In the same step as `ended`: a call still waiting has not
-                # resumed, so `waiting` says truly whether one takes the result.
+                # Call `_ended` in the same step that sets `ended`. A waiting
+                # call has not resumed yet, so `waiting` still shows correctly
+                # whether a call takes the result.
                 self._ended(run)
             if job.token.canceled:
                 return
 
     def _unreached(self, runs: Sequence[_Run]) -> None:
-        """End every run of a settled job that its body never reached (S6).
+        """End every run of a settled job that the job body never reached (S6).
 
-        The first run is on the table before its job starts, so a call meanwhile
-        joins it, and a run is ended only inside the body: a job canceled before the
-        body ran — or stopped after an earlier run, before this one — left a run
-        whose `ended` never set, which every later call joined, waited out `wait_s`
-        on, and no run was started again. Ended with no result and no error, which a
-        joined call reads as nothing to take and asks the command itself.
+        The first run goes on the table before its job starts, so that a call in
+        the meantime joins it. A run is marked ended only inside the job body. A
+        job can be canceled before its body runs, or stopped after an earlier run
+        and before this one. Without this method, such a job left a run whose
+        `ended` was never set. Every later call joined that run and waited for
+        `wait_s`, and no new run was started. This method ends such a run with no
+        result and no error. A joined call reads that as nothing to take, and
+        asks the command itself.
         """
         for run in runs:
             if not run.ended.is_set():
                 self._take_off(run)
 
     def _take_off(self, run: _Run) -> None:
-        """Take `run` off the table while it is still the one there, and end it: the
-        one way a run leaves, whether it ran, failed to start, or was never reached."""
+        """Remove `run` from the table if it is still the run there, and mark it
+        ended. This is the only way a run leaves the table, whether it ran, failed
+        to start, or was never reached."""
         key = (run.name, run.owner.id)
         if self.runs.get(key) is run:
             del self.runs[key]
         run.ended.set()
 
     def _ended(self, run: _Run) -> None:
-        """Tell `run`'s agent how it ended, unless a call is taking its result or
-        there is nothing to tell.
+        """Tell the agent of `run` how the run ended. Send nothing if a call takes
+        the result of the run, or if there is nothing to tell.
 
-        Five endings. A command that could not be started at all — no result,
-        and nothing on its stderr — is said with why. A last line that says
-        `done`: news when a call was answered "still going", or when a run
-        nobody asked for changed something. One that says `busy` — another run
-        held what it builds, and it did nothing — news only to a call answered
-        "still going". A last line that says `failed`: the tool's own sentence.
-        And no last line at all — the command was killed, ran out of memory, or
-        crashed below Python — which is said as that, with what it last wrote
-        and how far it had got."""
+        A run can end in five ways:
+
+        * The command could not be started. The run has no result, and nothing is
+          on its stderr. The note gives the reason.
+        * The last line says `done`. The agent gets a note when a call got the
+          "still going" answer, or when a run that nobody requested changed
+          something.
+        * The last line says `busy`. Another run held what this run builds, so
+          this run did nothing. The agent gets a note only when a call got the
+          "still going" answer.
+        * The last line says `failed`. The note gives the tool's own sentence.
+        * There is no last line. The command was killed, ran out of memory, or
+          crashed below Python. The note says so, and gives the last output of
+          the command and its progress."""
         result, job = run.result, run.job
         if run.waiting or (result is not None and result.canceled):
             return
         if job is not None and job.token.canceled:
-            # Stopped by its owner going, or by its manual's row unmounting.
+            # The run was stopped because its owner ended, or because the
+            # manual's row unmounted.
             return
         label = run.background.label
         if result is None:
@@ -792,7 +854,7 @@ class UtcpSeam:
             summary = f"The {label} is finished: {last.said()}"
             text = f"{summary}. Searches now cover all of it."
             if last.note:
-                # What its result would have said to a caller that waited.
+                # What the tool result would have told a caller that waited.
                 text = f"{text}\n{last.note}"
         else:
             if last is not None:
@@ -814,14 +876,16 @@ class UtcpSeam:
         self._tell(run.owner, summary, text)
 
     def _tell(self, owner: AgentHandle, summary: str, text: str) -> None:
-        """A note for `owner`, `inject`ed: it waits for the agent's next step,
-        starts no turn, and is in that agent's log."""
+        """Send a note to `owner` with `inject`. The note waits for the next step
+        of the agent, does not start a turn, and is recorded in the log of that
+        agent."""
         registry = self.ctx.get(AGENTS)
-        # Asked of the roster, which holds the driver: a handle is what a reader
-        # is given, and has no inbox to put a message in.
+        # Get the driver from the agent registry. A handle is what a reader of
+        # the agent gets, and it has no inbox for a message.
         driver = None if registry is None else registry.get(owner.id)
         if driver is None:
-            # An agent that has gone. The tool still says it.
+            # The agent has ended, so there is nobody to tell. The tool still
+            # reports the outcome.
             return
         try:
             driver.inject(
@@ -848,15 +912,17 @@ class UtcpSeam:
         *,
         timeout_ms: int,
     ) -> object:
-        """A call of a background tool: its answer, the command's own envelope.
+        """Answer a call of a background tool. The answer is the command's own
+        envelope.
 
-        The call starts a run — or joins the one going for its tree — and waits
-        `wait_s` for it. A run that was this call's and ended in time answers
-        with its own result. Otherwise the command is asked directly with
-        `--wait 0`, and says what it says while another run holds its work:
-        `state: indexing`, in the tool's own shape. The run goes on, and its
-        agent is told when it ends. The same request asked again joins its run
-        rather than starting another; a different one is not queued."""
+        The call starts a run, or joins the run in progress for its tree, and
+        waits up to `wait_s` for it. If the run was for this call's request and
+        ended in time, the call answers with the result of the run. Otherwise the
+        row asks the command directly with `--wait 0`. The command then gives the
+        answer that it gives while another run holds its work: `state: indexing`,
+        in the tool's own shape. The run continues, and the row tells its agent
+        when it ends. The same request made again joins its run and does not
+        start another run. A different request is not queued."""
         background = manual.background
         assert background is not None
         key = (name, owner.id)
@@ -874,13 +940,16 @@ class UtcpSeam:
                 finally:
                     current.waiting -= mine
                     if not current.ended.is_set():
-                        # Answered "still going" below: owed word of the end.
+                        # This call gets the "still going" answer below. The row
+                        # owes its agent a note when the run ends.
                         current.owed = True
                 if not mine:
-                    # Another request's run ended within the wait: now this one's.
+                    # The run of another request ended within the wait. Start
+                    # the run for this request.
                     continue
                 if isinstance(current.error, HarnessError):
-                    # A refusal with a code of its own: the sandbox's, say.
+                    # A refusal that has its own error code, for example from
+                    # the sandbox.
                     raise current.error
                 if current.error is not None:
                     raise HarnessError(
@@ -902,17 +971,19 @@ class UtcpSeam:
         return _answer_of(result, f"{name}.{tool}")
 
     def working(self, name: str, owner: AgentHandle | None) -> str | None:
-        """What to add to an answer of manual `name`'s tools while a run for
-        `owner`'s tree is going: how far it has got. The command knows only that
-        a run holds its work; this row has been reading the count."""
+        """The text to add to an answer of the tools of manual `name` while a run
+        for the tree of `owner` is in progress: the progress of the run. The
+        command knows only that a run holds its work. This row has read the
+        count."""
         run = None if owner is None else self.runs.get((name, owner.id))
         if run is None or run.progress is None or run.progress.state != "working":
             return None
         return f"[The {run.background.label} is still working: {run.progress.said()}.]"
 
     def reading(self, session: Session) -> StatusReading | None:
-        """The footer's phrase for this session: what its runs are building.
-        From memory — each run's stderr is read as it is written."""
+        """The footer text for this session: what its runs are building. The text
+        comes from memory, because the row reads the stderr of each run as the
+        command writes it."""
         said: list[str] = []
         for run in self.runs.values():
             owned = run.owner.session
@@ -924,11 +995,12 @@ class UtcpSeam:
         return StatusReading(text=", ".join(said), level="normal") if said else None
 
     async def eager(self, request: PreStepRequest, next_: Next[PreStepDecision]) -> PreStepDecision:
-        """`agent/pre-step`: before a root agent's step, start each manual's
-        `eager` background tools once — so its index is being built before the
-        model asks for it. After the workspace row's listener, which is what
-        gives the agent the tree the run works on. Started, not waited for: the
-        step is not the run's to hold up."""
+        """Handle `agent/pre-step`. Before a step of a root agent, start the
+        `eager` background tools of each manual, one time. The index is then in
+        progress before the model asks for it. This listener runs after the
+        listener of the workspace row, which gives the agent the tree that the
+        run works on. The run is started and not awaited, because a run must not
+        delay the step."""
         if not request.session.header.is_subagent:
             agent = request.agent
             for name, manual in list(self.manuals.items()):
@@ -945,12 +1017,13 @@ class UtcpSeam:
         return await next_()
 
     def _warm(self, name: str, agent: AgentHandle) -> None:
-        """Mark a tree warmed, for as long as its owner lives.
+        """Mark a tree as warmed for as long as its owner lives.
 
-        The mark is the agent's and goes with it: kept past that, the table held one
-        per root agent the process ever stepped. One holding (Holdings rule 1): the
-        take-back is registered, then the mark written, and a manual that goes first
-        drops it unrun.
+        The mark belongs to the agent and is removed with it. If marks were kept
+        longer, the table would hold one mark for every root agent that the
+        process ever stepped. This is one holding (Holdings rule 1): the take-back
+        is registered first, and then the mark is written. If the manual is
+        removed first, it drops the take-back without running it.
         """
         key = (name, agent.id)
 
@@ -962,7 +1035,7 @@ class UtcpSeam:
     # ------------------------------------------------------------- the tool --
 
     def _definition(self, name: str, manual: Manual, tool: Tool) -> ToolDefinition:
-        """One UTCP tool as a pH tool."""
+        """Build the pH tool for one UTCP tool."""
         utcp_name: str = tool.name
         own = utcp_name.removeprefix(f"{name}.")
         ph_name = own if manual.names == "bare" else _NOT_A_WORD.sub("_", utcp_name)
@@ -973,14 +1046,14 @@ class UtcpSeam:
         declared = value_schema(outputs) if manual.envelope else outputs
         confined = tool.tool_call_template.call_template_type == "cli"
         background = manual.background
-        # A background tool answers in `ph.toolcli`'s envelope: the row runs its
-        # command itself and reads what a `call` prints.
+        # A background tool answers in the `ph.toolcli` envelope. The row runs its
+        # command itself and reads what `call` prints.
         in_background = background is not None and own in background.tools and manual.envelope
 
         async def execute(args: object, run: ToolRunContext) -> object:
             arguments = dict(as_obj(args))
-            # The raw-schema path hands the model's arguments through unchecked;
-            # the tool owns validation, and this is the tool.
+            # The raw-schema path passes the model's arguments through without a
+            # check. The tool is responsible for validation, and this is the tool.
             violations = validate_json_schema_value(inputs, arguments)
             if violations:
                 raise HarnessError("; ".join(violations), UTCP_BAD_ARGUMENTS)
@@ -1006,10 +1079,11 @@ class UtcpSeam:
                 return self._unwrapped(utcp_name, name, manual, answer, run, owner)
             mismatches = validate_json_schema_value(declared, answer)
             if mismatches:
-                # The usual cause is a failure: the `cli` protocol ignores exit
-                # codes and returns stderr as the result, so a tool that declares
-                # an object answers with a sentence. The sentence is what the
-                # model needs, so it is the error rather than a schema complaint.
+                # The usual cause is a failed command. The `cli` protocol ignores
+                # exit codes and returns stderr as the result, so a tool that
+                # declares an object answers with a sentence. The model needs
+                # that sentence, so the error quotes it and does not list the
+                # schema violations.
                 raise HarnessError(
                     f"{utcp_name} did not answer in its declared shape: {_clip(answer)}",
                     UTCP_BAD_ANSWER,
@@ -1042,19 +1116,21 @@ class UtcpSeam:
         run: ToolRunContext,
         owner: AgentHandle | None,
     ) -> object:
-        """An envelope's `value`, presented with its `text` as the content.
+        """Return the `value` of an envelope, and present its `text` as the
+        content.
 
-        The text was written by the tool's own `render` in its own process, from
-        the arguments and the value — the projection a session would have made had
-        the tool been registered here — so it is what the registry shows for this
-        value (`ToolRunContext.present`), and what every post-execute row sees and
-        edits. A failure is raised with the tool's own code
-        (`ph.toolcli.read_envelope`).
+        The tool's own `render` wrote the text in the tool's own process, from
+        the arguments and the value. It is the projection that a session would
+        make if the tool were registered here. The text is therefore what the
+        registry shows for this value (`ToolRunContext.present`), and what every
+        post-execute row sees and edits. A failure is raised with the tool's own
+        code (`ph.toolcli.read_envelope`).
 
-        The command ran in `owner`'s tree. When that is not the asking agent's
-        own root — a child asking the index of the tree it shares — the text says
-        so, because the paths in it start there. And while a run for that tree is
-        going, the text says how far it has got (`working`)."""
+        The command ran in the tree of `owner`. That tree is not always the asking
+        agent's own root, for example when a child queries the index of the tree
+        that it shares. The text then says so, because the paths in the text
+        start at that tree. While a run for that tree is in progress, the text
+        also gives the progress of the run (`working`)."""
         try:
             value, text = read_envelope(answer)
         except ValueError as error:
@@ -1074,7 +1150,7 @@ class UtcpSeam:
     # ------------------------------------------------------------ reporting --
 
     def report(self) -> list[tuple[str, str]]:
-        """`phern doctor`'s section: each manual, and what it gave."""
+        """The section for `phern doctor`: each manual, and what it gave."""
         rows: list[tuple[str, str]] = []
         for name in sorted(self.states):
             state = self.states[name]
@@ -1085,7 +1161,7 @@ class UtcpSeam:
         return rows
 
     def unavailable(self) -> str:
-        """The note the model reads: which manuals gave no tools, and why."""
+        """The note that the model reads: the manuals that gave no tools, and why."""
         missing = [
             f"- `{name}`: {'; '.join(state.problems)}"
             for name, state in sorted(self.states.items())
@@ -1105,16 +1181,17 @@ class UtcpSeam:
 
 
 def _object_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """A manual's `inputs` as the object schema a provider is sent. A tool that
-    declares no inputs takes none."""
+    """Return the `inputs` of a manual as the object schema that is sent to a
+    model provider. A tool that declares no inputs takes none."""
     if schema.get("type") == "object":
         return schema
     return {"type": "object", "properties": {}, **schema}
 
 
 def _read_line(run: _Run, line: str) -> None:
-    """One line of a run's stderr: its progress, or — anything else — words kept
-    in case they are its last."""
+    """Handle one stderr line of a run. A progress line updates the progress of
+    the run. Any other line is kept, in case it is part of the run's last
+    output."""
     try:
         run.progress = Progress.model_validate_json(line)
     except ValueError:
@@ -1125,8 +1202,9 @@ def _read_line(run: _Run, line: str) -> None:
 
 
 def _answer_of(result: ShellResult, what: str) -> object:
-    """The one object a `ph.toolcli` command printed, for a command this row ran
-    itself. One that printed anything else failed before it could answer."""
+    """Return the one object that a `ph.toolcli` command printed, for a command
+    that this row ran itself. A command that printed anything else failed before
+    it could answer."""
     if result.canceled:
         raise Canceled("the UTCP command was canceled")
     if result.timed_out:
@@ -1143,14 +1221,14 @@ def _answer_of(result: ShellResult, what: str) -> object:
 
 
 def _unscrubbed(names: Sequence[str], subprocess: SubprocessService | None) -> list[str]:
-    """What to say of each variable a manual passes by name whose name the
-    deployment's environment scrub does not drop.
+    """Return a warning for each variable that a manual passes by name and that
+    the environment scrub of the deployment does not remove.
 
-    `pass_env` is how a credential reaches a manual's commands and no other:
-    every other command — an agent's `bash` — starts from the scrubbed
-    environment. But the scrub goes by a variable's name, and one it does not
-    match is in every command's environment already; passing it protects
-    nothing, and a person should know."""
+    `pass_env` gives a credential to the commands of one manual and to no other
+    command. Every other command, such as an agent's `bash`, starts from the
+    scrubbed environment. But the scrub matches on the name of a variable. A
+    variable whose name the scrub does not match is already in the environment of
+    every command. Passing it protects nothing, and a person should know that."""
     if subprocess is None:
         return []
     marks = ", ".join(subprocess.scrub.marks)
@@ -1165,23 +1243,25 @@ def _unscrubbed(names: Sequence[str], subprocess: SubprocessService | None) -> l
 
 
 def _made(paths: Sequence[str], root: str) -> tuple[list[str], list[str]]:
-    """Make each writable path a directory that exists: those that do, and why the
-    rest do not.
+    """Make each writable path a directory that exists. Returns the paths that now
+    exist, and a reason for each path that does not.
 
-    A path that overlaps the session's workspace `root` is not made and not
-    granted (`grants_apart`), and said here once, where a person reads it —
-    `ctx.shell` applies the same rule to every call, against the calling agent's
-    own root, and says nothing.
+    A path that overlaps the session's workspace `root` is not created and not
+    granted (`grants_apart`). This function reports it one time, where a person
+    reads it. `ctx.shell` applies the same rule to every call, against the
+    calling agent's own root, and reports nothing.
 
-    A sandbox backend grants a path by binding it, and a path that is not there
-    cannot be bound — so one missing directory would fail every call the manual's
-    tools make, with the backend's own words for it. Made once, here, and a path
-    that cannot be made is left out of the grant and said.
+    A sandbox backend grants a path by binding it, and it cannot bind a path that
+    does not exist. One missing directory would therefore fail every call of the
+    manual's tools, with the backend's own error text. This function creates each
+    directory one time. A path that cannot be created is left out of the grant
+    and reported.
 
-    Spelled as the deployment's own allowances are (`allowance_path`): `~`
-    expanded and every symlink resolved, so a profile's `~/.cache/x` is that
-    directory and not one named `~` under the harness's working directory, and
-    the path the backend binds is the one the kernel will see.
+    Paths are spelled as the deployment's own allowances are (`allowance_path`):
+    `~` is expanded and every symlink is resolved. A profile's `~/.cache/x` is
+    then that directory, and not a directory named `~` under the working
+    directory of the harness. The path that the backend binds is also the path
+    that the kernel sees.
     """
     made: list[str] = []
     apart, overlapping = grants_apart(root, paths)
@@ -1209,7 +1289,8 @@ def _clip(answer: object) -> str:
 
 @plugin("utcp", affects="environment", inject=[TOOLS, SHELL, FS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
-    """Mount the seam, and register the tools of every manual that answers."""
+    """Mount the seam, and register the tools of every manual whose discovery
+    succeeds."""
     install()
     held: list[Any] = []
 

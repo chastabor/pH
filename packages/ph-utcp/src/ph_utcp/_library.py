@@ -1,45 +1,48 @@
-"""The one module that imports `utcp`, and the pH door its commands run through.
+"""The only module that imports `utcp`. It makes the library run its commands through pH.
 
-## Imported behind a fence
+## The imports are guarded
 
-`utcp` and every protocol module call `logging.basicConfig(level=INFO)` when they
-are imported. In a process whose root logger has no handler yet — a test, a
-`phern -p` that has not configured logging — that installs a stderr handler at
-INFO for the whole process, on behalf of a library a row happened to mount. So
-the imports below are bracketed: the root logger's handlers and level are put
-back as they were, and the library's own loggers are set to WARNING, because its
-INFO line per call ("Executing shell script…") is narration a harness log does
-not want.
+`utcp` and each of its protocol modules call `logging.basicConfig(level=INFO)`
+at import. If the root logger has no handler yet, that call installs a stderr
+handler at INFO for the whole process. This happens in a test, and in a
+`phern -p` run that has not configured logging. The process would get that
+handler only because a row mounted a library. The imports below are therefore
+guarded. After the imports, this module restores the handlers and the level of
+the root logger. It also sets the library's own loggers to WARNING. The library
+logs one INFO line for each call ("Executing shell script…"), and a harness log
+does not need that line.
 
-Everything else in this package takes the library's names from here, so there is
-no second place the fence could be forgotten.
+Every other module in this package takes the library's names from this module.
+No second import site exists where the guard could be forgotten.
 
 ## A command runs where a pH command runs
 
 The library's `cli` protocol starts `/bin/bash -c <script>` itself, with
-`asyncio`, in the client's own working directory. Used unchanged inside pH that
-would be a shell command outside every row that bounds one: not the agent's
-workspace, not the sandbox, not the orphan journal, not the call's cancellation.
-`PhCliProtocol` keeps the library's script building — the argument substitution
-is where its security fixes live — and replaces only how the script is started:
-through `ctx.shell.run_argv`, for the agent the call is for.
+`asyncio`, in the working directory of the client. Inside pH, that command would
+run outside every row that limits a shell command. It would not run in the
+agent's workspace or under the sandbox. The orphan journal would not record it,
+and canceling the call would not stop it. `PhCliProtocol` keeps the way the
+library builds the script, because the argument substitution holds the library's
+security fixes. It replaces only the way the script is started. The script
+starts through `ctx.shell.run_argv`, for the agent that the call is for.
 
-Which agent travels in a `ContextVar`, because the library's `call_tool` has no
-parameter for it: `caller` is the client, and one client serves every agent of a
-mount. `calling()` sets it for the span of one call; outside any such span the
-protocol behaves exactly as the library's own, so a plain `UtcpClient` in the
-same process — a test, an embedding application — is not affected by this row
-having been imported.
+The library's `call_tool` has no parameter for the agent. Its `caller` is the
+client, and one client serves every agent of a mount. A `ContextVar` therefore
+carries the agent. `calling()` sets the variable for the duration of one call.
+Outside `calling()`, the protocol behaves exactly as the library's own protocol.
+A plain `UtcpClient` in the same process, such as one in a test or in an
+embedding application, is not affected when this row is imported.
 
 ## Failing closed
 
-The override rests on two private methods of `utcp_cli` and on winning the
-library's registry, so each is checked rather than assumed. `install` refuses
-when either method is missing from the class it overrides, and registers a
-*factory* — which the library resolves ahead of any shared instance of the same
-type. And a `Call` records that its command went through `run_argv`: a call that
-comes back without having done so ran outside the sandbox, and `require_ran`
-says so instead of handing its answer to a model.
+The override depends on two private methods of `utcp_cli`, and on taking
+precedence in the library's registry. The code checks both and does not assume
+them. `install` refuses to proceed when either method is missing from the class
+that it overrides. `install` registers a *factory*, which the library resolves
+before a shared instance of the same type. A `Call` records whether its command
+went through `run_argv`. If a call returns and its command did not go through
+`run_argv`, the command ran outside the sandbox. `require_ran` then raises an
+error and does not give the answer to a model.
 
 @module ph_utcp._library
 """
@@ -100,30 +103,33 @@ UTCP_TIMEOUT = "UTCP_TIMEOUT"
 UTCP_UNCONFINED = "UTCP_UNCONFINED"
 
 _OVERRIDDEN = ("_prepare_environment", "_execute_shell_script")
-"""The `CliCommunicationProtocol` methods `PhCliProtocol` replaces."""
+"""The `CliCommunicationProtocol` methods that `PhCliProtocol` replaces."""
 
 
 @dataclass(slots=True)
 class Call:
-    """Who one UTCP call is for, how pH runs its command, and what it did."""
+    """The context of one UTCP call: the agent that the call is for, how pH runs
+    its command, and what the command did."""
 
     shell: ShellService
     root: Path
-    """The tree the call is about — the agent's workspace, or the one whose state
-    it shares — where the command runs and a template's relative `working_dir` is
-    under."""
+    """The tree that the call works on. This is the workspace of the agent, or
+    the tree of the agent whose state it shares. The command runs here. A
+    relative `working_dir` in a template is resolved under this directory."""
     timeout_ms: int
-    """pH's budget for the command, in place of the library's fixed one."""
+    """The time limit that pH sets for the command. It replaces the library's
+    fixed limit."""
     env: Mapping[str, str]
-    """This manual's own variables, set over everything the template says."""
+    """The variables of this manual. They override every value from the template."""
     writable: tuple[str, ...] = ()
-    """Paths outside the workspace this manual's commands may write."""
+    """Paths outside the workspace that the commands of this manual may write."""
     agent: AgentHandle | None = None
     signal: Cancellation | None = None
     inherited: tuple[str, ...] = ()
-    """The names the template inherits, as the library read them. Selected by
-    `run_argv` from the deployment's scrubbed environment rather than from
-    `os.environ`, so a manual cannot name its way to a variable pH drops."""
+    """The names of the variables that the template inherits, as the library read
+    them. `run_argv` selects these variables from the scrubbed environment of the
+    deployment, not from `os.environ`. A manual therefore cannot get a variable
+    that pH removes by naming it."""
     ran: bool = False
     """Whether a command of this call went through `run_argv`."""
 
@@ -133,8 +139,8 @@ _CALL: ContextVar[Call | None] = ContextVar("ph_utcp_call", default=None)
 
 @contextmanager
 def calling(call: Call) -> Iterator[None]:
-    """Run the body's UTCP calls as `call`. One task, one call: the variable is
-    read in the same task that set it, a few frames down the library."""
+    """Run the UTCP calls in the body as `call`. One task makes one call. The
+    library reads the variable in the same task that set it, a few frames deeper."""
     token = _CALL.set(call)
     try:
         yield
@@ -145,10 +151,12 @@ def calling(call: Call) -> Iterator[None]:
 def require_ran(call: Call, what: str) -> None:
     """Refuse an answer whose command did not go through `run_argv`.
 
-    After the fact, because nothing earlier can see it: the library chose another
-    door — a protocol registered over this one, a method renamed under it — and
-    ran the command itself, unconfined. The answer is withheld and the reason is
-    the error, so the model and the log both see it."""
+    This check runs after the call, because nothing earlier can detect the
+    problem. The library took a different path and ran the command itself,
+    outside the sandbox. Two possible causes are a protocol registered over this
+    one, and an overridden method that the library renamed. This function
+    withholds the answer and raises an error that gives the reason. The model
+    and the log both see that error."""
     if not call.ran:
         raise HarnessError(
             f"{what} was run by the UTCP library itself, outside pH's sandbox; its "
@@ -159,15 +167,16 @@ def require_ran(call: Call, what: str) -> None:
 
 
 class PhCliProtocol(CliCommunicationProtocol):  # type: ignore[misc]
-    """The library's `cli` protocol, with its commands started by `ctx.shell`."""
+    """The library's `cli` protocol, changed so that `ctx.shell` starts its commands."""
 
     def _log_error(self, message: str) -> None:
-        """The library's errors, less the one that is not an error.
+        """Log the library's errors, except one message that is not an error.
 
-        It logs "Missing argument" at ERROR for every placeholder the call gave
-        no argument for — which is every optional field a model left out, on every
-        call. The placeholder it substitutes is one the command reads as absent
-        (`ph.toolcli`), so inside a pH call that line is narration."""
+        The library logs "Missing argument" at ERROR for each placeholder that the
+        call gave no argument for. A model leaves out optional fields on every
+        call, so the library logs this message on every call. The command reads
+        the substituted placeholder as an absent value (`ph.toolcli`). Inside a pH
+        call, the message is therefore logged at DEBUG."""
         if _CALL.get() is not None and message.startswith("Missing argument"):
             log.debug("ph_utcp: %s", message)
             return
@@ -178,9 +187,9 @@ class PhCliProtocol(CliCommunicationProtocol):  # type: ignore[misc]
         if call is None:
             inherited: dict[str, str] = super()._prepare_environment(provider)
             return inherited
-        # The names go to `run_argv`, which selects them from the scrubbed
-        # environment below the workspace's redirection; only the template's own
-        # values travel with the script.
+        # Pass only the names to `run_argv`. It selects those variables from the
+        # scrubbed environment, below the workspace's redirection. Only the
+        # template's own values travel with the script.
         call.inherited = (
             self._default_inherited_keys()
             if provider.inherit_env_vars is None
@@ -203,20 +212,21 @@ class PhCliProtocol(CliCommunicationProtocol):  # type: ignore[misc]
             return outcome
         call.ran = True
         result = await call.shell.run_argv(
-            # Not the platform's login shell: `bash -lc` reads the person's
-            # profile, and what a profile prints would be parsed as the answer.
+            # Do not use the platform's login shell. `bash -lc` reads the user's
+            # profile, and the output of the profile would be parsed as the answer.
             ("/bin/bash", "-c", script),
-            # In the tree the call is about (`UtcpSeam._tree`), which is how a
-            # `ph.toolcli` command is told its root.
+            # Run in the tree that the call works on (`UtcpSeam._tree`). The
+            # working directory is how a `ph.toolcli` command learns its root.
             cwd=call.root if working_dir is None else call.root / working_dir,
             agent=call.agent,
-            # pH's budget, not the library's fixed 60 and 120 seconds: how long a
-            # tool may take is the row's to say.
+            # Use the time limit from pH, not the library's fixed 60 and 120
+            # seconds. The row decides how long a tool may run.
             timeout_ms=call.timeout_ms,
             signal=call.signal,
             keep_env=call.inherited,
-            # The template's own values and the call's arguments (`env`), then the
-            # manual's: what the caller supplies wins over what is inherited.
+            # First the template's own values and the call's arguments (`env`),
+            # then the manual's values. A value that the caller supplies overrides
+            # an inherited value.
             extra_env={**env, **call.env},
             writable_extra=call.writable,
         )
@@ -234,16 +244,19 @@ _INSTALLED = False
 
 
 def install() -> None:
-    """Make `PhCliProtocol` the process's `cli` protocol. Idempotent.
+    """Make `PhCliProtocol` the `cli` protocol of the process. Safe to call again.
 
-    Registered as a factory, the library's per-client door, which its resolver
-    takes ahead of a shared instance of the same type — so the library's own
-    `cli` registration, an instance, cannot win over it. Process-wide because the
-    registry is; safe to leave in place for the life of the process, for what the
-    protocol does outside `calling()`.
+    This function registers a factory, which is how the library creates a
+    protocol for each client. The library's resolver uses a factory before a
+    shared instance of the same type. The library registers its own `cli`
+    protocol as an instance, so that registration cannot take precedence. The
+    registration is process-wide because the registry is process-wide. It is safe
+    to leave in place for the life of the process, because outside `calling()`
+    the protocol behaves as the library's own.
 
-    Refuses when a method it overrides is not on the class any more: the
-    override would then be dead code, and every command would run unconfined.
+    This function refuses to proceed when a method that it overrides is no longer
+    on the class. The override would then be dead code, and every command would
+    run outside the sandbox.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -256,8 +269,9 @@ def install() -> None:
             f"the installed utcp-cli has no {', '.join(missing)}, which ph-utcp overrides "
             "to run commands through pH's sandbox; install the utcp-cli version ph-utcp pins"
         )
-    # First, so the library's own registrations have happened and the one below
-    # replaces any `cli` factory among them rather than being replaced by it.
+    # Initialize the library's plugins first. The library's own registrations
+    # have then happened, and the registration below replaces any `cli` factory
+    # among them instead of being replaced by one.
     ensure_plugins_initialized()
     register_communication_protocol_factory("cli", PhCliProtocol, override=True)
     _INSTALLED = True
