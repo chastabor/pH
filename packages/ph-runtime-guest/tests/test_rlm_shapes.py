@@ -1,10 +1,11 @@
-"""A model class as a child's `output`, and an instance of it back (typed child results, B4).
+"""A model class as the `output` of a child, and an instance back (typed child results, B4).
 
-The cell defines the shape the way Python does, as a pydantic model, and gets one back:
-`rlm.run(..., output=Sort)` sends the host the class's JSON Schema, which is what the
-child is held to, and `await rlm.wait(handle)` hands back `Sort(...)`. These pin the
-guest's half with a dispatch that answers as the host would; `ph-rlm`'s binding tests
-run it across the real process boundary.
+The cell defines the shape in the Python way, as a pydantic model, and gets an
+instance back. `rlm.run(..., output=Sort)` sends the JSON Schema of the class to
+the host, and the child is held to that schema. `await rlm.wait(handle)` returns
+`Sort(...)`. These tests cover the guest half, with a dispatch that answers as
+the host would. The binding tests of `ph-rlm` run it across the real process
+boundary.
 """
 
 from __future__ import annotations
@@ -29,8 +30,8 @@ class Sort(BaseModel):
 
 
 class _Host:
-    """A dispatch that answers as the host does: a handle for `run`, a settled child for
-    `wait`, and every frame it was sent kept."""
+    """A dispatch that answers as the host does: a handle for `run`, and a settled
+    child for `wait`. It keeps every frame that it was sent."""
 
     def __init__(self, settled: dict[str, Any]) -> None:
         self.settled = settled
@@ -47,7 +48,7 @@ def _rlm(host: _Host) -> RlmNamespace:
 
 
 async def test_a_model_class_is_remembered_and_comes_back_an_instance() -> None:
-    """The gate's guest half. Sabotage: forget the class, or hand back the dict."""
+    """The guest half of the gate. Sabotage: forget the class, or return the dict."""
     host = _Host({"childId": "child-1", "status": "done", "value": {"kind": "bug"}})
     rlm = _rlm(host)
 
@@ -61,9 +62,9 @@ async def test_a_model_class_is_remembered_and_comes_back_an_instance() -> None:
 
 
 def test_the_wire_spells_a_model_class_as_its_schema_and_an_instance_as_its_json() -> None:
-    """A class crosses to the host as the shape it declares, which is what the child is
-    held to, wherever it sits in a frame; an instance as its JSON, as a cell's value.
-    Sabotage: leave both to `repr`."""
+    """A class crosses to the host as the shape that it declares, wherever it is
+    in a frame. The child is held to that shape. An instance crosses as its JSON,
+    as the value of a cell does. Sabotage: leave both to `repr`."""
     frame = {"arguments": {"output": Sort}, "value": Sort(kind="feature")}
 
     assert json.loads(json.dumps(frame, default=jsonable)) == {
@@ -83,8 +84,9 @@ def test_the_wire_spells_a_model_class_as_its_schema_and_an_instance_as_its_json
 async def test_a_child_asked_without_a_class_hands_back_what_it_returned(
     output: dict[str, Any] | None, settled: dict[str, Any], expected: object
 ) -> None:
-    """A schema given as a dict comes back as the dict; a child asked for no shape, as
-    its answer. Sabotage: validate against a class that was never given."""
+    """A schema that is given as a dict comes back as the dict. A child that was
+    asked for no shape returns its answer. Sabotage: validate against a class
+    that was never given."""
     rlm = _rlm(_Host(settled))
 
     await rlm.run(prompt="sort this", output=output)

@@ -1,39 +1,42 @@
-"""Per-variable snapshots, guest side (D17).
+"""Snapshots of each variable, guest side (D17).
 
-Per *variable*, not per namespace, and that is the whole design: an unchanged
-200 MiB DataFrame emits nothing, because its digest did not move. Snapshotting the
-namespace as one blob would append that DataFrame again on every cell that touched
-anything at all, and the log would grow with the *size of the namespace* rather
-than the size of the change.
+A snapshot is per *variable*, not per namespace, and that is the whole design. An
+unchanged 200 MiB DataFrame emits nothing, because its digest did not change. A
+snapshot of the namespace as one blob would append that DataFrame again on every
+cell that changed anything. The log would then grow with the *size of the
+namespace* and not with the size of the change.
 
-Three things make "emits nothing" actually cheap, because the digest comparison
-alone saves the *send* and not the serialization — which runs after every cell,
-for every name:
+The digest comparison alone saves only the *send*. It does not save the
+serialization, which runs after every cell for every name. Three things make
+"emits nothing" cheap in practice:
 
-**The C pickler is tried first.** `dill.Pickler` subclasses `pickle._Pickler`, the
-pure-Python one, so a large container would be serialized in Python bytecode.
-Anything the C pickler refuses — a cell-defined function, class or lambda, none of
-which is importable from `__ph_cell__` — falls back to `dill`, and `dill.loads`
-reads standard pickle bytes unchanged. Each object takes the same path every time,
-so digests stay stable.
+**The C pickler is tried first.** `dill.Pickler` subclasses `pickle._Pickler`,
+the pure-Python pickler, so it would serialize a large container in Python
+bytecode. The C pickler refuses some values: a function, a class, or a lambda
+that a cell defined, because none of them can be imported from `__ph_cell__`.
+Those values fall back to `dill`. `dill.loads` reads standard pickle bytes
+unchanged. Each object takes the same path every time, so digests stay stable.
 
-**A definitively-immutable value is compared by identity.** If the object under a
-name is the same `bytes`/`str`/`int` object as last cell, its content cannot have
-changed, so nothing is serialized. Deliberately *not* extended to tuples or
-frozensets: `t = ([1],)` keeps its identity while its contents change, and a fast
-path that is wrong once is worse than no fast path.
+**A value that is certainly immutable is compared by identity.** If the object
+under a name is the same `bytes`, `str`, or `int` object as after the last cell,
+its content cannot have changed, so nothing is serialized. This is deliberately
+*not* extended to tuples or frozensets. `t = ([1],)` keeps its identity while its
+contents change, and a fast path that is wrong one time is worse than no fast
+path.
 
-**An over-cap variable stops at the cap.** The pickler writes into a sink that
-raises once it passes `max_value_bytes`, and reports `too-large` either way.
+**A variable over the cap stops at the cap.** The pickler writes into a sink that
+raises when it passes `max_value_bytes`. The variable is then reported as
+`too-large`, whichever pickler was writing.
 
-What is deliberately **not** captured: the binding proxies, the imported skill
-modules, and anything else the bootstrap put there. Those are rebuilt at boot from
-the `boot` frame, so pickling them would store a stale copy of the harness's own
-surface — and `dill` would happily serialize a proxy holding a closure over a dead
-channel.
+Some things are deliberately **not** captured: the binding proxies, the imported
+skill modules, and everything else that the bootstrap put in the namespace. They
+are rebuilt at boot from the `boot` frame. Pickling them would store a stale copy
+of the harness's own surface, and `dill` would serialize a proxy that holds a
+closure over a dead channel without complaint.
 
-`dill` is imported lazily. A runtime venv without it still snapshots everything
-the C pickler accepts, which is a degraded session rather than no session.
+`dill` is imported lazily. A runtime venv without `dill` still snapshots
+everything that the C pickler accepts. That is a degraded session, not a failed
+session.
 
 @module ph_runtime.snapshot
 """
@@ -51,10 +54,11 @@ from ._characters import head
 __all__ = ["NamespaceSnapshotter", "restore", "serializable_names"]
 
 _IMMUTABLE: tuple[type, ...] = (bytes, str, int, float, complex, bool, type(None))
-"""Types whose contents cannot change while their identity does not.
+"""The types whose contents cannot change while their identity stays the same.
 
-Exact-type matched, and deliberately short. `tuple` and `frozenset` are absent
-because they hold references: their identity says nothing about their contents.
+The match is on the exact type, and the list is deliberately short. `tuple` and
+`frozenset` are absent because they hold references, so their identity says
+nothing about their contents.
 """
 
 
@@ -63,7 +67,7 @@ class _Overflow(Exception):
 
 
 class _BoundedSink:
-    """A write target that gives up once the payload exceeds `cap`."""
+    """A write target that stops when the payload exceeds `cap`."""
 
     __slots__ = ("cap", "chunks", "size")
 
@@ -82,7 +86,8 @@ class _BoundedSink:
 
 def _dill() -> Any | None:  # noqa: ANN401
     try:
-        # Optional in the runtime venv: without it each value is reported unpicklable.
+        # `dill` is optional in the runtime venv. Without it, each value that needs
+        # it is reported as unpicklable.
         import dill  # type: ignore[import-untyped]  # noqa: PLC0415
     except ImportError:  # pragma: no cover — a venv without dill
         return None
@@ -90,7 +95,7 @@ def _dill() -> Any | None:  # noqa: ANN401
 
 
 def serializable_names(namespace: dict[str, Any], protected: set[str]) -> list[str]:
-    """Top-level names worth trying to snapshot, in a stable order."""
+    """The top-level names that are worth a snapshot attempt, in a stable order."""
     return sorted(
         name
         for name, value in namespace.items()
@@ -101,15 +106,16 @@ def serializable_names(namespace: dict[str, Any], protected: set[str]) -> list[s
 
 
 def _serialize(value: object, cap: int) -> tuple[bytes | None, str, str]:
-    """`(payload, skipped, reason)` — exactly one of payload / skipped is set."""
+    """Return `(payload, skipped, reason)`. Exactly one of `payload` and `skipped`
+    is set."""
     sink = _BoundedSink(cap)
     try:
         pickle.Pickler(sink, protocol=pickle.HIGHEST_PROTOCOL).dump(value)
     except _Overflow:
         return None, "too-large", ""
     except Exception:
-        # Not picklable by the C pickler: a cell-defined function, class or
-        # lambda. `dill` handles those, and is only reached for them.
+        # The C pickler cannot pickle this value: a function, a class, or a lambda
+        # that a cell defined. `dill` handles those, and is used only for them.
         sink = _BoundedSink(cap)
         dill = _dill()
         if dill is None:  # pragma: no cover — a venv without dill
@@ -124,11 +130,11 @@ def _serialize(value: object, cap: int) -> tuple[bytes | None, str, str]:
 
 
 class NamespaceSnapshotter:
-    """Remembers what it last sent, so an unchanged variable costs nothing.
+    """Remembers what it last sent, so that an unchanged variable costs nothing.
 
-    The memo lives here rather than in the runner because it is what makes the
-    capture cheap, not merely what makes the send small — the identity fast path
-    needs the previous *object*, not just its digest.
+    The memo is here and not in the runner because it makes the capture cheap,
+    and not only the send small. The identity fast path needs the previous
+    *object*, not only its digest.
     """
 
     __slots__ = ("_digests", "_identities")
@@ -136,19 +142,21 @@ class NamespaceSnapshotter:
     def __init__(self) -> None:
         self._digests: dict[str, str] = {}
         self._identities: dict[str, tuple[int, Any]] = {}
-        """name → (id, a strong reference). The reference is what makes the id
-        meaningful: without it the object could be freed and its id reused by a
-        different value under the same name. It costs nothing — the namespace
-        holds the same object — and is dropped when the name goes."""
+        """Name → (id, a strong reference). The reference makes the id meaningful.
+        Without it, the object could be freed and its id reused by a different
+        value under the same name. The reference costs nothing, because the
+        namespace holds the same object. It is dropped when the name is removed."""
 
     def changed(
         self, namespace: dict[str, Any], *, protected: set[str], max_value_bytes: int
     ) -> list[dict[str, Any]]:
-        """Wire records for the variables that moved since the last call.
+        """Return the wire records for the variables that changed since the last
+        call.
 
-        Includes a `deleted` record per name that has gone, because a restore has
-        to *say* a name is absent: a model that finds one undefined mid-session
-        reads it as its own bug and spends a turn working around it.
+        The result includes a `deleted` record for each name that is gone. A
+        restore must *say* that a name is absent. A model that finds a name
+        undefined in the middle of a session reads that as its own bug, and uses
+        a turn to work around it.
         """
         records: list[dict[str, Any]] = []
         present = serializable_names(namespace, protected)
@@ -171,8 +179,9 @@ class NamespaceSnapshotter:
         payload, skipped, reason = _serialize(value, cap)
         if payload is None:
             self._identities.pop(name, None)
-            # Reported once, then quiet: the same refusal every cell would be
-            # one log record per cell for a variable that is not moving.
+            # Report the refusal one time, then stay quiet. The same refusal on
+            # every cell would be one log record per cell for a variable that is
+            # not changing.
             if self._digests.get(name) == skipped:
                 return None
             self._digests[name] = skipped
@@ -187,9 +196,9 @@ class NamespaceSnapshotter:
         if self._digests.get(name) == digest:
             return None
         self._digests[name] = digest
-        # Base64 only now that the record is known to be going out: encoding a
-        # large payload that turns out to be unchanged is a whole pass per cell
-        # over bytes nobody will send.
+        # Encode to base64 only now, when the record is certain to go out. To
+        # encode a large payload that is unchanged would be a whole pass per cell
+        # over bytes that nobody sends.
         return {
             "var": name,
             "digest": digest,
@@ -199,7 +208,8 @@ class NamespaceSnapshotter:
 
 
 def restore(namespace: dict[str, Any], variables: list[dict[str, Any]]) -> dict[str, list[str]]:
-    """Put payloads back. Reports what came back and what did not, per variable."""
+    """Put the payloads back. Returns the names that were restored and the names
+    that failed."""
     outcome: dict[str, list[str]] = {"restored": [], "failed": []}
     for record in variables:
         name = record.get("var")
@@ -209,8 +219,8 @@ def restore(namespace: dict[str, Any], variables: list[dict[str, Any]]) -> dict[
         try:
             namespace[name] = pickle.loads(base64.b64decode(blob))
         except Exception:
-            # `dill` reads standard pickle bytes, so the fallback is only needed
-            # for what only `dill` could write.
+            # `dill` reads standard pickle bytes. The fallback is therefore needed
+            # only for bytes that only `dill` could write.
             dill = _dill()
             if dill is None:  # pragma: no cover
                 outcome["failed"].append(name)

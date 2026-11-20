@@ -1,25 +1,27 @@
-"""Resource limits, applied in the child before it reports ready (D3).
+"""Resource limits, applied in the child process before it reports ready (D3).
 
-Two of the three are straightforward. The CPU limit is not, and the reason is
-worth stating because it changes what the number *means*:
+Two of the three limits are simple. The CPU limit is not, and the reason matters
+because it changes what the number *means*.
 
 **`RLIMIT_CPU` is cumulative over the process, and this process is persistent.**
-Setting it once to `cpu_seconds` would give the whole kernel one budget for its
-whole life — so the fortieth cell in a session would die on a limit the first
-cell nearly spent. Re-arming it at each run, from the CPU already consumed,
-turns the cumulative counter into a per-cell budget, which is what the caller
-means by `cpu_seconds` and what the gate tests.
+If the limit were set one time to `cpu_seconds`, the whole kernel would have one
+budget for its whole life. The fortieth cell in a session would then die on a
+limit that the first cell nearly used up. This module instead arms the limit
+again at each run, starting from the CPU already consumed. That turns the
+cumulative counter into a budget for each cell, which is what the caller means by
+`cpu_seconds` and what the gate tests.
 
-Exceeding it raises `CpuBudgetExceeded`, which derives from `BaseException` on
-purpose: like a denial (C3), a budget is not the program's to catch. A cell that
-could `except Exception` its way past the limit would make the limit advisory.
+A cell that exceeds the budget gets `CpuBudgetExceeded`. That class derives from
+`BaseException` on purpose. Like a denial (C3), a budget is not for the program
+to catch. If a cell could pass the limit with `except Exception`, the limit would
+be only advisory.
 
-**Who raises it is the runner's decision, not this module's.** `SIGXCPU` can only
-be turned into an exception safely when the main thread is executing the cell —
-otherwise it lands in whatever library frame the interpreter happens to be in,
-which for a guest that is mostly waiting means `asyncio`'s own internals. So this
-module arms and disarms the limit, and `Runner` installs the handler that knows
-where the cell is.
+**The runner decides who raises the exception, not this module.** `SIGXCPU` can
+be turned into an exception safely only when the main thread is executing the
+cell. In any other case the exception lands in whatever library frame the
+interpreter is in. A guest mostly waits, so that frame is usually inside
+`asyncio`. This module therefore arms and disarms the limit, and `Runner`
+installs the handler that knows where the cell is.
 
 @module ph_runtime.limits
 """
@@ -43,16 +45,17 @@ __all__ = [
 
 
 CPU_BUDGET_MESSAGE = "this cell used its CPU budget"
-"""What both routes out of a budget breach say.
+"""The message for both routes out of a budget breach.
 
-The handler raises on one path and cancels the run on the other, and
-`_on_cpu_budget`'s docstring promises they end in the same `cpu` error. Written
-out at each of them, that promise was two string literals keeping each other
-honest."""
+The handler raises on one path and cancels the run on the other. The docstring
+of `_on_cpu_budget` promises that both end in the same `cpu` error. When the text
+was written at each site, that promise depended on two string literals staying
+equal."""
 
 
 class CpuBudgetExceeded(BaseException):
-    """The cell used its CPU budget. Not an `Exception`: not catchable by policy."""
+    """The cell used its CPU budget. By policy this is not an `Exception`, so
+    `except Exception` does not catch it."""
 
 
 try:
@@ -62,7 +65,7 @@ except ImportError:  # pragma: no cover — Windows has no `resource` module
 
 
 def cpu_seconds_used() -> float:
-    """CPU seconds this process has consumed, user + system."""
+    """The CPU seconds that this process has consumed: user time plus system time."""
     if resource is None:  # pragma: no cover
         return time.process_time()
     usage = resource.getrusage(resource.RUSAGE_SELF)
@@ -70,11 +73,12 @@ def cpu_seconds_used() -> float:
 
 
 def apply_limits(*, address_space_bytes: int) -> dict[str, Any]:
-    """Apply the process-lifetime limits and report what took effect.
+    """Apply the limits that last for the life of the process, and report what
+    took effect.
 
-    Reported rather than assumed: a hard limit lower than the request cannot be
-    raised back, so the host logs the number in force instead of the number it
-    asked for.
+    The result is reported and not assumed. A hard limit that is lower than the
+    request cannot be raised again, so the host logs the number that is in force
+    and not the number that it asked for.
     """
     applied: dict[str, Any] = {"addressSpaceBytes": None, "cpu": "per-run"}
     if resource is None:  # pragma: no cover — Windows uses a Job Object instead
@@ -91,38 +95,39 @@ def apply_limits(*, address_space_bytes: int) -> dict[str, Any]:
             resource.setrlimit(resource.RLIMIT_AS, (target, hard))
             applied["addressSpaceBytes"] = target
         except (ValueError, OSError):
-            # The limit is *not* in force, and the report must say so in a number
-            # the host can read. macOS refuses `RLIMIT_AS` outright (`ValueError:
-            # current limit exceeds maximum limit`), and this branch used to report
-            # `soft` — which there is `RLIM_INFINITY`, 2**63-1, above the codec's
-            # lossless-integer bound. The host dropped the whole `boot-ack` as
-            # unreadable and waited out `boot_timeout` on every kernel start
-            # (measured 2026-09-07: 60 s of silence, then "did not report ready").
-            # `None` is what the report already means by "no limit"; a finite soft
-            # limit that was already in force is still the number in force.
+            # The limit is *not* in force, and the report must say so with a number
+            # that the host can read. macOS refuses `RLIMIT_AS` outright
+            # (`ValueError: current limit exceeds maximum limit`). This branch
+            # used to report `soft`, which on macOS is `RLIM_INFINITY`, 2**63-1.
+            # That is above the bound for lossless integers in the codec. The
+            # host dropped the whole `boot-ack` as unreadable and waited for
+            # `boot_timeout` on every kernel start (measured 2026-09-07: 60 s of
+            # silence, then "did not report ready"). In the report, `None` already
+            # means "no limit". A finite soft limit that was already in force is
+            # still the number in force.
             applied["addressSpaceBytes"] = None if soft == resource.RLIM_INFINITY else soft
     return applied
 
 
 def _uncaught_budget() -> bool:
-    """Whether a `SIGXCPU` would kill this process rather than reach a handler.
+    """Whether a `SIGXCPU` would kill this process and not reach a handler.
 
-    **Never arm a limit whose breach nothing here will catch** (M1). `RLIMIT_CPU`
-    is process-wide and `SIGXCPU`'s default disposition is to terminate, so an
-    arm made where no handler is installed points a timer at whatever process
-    this happens to be — and `Runner` is built in-process by this package's own
-    tests, where that process is pytest. It had been pointed for a while: the
-    per-run arm left the limit at `used + cpuSeconds` on the test runner, which
-    the suite reached on a long run and died of, reading as a run that finished
-    and printed no summary.
+    **Never arm a limit when nothing here will catch its breach** (M1).
+    `RLIMIT_CPU` is process-wide, and the default action of `SIGXCPU` is to
+    terminate. An arm with no handler installed therefore sets a timer on
+    whatever process this is. The tests of this package build `Runner`
+    in-process, and there the process is pytest. This happened for some time. The
+    per-run arm left the limit at `used + cpuSeconds` on the test runner. A long
+    run of the suite reached that limit and died, and it looked like a run that
+    finished and printed no summary.
 
-    Asked of `signal` rather than remembered by the caller, because a flag on
-    the one caller that exists today is a rule every later caller has to be told
-    about — and this also covers a handler reset after install, or an
-    `install_signal_handlers` that partially failed.
+    The function asks `signal` and does not rely on the caller to remember. A
+    flag on the one caller that exists today would be a rule that every later
+    caller must be told about. Asking `signal` also covers a handler that was
+    reset after install, and an `install_signal_handlers` that partly failed.
 
-    `getattr` because `SIGXCPU` is POSIX; where it does not exist there is no
-    budget to arm and nothing to catch.
+    `getattr` is used because `SIGXCPU` is POSIX only. Where it does not exist,
+    there is no budget to arm and nothing to catch.
     """
     sigxcpu = getattr(signal, "SIGXCPU", None)
     if sigxcpu is None:  # pragma: no cover - Windows
@@ -131,12 +136,14 @@ def _uncaught_budget() -> bool:
 
 
 def arm_cpu_budget(cpu_seconds: int) -> None:
-    """Give the *next* run `cpu_seconds` of CPU, from whatever is spent so far."""
+    """Give the *next* run `cpu_seconds` of CPU, counted from the CPU that is
+    already spent."""
     if resource is None or cpu_seconds <= 0:  # pragma: no cover
         return
-    # `ceil`, not `int`: flooring the CPU already spent hands the next cell less
-    # than `cpu_seconds` — a bomb that burned 1.9s floors to 1, so a budget of 1
-    # leaves 0.1s and the *next* trivial cell dies on the previous one's spend.
+    # Use `ceil`, not `int`. Rounding down the CPU already spent gives the next
+    # cell less than `cpu_seconds`. A cell that burned 1.9s rounds down to 1, so a
+    # budget of 1 leaves 0.1s, and the *next* trivial cell dies because of the
+    # previous cell.
     if _uncaught_budget():
         return
     used = math.ceil(cpu_seconds_used())
@@ -149,21 +156,22 @@ def arm_cpu_budget(cpu_seconds: int) -> None:
 
 
 def relax_cpu_budget() -> None:
-    """Put the soft limit back to the hard one. **Called first, from the handler.**
+    """Set the soft limit back to the hard limit. **The handler calls this
+    first.**
 
-    `RLIMIT_CPU` is not a one-shot. Linux delivers `SIGXCPU` when the soft limit
-    is first crossed and then **again every CPU-second** for as long as the
-    process stays over it — and the process stays over it, because the limit is
-    cumulative and nothing gives CPU back. So one budget breach became a signal
-    per second for the rest of the run's teardown: one landed in the cell and
-    unwound it as intended, and the next landed in `_snapshot` or `_settle`,
-    escaped the `try` that was supposed to report the failure, and the `done`
-    frame was never sent. The host has no wall clock of its own on a run, so it
-    waited for a frame that was never coming.
+    `RLIMIT_CPU` does not fire only one time. Linux delivers `SIGXCPU` when the
+    soft limit is first crossed, and then **again every CPU-second** while the
+    process stays over the limit. The process does stay over it, because the
+    limit is cumulative and nothing gives CPU back. One budget breach therefore
+    became one signal per second for the rest of the teardown of the run. One
+    signal landed in the cell and unwound it as intended. The next signal landed
+    in `_snapshot` or `_settle` and escaped the `try` that was meant to report
+    the failure, so the `done` frame was never sent. The host has no wall clock
+    of its own for a run, so it waited for a frame that would never come.
 
-    Disarming at the first delivery is what makes the budget the one-shot the
-    rest of the design assumes. The next `arm_cpu_budget` re-arms it, which is
-    where a per-run budget comes from in the first place.
+    Disarming at the first delivery makes the budget fire one time, which the
+    rest of the design assumes. The next `arm_cpu_budget` arms it again, and that
+    is also how a budget for each run is made.
     """
     if resource is None:  # pragma: no cover
         return

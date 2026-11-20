@@ -1,24 +1,26 @@
-"""Compiling one cell so that `await`, `return` and persistence all hold.
+"""Compile one cell so that `await`, `return`, and persistence all work.
 
-Three requirements pull against each other, and the way they are reconciled is
-the only interesting thing in this module.
+Three requirements conflict. How this module reconciles them is its only
+interesting part.
 
-1. **`await` at the top level.** The program is a coroutine on the child's one
-   loop, so there is no `nest_asyncio` question and no second loop to re-enter.
+1. **`await` at the top level.** The program is a coroutine on the one event loop
+   of the child process. There is no `nest_asyncio` question and no second loop
+   to re-enter.
 2. **`return` at the top level.** A bare `return` is a syntax error in module
-   code even with `PyCF_ALLOW_TOP_LEVEL_AWAIT`, so the body is wrapped in an
-   `async def` — which is also what makes (1) fall out for free.
-3. **Names persist across cells.** But a name assigned inside a function is
-   *local* to it, so the naive wrapping loses every variable the cell defined —
-   which would quietly undo the whole point of a persistent namespace.
+   code, even with `PyCF_ALLOW_TOP_LEVEL_AWAIT`. The body is therefore wrapped in
+   an `async def`, which also gives (1) at no cost.
+3. **Names persist across cells.** A name that is assigned inside a function is
+   *local* to that function. A simple wrapper would lose every variable that the
+   cell defined, and the persistent namespace would have no purpose.
 
-So the wrapper declares every name the cell binds at its top level as `global`.
-That is what this module computes: the bound-name set, from the AST, including
-the cases that are easy to forget — `import`, `with ... as`, `for`, `except ...
-as`, walrus, `del`, and function and class definitions.
+The wrapper therefore declares as `global` every name that the cell binds at its
+top level. This module computes that set of bound names from the AST. The set
+includes the cases that are easy to forget: `import`, `with ... as`, `for`,
+`except ... as`, the walrus operator, `del`, and function and class definitions.
 
-A trailing expression becomes the cell's value, as it would in a REPL, so
-`stdout / stderr / result / traceback` reads the way prime-agent's did.
+A trailing expression becomes the value of the cell, as in a REPL. The result
+then reads as `stdout / stderr / result / traceback`, the way it did in
+prime-agent.
 
 @module ph_runtime.cell
 """
@@ -40,36 +42,39 @@ __all__ = [
 CELL_FUNCTION = "__ph_cell__"
 
 CELL_FILENAME = "<cell>"
-"""The compiled name. Also the marker a traceback is trimmed to, so the model
-sees its own frames and not the runner's."""
+"""The name that the cell is compiled under. A traceback is also trimmed to this
+marker, so the model sees its own frames and not the frames of the runner."""
 
 MAGIC_PREFIXES = ("%%", "%", "!")
-"""Every IPython escape, exported because three layers describe this rule.
+"""Every IPython escape prefix. The list is exported because three layers describe
+this rule.
 
-The guest refuses them, the RLM doctrine tells the model so, and the conformance
-suite checks the two agree. A hole left in one prefix is the hole, so the list
-has one home rather than three that drift."""
+The guest refuses the prefixes, the RLM doctrine tells the model about the
+refusal, and the conformance suite checks that the two agree. A gap for one
+prefix would be a hole in the rule. The list therefore has one home, not three
+copies that drift."""
 
 MAGIC_HINT = (
     "IPython magics are not available: pH runs plain Python, so there is no "
     "`%%bash` to bypass the tool pipeline. Use `await tools.bash(command=...)` "
     "for a shell, and ordinary Python for the rest."
 )
-"""Attached to the `SyntaxError` a magic produces (D2).
+"""The text that is added to the `SyntaxError` that a magic produces (D2).
 
-The magic was the bypass — one shell command per cell that no `tools/pre-execute`
-listener, no approval and no sandbox `confine()` ever saw. Removing the
-mechanism closes the hole, so the error explains the governed route rather than
-apologizing for a missing feature.
+The magic was a bypass. It ran one shell command per cell that no
+`tools/pre-execute` listener, no approval, and no sandbox `confine()` ever saw.
+Removing the mechanism closes the hole. The error therefore explains the governed
+route and does not apologize for a missing feature.
 """
 
 
 def bound_names(body: list[ast.stmt]) -> set[str]:
-    """Every name the cell's *top level* binds, so the wrapper can globalize it.
+    """Return every name that the *top level* of the cell binds, so that the
+    wrapper can declare it global.
 
-    Only the top level: a name bound inside a nested function or comprehension
-    is local to it in module code too, so declaring it global would change the
-    program's meaning rather than preserve it.
+    Only the top level counts. A name that is bound inside a nested function or a
+    comprehension is local there in module code too. Declaring it global would
+    change the meaning of the program.
     """
     found: set[str] = set()
 
@@ -83,8 +88,8 @@ def bound_names(body: list[ast.stmt]) -> set[str]:
                 add_target(element)
 
     def walk_expression(node: ast.expr) -> None:
-        # A walrus binds in the enclosing scope, so `if (n := len(x)) > 3:` at
-        # the top level defines `n` for later cells.
+        # A walrus binds in the enclosing scope. `if (n := len(x)) > 3:` at the top
+        # level therefore defines `n` for later cells.
         for child in ast.walk(node):
             if isinstance(child, ast.NamedExpr):
                 add_target(child.target)
@@ -132,8 +137,8 @@ def bound_names(body: list[ast.stmt]) -> set[str]:
                     elif isinstance(child, ast.MatchMapping) and child.rest:
                         found.add(child.rest)
         elif isinstance(statement, ast.Delete):
-            # `del x` needs `global x` too, or it raises for a name that is in
-            # globals but not local.
+            # `del x` also needs `global x`. Without it, `del` raises for a name
+            # that is in globals but is not local.
             for target in statement.targets:
                 add_target(target)
         elif isinstance(statement, (ast.Expr, ast.Return)) and statement.value is not None:
@@ -145,7 +150,7 @@ def bound_names(body: list[ast.stmt]) -> set[str]:
 def compile_cell(program: str, filename: str = CELL_FILENAME) -> Any:  # noqa: ANN401
     """Compile `program` into a module that defines `CELL_FUNCTION`.
 
-    :raises SyntaxError: the program does not parse. A magic gets `MAGIC_HINT`
+    :raises SyntaxError: the program does not parse. For a magic, `MAGIC_HINT` is
         appended, because that is the one syntax error with a governed answer.
     """
     try:
@@ -186,8 +191,9 @@ def compile_cell(program: str, filename: str = CELL_FILENAME) -> Any:  # noqa: A
     )
     module = ast.Module(body=[wrapper], type_ignores=[])
     ast.fix_missing_locations(module)
-    # `dont_inherit`: a cell is not this module, so it keeps plain annotations rather
-    # than this module's `__future__` strings, which a pydantic model there cannot resolve.
+    # `dont_inherit`: a cell is not this module. It keeps plain annotations and not
+    # the `__future__` string annotations of this module, which a pydantic model in
+    # the cell cannot resolve.
     return compile(module, filename, "exec", dont_inherit=True)
 
 

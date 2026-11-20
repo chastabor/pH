@@ -1,23 +1,24 @@
-"""The narrowings `ph_runtime` needs from `ph.json` — a copy, pinned by a test.
+"""The narrowings that `ph_runtime` needs from `ph.json`: a copy, held equal by a test.
 
 This package ships into the guest venv with `dill` as its only dependency, so it
-cannot import `ph.json`: that module lives in the ph-core wheel, and depending on
-the wheel is the thing this package exists not to do.
+cannot import `ph.json`. That module is in the ph-core wheel, and this package
+exists to not depend on that wheel.
 
-**Copied by hand, compared character for character by
-`test_protocol_mirror.py`.** What keeps the two in step is the test rather than
-anyone's memory — that file opens by recording that *"a third copy that no test
-compared had already drifted"*. When it fails, copy the definition across again;
-when the guest comes to need a second narrowing, paste that one in and the test
-picks it up by name.
+**The definitions are copied by hand. `test_protocol_mirror.py` compares them
+character for character.** The test keeps the two copies equal, so nobody has to
+remember to do it. That test file starts by recording that *"a third copy that no
+test compared had already drifted"*. When the test fails, copy the definition
+across again. When the guest needs a second narrowing, paste it in, and the test
+finds it by name.
 
-The arrangement `truncation_marker` already has in `ph_runtime.protocol` — the
-other thing this package copies rather than imports — though that one is held to
-ph-core's by its output and this by its source, because a marker is a sentence
-built from two numbers and a narrowing is its text.
+`truncation_marker` in `ph_runtime.protocol` has a similar arrangement. It is the
+other thing that this package copies and does not import. The test compares that
+function with the function of ph-core by its output, and compares this module by
+its source. The reason is that a marker is a sentence built from two numbers, and
+a narrowing is its text.
 
-Private, and re-exported by `ph_runtime.protocol` for the names the guest uses:
-this is ph-core's code, not the guest's API.
+This module is private. `ph_runtime.protocol` re-exports the names that the guest
+uses. This is the code of ph-core, not the API of the guest.
 
 @module ph_runtime._json
 """

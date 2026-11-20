@@ -1,22 +1,21 @@
-"""The snapshotter's quiet paths: what it refuses, and what it can still read back.
+"""The quiet paths of the snapshotter: what it refuses, and what it can still read back.
 
-`NamespaceSnapshotter.changed` is called after every cell, and what it emits is
-the only account the host gets of a variable's fate. Two of its branches are
-about *not* saying things, which is exactly the kind of behavior a test has to
-pin because nothing downstream fails when it breaks:
+`NamespaceSnapshotter.changed` is called after every cell. What it emits is the
+only account that the host gets of what happened to a variable. Two of its
+branches are about *not* reporting something. A test must cover that kind of
+behavior, because nothing downstream fails when it breaks:
 
-* a variable that cannot be pickled is reported once and then stays quiet, so a
-  session with a database handle in it does not emit one identical refusal per
-  cell forever;
-* a variable that has gone is reported as `deleted`, because a restore that
-  merely omitted it would leave the model to discover a `NameError` and read it
-  as its own bug.
+* A variable that cannot be pickled is reported one time and is then quiet. A
+  session that holds a database handle therefore does not emit one identical
+  refusal for each cell, forever.
+* A variable that is gone is reported as `deleted`. A restore that only omitted
+  it would leave the model to find a `NameError` and read it as its own bug.
 
-`restore` has the matching pair on the way back: standard pickle first, `dill`
-only for what only `dill` could have written.
+`restore` has the matching pair in the other direction: standard pickle first,
+and `dill` only for bytes that only `dill` could have written.
 
-These were reached by `ph-rlm`'s kernel tests only incidentally — the suite's
-cells hold ints and strings, which serialize on the first path every time.
+The kernel tests of `ph-rlm` reached these paths only by accident. The cells of
+that suite hold ints and strings, which serialize on the first path every time.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ import pytest
 from ph_runtime.snapshot import NamespaceSnapshotter, restore, serializable_names
 
 CAP = 1 << 20
-"""A megabyte: large enough that nothing here trips the size refusal by accident."""
+"""One megabyte: large enough that nothing here causes the size refusal by accident."""
 
 
 def records_for(
@@ -44,11 +43,11 @@ def records_for(
 
 
 def test_an_unpicklable_variable_is_reported_once_and_then_stays_quiet() -> None:
-    """One refusal per *variable*, not one per cell.
+    """One refusal for each *variable*, not one for each cell.
 
-    A socket, a file handle or a database connection sits in a namespace for the
-    rest of the session. Reporting it every cell would be an unbounded stream of
-    identical records about a variable that is not moving — and the host logs
+    A socket, a file handle, or a database connection stays in a namespace for
+    the rest of the session. A report on every cell would be an endless stream of
+    identical records about a variable that does not change, and the host logs
     what it is told.
     """
     snapshotter = NamespaceSnapshotter()
@@ -62,11 +61,11 @@ def test_an_unpicklable_variable_is_reported_once_and_then_stays_quiet() -> None
 
 
 def test_a_variable_that_becomes_unpicklable_for_a_new_reason_speaks_up_again() -> None:
-    """Quiet is keyed to the reason, not to the name.
+    """The quiet state is keyed to the reason, not to the name.
 
-    The dedupe above must not swallow a *different* refusal for the same
-    variable — that is the case where something actually changed and the host
-    would otherwise never hear about it.
+    The deduplication above must not hide a *different* refusal for the same
+    variable. In that case something really changed, and without a report the
+    host would never learn of it.
     """
     snapshotter = NamespaceSnapshotter()
     namespace: dict[str, Any] = {"value": (item for item in range(3))}
@@ -79,7 +78,7 @@ def test_a_variable_that_becomes_unpicklable_for_a_new_reason_speaks_up_again() 
 
 
 def test_a_deleted_variable_is_reported_rather_than_omitted() -> None:
-    """A restore has to be able to say a name is gone."""
+    """A restore must be able to say that a name is gone."""
     snapshotter = NamespaceSnapshotter()
     namespace: dict[str, Any] = {"kept": 1, "goes": 2}
     assert set(records_for(namespace, snapshotter)) == {"kept", "goes"}
@@ -91,7 +90,7 @@ def test_a_deleted_variable_is_reported_rather_than_omitted() -> None:
 
 
 def test_an_unchanged_immutable_is_not_re_emitted() -> None:
-    """The identity shortcut, which is what keeps a steady namespace cheap."""
+    """The identity shortcut, which keeps a steady namespace cheap."""
     snapshotter = NamespaceSnapshotter()
     namespace: dict[str, Any] = {"n": 42, "text": "stable"}
 
@@ -113,11 +112,12 @@ def test_restore_reads_a_standard_pickle() -> None:
 
 
 def test_restore_falls_back_to_dill_for_what_only_dill_could_write() -> None:
-    """A cell-defined function round-trips; the C pickler cannot read it back.
+    """A function that a cell defined round-trips. The C pickler cannot read it
+    back.
 
-    This is the branch that makes a kernel snapshot survive a restart with the
-    model's own helpers still defined — the case `dill` is in the guest's
-    dependency list for at all.
+    This branch lets a kernel snapshot survive a restart with the helpers of the
+    model still defined. It is the reason why `dill` is in the dependency list of
+    the guest.
     """
     dill = pytest.importorskip("dill", reason="the fallback only exists when dill is installed")
 
@@ -146,7 +146,7 @@ def test_restore_reports_a_blob_neither_reader_can_take() -> None:
 
 
 def test_restore_skips_a_record_that_is_not_shaped_like_one() -> None:
-    """The wire is JSON from another process, so the shape is not a given."""
+    """The wire is JSON from another process, so the shape is not guaranteed."""
     namespace: dict[str, Any] = {}
 
     outcome = restore(
@@ -159,7 +159,7 @@ def test_restore_skips_a_record_that_is_not_shaped_like_one() -> None:
 
 
 def test_serializable_names_leaves_out_what_a_snapshot_has_no_business_carrying() -> None:
-    """Modules, dunders and the runtime's own names, which are re-made on boot."""
+    """Modules, dunder names, and the runtime's own names, which are made again at boot."""
     import json
 
     namespace: dict[str, Any] = {

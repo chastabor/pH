@@ -1,9 +1,10 @@
-"""The guest half of pH's Python code runtime.
+"""The guest half of the Python code runtime of pH.
 
-Runs inside `$PH_CACHE/runtime-venv`, in a subprocess the host spawns per agent,
-and reaches the host over one framed channel on fd 3. It imports neither
-`ph-core` nor `ph-rlm`: the process boundary exists so that model code cannot
-reach the harness, and importing the harness would put it back inside.
+The guest runs inside `$PH_CACHE/runtime-venv`, in a subprocess that the host
+starts for each agent. It reaches the host over one framed channel on fd 3. It
+imports neither `ph-core` nor `ph-rlm`. The process boundary exists so that model
+code cannot reach the harness, and an import of the harness would put the harness
+back inside the boundary.
 
 @module ph_runtime
 """

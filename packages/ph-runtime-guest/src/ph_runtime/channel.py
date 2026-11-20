@@ -1,11 +1,12 @@
 """Newline-delimited JSON over one duplex descriptor.
 
-`json.dumps` never emits a literal newline (it escapes them inside strings), so
-a line is exactly a frame and no length prefix or escaping layer is needed.
+`json.dumps` never emits a literal newline, because it escapes newlines inside
+strings. A line is therefore exactly one frame, and no length prefix or escaping
+layer is needed.
 
-The read limit is generous because two frames are legitimately large: a program
-the model wrote, and a `snapshot` carrying `dill` payloads. It is a cap on one
-line, not an allocation.
+The read limit is large because two kinds of frame can be large for good reason:
+a program that the model wrote, and a `snapshot` that carries `dill` payloads.
+The limit is a cap on one line, not an allocation.
 
 @module ph_runtime.channel
 """
@@ -28,17 +29,19 @@ from .protocol import FD_ENV, FRAME_BYTES_ENV, PROTOCOL_FD
 __all__ = ["MAX_FRAME_BYTES", "Channel", "Model", "frame_limit", "is_model", "jsonable"]
 
 MAX_FRAME_BYTES = 64 * 1024 * 1024
-"""The read limit when the host names none — see `FRAME_BYTES_ENV` (F8)."""
+"""The read limit when the host gives none. See `FRAME_BYTES_ENV` (F8)."""
 
 
 def frame_limit() -> int:
-    """The largest frame this guest will read: the host's number, else the default.
+    """The largest frame that this guest reads: the number from the host, or the
+    default.
 
-    The host sizes it from `maxSnapshotBytes`, because one snapshotted variable
-    must fit one frame in *both* directions — a fixed 64 MiB here lost the
-    namespace on restore as soon as a deployment raised the limit past ~48 MiB,
-    base64 being four bytes per three (F8). A value that is not a positive
-    integer is ignored rather than trusted: a zero limit would refuse every frame.
+    The host sizes the limit from `maxSnapshotBytes`, because one snapshotted
+    variable must fit in one frame in *both* directions. With a fixed 64 MiB
+    here, a restore lost the namespace as soon as a deployment raised the limit
+    past about 48 MiB, because base64 uses four bytes for every three (F8). A
+    value that is not a positive integer is ignored, because a limit of zero
+    would refuse every frame.
     """
     try:
         named = int(os.environ.get(FRAME_BYTES_ENV, ""))
@@ -48,8 +51,8 @@ def frame_limit() -> int:
 
 
 class Model(Protocol):
-    """A pydantic model class, known by its shape: this venv need not hold pydantic, and
-    model code that defines one brought it."""
+    """A pydantic model class, recognized by its shape. This venv does not need to
+    hold pydantic. Model code that defines such a class brought pydantic itself."""
 
     @classmethod
     def model_json_schema(cls) -> dict[str, Any]: ...
@@ -68,29 +71,30 @@ def is_model(value: object) -> TypeGuard[type[Model]]:
 
 
 def jsonable(value: object) -> object:
-    """One non-JSON value as something the host can use (F7).
+    """Convert one non-JSON value into something that the host can use (F7).
 
-    `default=repr` was the whole rule, and it is silently lossy for the two
-    types a cell passes most: `tools.read(Path("notes.md"))` arrived as the
-    string `"PosixPath('notes.md')"`, and a `datetime` as
-    `"datetime.datetime(2026, 9, 20, 0, 0)"`. Neither is an error anywhere — the
-    tool receives a string where the model wrote a value, and either refuses it
-    with a message about a path that does not exist or, worse, uses it.
+    The whole rule was once `default=repr`. That rule loses information silently
+    for the two types that a cell passes most often. `tools.read(Path("notes.md"))`
+    arrived as the string `"PosixPath('notes.md')"`, and a `datetime` arrived as
+    `"datetime.datetime(2026, 9, 20, 0, 0)"`. Neither is an error anywhere. The
+    tool receives a string where the model wrote a value. The tool then refuses
+    it with a message about a path that does not exist, or, worse, uses it.
 
-    The obvious spellings for the types that have one, and `repr` for the rest:
-    a value with no JSON form is a value the tool's own schema is going to
-    reject, and `repr` is what makes *that* refusal readable. Deliberately not a
-    guest-side raise — the guest does not know the tool's schema, and refusing
-    an argument a tool would have accepted is the worse error.
+    This function gives the obvious spelling for each type that has one, and
+    `repr` for the rest. A value with no JSON form is a value that the schema of
+    the tool will reject, and `repr` makes *that* refusal readable. The guest
+    deliberately does not raise. It does not know the schema of the tool, and
+    refusing an argument that a tool would accept is the worse error.
 
-    It lives here, on the channel, because the lossiness is a property of *the
-    wire* and not of one frame: an argument, a cell's value and every other
-    frame leave through `send`, and a `Path` that survives as one and not the
-    others is the same bug reported twice.
+    The function is here, on the channel, because the loss is a property of *the
+    wire* and not of one frame. An argument, the value of a cell, and every other
+    frame leave through `send`. A `Path` that survives in one frame and not in
+    the others would be the same bug reported twice.
 
-    A pydantic model class is the shape it declares, its JSON Schema, which is what a
-    tool taking one holds a value to (`rlm.run`'s `output`); an instance is its JSON,
-    as `rlm.wait` hands a cell one back.
+    A pydantic model class becomes the shape that it declares, its JSON Schema. A
+    tool that takes a model class holds a value to that schema (the `output` of
+    `rlm.run`). A model instance becomes its JSON. A cell gets such an instance
+    from `rlm.wait`.
     """
     if is_model(value):
         return value.model_json_schema()
@@ -109,7 +113,7 @@ def jsonable(value: object) -> object:
 
 
 class Channel:
-    """The framed channel, and the only way out of this process to the host."""
+    """The framed channel. It is the only way from this process to the host."""
 
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self._reader = reader
@@ -119,9 +123,9 @@ class Channel:
     async def open(cls, fd: int | None = None) -> Channel:
         """Attach to the inherited descriptor.
 
-        Wrapped in a `socket` object rather than opened as a file because the
-        host hands over one end of a `socketpair`: a pipe would be one-way, and
-        the guest has to both answer the host and call it.
+        The descriptor is wrapped in a `socket` object and not opened as a file,
+        because the host passes one end of a `socketpair`. A pipe is one-way, and
+        the guest must both answer the host and call it.
         """
         if fd is None:
             fd = int(os.environ.get(FD_ENV, PROTOCOL_FD))
@@ -131,11 +135,11 @@ class Channel:
         return cls(reader, writer)
 
     async def receive(self) -> dict[str, Any] | None:
-        """The next frame, or `None` when the host has gone.
+        """Return the next frame, or `None` when the host is gone.
 
-        A line that will not parse is skipped rather than fatal: the host is
-        trusted for *content*, but a truncated write at shutdown should end the
-        session quietly, not with a traceback into the log.
+        A line that does not parse is skipped and is not fatal. The host is
+        trusted for *content*. But a truncated write at shutdown must end the
+        session quietly, without a traceback in the log.
         """
         while True:
             try:
@@ -155,9 +159,10 @@ class Channel:
                 return frame
 
     def send(self, frame: dict[str, Any]) -> None:
-        """Queue one frame. Synchronous, so `print` inside a cell can call it."""
-        # A dead host is not this process's problem to report: the
-        # die-with-parent mechanism is what ends the guest (F3).
+        """Queue one frame. This method is synchronous, so that `print` inside a
+        cell can call it."""
+        # This process does not report a dead host. The die-with-parent mechanism
+        # is what ends the guest (F3).
         with contextlib.suppress(BrokenPipeError, ConnectionResetError, RuntimeError):
             self._writer.write(json.dumps(frame, default=jsonable).encode("utf-8") + b"\n")
 

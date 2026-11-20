@@ -1,30 +1,32 @@
-"""What the model sees in `globals()`: namespaces whose every call is governed.
+"""What the model sees in `globals()`: namespaces in which every call is governed.
 
-The programming model is prime-agent's, deliberately and exactly — `await
-rlm(...)`, `await agent_message.send(msg, receiver_role="parent")`, `await
-tools.read(path=...)`, skills as pre-imported callables. That is prime-agent's
-genuine contribution and it is what the RLM doctrine teaches, so it is preserved
-verbatim.
+The programming model is the model of prime-agent, deliberately and exactly:
+`await rlm(...)`, `await agent_message.send(msg, receiver_role="parent")`, `await
+tools.read(path=...)`, and skills as pre-imported callables. That model is the
+real contribution of prime-agent, and it is what the RLM doctrine teaches, so it
+is kept unchanged.
 
-What changed is everything underneath. Each of these calls marshals **one `call`
-frame** to the host, where it re-enters the full tool pipeline as a sub-call and
+Everything below it changed. Each of these calls sends **one `call` frame** to
+the host. There the call re-enters the full tool pipeline as a sub-call and
 settles as a durable `tool/code-dispatch` record. Prime-agent reached the host
-over an `ipykernel.Comm`, which no `tools/pre-execute` listener, no approval and
-no call limit ever observed; there is no such channel here, so the governed path
-is not a convention but the only path that exists.
+over an `ipykernel.Comm`, which no `tools/pre-execute` listener, no approval, and
+no call limit ever observed. No such channel exists here. The governed path is
+therefore not a convention. It is the only path.
 
-Unknown attributes and unknown keyword arguments fail loudly, with the available
-names in the message. The reader is a model, and a silent `None` is how a cell
-spends a turn discovering that a capability it invented does not exist.
+Unknown attributes and unknown keyword arguments fail with an error that lists
+the available names. The reader is a model. With a silent `None`, a cell would
+use a turn to discover that a capability that the model invented does not exist.
 
-**A binding is called the way the SDK listing shows it.** The listing renders
-`async def tools.context_tombstone(sections: list, reason: str)`, so positional
-arguments bind to the parameters in the order it declares them, and keywords by
-name — the host sends that order (`ph.tools.sdk.parameter_names`), so the two read
-one source. A live model wrote `tools.context_tombstone(['S12'], reason=...)` from
-the listing and was refused when this took keywords only, losing the step it had to
-edit in. More positionals than parameters, or one parameter given both ways, is
-refused with the call spelled out.
+**A binding is called in the way that the SDK listing shows it.** The listing
+renders `async def tools.context_tombstone(sections: list, reason: str)`.
+Positional arguments therefore bind to the parameters in the order that the
+listing declares, and keyword arguments bind by name. The host sends that order
+(`ph.tools.sdk.parameter_names`), so both sides read one source. A live model
+wrote `tools.context_tombstone(['S12'], reason=...)` from the listing. At that
+time this module accepted keywords only, so the call was refused, and the model
+lost the step that it needed for the edit. A call with more positional arguments
+than parameters, or with one parameter given both ways, is refused with a message
+that shows the full call.
 
 @module ph_runtime.proxies
 """
@@ -41,24 +43,27 @@ __all__ = ["Namespace", "RlmNamespace", "build_namespaces"]
 Dispatch = Callable[[str, str, dict[str, Any]], Awaitable[Any]]
 
 RLM_KWARGS = ("name", "model", "output", "thinking", "access")
-"""`rlm()`'s keyword arguments. Validated here as well as on the host so a typo
-costs a `TypeError` in the cell rather than a round trip and a tool failure.
+"""The keyword arguments of `rlm()`. They are validated here as well as on the
+host, so that a typo costs a `TypeError` in the cell and not a round trip and a
+tool failure.
 
-`access` is pH's one addition to prime-agent's contract, and its default is
-`"read"` rather than prime-agent's implicit write (E4, Q11): a research child
-that turns out to need writes costs one turn to re-spawn, where a writing child
-that should not have written costs a review of every diff it produced."""
+`access` is the one addition of pH to the contract of prime-agent. Its default is
+`"read"`, where prime-agent has an implicit write (E4, Q11). A research child
+that needs writes costs one turn to spawn again. A writing child that should not
+have written costs a review of every diff that it produced."""
 
 
 class Namespace:
-    """A group of governed callables — `tools`, `agent_message`, `agent_observe`."""
+    """A group of governed callables, such as `tools`, `agent_message`, and
+    `agent_observe`."""
 
     def __init__(
         self, name: str, bindings: Mapping[str, Sequence[str]], dispatch: Dispatch
     ) -> None:
         self._name = name
         self._parameters = {binding: tuple(names) for binding, names in bindings.items()}
-        """Each binding, with its parameter names in the order the host declared them."""
+        """Each binding, with its parameter names in the order that the host
+        declared them."""
         self._bindings = tuple(self._parameters)
         self._dispatch = dispatch
 
@@ -87,19 +92,20 @@ class Namespace:
         return call
 
     async def _call(self, name: str, arguments: dict[str, object]) -> Any:  # noqa: ANN401
-        """One call frame to the host; a value with no JSON form is the wire's to spell
-        (`jsonable`)."""
+        """Send one call frame to the host. The wire decides how to spell a value
+        that has no JSON form (`jsonable`)."""
         return await self._dispatch(self._name, name, arguments)
 
 
 class RlmNamespace(Namespace):
     """`rlm` is callable *and* a namespace: `await rlm(prompt)`, `rlm.find_models()`.
 
-    **A model class as `output` comes back as an instance.** `rlm.run(..., output=Sort)`
-    sends the host `Sort`'s JSON Schema (`jsonable`), which is what the child is held
-    to, and remembers the class for that child; `await rlm.wait(handle)` then hands back
-    `Sort.model_validate(value)`, so pydantic checks the value once more in the cell's
-    own terms.
+    **A model class given as `output` comes back as an instance.**
+    `rlm.run(..., output=Sort)` sends the JSON Schema of `Sort` to the host
+    (`jsonable`). The child is held to that schema. The namespace remembers the
+    class for that child. `await rlm.wait(handle)` then returns
+    `Sort.model_validate(value)`, so pydantic checks the value one more time, in
+    the terms of the cell.
     """
 
     RUN = "run"
@@ -110,7 +116,7 @@ class RlmNamespace(Namespace):
     ) -> None:
         super().__init__(name, bindings, dispatch)
         self._shapes: dict[str, type[Model]] = {}
-        """The model class each child was asked to return its value as, by child id."""
+        """The model class that each child must return its value as, keyed by child id."""
 
     async def __call__(self, prompt: str, **kwargs: object) -> Any:  # noqa: ANN401
         unknown = sorted(set(kwargs) - set(RLM_KWARGS))
@@ -129,7 +135,8 @@ class RlmNamespace(Namespace):
         return await super()._call(name, arguments)
 
     async def _run(self, arguments: dict[str, object]) -> Any:  # noqa: ANN401
-        """A spawn, with a model class `output` remembered for the child it admitted."""
+        """Spawn a child. If `output` is a model class, remember it for the child
+        that was admitted."""
         handle = await super()._call(self.RUN, arguments)
         shape = arguments.get("output")
         child = handle.get("childId") if isinstance(handle, Mapping) else None
@@ -138,11 +145,12 @@ class RlmNamespace(Namespace):
         return handle
 
     async def _wait(self, arguments: dict[str, object]) -> Any:  # noqa: ANN401
-        """One child's value, as an instance of the class it was asked for; else the
-        value, or the answer of a child asked for no shape."""
+        """Return the value of one child as an instance of the class that was
+        requested for it. With no class, return the value. For a child that was
+        asked for no shape, return its answer."""
         child = arguments.get("child_id")
         if isinstance(child, Mapping):
-            # A handle as `run` gave it, or the child's id.
+            # The argument is a handle as `run` returned it, or the id of the child.
             child = child.get("childId")
         settled = await super()._call(self.WAIT, {**arguments, "child_id": child})
         if not isinstance(settled, Mapping):
@@ -160,8 +168,8 @@ def _bound(
     positional: Sequence[object],
     arguments: dict[str, object],
 ) -> dict[str, object]:
-    """`arguments`, with the positional ones bound to the parameters in declared order —
-    or a refusal that spells the call out."""
+    """Return `arguments` with the positional arguments bound to the parameters
+    in declared order, or raise a refusal that shows the full call."""
     spelled = f"{call}({', '.join(parameters)})"
     if len(positional) > len(parameters):
         raise TypeError(
@@ -178,10 +186,10 @@ def _bound(
 def build_namespaces(
     declared: Sequence[dict[str, Any]], dispatch: Dispatch
 ) -> dict[str, Namespace]:
-    """Build one proxy per namespace the `boot` frame declared.
+    """Build one proxy for each namespace that the `boot` frame declared.
 
-    Driven by the frame rather than by a list here, so a namespace a plugin adds
-    reaches the cell without this module changing (I1, I7).
+    The frame drives this, not a list in this module. A namespace that a plugin
+    adds therefore reaches the cell without a change to this module (I1, I7).
     """
     built: dict[str, Namespace] = {}
     for namespace in declared:

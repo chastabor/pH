@@ -1,22 +1,23 @@
-"""The CPU budget's arming and disarming, which nothing downstream can observe.
+"""Arming and disarming the CPU budget, which nothing downstream can observe.
 
-`RLIMIT_CPU` is the one limit that is **not** a one-shot. Linux delivers
-`SIGXCPU` when the soft limit is first crossed and then again every CPU-second
-for as long as the process stays over it — and a cumulative counter never goes
-back down, so "over it" is permanent for the life of the process.
+`RLIMIT_CPU` is the one limit that does **not** fire only one time. Linux
+delivers `SIGXCPU` when the soft limit is first crossed, and then again every
+CPU-second while the process stays over the limit. A cumulative counter never
+goes down, so the process stays over the limit for the rest of its life.
 
-That is invisible from the kernel tests: the first delivery ends the cell, which
-is what they assert, and the second one lands in whatever the guest does next.
-When that was `_snapshot` it escaped the `try` meant to report failures, the run
-sent no `done` frame, and the host — which has no wall clock on a run — waited
-for one forever. A test that spins a real cell and hopes to lose the race is not
-a test, so the mechanism is pinned here instead.
+The kernel tests cannot see this. The first delivery ends the cell, which is what
+they assert, and the second delivery lands in whatever the guest does next. When
+that was `_snapshot`, the signal escaped the `try` that was meant to report
+failures. The run sent no `done` frame, and the host, which has no wall clock for
+a run, waited for the frame forever. A test that spins a real cell and hopes to
+lose the race is not a test, so the mechanism is tested here directly.
 
-Both functions mutate this process's own `RLIMIT_CPU`, so every test restores
-it — and installs a handler first, because `arm_cpu_budget` now refuses to arm
-where the breach would kill the process rather than reach one (M1). Satisfying
-that rule is the honest way to test the armer; sidestepping it would leave this
-module the one place that still points an unhandled timer at pytest.
+Both functions change the `RLIMIT_CPU` of this process, so every test restores
+it. Every test also installs a handler first, because `arm_cpu_budget` now
+refuses to arm where the breach would kill the process and not reach a handler
+(M1). Satisfying that rule is the correct way to test the armer. Bypassing it
+would leave this module as the one place that still sets an unhandled timer on
+pytest.
 """
 
 from __future__ import annotations
@@ -37,11 +38,12 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="RLIMIT_CPU is P
 def armable() -> object:
     """A caught `SIGXCPU` and a restored budget, around every test here.
 
-    The handler is what makes `arm_cpu_budget` willing to arm at all: its guard
-    reads `signal.getsignal`, so a module that arms the test process on purpose
-    has to be a process that would catch the breach. A no-op is enough — none
-    of these tests spends 3600 CPU-seconds — and it is removed afterwards, so
-    the invariant `test_run_settlement` asserts about this process still holds.
+    The handler is what makes `arm_cpu_budget` willing to arm. Its guard reads
+    `signal.getsignal`, so a module that arms the test process on purpose must be
+    a process that catches the breach. A no-op handler is sufficient, because
+    none of these tests uses 3600 CPU-seconds. The handler is removed afterward,
+    so the invariant that `test_run_settlement` asserts about this process still
+    holds.
     """
     before = resource.getrlimit(resource.RLIMIT_CPU)
     handler = signal.getsignal(signal.SIGXCPU)
@@ -52,28 +54,28 @@ def armable() -> object:
 
 
 def test_arming_bounds_the_budget_from_what_is_already_spent() -> None:
-    """The per-run budget, out of a counter that only goes up.
+    """The per-run budget, made from a counter that only goes up.
 
-    A generous number, because this arms the *test process*: what is asserted is
-    the arithmetic — the soft limit lands above what has been spent by about the
-    budget — and not a limit anything is meant to reach.
+    The number is generous, because this arms the *test process*. The test
+    asserts the arithmetic: the soft limit is above the CPU already spent by
+    about the budget. Nothing is meant to reach the limit.
     """
     arm_cpu_budget(3600)
 
     soft, _hard = resource.getrlimit(resource.RLIMIT_CPU)
     spent = cpu_seconds_used()
     assert soft >= spent + 3600
-    # And bounded by it: the whole point of re-arming is that the fortieth cell
-    # does not inherit what the first one spent.
+    # The limit is also bounded by the budget. The purpose of arming again is
+    # that the fortieth cell does not inherit what the first cell spent.
     assert soft <= spent + 3601 + 1
 
 
 def test_relaxing_puts_the_soft_limit_back_and_stops_re_delivery() -> None:
-    """The disarm, which is what makes one breach one signal.
+    """The disarm, which makes one breach produce one signal.
 
-    Without it the soft limit stays where `arm_cpu_budget` left it, the process
-    stays over it, and the kernel keeps being signalled every CPU-second through
-    the teardown that is trying to report the breach.
+    Without the disarm, the soft limit stays where `arm_cpu_budget` left it and
+    the process stays over it. The kernel then signals the process every
+    CPU-second, through the teardown that tries to report the breach.
     """
     _, hard = resource.getrlimit(resource.RLIMIT_CPU)
     arm_cpu_budget(3600)

@@ -1,14 +1,15 @@
 """Python skills as pre-imported callables.
 
-Ported convention, not ported code (§6.8): prime-agent's `rlm/skill.py` makes a
-module with a `run()` callable, so a cell writes `await websearch(query=...)`
-rather than `await websearch.run(query=...)`. The wrapper keeps that, and keeps
-attribute access working, so both spellings mean the same thing.
+This is a ported convention, not ported code (§6.8). The `rlm/skill.py` of
+prime-agent makes a module with a `run()` function callable. A cell then writes
+`await websearch(query=...)` and not `await websearch.run(query=...)`. The
+wrapper keeps that convention and keeps attribute access working, so both
+spellings mean the same thing.
 
-An import that fails binds a **stub that explains itself** instead of leaving the
-name undefined. A model that finds a name missing reads it as its own mistake and
-spends a turn working around it; a stub that says "this skill failed to import,
-here is why" is one line of context and no wasted turn.
+An import that fails binds a **stub that explains itself**. It does not leave the
+name undefined. A model that finds a name missing reads that as its own mistake,
+and uses a turn to work around it. A stub that says "this skill failed to import,
+and here is why" costs one line of context and no turn.
 
 @module ph_runtime.skill
 """
@@ -23,7 +24,7 @@ __all__ = ["UnavailableSkill", "wrap_skill_module"]
 
 
 class _CallableModule:
-    """A module whose `run()` is reachable by calling the module itself."""
+    """A module whose `run()` can be reached by calling the module itself."""
 
     def __init__(self, module: ModuleType, entry: Callable[..., Any]) -> None:
         self._module = module
@@ -43,7 +44,7 @@ class _CallableModule:
 
 
 class UnavailableSkill:
-    """A skill that did not import. Says so when used, and when printed."""
+    """A skill that did not import. It says so when it is used and when it is printed."""
 
     def __init__(self, name: str, reason: str) -> None:
         self._name = name
@@ -69,6 +70,7 @@ class UnavailableSkill:
 
 
 def wrap_skill_module(module: ModuleType) -> Any:  # noqa: ANN401
-    """The module, callable when it offers a `run()`; otherwise unchanged."""
+    """Return the module, made callable when it has a `run()`. Otherwise return it
+    unchanged."""
     entry = getattr(module, "run", None)
     return _CallableModule(module, entry) if callable(entry) else module

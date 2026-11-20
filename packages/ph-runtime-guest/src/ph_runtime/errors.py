@@ -1,14 +1,14 @@
-"""The two failures a cell can see from a governed call, and the line between them.
+"""The two failures that a cell can see from a governed call, and how they differ.
 
-`ToolFailed` is the program's to handle — a timeout, a bad argument, a file that
-was not there. Catching it and trying something else is exactly right.
+`ToolFailed` is for the program to handle: a timeout, a bad argument, or a file
+that was not there. To catch it and try something else is correct.
 
-`RunStopped` is not. It derives from `BaseException` so that `except Exception`
-does not swallow it, and the reason is C3: a program that can catch a refusal can
-route around it — retry with a different path, fall back to `subprocess`. The
-refusal ends the run, the model sees it in context, and partial state is bounded
-to one cell. A budget (C4) ends the run for the same reason: governance is per
-call, but attention is per turn.
+`RunStopped` is not for the program to handle. It derives from `BaseException` so
+that `except Exception` does not catch it. The reason is C3: a program that can
+catch a refusal can go around it, for example by a retry with a different path or
+a fallback to `subprocess`. The refusal ends the run, the model sees it in
+context, and partial state is limited to one cell. A budget (C4) ends the run for
+the same reason: governance is per call, but attention is per turn.
 
 @module ph_runtime.errors
 """
@@ -19,7 +19,7 @@ __all__ = ["RunStopped", "ToolFailed"]
 
 
 class ToolFailed(Exception):
-    """A governed call failed. Yours to handle."""
+    """A governed call failed. The program may handle this."""
 
     def __init__(self, name: str, message: str) -> None:
         super().__init__(f"{name} failed: {message}")
@@ -27,11 +27,12 @@ class ToolFailed(Exception):
 
 
 class RunStopped(BaseException):
-    """The run is over — refused, or out of budget. Not yours to handle.
+    """The run is over, because it was refused or it is out of budget. The program
+    must not handle this.
 
-    `BaseException` so `except Exception` does not swallow it — but note where
-    the *enforcement* is: a cell can still write `except BaseException`, so what
-    actually ends a refused run is the host firing its abort ladder (C3). This
-    class is the courtesy that lets a well-behaved cell unwind with a readable
-    message first.
+    The class derives from `BaseException` so that `except Exception` does not
+    catch it. But the *enforcement* is elsewhere. A cell can still write `except
+    BaseException`, so what really ends a refused run is the abort ladder of the
+    host (C3). This class is a courtesy: it lets a well-behaved cell unwind with
+    a readable message first.
     """

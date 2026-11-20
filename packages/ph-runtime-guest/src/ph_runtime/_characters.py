@@ -1,17 +1,17 @@
-"""The cuts `ph_runtime` needs from `ph.characters` — a copy, pinned by a test.
+"""The cuts that `ph_runtime` needs from `ph.characters`: a copy, held equal by a test.
 
-The guest bounds what a cell prints by bytes, and a bound that cuts text has to
-cut between characters: an accent left without its letter, half an emoji
-sequence, a byte sequence broken in two. `ph.characters` is that rule, and this
-package ships into the guest venv with `dill` as its only dependency, so it
-cannot import it — the module lives in the ph-core wheel.
+The guest limits what a cell prints by bytes. A limit that cuts text must cut
+between characters. A bad cut leaves an accent without its letter, half of an
+emoji sequence, or a byte sequence broken in two. `ph.characters` is the rule for
+a correct cut. This package ships into the guest venv with `dill` as its only
+dependency, so it cannot import that module, which is in the ph-core wheel.
 
-**Copied whole, compared character for character below this docstring by
-`test_protocol_mirror.py`** — the arrangement `_json.py` has, taken a step
-further because the rule here is tables as well as functions. When the test
-fails, copy `ph/characters.py` across again, below this docstring.
+**The module is copied whole. `test_protocol_mirror.py` compares everything below
+this docstring character for character.** `_json.py` has the same arrangement.
+Here it goes one step further, because the rule is tables as well as functions.
+When the test fails, copy `ph/characters.py` across again, below this docstring.
 
-Private: this is ph-core's code, not the guest's API.
+This module is private. It is the code of ph-core, not the API of the guest.
 
 @module ph_runtime._characters
 """

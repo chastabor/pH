@@ -1,4 +1,4 @@
-"""`python -m ph_runtime` — how the host spawns the guest."""
+"""`python -m ph_runtime`: the command that the host uses to start the guest."""
 
 from __future__ import annotations
 
