@@ -1,32 +1,34 @@
-"""The event vocabulary this build understands.
+"""The event vocabulary that this build understands.
 
-The persistence read path refuses to interpret a log containing a type outside
-this set **unless** the event carries `ignorable`. Such a log was likely written
-by a newer harness, and an unrecognized *required* event may change how the rest
-of the log is read — so silently skipping it would reconstruct a wrong session
-rather than an incomplete one.
+The persistence read path refuses to interpret a log that contains a type
+outside this set, **unless** the event carries `ignorable`. A newer harness
+probably wrote such a log. An unrecognized *required* event may change how the
+rest of the log is read. So to skip it silently would reconstruct a wrong
+session, and not only an incomplete one.
 
-Checked by `test_log_writers.py`, which walks every write in **every** package's
-shipped code — ph-core's and the bundles' alike: a type that ships without an entry
-here would be a log this build could write and then refuse to read. Whether a type
-is *ignorable* is its own decision, argued in the comment beside it and pinned by
-its producer's tests.
+`test_log_writers.py` checks the set. It walks every write in the shipped code
+of **every** package: ph-core and the bundles alike. A type that ships without
+an entry here would be a log that this build could write and then refuse to
+read. Whether a type is *ignorable* is a separate decision. The comment beside
+the type argues it, and the tests of its producer check it.
 
-**And the write door now refuses what the read door refuses** (F11): the append behind
-every writer (`Session._append`, T6) raises `UnknownEventTypeError` for a type outside
-the vocabulary, where it used to
-write it and leave the log unopenable at the next resume. A type that belongs to a
-package outside ph-core is added with `declare_log_type`, at import, the way a bus
-event is declared with `EventRegistry.declare`.
+**The write path refuses what the read path refuses** (F11). The append behind
+every writer (`Session._append`, T6) raises `UnknownEventTypeError` for a type
+outside the vocabulary. Earlier it wrote the type and left the log impossible
+to open at the next resume. A package outside ph-core adds its type with
+`declare_log_type`, at import, the way a bus event is declared with
+`EventRegistry.declare`.
 
 **Whether only an auditor reads a type is declared here too**
-(`AUDIT_ONLY_SESSION_EVENT_TYPES`, `declare_log_type(audit_only=)`): a front end draws no
-conversation row for one, and the auditor's view records it. So a front end derives both
-of its tables from the vocabulary, rather than each type being listed again in each.
+(`AUDIT_ONLY_SESSION_EVENT_TYPES`, `declare_log_type(audit_only=)`). A front
+end draws no conversation row for such a type, and the auditor's view records
+it. So a front end derives both of its tables from the vocabulary, and does not
+list each type again in each table.
 
-**And which of a type's fields telemetry ships** (`EXPORTED_SESSION_EVENT_FIELDS`,
-`declare_log_type(exported=)`): a ledger record names its event, and carries only the
-fields its type declares, so the telemetry seam never names a type or a payload key.
+**Which fields of a type telemetry ships is declared here too**
+(`EXPORTED_SESSION_EVENT_FIELDS`, `declare_log_type(exported=)`). A ledger
+record names its event, and carries only the fields that its type declares. So
+the telemetry seam never names a type or a payload key.
 
 @module ph.session.known_event_types
 """
@@ -69,81 +71,86 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "request/header",
         "session/end-seed",
         "session/resumed",
-        # A step's model call made again, by the row named in `by` (P1). One per
-        # retry the loop accepted, so `step/start` plus these is every model
-        # call. Ignorable: a reader that skips it undercounts the calls a
-        # ceiling has seen — accounting — and the conversation is unchanged,
-        # since a failed attempt appends no message.
+        # A model call of a step, made again by the row named in `by` (P1). There
+        # is one for each retry that the loop accepted, so `step/start` plus
+        # these is every model call. Ignorable: a reader that skips it
+        # undercounts the calls that a ceiling has seen. That is accounting. The
+        # conversation is unchanged, because a failed attempt appends no message.
         "step/retry",
-        # A session continued in a fresh file (§7 step 6). The parent's own
-        # terminal record, naming the log that carries on — the forward half of
-        # a link whose backward half is the child's `parent_session` header.
-        # Needed because a segment and a branch are structurally identical: both
-        # are a fork, and only this says which one a person is looking at.
+        # A session continued in a fresh file (§7 step 6). It is the terminal
+        # record of the parent, and it names the log that carries on. It is the
+        # forward half of a link. The backward half is the `parent_session`
+        # header of the child. It is needed because a segment and a branch have
+        # the same structure: both are a fork, and only this record says which
+        # one a reader is looking at.
         "session/segmented",
-        # A mutating command a protocol client asked for, recorded so asking
-        # twice is safe across a restart (P5-02). Not a slash `command/*`. Its
-        # settle says the verb finished, or — written by repair — that a crash
-        # left its outcome unknown (P10-10), which is what a retry is told.
+        # A mutating command that a protocol client asked for. It is recorded so
+        # that asking twice is safe across a restart (P5-02). It is not a slash
+        # `command/*`. Its settle says that the verb finished. When repair
+        # writes the settle, it says that a crash left the outcome unknown
+        # (P10-10), and a retry is told that.
         "client/command",
         "client/command-settled",
-        # The supervisor's retry ladder (P5-04): a crashed root task being run
-        # again, the ladder giving up, and a retry that worked. In the log
-        # rather than in supervisor memory, because "this root tried three times
-        # and stopped" must survive the process that decided it — and a root
-        # resumed mid-ladder that forgot would start the count over and retry
-        # forever.
+        # The retry ladder of the supervisor (P5-04): a crashed root task that
+        # is run again, the ladder giving up, and a retry that worked. These are
+        # in the log and not in the memory of the supervisor, because "this root
+        # tried three times and stopped" must survive the process that decided
+        # it. A root that was resumed in the middle of the ladder and forgot
+        # would start the count over and retry forever.
         #
-        # `supervisor/*` and not `agent/*`: `ph.agent` owns that namespace (its
-        # registry declares `agent/status`, `agent/error` and `agent/inbox/*`
-        # with `owner="ph.agent"`), and these are the supervisor's records
-        # *about* an agent rather than the agent's own. `agent/failed` also sat
-        # one letter from `agent/error`, which means something else entirely.
+        # They are `supervisor/*` and not `agent/*`. `ph.agent` owns that
+        # namespace: its registry declares `agent/status`, `agent/error` and
+        # `agent/inbox/*` with `owner="ph.agent"`. These are the records of the
+        # supervisor *about* an agent, and not the records of the agent itself.
+        # The earlier name `agent/failed` also read too much like
+        # `agent/error`, which means something else.
         "supervisor/retry",
         "supervisor/failed",
         "supervisor/recovered",
-        # A root released for being idle (P5-05). Its own record because the
-        # alternative is an unexplained gap: a transcript that stops for three
-        # days and resumes reads as a crash, and the `session/resumed` on the
-        # way back says only that something was resumed, not that nothing had
-        # gone wrong.
+        # A root released because it was idle (P5-05). It has its own record
+        # because the alternative is an unexplained gap. A transcript that stops
+        # for three days and then resumes reads as a crash. The
+        # `session/resumed` on the way back says only that something was
+        # resumed. It does not say that nothing had gone wrong.
         "supervisor/passivated",
-        # The daemon can no longer be reached, written into every root it is
-        # running (P5-11). Its reader is nobody who is connected: by the time
-        # this is appended the socket is gone, so a client can neither be
-        # notified nor connect to ask. The transcript is the surface that
-        # survives — a run that went quiet at 18:04 says here that its
-        # supervisor lost its socket at 18:04, and names the fix.
+        # The daemon can no longer be reached. This is written into every root
+        # that it is running (P5-11). No connected client reads it: by the time
+        # it is appended the socket is gone, so a client can neither be notified
+        # nor connect to ask. The transcript is the surface that survives. A run
+        # that went quiet at 18:04 says here that its supervisor lost its socket
+        # at 18:04, and names the fix.
         "supervisor/unreachable",
         # A pollable invariant did not hold when the supervisor last asked (I6).
-        # In the log rather than in the daemon's stderr because the finding is
-        # about bookkeeping the same process owns: a projection that no longer
-        # equals its fold is exactly the condition under which that process's
-        # own account of itself is the thing in doubt.
+        # The finding is in the log and not in the stderr of the daemon, because
+        # it is about bookkeeping that the same process owns. When a projection
+        # no longer equals its fold, the account that the process gives of
+        # itself is exactly what is in doubt.
         "supervisor/violated",
-        # Future work a root will do, and the claim that it is doing it (P5-06).
-        # `schedule/tick` is appended *before* delivery: a tick recorded and
-        # lost to a crash costs one skipped run, while a tick delivered and lost
-        # costs a repeated one — and repeating a scheduled prompt bills twice
-        # and confuses the transcript.
+        # Future work that a root will do, and the claim that it is doing it
+        # (P5-06). `schedule/tick` is appended *before* delivery. A tick that is
+        # recorded and then lost to a crash costs one skipped run. A tick that
+        # is delivered and then lost costs a repeated run, and a repeated
+        # scheduled prompt bills twice and confuses the transcript.
         "schedule/created",
         "schedule/canceled",
         "schedule/tick",
-        # An autonomous run's objective, its spend, its quality gates and how it
-        # ended (P5-07). `goal/settled` names *which* budget stopped it, because
-        # "it stopped" and "it ran out of turns" are different things to whoever
-        # reads the trace, and only one of them suggests raising the budget.
+        # The objective of an autonomous run, its spend, its quality gates and
+        # how it ended (P5-07). `goal/settled` names *which* budget stopped the
+        # run. "It stopped" and "it ran out of turns" are different things to
+        # the reader of the trace, and only one of them suggests a larger
+        # budget.
         "goal/set",
         "goal/continued",
         "goal/gate",
         "goal/settled",
         "step/end",
         "step/start",
-        # Appended once the pipeline's gate has decided and before the body runs
-        # (B4, P7-15): after the *wait*, before the *act*. A call still parked on
-        # a human when the process dies therefore has no record — nothing
-        # happened — and repair reads that as `TOOL_NOT_STARTED`. Its arguments
-        # are what ran; the model's own are in the assistant message.
+        # Appended after the gate of the pipeline has decided and before the
+        # body runs (B4, P7-15): after the *wait*, before the *act*. So a call
+        # that is still waiting for a human when the process dies has no record,
+        # because nothing happened. Repair reads that as `TOOL_NOT_STARTED`. The
+        # arguments of this record are what ran. The arguments that the model
+        # wrote are in the assistant message.
         "tool/call",
         "tool/result",
         "turn/end",
@@ -153,267 +160,291 @@ KNOWN_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "approval/asked",
         "approval/decided",
         "approval/policy",
-        # The model asking the person something that is not an approval (P7-09,
-        # emitted by `tool-ask-user`). Two events for the reason approvals have
-        # two: the ask is appended before the waterfall runs, so a crash while
-        # somebody was deciding leaves the question in the log rather than losing
-        # it — `QUESTION_ASK` open, which repair settles on resume.
+        # The model asks the user something that is not an approval (P7-09,
+        # emitted by `tool-ask-user`). There are two events for the same reason
+        # that approvals have two. The ask is appended before the waterfall
+        # runs. So a crash while somebody was deciding leaves the question in
+        # the log and does not lose it: `QUESTION_ASK` is open, and repair
+        # settles it on resume.
         #
         # Only a question that was actually *delivered* appears at all. An
-        # unattended ask resolves to "no answer" without appending, so a log
-        # never claims a person was asked and declined when no person was there.
+        # unattended ask resolves to "no answer" and appends nothing. So a log
+        # never claims that a person was asked and declined when no person was
+        # there.
         "question/asked",
         "question/answered",
-        # A shell command a *person* ran from the composer, and what it printed
-        # (P7-10, emitted by `ph-app`'s `session/shell`). Two events for the
-        # reason `tool/call`/`tool/result` are two: the command is appended
-        # before it runs, so one that hangs — or that takes the daemon down with
-        # it — still shows in the log what was started, which is exactly the
-        # command worth knowing about.
+        # A shell command run outside a tool call, and what it printed (P7-10).
+        # Both records go through `ShellService.run_recorded`. The
+        # `session/shell` verb of `phern` calls it for a command that the user
+        # ran from the composer, and an autonomous goal calls it for a gate
+        # (S16). There are two events for the same reason that `tool/call` and
+        # `tool/result` are two. The command is appended before it runs. So a
+        # command that hangs, or that takes the daemon down with it, still shows
+        # in the log what was started. That is exactly the command worth knowing
+        # about.
         #
-        # Invisible to the model by not being one of the three surface-eligible
-        # types — see `SURFACE_EVENT_TYPES`, which is where that mechanism is
-        # defined and explained.
+        # These are invisible to the model because they are not among the three
+        # surface-eligible types. See `SURFACE_EVENT_TYPES`, which defines and
+        # explains that mechanism.
         "shell/command",
         "shell/result",
-        # The gating *posture* (P4-05; emitted by ph-stabilize's `hitl`). Its own
-        # type rather than a field on `approval/policy`, which `permission-presets`
-        # also writes: one last-write-wins fold with two writers, one of which
-        # does not know the field exists, is a posture that silently reverts when
-        # someone switches preset. Listed here because the reader that refuses an
-        # unknown type is ph-core's.
+        # The gating *posture* (P4-05; emitted by `hitl` in ph-stabilize). It is
+        # its own type and not a field on `approval/policy`, which
+        # `permission-presets` also writes. One last-write-wins fold with two
+        # writers, where one writer does not know that the field exists, is a
+        # posture that silently reverts when someone switches preset. The type
+        # is listed here because the reader that refuses an unknown type belongs
+        # to ph-core.
         "approval/mode",
-        # A slash command, on disk before its body runs and settled after (S16):
-        # `COMMAND_RUN`, whose orphan repair closes, since a body may do anything a
-        # command does — `/revert` rewrites the tree.
+        # A slash command, on disk before its body runs and settled after (S16).
+        # This is `COMMAND_RUN`. Repair closes its orphan, because a body may do
+        # anything that a command does, and `/revert` rewrites the tree.
         "command/done",
         "command/run",
-        # The environment a session started in, in full (session profiles, S3):
-        # every environment row through its model, and the person's layers it came
-        # from. Required: a reader that skipped it would rebuild a session in an
-        # environment it never ran in.
+        # The full environment that a session started in (session profiles, S3):
+        # every environment row through its model, and the layers of the user
+        # that it came from. Required: a reader that skipped it would rebuild a
+        # session in an environment that it never ran in.
         "profile/base",
-        # One deviation from that base, as a profile entry (S4): a start option, a
-        # slash command or a verb. Required, and written before the change is made:
-        # a reader that skipped one would rebuild a session without an allowance it
-        # ran with.
+        # One deviation from that base, as a profile entry (S4): a start option,
+        # a slash command or a verb. Required, and written before the change is
+        # made. A reader that skipped one would rebuild a session without an
+        # allowance that it ran with.
         "profile/override",
         # A named profile that moved since the session started (S6): a version
-        # accepted for the next start, and one a person said no to — and an
-        # override that stops applying. The first two are ignorable: a reader that
-        # skipped them would start on the base it already has, or ask once more.
-        # The clear is required: skipping it rebuilds an override no longer in force.
+        # accepted for the next start, a version that a person said no to, and
+        # an override that stops applying. The first two are ignorable: a reader
+        # that skipped them would start on the base that it already has, or ask
+        # one more time. The clear is required: a reader that skipped it would
+        # rebuild an override that is no longer in force.
         "profile/adopted",
         "profile/declined",
         "profile/override-cleared",
-        # An adopted version a start could not mount, taken back with the reason.
-        # Required: a reader that skipped it would apply the adoption again.
+        # An adopted version that a start could not mount, taken back with the
+        # reason. Required: a reader that skipped it would apply the adoption
+        # again.
         "profile/withdrawn",
-        # Changes the log could not hold when they were made, refused and so never
-        # in force. Required: a reader that skipped it would start the session on
-        # a change the person was told was refused.
+        # Changes that the log could not hold when they were made. They were
+        # refused and so were never in force. Required: a reader that skipped it
+        # would start the session on a change that the user was told was
+        # refused.
         "profile/refused",
-        # The session's environment saved as a named profile (S7): ignorable, since
-        # it changes nothing the session runs with.
+        # The environment of the session, saved as a named profile (S7).
+        # Ignorable, because it changes nothing that the session runs with.
         "profile/saved",
-        # A skill's body read at runtime, hashed, for the audit (S8, decision 12).
-        # Ignorable: a skill's version never stops a task or makes a restart ask.
+        # The body of a skill, read at runtime and hashed for the audit (S8,
+        # decision 12). Ignorable: the version of a skill never stops a task or
+        # makes a restart ask.
         "skill/read",
         "permission/preset",
         "sandbox/mode",
-        # A confined command refused something (P6-38): a host the egress proxy
-        # would not carry, or a write the kernel turned back. The proxy knows the
-        # host; the kernel refuses in silence, so the filesystem half is read from
-        # what the command printed and the record says so (`via`). Ignorable: the
-        # command's own result already shows it failed; this is the account of
-        # *why*, carrying the `/sandbox` line that lifts it.
+        # A confined command was refused something (P6-38): a host that the
+        # egress proxy would not carry, or a write that the kernel turned back.
+        # The proxy knows the host. The kernel refuses in silence, so the
+        # filesystem half is read from what the command printed, and the record
+        # says so (`via`). Ignorable: the result of the command already shows
+        # that it failed. This record is the account of *why*, and it carries
+        # the `/sandbox` line that lifts the refusal.
         "sandbox/denied",
         # capability observations
         "fs/observed",
-        # Where an agent's writes land (D21, P4-07). A *pair*: an `acquired` with
-        # no `disposed` is how a leaked workspace is detected at session open,
-        # which only works if both halves are in the vocabulary.
+        # Where the writes of an agent land (D21, P4-07). This is a *pair*. An
+        # `acquired` with no `disposed` is how a leaked workspace is detected at
+        # session open, and that only works if both halves are in the
+        # vocabulary.
         "workspace/acquired",
         "workspace/disposed",
-        # A workspace put back to a restore point, and whether it was (S12) —
-        # `WORKSPACE_RESTORE`. A pair, because the restore is an act of its own: one
-        # cut short leaves a tree that is neither the restore point nor what was
-        # there. Opened by the seam, whoever asked — `/revert` or a retry.
+        # A workspace put back to a restore point, and whether it was (S12).
+        # This is `WORKSPACE_RESTORE`. It is a pair because the restore is an
+        # act of its own: a restore that is cut short leaves a tree that is
+        # neither the restore point nor what was there. The seam opens it,
+        # whoever asked: `/revert` or a retry.
         "workspace/restoring",
         "workspace/restored",
-        # Where a tier is *about to* put a fresh tree, written before it makes one
-        # (S12): an `acquiring` with nothing after it is a tree a crash may have left
-        # half-made — a checkout, or a mounted overlay — and reconcile needs the
-        # root to find it.
+        # Where a tier is *about to* put a fresh tree, written before the tier
+        # makes one (S12). An `acquiring` with nothing after it is a tree that a
+        # crash may have left half-made: a checkout, or a mounted overlay.
+        # Reconcile needs the root to find it.
         "workspace/acquiring",
-        # A tree marked as evidence, written when the mark is made rather than
-        # only on the closing half (P6-28). A retention is decided because a run
-        # went wrong, and the most complete way for one to go wrong writes no
-        # `disposed` at all — so the mark has to be durable before that.
+        # A tree marked as evidence. It is written when the mark is made, and
+        # not only on the closing half (P6-28). A retention is decided because a
+        # run went wrong, and the most complete way for a run to go wrong writes
+        # no `disposed` at all. So the mark has to be durable before that.
         "workspace/retained",
-        # Materials that did not reach a fresh workspace (E14). Appended only
-        # when something failed — a silent success is the ordinary case, and one
-        # event per agent saying "nothing went wrong" is noise in a log whose
-        # whole value is that everything in it happened.
+        # Materials that did not reach a fresh workspace (E14). It is appended
+        # only when something failed. A silent success is the ordinary case. One
+        # event for each agent that says "nothing went wrong" is noise in a log
+        # whose value is that everything in it happened.
         "workspace/provisioned",
-        # The per-run restore point (E7). **Not** ignorable: a reader that
+        # The restore point of each run (E7). **Not** ignorable: a reader that
         # skipped it would offer `/revert` a session with no restore points
-        # while the refs are sitting in the repository, which is a build
-        # misreading recoverable state as unrecoverable.
+        # while the refs are in the repository. That build would misread
+        # recoverable state as unrecoverable.
         "workspace/checkpoint",
         # retry
         "llm/retry",
-        # Questions a decision model answered on one of the session's routes, for
-        # this session's agent (`LlmRuntime.decide`): which route, how many
-        # questions, and what the provider said it cost — or why it would not.
-        # Not a turn's request, so no `assistant/message` carries the spend; this
-        # is where a budget and a child's account find it (`SPENDING_TYPES`).
-        # Ignorable: nothing in the conversation moves, and a reader that skips
-        # it loses the metering.
+        # Questions that a decision model answered on one of the routes of the
+        # session, for the agent of this session (`LlmRuntime.decide`): which
+        # route, how many questions, and what the provider said it cost, or why
+        # the route would not decide. This is not the request of a turn, so no
+        # `assistant/message` carries the spend. A budget and the account of a
+        # child find the spend here (`SPENDING_TYPES`). Ignorable: nothing in
+        # the conversation moves, and a reader that skips it loses the metering.
         "llm/decided",
         "llm/decision-failed",
         # Code Mode dispatch records (log-only; see ph.tools.code_mode)
         "tool/code-dispatch",
         "tool/code-dispatch-start",
-        # A call whose tool names its effect (P10-12): opened before the body,
-        # settled with what it returned, so the same effect asked for again
-        # under a new call id is answered from the log. **Not** ignorable: a
-        # reader that skipped them would run an effect the log says happened.
+        # A call whose tool names its effect (P10-12). It is opened before the
+        # body and settled with what the body returned. So the same effect,
+        # asked for again under a new call id, is answered from the log. **Not**
+        # ignorable: a reader that skipped them would run an effect that the log
+        # says happened.
         "tool/effect",
         "tool/effect-settled",
-        # A session, or one of its children, waiting for a credential its route
-        # names and this deployment cannot supply (T5) — opened when the resume
-        # check holds it, settled when the name arrives. Names only, never values
-        # (I-3). Ignorable: a reader that skips them starts the work and meets the
-        # missing key at its first request, which is what every build did before.
+        # A session, or one of its children, that waits for a credential that
+        # its route names and this deployment cannot supply (T5). It is opened
+        # when the resume check holds it, and settled when the name arrives.
+        # Names only, never values (I-3). Ignorable: a reader that skips them
+        # starts the work and meets the missing key at its first request, which
+        # is what every build did before.
         "credential/needed",
         "credential/supplied",
-        # Persistent-kernel state (D17; emitted by ph-rlm's snapshot policy).
-        # These are what make `persistence: "namespace"` admissible at all: the
-        # seam takes the provider's promise at registration, and these events are
-        # the promise being kept. Listed here rather than in ph-rlm because the
-        # *reader* is ph-core — a log carrying a type this build does not know is
-        # refused on the seed path, so the vocabulary has one home.
+        # Persistent-kernel state (D17; emitted by the snapshot policy of
+        # ph-rlm). These make `persistence: "namespace"` admissible at all: the
+        # seam takes the promise of the provider at registration, and these
+        # events are the promise being kept. They are listed here and not in
+        # ph-rlm because the *reader* is ph-core. The seed path refuses a log
+        # that carries a type this build does not know, so the vocabulary has
+        # one home.
         "kernel/snapshot",
         "kernel/restored",
-        # Delegation (P3-11; emitted by a `ctx.subagents` provider). Named for
-        # the *seam*, not for the bundle that ships the first provider: the
-        # reader is ph-core and ph-app, neither of which depends on ph-rlm, and a
-        # second provider emitting `rlm/…` would be lying about its identity in
-        # an append-only log. The provider names itself in the payload instead.
-        # Each is in the **child's own** log (Phase 11): a child's state *is* the
-        # fold of these, with no parent's copy beside it, so each is required
-        # reading — the ladder counts starts off the statuses, and a child's value
-        # is its `returned`.
+        # Delegation (P3-11; emitted by a `ctx.subagents` provider). The types
+        # are named for the *seam*, and not for the bundle that ships the first
+        # provider. The readers are ph-core and `ph_app`, and neither imports
+        # ph-rlm. A second provider that emitted `rlm/…` would state a false
+        # identity in an append-only log. The provider names itself in the
+        # payload instead. Each record is in the **own log of the child**
+        # (Phase 11). The state of a child *is* the fold of these records, with
+        # no copy in the parent beside it. So each one is required reading: the
+        # ladder counts starts from the statuses, and the value of a child is
+        # its `returned`.
         "subagent/admitted",
         "subagent/deleted",
         "subagent/returned",
         "subagent/status",
-        # The Continual Harness (P3-16). Its state *is* this fold — there is no
-        # side file to fall back on — so a reader that skipped one would show a
-        # harness the session does not have. A rollback is a refinement with
-        # `rollbackOf` set, so there is one type rather than two fold cases that
-        # have to agree about one operation.
+        # The Continual Harness (P3-16). Its state *is* this fold, and there is
+        # no side file to fall back on. So a reader that skipped one would show
+        # a harness that the session does not have. A rollback is a refinement
+        # with `rollbackOf` set. So there is one type, and not two fold cases
+        # that have to agree about one operation.
         "harness/refined",
-        # Considering and declining. Unlike the refinement itself this changes no
-        # state — it is what advances the auto-refine cooldown (H7) — so it is
-        # ignorable: a reader that skips it gets one extra review pass, not a
-        # harness the session does not have.
+        # Considering and declining. Unlike the refinement itself, this changes
+        # no state. It advances the auto-refine cooldown (H7). So it is
+        # ignorable: a reader that skips it gets one extra review pass, and not
+        # a harness that the session does not have.
         "harness/refine-considered",
-        # H1's probe of a skill entry's reference, and what it found (S21) —
-        # `HARNESS_PROBE`, declared in `ph_rlm.kinds`. Ignorable: the refinement
-        # records what it refused, and a reader that skips these loses the account
-        # of the check, not the harness.
+        # The probe by H1 of the reference of a skill entry, and what it found
+        # (S21). This is `HARNESS_PROBE`, declared in `ph_rlm.kinds`. Ignorable:
+        # the refinement records what it refused. A reader that skips these
+        # loses the account of the check, and not the harness.
         "harness/probe",
         "harness/probed",
-        # Offloading (P4-02, G2; emitted by `ph-stabilize`'s `tool-result-offload`).
-        # The forwarding address for a result the model was handed a preview of.
-        # Ignorable: `tool/result` already carries what the model saw, so a
-        # reader that skips this loses the way back to the original, not the
-        # conversation — the same test the `context/loaded` recipe passes.
+        # Offloading (P4-02, G2; emitted by `tool-result-offload` in
+        # `ph-stabilize`). The forwarding address for a result of which the
+        # model was handed a preview. Ignorable: `tool/result` already carries
+        # what the model saw. A reader that skips this loses the way back to the
+        # original, and not the conversation. The `context/loaded` recipe passes
+        # the same test.
         "offload/spilled",
-        # And the input side (G3): where a pasted message went. Ignorable for
-        # the same reason — the surface `replace` beside it is what the model
-        # reads, and that is a required `user/message`, so a reader skipping
-        # this loses the forwarding address and nothing else.
+        # The input side (G3): where a pasted message went. Ignorable for the
+        # same reason. The surface `replace` beside it is what the model reads,
+        # and that is a required `user/message`. So a reader that skips this
+        # loses the forwarding address and nothing else.
         "offload/input-spilled",
-        # Planning (P4-01, G1; emitted by `ph-stabilize`'s `tool-todo`, and by
-        # `skill-steps` when a skill it read declares a procedure — two writers
-        # of one event, deliberately, because both mean "the list is now this").
-        # The
-        # list *is* this fold — there is no side table — and it reaches the
-        # model through a prompt context, so a reader that skipped it would
-        # assemble a different prompt than the session had. Required, not
-        # ignorable: the difference is model-visible.
+        # Planning (P4-01, G1). `tool-todo` in `ph-stabilize` emits it, and so
+        # does `skill-steps` when a skill that it read declares a procedure.
+        # There are two writers of one event on purpose, because both mean "the
+        # list is now this". The list *is* this fold, and there is no side
+        # table. The list reaches the model through a prompt context, so a
+        # reader that skipped it would assemble a different prompt from the one
+        # that the session had. Required, not ignorable: the difference is
+        # model-visible.
         "todo/write",
-        # The nudge budget of the procedure `skill-steps` seeded last (D16): the
-        # skill's own `max-nudges`, or `null` for the row's default. Ignorable:
-        # a reader that skips it steers against the profile's budget instead,
-        # which changes how many nudges come *next* — every nudge already sent
-        # is a required `user/message` of its own.
+        # The nudge budget of the procedure that `skill-steps` seeded last
+        # (D16): the `max-nudges` of the skill, or `null` for the default of the
+        # row. Ignorable: a reader that skips it steers against the budget of
+        # the profile instead. That changes how many nudges come *next*. Every
+        # nudge that was already sent is a required `user/message` of its own.
         "skill-steps/budget",
-        # What a decision model said of a turn that stopped with a procedure
-        # unfinished, and the line `skill-steps` held its nudge at. Ignorable:
-        # a held nudge is a message that was never sent, so a reader that skips
-        # this reads the same conversation and loses why the turn was let end.
+        # What a decision model said about a turn that stopped with a procedure
+        # unfinished, and the threshold at which `skill-steps` held its nudge.
+        # Ignorable: a held nudge is a message that was never sent. So a reader
+        # that skips this reads the same conversation, and loses why the turn
+        # was allowed to end.
         "skill-steps/decided",
-        # Compaction (P4-03, G4; emitted by `ph-stabilize`'s `compaction-summarize`).
-        # The accounting for one landed summary: what it shadowed, what that
-        # cost, and which model wrote it. Ignorable — the summary the model
-        # actually reads is the `user/message` appended immediately after this,
-        # a required surface event, so a reader that skips this loses the
-        # metering and the provenance rather than the conversation. Kept
-        # adjacent to its replacement on purpose: that adjacency is what lets a
-        # consumer price a shadowed range without retaining per-node prices.
+        # Compaction (P4-03, G4; emitted by `compaction-summarize` in
+        # `ph-stabilize`). The accounting for one landed summary: what it
+        # shadowed, what that cost, and which model wrote it. Ignorable: the
+        # summary that the model actually reads is the `user/message` appended
+        # immediately after this, and that is a required surface event. So a
+        # reader that skips this loses the metering and the provenance, and not
+        # the conversation. It is kept adjacent to its replacement on purpose.
+        # The adjacency lets a consumer price a shadowed range without keeping a
+        # price for each node.
         "compaction/summarized",
         # An attempt that changed nothing, and why. Also ignorable: nothing in
         # the derivation moved, so a reader that skips it reads the same
-        # conversation — it just cannot say why the session was never compacted.
+        # conversation. It only cannot say why the session was never compacted.
         "compaction/declined",
         # The model-free half of the same row: long tool-call arguments elided
         # from retained history. The elision itself is an `assistant/message`
         # surface `replace`, so a reader that skips this still derives exactly
-        # what the model saw — it loses the harness's statement of what it took
-        # out and why, not the message. Ignorable for that reason, and adjacent
-        # to nothing: it names the seqs it rewrote rather than relying on
-        # position, because a truncation pass rewrites several at once.
+        # what the model saw. It loses the statement of the harness about what
+        # it took out and why, and not the message. Ignorable for that reason.
+        # It is adjacent to nothing: it names the seqs that it rewrote and does
+        # not rely on position, because a truncation pass rewrites several at
+        # the same time.
         "compaction/args-truncated",
-        # Hard boundaries (P4-04, G5; emitted by `ph-stabilize`'s `limits`).
-        # Why a turn stopped, or why a tool stopped being called. Both ignorable:
-        # the model read the denial as a `tool/result`, and a rejected step logs
-        # its own `turn/end{blocked}` — a reader that skips these loses the
-        # *reason*, which is accounting, not the conversation.
+        # Hard boundaries (P4-04, G5; emitted by `limits` in `ph-stabilize`).
+        # Why a turn stopped, or why a tool stopped being called. Both are
+        # ignorable. The model read the denial as a `tool/result`, and a
+        # rejected step logs its own `turn/end{blocked}`. A reader that skips
+        # these loses the *reason*, which is accounting and not the
+        # conversation.
         "limits/exceeded",
         "limits/breaker-tripped",
-        # Media that could not be sent (P7-01). Appended when the route a
-        # request went to would not take an attachment — an unaccepted MIME, an
-        # over-limit file, bytes no longer on disk — so that "the model was not
-        # shown this" is a fact in the log rather than a line in a process log
-        # nobody reads. Ignorable: the model saw the pointer the adapter put in
-        # its place, and that rides the `user/message` it was already carried
-        # by, so a reader skipping this loses the account of *why*, not the
-        # conversation.
+        # Media that could not be sent (P7-01). It is appended when the route
+        # that a request went to would not take an attachment: a MIME type that
+        # is not accepted, a file over the limit, bytes that are no longer on
+        # disk. So "the model was not shown this" is a fact in the log, and not
+        # a line in a process log that nobody reads. Ignorable: the model saw
+        # the pointer that the adapter put in its place. That pointer is in the
+        # `user/message` that already carried the attachment. So a reader that
+        # skips this loses the account of *why*, and not the conversation.
         "attachment/degraded",
-        # Media that was sent and is larger than the route can use (P7-03).
-        # Not a degradation: the model saw the picture and the turn is correct.
-        # What is wrong is the bill — the surplus pixels are re-uploaded on every
-        # request of the session and discarded at the far end — and a person is
-        # the only one who can act on it, which is why it is a record here rather
-        # than a line in a process log. Ignorable for the same reason as its
+        # Media that was sent and is larger than the route can use (P7-03). It
+        # is not a degradation: the model saw the picture and the turn is
+        # correct. The bill is what is wrong. The surplus pixels are uploaded
+        # again on every request of the session and discarded at the far end.
+        # Only a person can act on that, which is why it is a record here and
+        # not a line in a process log. Ignorable for the same reason as its
         # sibling, and more so: nothing about the conversation changed.
         "attachment/oversized",
-        # Bytes left this machine for a named provider's file API (P7-03). The
-        # *handle* is a cache under `$PH_CACHE` and deliberately not here — it is
-        # a prediction with an expiry, and an append-only log cannot take one
-        # back — but that a file was uploaded is a fact, it is privacy-relevant,
-        # and it is what a person auditing where their data went comes for.
-        # Ignorable: the model reads the same attachment either way. Opened by
-        # `attachment/uploading` (`UPLOAD`, S9), on disk before the bytes leave.
+        # Bytes left this machine for the file API of a named provider (P7-03).
+        # The *handle* is a cache under `$PH_CACHE` and is deliberately not
+        # here. It is a prediction with an expiry, and an append-only log cannot
+        # take one back. But that a file was uploaded is a fact, it is
+        # privacy-relevant, and it is what a person who audits where their data
+        # went looks for. Ignorable: the model reads the same attachment in
+        # both cases. `attachment/uploading` opens it (`UPLOAD`, S9), on disk
+        # before the bytes leave.
         "attachment/uploaded",
         "attachment/uploading",
-        # The context loader's recipe (P3-17): which corpus a session was told
-        # about, and the digest of the sources it was built from. Ignorable — a
-        # reader that skips it loses the note, not the conversation.
+        # The recipe of the context loader (P3-17): which corpus a session was
+        # told about, and the digest of the sources that it was built from.
+        # Ignorable: a reader that skips it loses the note, and not the
+        # conversation.
         "context/loaded",
     }
 )
@@ -442,46 +473,47 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "attachment/oversized",
         "attachment/uploaded",
         "attachment/uploading",
-        # Protocol bookkeeping a reader can skip without misreading anything
-        # else: the turn it deduplicated is in the log either way.
+        # Protocol bookkeeping that a reader can skip without misreading
+        # anything else. The turn that it deduplicated is in the log either way.
         "client/command",
         "client/command-settled",
         # Supervisor bookkeeping (P5-04), ignorable on the same terms as
-        # `limits/*`: a reader skipping these loses the *account* of why a root
-        # paused, gave up or came back — which is accounting, not the
-        # conversation, and derives no message. Listed so a build without the
-        # ladder can still seed a log a P5-04 daemon touched, rather than
-        # hard-refusing a whole session over two records carrying no
-        # conversational content.
+        # `limits/*`. A reader that skips these loses the *account* of why a
+        # root paused, gave up or came back. That is accounting and not the
+        # conversation, and it derives no message. They are listed so that a
+        # build without the ladder can still seed a log that a P5-04 daemon
+        # touched. Otherwise it would refuse a whole session over records that
+        # carry no conversational content.
         "supervisor/retry",
         "supervisor/failed",
         "supervisor/recovered",
         "supervisor/passivated",
         "supervisor/unreachable",
         "supervisor/violated",
-        # Scheduler bookkeeping: a reader skipping these loses *why* a turn
-        # started at 3am, which is accounting rather than the conversation —
-        # the prompt the tick delivered is a `user/message` either way.
+        # Scheduler bookkeeping. A reader that skips these loses *why* a turn
+        # started at 3am. That is accounting and not the conversation: the
+        # prompt that the tick delivered is a `user/message` either way.
         "schedule/created",
         "schedule/canceled",
         "schedule/tick",
-        # What a person poked at from the composer. Ignorable: a reader skipping
-        # these loses the account of what someone ran beside the conversation,
-        # and never the conversation — the model was not shown it either way,
-        # which is the whole point of the type.
+        # What ran outside a tool call: a command of the user from the composer,
+        # or the gate of a goal. Ignorable: a reader that skips these loses the
+        # account of what ran beside the conversation, and never the
+        # conversation. The model is not shown these records either way, which
+        # is the purpose of the type.
         "shell/command",
         "shell/result",
         # What the model asked a person and what they said. Ignorable, unlike
-        # `approval/*`: an approval's decision can carry substituted arguments
-        # and so changes what ran, while a question's answer reaches the model
-        # only as the `ask_user` tool result — which is a `tool/result` either
-        # way. A reader that skips these loses the account of the exchange, not
-        # the conversation. And a build that does not know these types has no
-        # `ask_user` to re-pose them with.
+        # `approval/*`. The decision of an approval can carry substituted
+        # arguments and so changes what ran. The answer to a question reaches
+        # the model only as the `ask_user` tool result, which is a `tool/result`
+        # either way. A reader that skips these loses the account of the
+        # exchange, and not the conversation. And a build that does not know
+        # these types has no `ask_user` to pose them again with.
         "question/asked",
         "question/answered",
-        # Goal bookkeeping: a reader skipping these loses why the loop went
-        # round again, which is accounting — the turns themselves are all there.
+        # Goal bookkeeping. A reader that skips these loses why the loop went
+        # round again. That is accounting: the turns themselves are all there.
         "goal/continued",
         "goal/gate",
         "limits/exceeded",
@@ -494,8 +526,9 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "workspace/disposed",
         "workspace/retained",
         "workspace/provisioned",
-        # A version accepted for the next start, or declined when one asked (S6):
-        # skipped, the session starts on the base it has, or is asked once more.
+        # A version accepted for the next start, or declined when a start asked
+        # (S6). When a reader skips these, the session starts on the base that
+        # it has, or is asked one more time.
         "profile/adopted",
         "profile/declined",
         # A save changes nothing the session runs with (S7).
@@ -504,37 +537,40 @@ IGNORABLE_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "skill/read",
     }
 )
-"""Types a *different* build may skip without misreading the rest of the log.
+"""Types that a *different* build may skip without misreading the rest of the log.
 
-Ignorability is a property of the type, not of the call — "a reader that does
-not recognize this `type` may skip it" is true of every record of the type or
-none — so it is declared here, beside the type, and `Session._append` stamps it.
-A per-call flag would let two call sites disagree about one type, and a
-forgotten flag is an older build refusing a log it could have read.
+Ignorability is a property of the type, and not of the call. "A reader that
+does not recognize this `type` may skip it" is true of every record of the type
+or of none. So it is declared here, beside the type, and `Session._append`
+stamps it. A flag on each call would let two call sites disagree about one
+type. A forgotten flag would make an older build refuse a log that it could
+have read.
 
-The set is deliberately small: an unrecognized *required* event must still
+The set is deliberately limited. An unrecognized *required* event must still
 refuse the seed, because skipping one can change how everything after it reads.
-Only purely informational records — kernel state, subagent status, usage
-attribution — belong here.
+Only purely informational records belong here, such as kernel state, metering
+and supervisor bookkeeping.
 """
 
 AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
     {
-        # The prompt snapshot each request was built from: the conversation is the
-        # messages, and this is how they were assembled.
+        # The prompt snapshot that each request was built from. The conversation
+        # is the messages, and this is how they were assembled.
         "request/header",
         # A model call made again (P1). The transcript shows the answer, and
-        # `llm/retry` already tells a reader a transient failure was retried.
+        # `llm/retry` already tells a reader that a transient failure was
+        # retried.
         "step/retry",
-        # Postures: a reading the owning row contributes to the footer, not a moment
-        # in the conversation. The auditor wants each move, and who made it.
+        # Postures. Each is a reading that the owning row contributes to the
+        # footer, and not a moment in the conversation. The auditor wants each
+        # move, and who made it.
         "approval/mode",
         "approval/policy",
         "permission/preset",
         "sandbox/mode",
-        # The environment (S3 to S7): the base, each deviation, and what a person
-        # decided about a named profile that moved. The command or the modal that
-        # asked is already the conversation's row.
+        # The environment (S3 to S7): the base, each deviation, and what a
+        # person decided about a named profile that moved. The command or the
+        # modal that asked is already the row in the conversation.
         "profile/base",
         "profile/override",
         "profile/adopted",
@@ -547,9 +583,10 @@ AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         "skill/read",
         "fs/observed",
         "session/end-seed",
-        # Where an agent's writes land and what happened to the tree: why it was
-        # kept (P6-28), what did not reach it, its restore points, and a restore
-        # about to run (S12), whose settle `workspace/restored` is the row.
+        # Where the writes of an agent land and what happened to the tree: why
+        # it was kept (P6-28), what did not reach it, its restore points, and a
+        # restore that is about to run (S12). The settle of that restore,
+        # `workspace/restored`, is the row.
         "workspace/acquiring",
         "workspace/acquired",
         "workspace/disposed",
@@ -560,58 +597,62 @@ AUDIT_ONLY_SESSION_EVENT_TYPES: frozenset[str] = frozenset(
         # A schedule created or canceled (P5-06): the tick is the row.
         "schedule/created",
         "schedule/canceled",
-        # The goal loop's accounting: `goal/set` and `goal/settled` bracket the run as
-        # rows, while a continuation and a gate result show as turns and tool output.
+        # The accounting of the goal loop. `goal/set` and `goal/settled` bracket
+        # the run as rows. A continuation and a gate result show as turns and
+        # tool output.
         "goal/continued",
         "goal/gate",
-        # Which client asked for a turn and how it ended (P5-02, P10-10): provenance
-        # to an auditor, deduplication a reader never sees.
+        # Which client asked for a turn and how it ended (P5-02, P10-10). It is
+        # provenance to an auditor, and deduplication that a reader never sees.
         "client/command",
         "client/command-settled",
-        # A keyed call's effect record (P10-12): the call renders as its tool card,
-        # and that it was answered from the log rides on the result.
+        # The effect record of a keyed call (P10-12). The call renders as its
+        # tool card, and the result carries the fact that it was answered from
+        # the log.
         "tool/effect",
         "tool/effect-settled",
         # Bytes about to leave for a provider (S9): `attachment/uploaded` is the row.
         "attachment/uploading",
-        # H1's probe and what it found (S21): the refinement's row says what it
-        # refused.
+        # The probe by H1 and what it found (S21). The row of the refinement
+        # says what it refused.
         "harness/probe",
         "harness/probed",
-        # A skill's nudge budget (D16): each nudge is a row; the number behind them
-        # is the auditor's.
+        # The nudge budget of a skill (D16). Each nudge is a row. The number
+        # behind the nudges is for the auditor.
         "skill-steps/budget",
-        # Why a turn was let end with a procedure unfinished, or was not: the
-        # nudge it decided for is the row.
+        # Why a turn was allowed to end with a procedure unfinished, or was not.
+        # The nudge that it decided for is the row.
         "skill-steps/decided",
-        # What a decision cost, and one that failed: whoever asked records what
-        # it was for.
+        # What a decision cost, and a decision that failed. Whoever asked
+        # records what the decision was for.
         "llm/decided",
         "llm/decision-failed",
-        # The accounting for a compaction, whose summary already draws a row as the
-        # replacement `user/message` it rides on. `compaction/declined` is not here:
-        # a compaction that did not happen leaves no row of its own.
+        # The accounting for a compaction. Its summary already draws a row, as
+        # the replacement `user/message` that carries it. `compaction/declined`
+        # is not here: a compaction that did not happen leaves no row of its
+        # own.
         "compaction/summarized",
-        # A sub-agent's own records (Phase 11), in its own log and never a root's:
-        # its spawn and revocation are the root's tool cards, and its log is read in
-        # the auditor's view.
+        # The own records of a sub-agent (Phase 11). They are in its own log and
+        # never in the log of a root. Its spawn and its revocation are tool
+        # cards of the root, and its log is read in the auditor's view.
         "subagent/admitted",
         "subagent/status",
         "subagent/returned",
         "subagent/deleted",
     }
 )
-"""Types only an auditor reads: a front end draws no row for one in the conversation,
-and the auditor's view records it — from its payload, unless that view has a handler of
-its own for the type.
+"""Types that only an auditor reads. A front end draws no row in the
+conversation for one. The auditor's view records it from its payload, unless
+that view has a handler of its own for the type.
 
-**A property beside ignorability, not inside it.** `attachment/uploaded` is ignorable
-and draws a row; `request/header` is required and draws none. Ignorability is a promise
-to other builds about skipping a record; this says who reads one.
+**This property is beside ignorability, and not inside it.**
+`attachment/uploaded` is ignorable and draws a row. `request/header` is required
+and draws none. Ignorability is a promise to other builds about skipping a
+record. This property says who reads a record.
 
-Not every type without a row is here: `step/start` and `kernel/snapshot` draw no row and
-no record either, since another record carries them or they are too fine-grained to
-read, and each front end lists those for its own reasons.
+Not every type without a row is here. `step/start` and `kernel/snapshot` draw
+no row and no record either, because another record carries them or they are
+too fine-grained to read. Each front end lists those for its own reasons.
 """
 
 EXPORTED_SESSION_EVENT_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
@@ -636,15 +677,17 @@ EXPORTED_SESSION_EVENT_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "supervisor/violated": ("violations",),
     }
 )
-"""The fields of a type's payload that telemetry ships, each as `event.<field>`.
+"""The fields of the payload of a type that telemetry ships, each as `event.<field>`.
 
-**Why the work failed, was refused or stopped**, and nothing else: that is what an
-operator filters on without the log at hand. Everything else stays in the log, which
-is why a record carried no data at all before, and why a type is listed rather than
-every field named `reason` shipped: `request/header`'s `reason` says which prompt
-snapshot it is, and much of a payload is what the model or a person wrote.
+**The fields say why the work failed, was refused or stopped**, and nothing
+else. An operator filters on that without the log at hand. Everything else
+stays in the log. That is why a record carried no data at all before. It is
+also why a type is listed here, and telemetry does not ship every field named
+`reason`: the `reason` of `request/header` says which prompt snapshot it is,
+and much of a payload is what the model or a person wrote.
 
-Each name is one its writers write, which `test_log_writers` reads from the source.
+Each name is one that the writers of its type write. `test_log_writers` reads
+that from the source.
 """
 
 
@@ -653,11 +696,11 @@ Each name is one its writers write, which `test_log_writers` reads from the sour
 
 @dataclass(frozen=True, slots=True)
 class IntentPair:
-    """What settles the intent one type opens, and the leaf that declares its kind."""
+    """What settles the intent that one type opens, and the leaf that declares its kind."""
 
     settled: str
     leaf: str
-    """The module whose `IntentKind(...)` declares the pair — a package's `kinds`."""
+    """The module whose `IntentKind(...)` declares the pair: the `kinds` of a package."""
 
 
 INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
@@ -677,22 +720,24 @@ INTENT_PAIRS: Mapping[str, IntentPair] = MappingProxyType(
 )
 """Every type that opens an intent, by the type that opens it (T4).
 
-**What lets repair notice a kind it was never given.** A kind is declared by
-importing its leaf, and a process that never imported a package has none of that
-package's kinds: before this table, repair settled what was declared and silently
-left the rest open — an open `client/command`, resumed by a process without
-`ph_app`, read as a command still running forever. With it, repair refuses such a
-resume and names the leaf (`UndeclaredIntentError`).
+**This table lets repair notice a kind that it was never given.** A kind is
+declared by importing its leaf, and a process that never imported a package has
+none of the kinds of that package. Before this table, repair settled what was
+declared and silently left the rest open. An open `client/command`, resumed by
+a process without `ph_app`, read as a command that was still running forever.
+With the table, repair refuses such a resume and names the leaf
+(`UndeclaredIntentError`).
 
-Here, beside the vocabulary, for decision 7's reason: ph-core's reader already knows
-every type a package writes, so it can know which of them open an intent without
-importing the package. `test_intent_kinds.py` holds this table equal to the kinds
-the leaves declare, in both directions — every `IntentKind(...)` in shipped code, its
+The table is here, beside the vocabulary, for the reason that decision 7 gives.
+The reader of ph-core already knows every type that a package writes. So it can
+know which of them open an intent without importing the package.
+`test_intent_kinds.py` holds this table equal to the kinds that the leaves
+declare, in both directions: every `IntentKind(...)` in shipped code, its
 settling type and its module.
 
-Not enforced: an intent pair on a *declared* log type (`declare_log_type`). None
-ships; one would be a package's own, and a log carrying a required type this reader
-does not know is refused at seed already.
+Not enforced: an intent pair on a *declared* log type (`declare_log_type`). No
+such pair ships. One would belong to a package, and a log that carries a
+required type that this reader does not know is already refused at seed.
 """
 
 
@@ -700,8 +745,8 @@ does not know is refused at seed already.
 
 
 def _with_pairs(appended: Mapping[str, frozenset[str]]) -> Mapping[str, frozenset[str]]:
-    """`appended`, plus each intent pair credited to the leaf that declares its kind —
-    so `INTENT_PAIRS` is the one statement of which leaf writes which pair."""
+    """`appended`, plus each intent pair credited to the leaf that declares its kind.
+    So `INTENT_PAIRS` is the one statement of which leaf writes which pair."""
     table = dict(appended)
     for opened, pair in INTENT_PAIRS.items():
         table[pair.leaf] = table.get(pair.leaf, frozenset()) | {opened, pair.settled}
@@ -736,10 +781,11 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph.seams.sandbox": frozenset({"sandbox/denied", "sandbox/mode"}),
         "ph.seams.skills": frozenset({"skill/read"}),
         "ph.seams.schedule": frozenset({"schedule/canceled", "schedule/created", "schedule/tick"}),
-        # Every record of a child, in the child's own log, and from nowhere else: the
-        # seam writes the admission, and a provider reports its child through this
-        # module's doors (`record_waiting`, `record_started`, `record_ended`,
-        # `record_deleted`, `record_returned`), which keep the rules each carries.
+        # Every record of a child, in the own log of the child, and from nowhere
+        # else. The seam writes the admission. A provider reports its child
+        # through the functions of that module (`record_waiting`,
+        # `record_started`, `record_ended`, `record_deleted`, `record_returned`),
+        # and each function keeps the rules of its record.
         "ph.seams.subagents": frozenset(
             {"subagent/admitted", "subagent/deleted", "subagent/returned", "subagent/status"}
         ),
@@ -765,10 +811,11 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
                 "profile/withdrawn",
             }
         ),
-        # Every surface replacement — a substitution as a `user/message`, a rewrite in
-        # place as the `assistant/message` or `tool/result` it rewrites — from the one
-        # door that keeps their rules. Compaction, input-offload and ph-clm write
-        # through it, and keep only their own records here.
+        # Every surface replacement, from the one module that keeps their rules.
+        # A substitution is a `user/message`. A rewrite in place is the
+        # `assistant/message` or the `tool/result` that it rewrites. Compaction,
+        # input-offload and ph-clm write a replacement through this module.
+        # Each of them writes only its own records itself.
         "ph.session.revise": frozenset({"assistant/message", "tool/result", "user/message"}),
         "ph.session.store": frozenset({"session/end-seed", "session/segmented"}),
         "ph.tools.batch": frozenset({"tool/call", "tool/result"}),
@@ -786,50 +833,57 @@ _WRITTEN_BY: Mapping[str, frozenset[str]] = _with_pairs(
         "ph_rlm.harness": frozenset({"harness/refine-considered"}),
         "ph_rlm.harness.service": frozenset({"harness/refined"}),
         "ph_rlm.snapshot": frozenset({"kernel/restored", "kernel/snapshot"}),
-        # Compaction rewrites the model's history — a summary, an elided call, a
-        # clipped result — through `ph.session.revise`, and records here why.
+        # Compaction rewrites the history of the model (a summary, an elided
+        # call, a clipped result) through `ph.session.revise`, and records the
+        # reason here.
         "ph_stabilize.compaction": frozenset(
             {"compaction/args-truncated", "compaction/declined", "compaction/summarized"}
         ),
         "ph_stabilize.hitl": frozenset({"approval/mode"}),
-        # An offloaded paste's preview goes through the same door.
+        # The preview of an offloaded paste goes through `ph.session.revise` too.
         "ph_stabilize.input_offload": frozenset({"offload/input-spilled"}),
         "ph_stabilize.limits": frozenset({"limits/breaker-tripped", "limits/exceeded"}),
         "ph_stabilize.offload": frozenset({"offload/spilled"}),
-        # Two writers of one list on purpose: a procedure a skill declares is a todo
-        # list, and both rows mean "the list is now this".
+        # Two writers of one list on purpose: a procedure that a skill declares
+        # is a todo list, and both rows mean "the list is now this".
         "ph_stabilize.skill_steps": frozenset(
             {"skill-steps/budget", "skill-steps/decided", "todo/write"}
         ),
         "ph_stabilize.todo": frozenset({"todo/write"}),
     }
 )
-"""Which shipped module appends which of ph-core's types (P10-01). The leaves'
-rows — each kind's pair, through `ctx.intents` (P10-08, T4) — come from
-`INTENT_PAIRS`.
+"""Which shipped module appends which of the types of ph-core (P10-01). The rows
+of the leaves come from `INTENT_PAIRS`: the pair of each kind, written through
+`ctx.intents` (P10-08, T4).
 
-**Who may write each type**, which F11's refusal of an unknown type cannot say: the
-difference between "deliberately shared" and "nobody noticed". Grouped by module so each
-shared type carries its reason where it is shared.
+**The table says who may write each type.** The refusal of an unknown type
+(F11) cannot say that. It is the difference between "deliberately shared" and
+"nobody noticed". The table is grouped by module, so that each shared type
+carries its reason where it is shared.
 
-**The authority a module's writer is minted from** (T6): `log_writer(__name__)` hands a
-module a writer for exactly its row, and the writer refuses any other type at the write
-(F12) — so this table is enforced at runtime, not only read by a test.
-`test_log_writers.py` holds it to the code in both directions: a module that writes a
-type its row does not grant fails, and so does a grant nothing writes any more.
-**Lexical, not dynamic** — the module whose writer writes, not the row that happened to
-be running: `permission-presets` changes the sandbox posture by calling
-`SandboxSeam.set_mode`, and the write is the seam's.
+**The writer of a module is minted from this table** (T6).
+`log_writer(__name__)` hands a module a writer for exactly its row, and the
+writer refuses any other type at the write (F12). So this table is enforced at
+runtime, and not only read by a test. `test_log_writers.py` holds the table to
+the code in both directions. A module that writes a type that its row does not
+grant fails. A grant that nothing writes any more fails too.
+
+**The table is lexical, not dynamic.** It names the module whose writer writes,
+and not the row that happened to be running. `permission-presets` changes the
+sandbox posture by calling `SandboxSeam.set_mode`, and the write belongs to the
+seam.
 
 **A pair written through `ctx.intents` belongs to the leaf that declares its
-kind** (`IntentKind(opened=…, settled=…)` in a package's `kinds`, T4), not to the
-journal that writes it through the leaf's writer (`IntentKind.writer`), nor to the
-seam holding the kind: the declaration is the one place both types are named, and a
-kind whose writer does not own both is refused. Not enforced: which modules may *use*
-a declared kind — the walk sees the declaration, not who passes it to the journal.
+kind** (`IntentKind(opened=…, settled=…)` in the `kinds` of a package, T4). It
+does not belong to the journal, which writes it through the writer of the leaf
+(`IntentKind.writer`). It does not belong to the seam that holds the kind
+either. The declaration is the one place where both types are named, and a kind
+whose writer does not own both is refused. Not enforced: which modules may
+*use* a declared kind. The walk sees the declaration, and not who passes it to
+the journal.
 
-Repair is not a writer here: its closers are synthesized onto a seed
-(`interrupted_turn_closers`), never appended.
+Repair is not a writer here. Its closers are synthesized onto a seed
+(`interrupted_turn_closers`) and never appended.
 """
 
 WRITERS: Mapping[str, frozenset[str]] = MappingProxyType(
@@ -858,9 +912,9 @@ class LogTypeDeclaration:
 
     name: str
     owner: str
-    """The module that appends it — the type's producer of record, as for a bus
-    event. Usually the declaring module; a package's leaf may declare for the
-    modules that write."""
+    """The module that appends the type. It is the producer of record of the type,
+    as for a bus event. It is usually the declaring module. The leaf of a package
+    may declare for the modules that write."""
     ignorable: bool
     audit_only: bool
     """Only an auditor reads it, as for `AUDIT_ONLY_SESSION_EVENT_TYPES`."""
@@ -869,46 +923,52 @@ class LogTypeDeclaration:
 
 
 _NAME = re.compile(r"[a-z][a-z0-9-]*(?:/[a-z0-9-]+)+")
-"""`namespace/type`, the shape `ph.selectors` addresses the log vocabulary by."""
+"""`namespace/type`: the shape by which `ph.selectors` addresses the log vocabulary."""
 
 _DECLARED: dict[str, LogTypeDeclaration] = {}
-"""What packages outside ph-core declared. The one mutable table: known and
-ignorable are asked of the frozen sets first, then of this."""
+"""What packages outside ph-core declared. This is the one mutable table. A
+question about known or ignorable goes to the frozen sets first, and then to
+this table."""
 
 
 def declare_log_type(
     name: str, *, owner: str, ignorable: bool, audit_only: bool, exported: tuple[str, ...] = ()
 ) -> LogTypeDeclaration:
-    """Add a type to the vocabulary this build writes and reads. Call at import.
+    """Add a type to the vocabulary that this build writes and reads. Call at import.
 
-    For a package outside ph-core, whose types this frozen set cannot list
-    without ph-core learning about it. ph-core's own types stay in
-    `KNOWN_SESSION_EVENT_TYPES`, beside the reasoning each one carries.
+    This is for a package outside ph-core. The frozen set cannot list the types
+    of such a package without ph-core learning about the package. The own types
+    of ph-core stay in `KNOWN_SESSION_EVENT_TYPES`, beside the reasoning that
+    each one carries.
 
-    **Ignorable is a promise to other builds**, as it is for the core set: a
+    **Ignorable is a promise to other builds**, as it is for the core set. A
     reader without the declaring package skips an ignorable record and refuses
     a required one, because skipping a required record can change how the rest
-    of the log reads. So `ignorable=False` means a log carrying the type opens
-    only where the package is installed — which is the point of required.
+    of the log reads. So `ignorable=False` means that a log that carries the
+    type opens only where the package is installed. That is the purpose of
+    required.
 
-    **Audit-only says who reads it**, as `AUDIT_ONLY_SESSION_EVENT_TYPES` does for
-    ph-core's: no conversation row, and a record in the auditor's view, derived from
-    the payload. A front end can have no handler of its own for a type it cannot
-    import, so a declared type that is not audit-only is one no front end shows.
+    **Audit-only says who reads the type**, as `AUDIT_ONLY_SESSION_EVENT_TYPES`
+    does for the types of ph-core: no conversation row, and a record in the
+    auditor's view, derived from the payload. A front end can have no handler
+    of its own for a type that it cannot import. So no front end shows a
+    declared type that is not audit-only.
 
-    **Exported names the fields telemetry ships**, as `EXPORTED_SESSION_EVENT_FIELDS`
-    does for ph-core's: the ones that say why the work failed, was refused or stopped.
+    **Exported names the fields that telemetry ships**, as
+    `EXPORTED_SESSION_EVENT_FIELDS` does for the types of ph-core: the fields
+    that say why the work failed, was refused or stopped.
 
-    Refused, the way `EventRegistry.declare` refuses a bus event:
+    A declaration is refused, the way `EventRegistry.declare` refuses a bus
+    event, for:
 
-    * a name ph-core already owns — one type, one home;
-    * a second owner, or the same owner changing its ignorability, who reads it or
-      what ships — two statements of one type that disagree are a log two builds
-      read two ways;
+    * a name that ph-core already owns. One type has one home.
+    * a second owner, or the same owner changing the ignorability of the type,
+      who reads it, or what ships. Two statements of one type that disagree are
+      a log that two builds read in two ways.
     * a name that is not `namespace/type`.
 
-    Declaring the same thing twice returns the first, so a module imported
-    twice does not refuse itself.
+    Declaring the same thing twice returns the first declaration, so a module
+    that is imported twice does not refuse itself.
     """
     if not _NAME.fullmatch(name):
         raise LogTypeError(f'"{name}" is not a log type name; it must be namespace/type')
@@ -947,7 +1007,7 @@ def declare_log_type(
 
 
 def written_by(module: str) -> frozenset[str]:
-    """The ph-core types `module` is a writer of record for — what its writer may write."""
+    """The ph-core types that `module` is a writer of record for. Its writer may write these."""
     return _WRITTEN_BY.get(module, frozenset())
 
 
@@ -963,14 +1023,15 @@ def is_known(event_type: str) -> bool:
 
 
 def known_log_types() -> frozenset[str]:
-    """The whole vocabulary this process writes and reads: ph-core's, and every type a
-    package has declared so far — what a front end's completeness check holds."""
+    """The whole vocabulary that this process writes and reads: the types of ph-core,
+    and every type that a package has declared so far. The completeness check of
+    a front end compares its tables with this."""
     return KNOWN_SESSION_EVENT_TYPES | frozenset(_DECLARED)
 
 
 def is_audit_only(event_type: str) -> bool:
-    """Whether only an auditor reads `event_type`: no conversation row, a record in the
-    auditor's view."""
+    """Whether only an auditor reads `event_type`: no conversation row, and a record
+    in the auditor's view."""
     if event_type in AUDIT_ONLY_SESSION_EVENT_TYPES:
         return True
     declared = _DECLARED.get(event_type)
@@ -987,7 +1048,7 @@ def exported_fields(event_type: str) -> tuple[str, ...]:
 
 
 def is_ignorable(event_type: str) -> bool:
-    """Whether a build without this type may skip it. Stamped by `Session._append`."""
+    """Whether a build without this type may skip it. `Session._append` stamps it."""
     if event_type in IGNORABLE_SESSION_EVENT_TYPES:
         return True
     declared = _DECLARED.get(event_type)

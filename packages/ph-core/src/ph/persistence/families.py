@@ -1,13 +1,13 @@
-"""Where a lineage's logs sit on disk: `<root>/<family>/<name><suffix>`.
+"""Where the logs of a lineage sit on disk: `<root>/<family>/<name><suffix>`.
 
-**One statement of the layout, for backends that agree about nothing else.** JSONL
-and Turso disagree about how a log is *encoded* and must not disagree about where
-it *is*. Two implementations whose docstrings have to assert they agree ("JSONL's
-rule exactly") are not a mechanism, and the two copies had already drifted before
-either shipped.
+**One statement of the layout, for backends that agree about nothing else.**
+JSONL and Turso disagree about how a log is *encoded*. They must not disagree
+about where it *is*. Two implementations whose docstrings have to assert that
+they follow the same rule are not a mechanism. The two copies had already
+drifted before either backend shipped.
 
-Suffix-parameterized rather than shared by inheritance, because that is the only
-thing the two backends actually differ by here.
+The functions take the suffix as a parameter and are not shared by inheritance,
+because the suffix is the only difference between the two backends here.
 
 @module ph.persistence.families
 """
@@ -40,24 +40,26 @@ def path_under(root: Path, family: str, name: str, suffix: str) -> Path:
 def family_dirs(root: Path, *, tag: str = "") -> list[str]:
     """The lineage directories under `root`, or nothing if it cannot be read.
 
-    A missing or unreadable sessions root is an empty store, not an error: every
-    caller here is answering "what is on record", and a listing that raised would
-    turn an empty deployment into a crash.
+    A sessions root that is missing or unreadable is an empty store, not an
+    error. Every caller here answers "what is on record", and a listing that
+    raised would turn an empty deployment into a crash.
 
-    `tag` keeps only the lineages worked in one directory — the `<cwd-tag>-` a
-    root's `family` carries (format 1). **This is where a filtered listing gets
-    cheap**: a repo's sessions are skipped here, without a `scandir` of their
-    files, without a `stat` on any of them, and without opening one. `""` is
-    every lineage, which is what an unfiltered listing asks for.
+    `tag` keeps only the lineages that were worked in one directory: those whose
+    name starts with the `<cwd-tag>-` that the `family` of a root carries
+    (format 1). **A filtered listing becomes cheap here.** The sessions of
+    every other repo are skipped here, without a `scandir` of their files,
+    without a `stat` on any of them, and without opening one. `""` means every
+    lineage, which is what an unfiltered listing asks for.
 
-    A *tagless* directory — a session created with no cwd — is not matched by any
-    tag, which is the honest answer: it belongs to no working directory.
+    A *tagless* directory, which belongs to a session created with no cwd, is
+    matched by no tag. That is the correct answer: the session belongs to no
+    working directory.
 
-    **A dotted directory is not a lineage**, and saying so here is what keeps it
-    from being one. `lease.LEASES` is `.leases` under this same root, and an
-    unfiltered listing collected it as a family — harmless only because the
-    suffix filter downstream finds no logs in it, which is the kind of accident
-    that stops being one when somebody adds a second dot-directory.
+    **A dotted directory is not a lineage**, and this function is where that is
+    decided. `lease.LEASES` is `.leases` under this same root, and an unfiltered
+    listing collected it as a family. That was harmless only because the suffix
+    filter downstream finds no logs in it. Such an accident stops being harmless
+    when somebody adds a second dot-directory.
     """
     prefix = f"{tag}-" if tag else ""
     try:
@@ -76,15 +78,17 @@ def family_dirs(root: Path, *, tag: str = "") -> list[str]:
 def logs_under(root: Path, suffix: str, *, tag: str = "") -> list[tuple[Path, os.stat_result]]:
     """Every stored log, **newest first**, one family directory at a time.
 
-    `tag` narrows it to one working directory's lineages — see `family_dirs`,
-    which is where the skipping happens and why it costs nothing per file.
+    `tag` narrows the result to the lineages of one working directory. See
+    `family_dirs`, which does the skipping and explains why it costs nothing for
+    each file.
 
-    One level deep and no deeper: a family is flat inside, so this is not a walk
-    and cannot wander into a workspace someone parked in the sessions root.
+    The scan is one level deep and no deeper. A family is flat inside, so this
+    is not a walk, and it cannot enter a workspace that someone left in the
+    sessions root.
 
-    Sorted here because all three callers sorted it identically the moment they
-    got it, and a helper that hands back an order nobody wants is a helper that
-    is really two.
+    The result is sorted here because all three callers sorted it identically as
+    soon as they got it. A helper that returns an order that nobody wants is
+    really two helpers.
     """
     found: list[tuple[Path, os.stat_result]] = []
     for family in family_dirs(root, tag=tag):
@@ -155,24 +159,26 @@ def children_under(
 def locate_under(root: Path, name: str, suffix: str) -> Path | None:
     """The log for one id, wherever it sits. `None` if there is none.
 
-    **The cost of the family layout, stated in one place.** An id alone does not
-    determine a path, so a read that has only an id has to look — and callers
-    holding a family skip the looking entirely, through `path_under`.
+    **The cost of the family layout is stated in this one place.** An id alone
+    does not determine a path, so a read that has only an id has to look. A
+    caller that holds a family skips the search entirely, through `path_under`.
 
-    **Its lineage's directories first.** A family is `<cwd-tag>-<root>` or a bare
-    `<root>` (`family_for`), and every id beneath a root begins with the root's id
-    and a dash (`child_session_id`), so the directory a root or any of its
-    descendants is in says so in its name. Those are tried first, one `stat` each;
-    every other directory only after, which is where a fork is — a new id filed in
-    its source's family. Before, only a bare root was found without that scan, and
-    since format 1 a root with a cwd is not bare, so nearly every lookup by id
-    `stat`ed every family.
+    **The directories of its lineage are tried first.** A family is
+    `<cwd-tag>-<root>` or a bare `<root>` (`family_for`). Every id beneath a
+    root begins with the id of the root and a dash (`child_session_id`). So the
+    name of a directory says whether it holds a root or any of its descendants.
+    Those directories are tried first, with one `stat` each. Every other
+    directory is tried only after them. A fork is found there, because a fork
+    is a new id filed in the family of its source. Before, only a bare root was
+    found without that scan. Since format 1 a root with a cwd is not bare, so
+    nearly every lookup by id `stat`ed every family.
 
-    **The bare root's own path before any listing**, and not tried again in it. A
-    root opened with no cwd — the print and rpc hosts open theirs so — is filed
-    under its own id, and one `stat` finds it without a `scandir` of the store.
-    For a root with a cwd that `stat` misses, which costs one `stat`; dropping it
-    would cost every bare root a listing.
+    **The own path of a bare root is tried before any listing**, and it is not
+    tried again in the listing. A root opened with no cwd is filed under its own
+    id, and one `stat` finds it without a `scandir` of the store. The print and
+    rpc hosts open their roots that way. For a root with a cwd that `stat`
+    misses, which costs one `stat`. Dropping it would cost every bare root a
+    listing.
     """
     own = path_under(root, name, name, suffix)
     if own.is_file():
@@ -188,18 +194,20 @@ def locate_under(root: Path, name: str, suffix: str) -> Path | None:
 
 
 def stored_under(root: Path, name: str, suffix: str, family: str | None = None) -> bool:
-    """Whether a log for `name` is on disk: in `family` alone when one is given, one
-    `stat`, and anywhere under `root` when not (`locate_under`). `exists` for both
-    backends, which differ only in `suffix`."""
+    """Whether a log for `name` is on disk. When `family` is given, only that family
+    is checked, with one `stat`. When it is not, the log is looked for anywhere
+    under `root` (`locate_under`). This is `exists` for both backends, which
+    differ only in `suffix`."""
     if family:
         return path_under(root, family, name, suffix).is_file()
     return locate_under(root, name, suffix) is not None
 
 
 def _holds_lineage_of(family: str, name: str) -> bool:
-    """Whether a family directory's name says it holds `name`'s lineage: its root
-    (the name, less a cwd tag) is `name` or an ancestor's id of it. Only an
-    ordering — `locate_under` looks everywhere else after."""
+    """Whether the name of a family directory says that it holds the lineage of
+    `name`: its root (the name, less a cwd tag) is `name` or the id of an
+    ancestor of `name`. This is only an ordering. `locate_under` looks everywhere
+    else after."""
     tag, dash, rest = family.partition("-")
     roots = {family, rest} if dash and len(tag) == CWD_TAG_LENGTH else {family}
     return any(name == root or name.startswith(f"{root}-") for root in roots)
@@ -208,28 +216,30 @@ def _holds_lineage_of(family: str, name: str) -> bool:
 def descendants(lineage: Iterable[tuple[str, str | None]], agent_id: str) -> list[str]:
     """`agent_id` and everything spawned beneath it, transitively (P6-28).
 
-    **Not `reachable_family`, and the difference is the point.** That answers "who
-    may this agent *address*" — the C7 nuclear family, including siblings and the
-    parent — which is the right rule for a message. This answers "whose leftovers are
-    mine to account for": a sibling's worktree is not this agent's to enumerate,
-    still less to collect, and borrowing the messaging rule would widen a filesystem
-    question with an answer computed for a different one (I7).
+    **This is not `reachable_family`, and the difference matters.**
+    `reachable_family` answers "who may this agent *address*": the C7 nuclear
+    family, with the siblings and the parent. That is the right rule for a
+    message. This function answers "whose leftovers must this agent account
+    for". The worktree of a sibling is not for this agent to enumerate, and
+    still less to collect. The messaging rule would widen a filesystem question
+    with an answer that was computed for a different question (I7).
 
-    Transitive where `reachable_family` is one hop: a grandchild that failed is
-    evidence its grandparent is the only live party left to look at, because the
-    child that spawned it settled too.
+    This function is transitive where `reachable_family` is one hop. A
+    grandchild that failed is evidence that its grandparent is the only live
+    party left to look at, because the child that spawned it settled too.
 
-    An agent's id is its session's id, so the links are `delegating_parent` — the
-    agent that spawned each one — and nothing needs a side index. Not
-    `parent_session`: a fork names the log it was cut from there, and a fork's
-    trees are its own, not its source's leftovers. **`(id, parent)` pairs rather than
-    `Session` objects**, which is what lets the workspace collector and the store's
-    `descendants_among` answer this from a *listing* — a family is narrowed before a
-    single log is read rather than after all of them are.
+    The id of an agent is the id of its session. So the links are
+    `delegating_parent`, the agent that spawned each one, and nothing needs a
+    side index. The link is not `parent_session`: a fork names there the log
+    that it was cut from, and the trees of a fork are its own, not the leftovers
+    of its source. **The input is `(id, parent)` pairs and not `Session`
+    objects.** So the workspace collector and `protocol.descendants_among` can
+    answer this from a *listing*. A family is narrowed before a single log is
+    read, and not after all of them are read.
 
-    Breadth-first, and cycle-safe by construction: `seen` is tested before descent,
-    so a log claiming its own ancestor as a child costs a wasted lookup rather than a
-    hang.
+    The walk is breadth-first and cycle-safe by construction. `seen` is tested
+    before descent, so a log that claims its own ancestor as a child costs a
+    wasted lookup and not a hang.
     """
     children: dict[str, list[str]] = {}
     known = set()

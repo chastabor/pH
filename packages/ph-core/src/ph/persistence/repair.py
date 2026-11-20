@@ -1,70 +1,78 @@
 """Crash repair: closing a turn the process died inside, and every intent it left open (P1-12, A5).
 
-A log whose last turn is half-written is not just untidy — it is *invalid* to a
-provider. An assistant message carrying a tool call with no matching result is
-rejected outright by several APIs, so a session that crashed mid-batch could
-never be resumed at all without this.
+A log whose last turn is half-written is not only untidy. It is *invalid* to a
+provider. Several APIs reject outright an assistant message that carries a tool
+call with no matching result. So without this module, a session that crashed in
+the middle of a batch could never be resumed.
 
-The synthesized closers are deterministic: sequences continue the log, and the
-timestamp is the **last real event's**, never `now()`. A repair that invented a
-future time would make the log say the recovery happened during the crash.
+The synthesized closers are deterministic. Their sequences continue the log,
+and their timestamp is that of the **last real event**, never `now()`. A repair
+that invented a future time would make the log say that the recovery happened
+during the crash.
 
-Two failure shapes, and the difference is the whole point of having two codes:
+There are two failure shapes, and the two codes exist to tell them apart:
 
-* `TOOL_NOT_STARTED` — the assistant asked, but no `tool/call` was ever
-  recorded. Nothing ran, so retrying is safe and the text says so.
-* `TOOL_OUTCOME_UNKNOWN` — the call *was* recorded, and then the process died.
-  It may have completed. The text tells the model to reason from the tool's own
-  semantics rather than retry blindly, because a blind retry of a non-idempotent
-  operation is how one crash becomes two side effects.
+* `TOOL_NOT_STARTED`: the assistant asked, but no `tool/call` was ever
+  recorded. Nothing ran, so a retry is safe, and the text says so.
+* `TOOL_OUTCOME_UNKNOWN`: the call *was* recorded, and then the process died.
+  The call may have completed. The text tells the model to reason from the
+  semantics of the tool and not to retry blindly. A blind retry of a
+  non-idempotent operation turns one crash into two side effects.
 
-**Dangling asks, settled here for the same reason** (P5-13). An `approval/asked`
-with no `approval/decided` — and a `question/asked` with no `question/answered` —
-is a question put to a person that the process stopped existing before
-answering. Without a closer those pairs stay half-written *forever*: every future
-reader of a resumed log is told a decision is outstanding when nothing is waiting
-for one, and the transcript never says what became of the person's question.
-Since P10-09 they are two declared intent kinds like any other, so this module
-knows neither's keying nor its closer's words: `ph.session.kinds` states both once.
+**Dangling asks are settled here for the same reason** (P5-13). An
+`approval/asked` with no `approval/decided`, or a `question/asked` with no
+`question/answered`, is a question that was put to a person, and the process
+died before the answer came. Without a closer, those pairs stay half-written
+*forever*. Every future reader of a resumed log is told that a decision is
+outstanding when nothing waits for one, and the transcript never says what
+became of the question. Since P10-09 they are two declared intent kinds like any
+other. So this module knows neither the keying of a kind nor the words of its
+closer: `ph.session.kinds` states both in one place.
 
-**Every declared intent, in a turn or out of one** (P10-07, F13). The asks above are
-two of the pairs `ph.session.intents` declares; the others — a shell command the
-daemon died during, a daemon verb — happen *between* turns, so a repair that
-returned early for a balanced turn left them open forever, and every reader was
-told a command was still running. One pass over `declared_intents()` settles each
-open intent of a kind that is neither `owner-settles` (its owner looks, and
-reconciles on open) nor model-visible when settled: the tool pair's closer is a
-surface event a provider validates, which is the turn repair's job below and
-answers a different requirement. The kind's own `closer` writes the payload, so
-this module knows no kind's keying: a second spelling of "what counts as open"
-here would be a second spelling of what repair must settle, drifting in the one
-direction nothing fails.
+**Every declared intent is settled, in a turn or out of one** (P10-07, F13).
+The asks above are two of the declared kinds. Some of the others, such as a
+shell command that the daemon died during or a daemon verb, happen *between*
+turns. A repair that returned early for a balanced turn left them open forever,
+and every reader was told that a command was still running. One pass over
+`declared_intents()` settles each open intent of every kind that is not
+`owner-settles` (the owner of such a kind looks, and reconciles on open). A
+pair whose settle is model-visible is not a kind, because `declare_intent`
+refuses it. The closer of the tool pair is a surface event that a provider
+validates. Writing it is the work of the turn repair below, which answers a
+different requirement. The `closer` of the kind writes the payload, so this
+module knows the keying of no kind. A second spelling here of "what counts as
+open" would be a second spelling of what repair must settle. It would drift in
+the one direction in which nothing fails.
 
-**A kind this process never declared is refused, by name** (T4). Repair settles the
-kinds declared *in the resuming process*, and a kind is declared by importing the
-leaf that holds it: ph-core's by importing `ph.session`, which this module does, and
-a package's by importing the package (`ph_app` imports `ph_app.kinds`). The
-vocabulary's `INTENT_PAIRS` names every type that opens an intent and the leaf that
-declares its kind, so a log holding an open intent of a kind this process lacks —
-an open `client/command`, resumed without `ph_app` — raises `UndeclaredIntentError`
-naming the type and the leaf, where it used to be left open with nothing said.
+**A kind that this process never declared is refused, by name** (T4). Repair
+settles the kinds that are declared *in the resuming process*. A kind is
+declared by importing the leaf that holds it. The kinds of ph-core are declared
+by importing `ph.session`, which this module does. The kinds of a package are
+declared by importing the package (`ph_app` imports `ph_app.kinds`).
+`INTENT_PAIRS` in the vocabulary names every type that opens an intent and the
+leaf that declares its kind. So a log that holds an open intent of a kind that
+this process lacks raises `UndeclaredIntentError`, which names the type and the
+leaf. An example is an open `client/command`, resumed without `ph_app`.
+Formerly such an intent was left open and nothing was reported.
 
-Not enforced: *which* intent is open, for a kind this process lacks. Without the
-kind's keys its records cannot be paired, so they are counted — more openings than
-settles means one is open. Exact, because the journal writes a settle only through a
-claim on an open intent: T3 made each settle close exactly one, and nothing writes a
-settle with no opening (a refused Code Mode dispatch has its start too, P7-15). A
-journal door that settled with no opening would make the count miss an open intent.
+Not enforced: *which* intent is open, for a kind that this process lacks.
+Without the keys of the kind, its records cannot be paired, so they are
+counted. More openings than settles means that one is open. The count is exact,
+because the journal writes a settle only through a claim on an open intent. T3
+made each settle close exactly one intent, and nothing writes a settle with no
+opening (a refused Code Mode dispatch has its start too, P7-15). A journal
+method that wrote a settle with no opening would make the count miss an open
+intent.
 
-For a turn parked on an ask, the turn is still closed `interrupted` and the tool
-result is still synthesized `TOOL_NOT_STARTED` — that is what keeps the rebuilt log
-something a provider will accept. The question is *settled* rather than left
-hanging. The work resumes the way the harness
-resumes any interrupted work: the model reads "not started" and asks again, to
-whoever is attached then.
+For a turn parked on an ask, the turn is still closed `interrupted`, and the
+tool result is still synthesized as `TOOL_NOT_STARTED`. That keeps the rebuilt
+log acceptable to a provider. The question is *settled* and not left open. The
+work resumes in the way that the harness resumes any interrupted work: the model
+reads "not started" and asks again, and whoever is attached at that time gets
+the question.
 
-Ported from dsh `packages/core/session/src/repair.ts`, message texts included:
-this vocabulary is what a resumed model reads, and paraphrasing it would change
+Ported from dsh `packages/core/session/src/repair.ts`, with the message texts.
+This vocabulary is what a resumed model reads. A paraphrase would change
 behavior that was tuned deliberately.
 
 @module ph.persistence.repair
@@ -101,6 +109,7 @@ __all__ = [
     "CallOutcome",
     "UndeclaredIntentError",
     "interrupted_turn_closers",
+    "repaired",
     "unresolved_calls",
 ]
 
@@ -140,16 +149,16 @@ class UndeclaredIntentError(IntentError):
 
 
 def _kinds() -> list[IntentKind]:
-    """Every declared kind, in type order. ph-core's own are always among them:
-    `ph.session` imports their leaf, and this module imports `ph.session`."""
+    """Every declared kind, in type order. The kinds of ph-core are always among
+    them: `ph.session` imports their leaf, and this module imports `ph.session`."""
     return sorted(declared_intents(), key=lambda kind: kind.opened)
 
 
 def _refuse_undeclared(counted: Mapping[str, int], missing: Mapping[str, IntentPair]) -> None:
-    """Refuse, by name, a log with an open intent of a kind nothing here declares.
+    """Refuse, by name, a log with an open intent of a kind that nothing here declares.
 
-    Counted, since the kind's keys are not here to pair its records with: more
-    openings than settles means one is open.
+    The records are counted, because the keys of the kind are not here to pair
+    them with. More openings than settles means that one is open.
     """
     for opened, pair in sorted(missing.items()):
         left = counted.get(opened, 0) - counted.get(pair.settled, 0)
@@ -165,27 +174,30 @@ def _refuse_undeclared(counted: Mapping[str, int], missing: Mapping[str, IntentP
 def _settled_intents(
     events: Sequence[SessionEvent], answers: Mapping[str, Mapping[str, CallOutcome]]
 ) -> tuple[list[dict[str, Any]], dict[str, list[tuple[str, CallOutcome]]]]:
-    """The settles for every open intent of a kind repair is told to settle, and what
-    the answered ones inside a call were found to have done, by that call's id.
+    """The settles for every open intent of a kind that repair is told to settle. Also
+    what the answered intents inside a call were found to have done, by the id of
+    that call.
 
-    Kind by kind **in type order**, then in opening order, so the same log repairs
-    the same way in every process — declaration order is import order, which a
-    daemon and a trajectory viewer need not share. Folded in **one pass** over the
-    log for every kind, since a resume runs this over the whole of it. Each closer
-    is checked against the kind's own `settled_key` before it is returned: a closer
-    that wrote a settle the fold does not pair would leave the intent open, and
-    every resume after would write another — the log growing on each reopen, which
-    is the one thing a repair must never do.
+    The kinds are taken **in type order**, and the intents of each kind in
+    opening order, so the same log repairs the same way in every process.
+    Declaration order is import order, and a daemon and a trajectory viewer need
+    not share it. Every kind is folded in **one pass** over the log, because a
+    resume runs this function over the whole log. Each closer is checked against
+    the `settled_key` of its kind before it is returned. A closer that wrote a
+    settle that the fold does not pair would leave the intent open, and every
+    later resume would write another settle. The log would grow on each reopen,
+    which a repair must never cause.
 
-    `answers` are what tools said on resume about open intents of their own, by the
-    kind's opening type and then the intent's key (L6b). For a kind that declares
-    `reconciled`, a done answer is settled by that builder and a not-done one by the
-    closer as `not-started`, both marked `reconciled`; a kind that declares `within`
-    also names the call it ran inside.
+    `answers` are what tools said on resume about open intents of their own, by
+    the opening type of the kind and then by the key of the intent (L6b). For a
+    kind that declares `reconciled`, that builder settles a done answer, and the
+    closer settles a not-done answer as `not-started`. Both settles are marked
+    `reconciled`. A kind that declares `within` also names the call that the
+    intent ran inside.
 
-    :raises IntentError: when a kind's closer does not settle its own key.
+    :raises IntentError: when the closer of a kind does not settle its own key.
     :raises UndeclaredIntentError: when the log holds an open intent of a type
-        `INTENT_PAIRS` names and no declared kind opens.
+        that `INTENT_PAIRS` names and that no declared kind opens.
     """
     declared = _kinds()
     kinds = [kind for kind in declared if kind.orphan != "owner-settles"]
@@ -241,13 +253,14 @@ def _settled_intents(
 
 @dataclass(frozen=True, slots=True)
 class CallOutcome:
-    """What a tool said about a started call a crash left unresolved (P10-13).
+    """What a tool said about a started call that a crash left unresolved (P10-13).
 
-    **Data, handed in** — which is what keeps repair a pure fold. Asking a tool
-    needs a mounted deployment, and `interrupted_turn_closers` also runs over a
-    stored log with nothing mounted; so the question is asked by the caller that
-    is mounted (`resume_session`) and only the answers reach here. `content` is
-    the call's result as the tool renders it, in wire form, when `done`.
+    **The answer is data that is handed in**, and that keeps repair a pure fold.
+    Asking a tool needs a mounted deployment, and `interrupted_turn_closers`
+    also runs over a stored log with nothing mounted. So the caller that is
+    mounted (`resume_session`) asks the question, and only the answers reach
+    this module. `content` is the result of the call as the tool renders it, in
+    wire form, when `done` is true.
     """
 
     done: bool
@@ -272,9 +285,9 @@ class _Tail:
 def unresolved_calls(events: Sequence[SessionEvent]) -> list[SessionEvent]:
     """The `tool/call` records of the open tail turn that have no result.
 
-    The calls a crash left *started* and unresolved — the ones worth asking the
-    tool about (`ToolDefinition.reconcile`), since a call never recorded as
-    started is not-started by construction.
+    These are the calls that a crash left *started* and unresolved. They are the
+    calls worth asking the tool about (`ToolDefinition.reconcile`), because a
+    call that was never recorded as started is not-started by construction.
     """
     tail = _tail(events)
     if tail.turn is None:
@@ -302,17 +315,19 @@ def _tail(events: Sequence[SessionEvent]) -> _Tail:
             tail.step = None
         elif event.type == "assistant/message":
             if is_in_place_rewrite(event):
-                # A near-copy of a message already in the log — argument
-                # truncation is the one that does this — so its `tool-call`
-                # blocks are answered behind it and registering them again would
-                # have this fold write a second `tool/result` for one id.
+                # This is a near-copy of a message that is already in the log.
+                # Argument truncation is the one that does this. Its `tool-call`
+                # blocks are answered behind it, so registering them again would
+                # make this fold write a second `tool/result` for one id.
                 #
-                # `is_in_place_rewrite` rather than `is_replacement_surface_event`:
-                # the narrower predicate is the one that means "not new work". The
-                # commit refuses an assistant replacement that is anything else
-                # (`surface._assert_assistant_rewrite`) — new speech in place of a
-                # range would carry calls that *do* need closing — so the two agree
-                # today, and the narrow one stays right if that ever changes.
+                # The check is `is_in_place_rewrite` and not
+                # `is_replacement_surface_event`, because the narrower predicate
+                # is the one that means "not new work". The commit refuses an
+                # assistant replacement that is anything else
+                # (`surface._assert_assistant_rewrite`). New speech in place of
+                # a range would carry calls that *do* need closing. So the two
+                # predicates agree today, and the narrow one stays right if that
+                # ever changes.
                 continue
             content = as_seq(as_obj(event.data.get("message")).get("content"))
             for block in (as_obj(one) for one in content):
@@ -336,16 +351,17 @@ def interrupted_turn_closers(
     """The synthetic events that close an open tail turn and settle every open
     intent, in order.
 
-    Returns `[]` for a balanced log — no open turn and no open intent — so a
-    clean resume appends nothing and reopening a session does not grow it.
+    Returns `[]` for a balanced log, which has no open turn and no open intent.
+    So a clean resume appends nothing, and reopening a session does not grow it.
 
     `answers` are what tools said about their started, unresolved calls, by call
-    id (`CallOutcome`); a call with none keeps `TOOL_OUTCOME_UNKNOWN`. `intents` are
-    what tools said about open intents of their own, by opening type and key: a Code
-    Mode dispatch's tool, asked as a top-level call's is (L6b). A call left
-    `TOOL_OUTCOME_UNKNOWN` says what the answered dispatches inside it did, since
-    the model reads only the call's result. Without either this is the same pure
-    fold it always was.
+    id (`CallOutcome`). A call with no answer keeps `TOOL_OUTCOME_UNKNOWN`.
+    `intents` are what tools said about open intents of their own, by opening
+    type and key. The tool of a Code Mode dispatch is asked in the same way as
+    the tool of a top-level call (L6b). A call left `TOOL_OUTCOME_UNKNOWN` says
+    what the answered dispatches inside it did, because the model reads only the
+    result of the call. With neither argument, this is the same pure fold as
+    before.
     """
     tail = _tail(events)
     open_turn, open_step, pending = tail.turn, tail.step, tail.pending
@@ -360,23 +376,24 @@ def interrupted_turn_closers(
     time = last.time
     closers: list[SessionEvent] = []
 
-    # Intents — the asks among them — settle before the call they were gating.
-    # Nothing downstream depends on the order — no settle written here is
+    # Intents, the asks among them, settle before the call that they were gating.
+    # Nothing downstream depends on the order: no settle written here is
     # surface-eligible, so none derives a message or moves the provider-facing
-    # sequence — but the log reads in the order things happened, and the ask
-    # came first.
+    # sequence. But the log reads in the order in which things happened, and the
+    # ask came first.
     #
-    # No `source_event_seqs` back to the opening record, tempting as the symmetry
-    # with the tool closer below is: `SURFACE_EVENT_TYPES` permits that field only
-    # on the three types that carry a `surfaceOp`, and none of these is one.
+    # The settles carry no `source_event_seqs` back to the opening record. The
+    # symmetry with the tool closer below is tempting, but `SURFACE_EVENT_TYPES`
+    # permits that field only on the three types that carry a `surfaceOp`, and
+    # none of these types is one of the three.
     for settled in orphans:
         closers.append(SessionEvent(seq=next_seq, time=time, **settled))
         next_seq += 1
     if open_turn is None:
         return closers
 
-    # Calls close before their step: a provider rejects a dangling assistant
-    # call, and insertion order preserves the transcript order the model saw.
+    # Calls close before their step. A provider rejects a dangling assistant
+    # call, and insertion order preserves the transcript order that the model saw.
     for call_id, entry in pending.items():
         started = entry.call_seq is not None
         answer = (answers or {}).get(call_id) if started else None
@@ -384,7 +401,7 @@ def interrupted_turn_closers(
         closers.append(_tool_result(call_id, entry, open_turn, next_seq, time, answer, within))
         next_seq += 1
 
-    # An open step must close before its turn: `turn/end` while a step is open
+    # An open step must close before its turn. A `turn/end` while a step is open
     # is itself an invariant violation, so repairing one must not create another.
     if open_step is not None:
         closers.append(
@@ -420,18 +437,20 @@ def _tool_result(
     answer: CallOutcome | None,
     inside: Sequence[tuple[str, CallOutcome]],
 ) -> SessionEvent:
-    """The `tool/result` that closes one call the turn left without one.
+    """The `tool/result` that closes one call that the turn left without one.
 
-    With no `answer`, today's closer: `TOOL_NOT_STARTED` for a call never recorded
-    as started, `TOOL_OUTCOME_UNKNOWN` for one that was. With one, what the tool
-    said (P10-13) — the result it vouched for, or the not-started closer it made
-    true — marked `reconciled` in `meta`, so a reader can tell a result the tool
-    produced from one it reported afterwards about a call it had not seen finish.
+    With no `answer`, this is the plain closer: `TOOL_NOT_STARTED` for a call
+    that was never recorded as started, and `TOOL_OUTCOME_UNKNOWN` for one that
+    was. With an `answer`, it is what the tool said (P10-13): the result that
+    the tool vouched for, or the not-started closer, which the answer of the
+    tool makes true. It is marked `reconciled` in `meta`. So a reader can tell a
+    result that the tool produced from one that it reported afterwards about a
+    call that it had not seen finish.
 
-    `inside` are the intents opened inside this call whose tools answered on resume,
-    by name (L6b). A call left `TOOL_OUTCOME_UNKNOWN` lists them, because the model reads
-    only this result: a program interrupted after a send the receiver's log holds
-    should not send it again.
+    `inside` are the intents opened inside this call whose tools answered on
+    resume, by name (L6b). A call left `TOOL_OUTCOME_UNKNOWN` lists them,
+    because the model reads only this result. A program that was interrupted
+    after a send that the log of the receiver holds should not send it again.
     """
     started = entry.call_seq is not None
     error: dict[str, str] | None
@@ -489,5 +508,5 @@ def _inside(answered: Sequence[tuple[str, CallOutcome]]) -> str:
 
 
 def repaired(events: Sequence[SessionEvent]) -> list[SessionEvent]:
-    """The log plus whatever closes it — what a resume should seed with."""
+    """The log plus whatever closes it. A resume should seed with this."""
     return [*events, *interrupted_turn_closers(events)]

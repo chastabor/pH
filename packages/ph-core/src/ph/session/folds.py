@@ -1,42 +1,43 @@
-"""Caching a plugin's own fold over a session log, without owning the log.
+"""A cache for the fold of a plugin over a session log, without ownership of the log.
 
-Several plugins project the log into something they need per turn: the subagent
-roster, the Continual Harness state (P3-16), a namespace's kernel snapshot. Each
-is a fold, each is O(log), and a long session's log is mostly
-`assistant/chunk` — so a projection read once per model step must not re-scan it.
+Several plugins project the log into something that they need per turn: the
+subagent roster, the Continual Harness state (P3-16), the kernel snapshot of a
+namespace. Each is a fold, and each is O(log). The log of a long session is
+mostly `assistant/chunk`. So a projection that is read one time per model step
+must not scan the log again.
 
-The obvious answer, and the wrong one, is to attach folds to `Session` the way
-`Session.projection` attaches them. It does not work for this family, and the
-reason is a property worth protecting: **these folds must stay callable on a log
-that is not the live one.** `fold_namespace` is what makes `ctx.sessions.fork(source,
-boundary)` reconstruct a namespace *as of the boundary* (D17), and P3-24's
-trajectory view projects a stored log with nothing mounted. A fold attached to a
-live `Session` is monotonic in that log and cannot answer for an earlier prefix,
-so attaching it would trade the whole point for the speed.
+The obvious answer is to attach folds to `Session`, as `Session.projection`
+attaches them. That answer is wrong for this family, because of a property that
+is worth protecting: **these folds must stay callable on a log that is not the
+live one.** `fold_namespace` is what makes `ctx.sessions.fork(source, boundary)`
+reconstruct a namespace *as of the boundary* (D17). The trajectory view of P3-24
+projects a stored log with nothing mounted. A fold that is attached to a live
+`Session` is monotonic in that log and cannot answer for an earlier prefix. So
+to attach it would give up the purpose in exchange for the speed.
 
-So the fold stays a pure function of a log, and the *cache* is a separate thing a
-consumer owns. `session.seq` is an exact invalidation key because the log is
-append-only (A1): if it has not grown, no fold over it can have changed.
+So the fold stays a pure function of a log, and the *cache* is a separate object
+that a consumer owns. `session.seq` is an exact invalidation key because the log
+is append-only (A1): if the log has not grown, no fold over it can have changed.
 
-**Which of the two to reach for.** `Session.projection` is the narrow family —
-"the latest event of type X, read as Y" — where the answer is one event and the
-fold can start from wherever it left off. This is the general one: an arbitrary
-fold over the whole log, which is why it has to be a pure function and why it is
-the one held to `ph.testing.folds`' laws. A projection that grows past one event
-belongs here, not there.
+**Which of the two to use.** `Session.projection` is the narrow family: "the
+latest event of type X, read as Y". The answer is one event, and the fold can
+start from the point where it stopped. `SessionFoldCache` is the general one: an
+arbitrary fold over the whole log. That is why the fold must be a pure function,
+and why it is the one held to the laws of `ph.testing.folds`. A projection that
+grows past one event belongs here and not there.
 
-**The one requirement**, and the only way to misuse this: the cached function
-must be a pure fold of the prefix. A function that also reads the clock, the
-filesystem, or a mutable table can change its answer without the log growing, and
-the cache will not notice. Nothing here can check that *ahead* of the fact;
-`ph.testing.folds` can, from a process that holds the whole log and so every
-prefix of it, and each consumer's tests hold their fold to those laws before the
-cache ever relies on them.
+**The one requirement**, and the only way to misuse this cache: the cached
+function must be a pure fold of the prefix. A function that also reads the
+clock, the filesystem, or a mutable table can change its answer when the log has
+not grown, and the cache will not notice. Nothing here can check that *ahead* of
+the fact. `ph.testing.folds` can, from a process that holds the whole log and
+therefore every prefix of it. The tests of each consumer hold its fold to those
+laws before the cache relies on them.
 
-What `stale` adds is the half a test cannot reach: whether the answers this cache
-is serving **right now**, in a running deployment, still equal the fold. Each
-consumer polls it through its own invariant row, so a report names which cache
-drifted rather than that one did.
+`stale` adds the part that a test cannot reach: whether the answers that this
+cache serves **right now**, in a running deployment, still equal the fold. Each
+consumer polls it through its own invariant row. So a report names the cache
+that drifted, and does not say only that one drifted.
 
 @module ph.session.folds
 """
@@ -55,11 +56,11 @@ __all__ = ["SessionFoldCache"]
 class SessionFoldCache[T]:
     """One cached fold per session, recomputed only when the log grew.
 
-    Bounded by live sessions rather than by history: an entry is *replaced*, not
-    accumulated, so a million-event session holds one value. And by live sessions
-    in the store's sense: the entries are a `SessionTable`, so a session the store
-    lets go takes its entry, and a read of one that has already gone is answered
-    without being filed.
+    The cache is bounded by live sessions and not by history. An entry is
+    *replaced* and not accumulated, so a million-event session holds one value.
+    "Live" has the meaning that the store gives it: the entries are a
+    `SessionTable`, so a session that the store lets go takes its entry with it.
+    A read of a session that has already gone is answered and not filed.
     """
 
     __slots__ = ("_compute", "_entries", "_extend")
@@ -75,15 +76,16 @@ class SessionFoldCache[T]:
         self._entries: SessionTable[tuple[int, T]] = SessionTable()
 
     def read(self, session: Session) -> T:
-        """The fold over this session, folded at most once per appended event.
+        """The fold over this session, folded at most one time per appended event.
 
-        With `extend`, a miss folds only the new slice: `session.seq` bumps on
-        every event of any type — a long session is mostly chunks — so a
-        projection read each model step misses the key almost every time even
-        though the events it folds are rare. `extend(previous, session,
-        from_seq)` carries the same requirement as `compute`, resumed from a
-        prefix: extending the fold of a prefix must equal folding the whole log.
-        Without it a miss refolds from zero, which is still correct.
+        With `extend`, a miss folds only the new slice. `session.seq` increases
+        on every event of any type, and a long session is mostly chunks. So a
+        projection that is read at each model step misses the key almost every
+        time, although the events that it folds are rare.
+        `extend(previous, session, from_seq)` carries the same requirement as
+        `compute`, resumed from a prefix: to extend the fold of a prefix must
+        equal a fold of the whole log. Without `extend`, a miss folds again from
+        zero, which is still correct.
         """
         cached = self._entries.get(session)
         if cached is not None and cached[0] == session.seq:
@@ -98,23 +100,26 @@ class SessionFoldCache[T]:
     def stale(self, sessions: Iterable[Session]) -> list[str]:
         """Every cached answer that no longer equals the fold of its log (I6).
 
-        Here rather than in the invariant row that declares it, for
-        `ToolRuntime.stale_views`' reason: `_entries` is this class's own secret,
-        and a check written against it from outside is one a rename disables
-        without anybody noticing.
+        The check is here and not in the invariant row that declares it, for the
+        reason that `ToolRuntime.stale_views` gives. `_entries` is private to
+        this class. A rename would disable a check that was written against it
+        from outside, and nobody would notice.
 
-        **Only entries whose key still matches are compared.** An entry below the
-        session's current `seq` is not drift — it is the ordinary state of a cache
-        between reads, and `read` will fold the new slice before serving it. What
-        this catches is the failure the key cannot see: a fold that answered from
-        something other than the log, and a reader that mutated the value it was
-        handed and so poisoned the entry for everyone after it.
+        **Only entries whose key still matches are compared.** An entry below
+        the current `seq` of the session is not drift. It is the ordinary state
+        of a cache between reads, and `read` folds the new slice before it
+        serves the entry. This check catches the failures that the key cannot
+        see: a fold that answered from something other than the log, and a
+        reader that mutated the value that it was given and so corrupted the
+        entry for every later reader.
 
-        A cached session that is no longer live is skipped rather than reported:
-        there is no log left to fold, so nothing here can say whether it drifted.
+        A cached session that is no longer live is skipped and not reported.
+        There is no log left to fold, so nothing here can say whether it
+        drifted.
 
-        O(events) per cached session, which is why this is polled and never run on
-        `read` — doing it there would cost exactly the memoization it checks.
+        The cost is O(events) per cached session. That is why this is polled and
+        never run on `read`: on `read` it would cost exactly the memoization
+        that it checks.
         """
         found: list[str] = []
         for session in sessions:

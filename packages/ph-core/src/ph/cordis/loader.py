@@ -575,9 +575,9 @@ def _warn_unflushed(rows: Iterable[Row]) -> None:
     Without a `checkpoint` row, nothing flushes before a model request or a tool
     body. A crash then loses whatever no other write put on disk. The one write
     left at shutdown is the last write of the mount
-    (`ph.persistence.write_on_unwind`), which runs after telemetry has gone. This
-    is a warning and not a refusal, because the log is still written and the
-    deployment may choose this trade.
+    (`ph.persistence.protocol.write_on_unwind`), which runs after telemetry has
+    gone. This is a warning and not a refusal, because the log is still written
+    and the deployment may choose this trade.
 
     The check reads the rows that a mount activated, after the mount has
     settled. A checkpoint row that still waits for a service flushes nothing,

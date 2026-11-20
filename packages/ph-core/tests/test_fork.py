@@ -264,6 +264,38 @@ def test_fork_boundaries_agrees_with_the_per_boundary_rule() -> None:
     assert not fast & {event.seq for event in log[-2:]}, "an open turn is not a target"
 
 
+def test_a_boundary_inside_a_batch_is_no_fork_point() -> None:
+    """A batch is a set of records that only mean something together (P10-15).
+    `fork` refuses a prefix that ends between two of them, so a reader must not
+    offer that record as a fork point. The last member of the batch is one.
+
+    Sabotage: drop `_cut_batch_at` from `fork_boundaries` or from
+    `is_fork_boundary`, and each marks a boundary that `fork` refuses with
+    `OPEN_BATCH`.
+    """
+    store = _store()
+    session = store.create("batched")
+    _closed_turn(session, 1, "first")
+    with session.batch() as batch:
+        first = log_event(batch, "approval/policy", {"mode": "ask"})
+        last = log_event(batch, "approval/policy", {"mode": "never"})
+    log = session.events
+
+    marked = fork_boundaries(log)
+
+    assert first.seq not in marked and last.seq in marked
+    assert marked == {event.seq for event in log if is_fork_boundary(log, event.seq)}
+    for event in log:
+        if event.seq in marked:
+            store.fork(session, event.seq)
+        else:
+            with pytest.raises(SessionForkError):
+                store.fork(session, event.seq)
+    with pytest.raises(SessionForkError) as refused:
+        store.fork(session, first.seq)
+    assert refused.value.code == "OPEN_BATCH"
+
+
 # ------------------------------------------------- segmentation (§7 step 6) --
 
 

@@ -1,4 +1,4 @@
-"""`ph.persistence` — session storage backends, checkpoints, and crash repair."""
+"""`ph.persistence`: session storage backends, checkpoints, and crash repair."""
 
 from __future__ import annotations
 

@@ -1,14 +1,15 @@
 """The ordered surface over the append-only log.
 
-The log never changes; the *surface* does. Compaction, pruning and offloading
-append an event whose `surfaceOp` replaces a range of nodes — the shadowed
+The log never changes. The *surface* does. Compaction, pruning and offloading
+append an event whose `surfaceOp` replaces a range of nodes. The shadowed
 events leave the derivation and stay in the log (invariant I4). That one
-mechanism gives compaction, offload, rollback and fork/replay the same shape,
-and is why a checkpointer could not substitute for it (port plan §8).
+mechanism gives compaction, offload, rollback and fork/replay the same shape.
+It is also why a checkpointer could not substitute for it (port plan §8).
 
-Ported from dsh `packages/core/session/src/surface.ts`. One simplification:
-dsh's manager can fold a loaded *window* of a log (`baseSeq`); pH always holds
-the whole log, so `seq` is the list index everywhere (A1).
+Ported from dsh `packages/core/session/src/surface.ts`, with one
+simplification. The manager of dsh can fold a loaded *window* of a log
+(`baseSeq`). pH always holds the whole log, so `seq` is the list index
+everywhere (A1).
 
 @module ph.session.surface
 """
@@ -54,10 +55,10 @@ def is_surface_event(event: SessionEvent) -> bool:
 def is_append_surface_event(event: SessionEvent) -> bool:
     """Whether the event entered the surface at its own log position.
 
-    The surface deliberately shadows replaced ranges, which makes it the wrong
-    source for a *human* transcript — a landed compaction would erase
-    conversation the user already saw. Append-origin events are that
-    transcript's source material; replacement copies stay model-only.
+    The surface deliberately shadows replaced ranges. That makes it the wrong
+    source for a *human* transcript, because a landed compaction would erase
+    conversation that the user already saw. Append-origin events are the source
+    material of that transcript. Replacement copies stay model-only.
     """
     return is_surface_event(event) and event.surface_op == "append"
 
@@ -67,7 +68,7 @@ def is_replacement_surface_event(event: SessionEvent) -> bool:
 
 
 def shadowed_by(event: SessionEvent) -> tuple[int, ...]:
-    """The nodes `event` took off the surface; `()` for anything but a replacement."""
+    """The nodes that `event` took off the surface. `()` for anything but a replacement."""
     operation = event.surface_op
     if is_replacement_surface_event(event) and isinstance(operation, SurfaceReplace):
         return operation.replaces
@@ -75,18 +76,20 @@ def shadowed_by(event: SessionEvent) -> tuple[int, ...]:
 
 
 def is_stand_in(event: SessionEvent) -> bool:
-    """Whether this node is text standing in for conversation that left the surface.
+    """Whether this node is text that stands in for conversation that left the surface.
 
-    The claim `PluginSource.form == "compaction"` makes — a summary compaction wrote,
-    or a model's own revision of its context — on a replacement, which is what
-    separates it from the other plugin-authored replacement, an offloaded paste, and
-    from a row that merely names a plugin. A reader that keys on it treats the text
-    as already condensed: compaction declines to summarize a summary, and a context
-    editor lists it as a revision.
+    This is the claim that `PluginSource.form == "compaction"` makes on a
+    replacement: the text is a summary that compaction wrote, or a revision by
+    a model of its own context. The claim separates the node from the other
+    plugin-authored replacement, an offloaded paste, and from a row that only
+    names a plugin. A reader that keys on it treats the text as already
+    condensed: compaction declines to summarize a summary, and a context editor
+    lists it as a revision.
 
-    `data["source"]`, not `data["message"]["source"]`: a `user/message` payload *is*
-    the message, where an `assistant/message` wraps one. An assistant node therefore
-    has no top-level source and answers `False`, which is the right answer for it.
+    The function reads `data["source"]`, not `data["message"]["source"]`. A
+    `user/message` payload *is* the message, where an `assistant/message` wraps
+    one. An assistant node therefore has no top-level source and answers
+    `False`, which is the right answer for it.
     """
     source = event.data.get("source")
     return (
@@ -98,27 +101,31 @@ def is_stand_in(event: SessionEvent) -> bool:
 
 
 def is_in_place_rewrite(event: SessionEvent) -> bool:
-    """Whether a replacement stands for exactly the one node it replaces.
+    """Whether a replacement stands for exactly the one node that it replaces.
 
-    The two shapes a `replace` comes in, told apart structurally rather than by
-    guessing from the producer. A **substitution** stands in for a range with
-    something new — a compaction summary, an offloaded paste, a model's revision of
-    its context — and the rows it shadows leave the model's view. An **in-place
-    rewrite** replaces a single node with a near-copy of itself: a tool result whose
-    content was relocated, an assistant message whose call arguments were elided.
-    Nothing leaves the conversation, so a reader should update the row it already
-    has rather than draw a second one and dim the first.
+    A `replace` has two shapes. This function tells them apart by structure and
+    does not guess from the producer:
 
-    **By type, because the commit makes the type exact**: an `assistant/message` or
-    `tool/result` replacement is refused unless it rewrites exactly one node of its
-    own type, cites it, and keeps its message id (`_assert_assistant_rewrite`,
-    `_assert_tool_result_rewrite`) — so every other replacement, a substitution, is
-    a `user/message`. The shape alone — one node, cited as the source — cannot tell
-    them apart: a substitution standing for a single message has it too.
+    * A **substitution** stands in for a range with something new: a compaction
+      summary, an offloaded paste, or a revision by a model of its context. The
+      rows that it shadows leave the view of the model.
+    * An **in-place rewrite** replaces a single node with a near-copy of
+      itself: a tool result whose content was relocated, or an assistant
+      message whose call arguments were elided. Nothing leaves the
+      conversation, so a reader should update the row that it already has, and
+      not draw a second row and dim the first.
+
+    **The test is by type, because the commit makes the type exact.** An
+    `assistant/message` or `tool/result` replacement is refused unless it
+    rewrites exactly one node of its own type, cites it, and keeps its message
+    id (`_assert_assistant_rewrite`, `_assert_tool_result_rewrite`). So every
+    other replacement, which is a substitution, is a `user/message`. The shape
+    alone (one node, cited as the source) cannot tell them apart, because a
+    substitution that stands for a single message has that shape too.
 
     A consumer that keyed on `is_replacement_surface_event` alone had to hold a
-    list of which producers do which — exactly the shape-matching that the
-    `form` discriminator replaced one layer up.
+    list of which producers do which. That is exactly the shape-matching that
+    the `form` discriminator replaced one layer up.
     """
     replaced = shadowed_by(event)
     return (
@@ -129,17 +136,18 @@ def is_in_place_rewrite(event: SessionEvent) -> bool:
 
 
 REWRITTEN_IN_PLACE = frozenset({"assistant/message", "tool/result"})
-"""The types a replacement may rewrite in place — and the only types it may."""
+"""The types that a replacement may rewrite in place. It may rewrite no other type in place."""
 
 
 @dataclass(frozen=True, slots=True)
 class SurfaceFoldReplacement:
     seq: int
     shadowed_seqs: tuple[int, ...]
-    """The nodes this event took out, in **surface order**.
+    """The nodes that this event took out, in **surface order**.
 
-    The set, not a `start`/`end` range: the range is only an encoding of it, and
-    the set is what anyone asking "what did this compaction shadow" wants.
+    This is the set and not a `start`/`end` range. A range is only an encoding
+    of the set, and a caller that asks "what did this compaction shadow" wants
+    the set.
     """
 
 
@@ -211,27 +219,27 @@ def _assert_provenance(event: SessionEvent, shadowed_seqs: Sequence[int]) -> Non
 
 
 def _shadowed(state: _FoldState, op: SurfaceReplace) -> tuple[int, ...]:
-    """Which nodes this replacement takes out, in surface order.
+    """The nodes that this replacement takes out, in surface order.
 
-    **Membership, never arithmetic.** Every named seq has to be a node right now or
-    the whole operation is refused — there is no "between", so a name that has already
-    been shadowed cannot be silently re-shadowed and a range cannot drift over
-    messages nobody cited.
+    **Membership, never arithmetic.** Every named seq must be a node now, or
+    the whole operation is refused. There is no "between". A name that is
+    already shadowed cannot be silently shadowed again, and a range cannot
+    drift over messages that nobody cited.
 
-    Returned in surface order rather than the order the writer listed them, so a
-    consumer reading `shadowed_seqs` sees the conversation's order and not an accident
-    of how the set was built.
+    The result is in surface order and not in the order that the writer listed
+    the names. A consumer that reads `shadowed_seqs` therefore sees the order
+    of the conversation, and not an accident of how the set was built.
 
-    **One pass with a set, not `.index` per name** — resolving each name by scanning
-    the node list from 0 is O(names x nodes), quadratic in the number of names, which
-    is precisely the direction compaction grows.
+    **One pass with a set, not `.index` per name.** To resolve each name by a
+    scan of the node list from 0 is O(names x nodes). That is quadratic in the
+    number of names, and the number of names is what grows with compaction.
     """
     if len(op.replaces) == 1:
         # **The common case keeps the cheap test.** A membership scan stops at
-        # the node it finds, so replacing an early one costs its position, where
-        # the set below always costs the whole surface. Building it for a
-        # single-name replace is slower than not having it, because almost every
-        # replace names exactly one node.
+        # the node that it finds, so the cost to replace an early node is its
+        # position. The set below always costs the whole surface. For a
+        # single-name replace, it is slower to build the set than to go without
+        # it, and almost every replace names exactly one node.
         only = op.replaces[0]
         if only not in state.nodes:
             raise SurfaceError(f"surface replace: seq {only} is not a current surface node")
@@ -247,10 +255,10 @@ def _shadowed(state: _FoldState, op: SurfaceReplace) -> tuple[int, ...]:
 def _assert_tool_result_rewrite(
     event: SessionEvent, shadowed_seqs: Sequence[int], log: Sequence[SessionEvent]
 ) -> None:
-    """A `tool/result` replacement may change only the result's content.
+    """A `tool/result` replacement may change only the content of the result.
 
-    Offloading rewrites one result in place (G2/C5). Letting it change the call
-    id or the error identity as well would let a "spill" silently rewrite what
+    Offloading rewrites one result in place (G2/C5). If it could also change
+    the call id or the error identity, a "spill" could silently rewrite what
     the model is told happened.
     """
     if event.type != "tool/result":
@@ -269,13 +277,14 @@ def _assert_assistant_rewrite(
 ) -> None:
     """An `assistant/message` replacement rewrites one reply in place, or nothing.
 
-    The reply-side twin of `_assert_tool_result_rewrite`, and what lets
-    `is_in_place_rewrite` decide by type: a replacement in assistant role that named
-    a range, or carried a message of its own, would be new speech the model never
-    made — and readers that skip a rewrite's calls as already answered (repair, the
-    todo row) would skip a substitution's too. Text standing in for a range is a
-    `user/message`. Every log this format reads already agrees: the one producer of
-    assistant replacements has always rewritten a single reply in place.
+    This is the reply-side counterpart of `_assert_tool_result_rewrite`. It is
+    what lets `is_in_place_rewrite` decide by type. A replacement in assistant
+    role that named a range, or carried a message of its own, would be new
+    speech that the model never made. Readers that skip the calls of a rewrite
+    as already answered (repair, the todo row) would also skip the calls of a
+    substitution. Text that stands in for a range is a `user/message`. Every
+    log that this format reads already agrees: the one producer of assistant
+    replacements has always rewritten a single reply in place.
     """
     if event.type != "assistant/message":
         return
@@ -302,14 +311,15 @@ def _message_id(event: SessionEvent) -> object:
 
 
 def _blank_result_content(data: object) -> PlainJsonValue:
-    """A `tool/result` payload with every result block's content blanked out.
+    """A `tool/result` payload with the content of every result block blanked out.
 
-    **Every block, and the list kept at its own length.** Blanking only the first
-    and collapsing the list to it compared two payloads by their first block
-    alone: a replacement could drop the blocks behind it, or add one carrying a
-    different `toolCallId` or `isError`, and still read as "content only". The
-    narrowing is what stops a spill rewriting what the model is told happened, so
-    it has to hold for the whole message rather than its opening block.
+    **Every block is blanked, and the list keeps its length.** An earlier
+    version blanked only the first block and collapsed the list to it, so it
+    compared two payloads by their first block alone. A replacement could drop
+    the blocks behind the first, or add one with a different `toolCallId` or
+    `isError`, and still read as "content only". This narrowing is what stops a
+    spill from rewriting what the model is told happened. It must therefore
+    hold for the whole message and not only for its first block.
     """
     plain = thaw_json(data)
     message = plain.get("message") if isinstance(plain, dict) else None
@@ -318,8 +328,8 @@ def _blank_result_content(data: object) -> PlainJsonValue:
         if isinstance(blocks, list):
             # `thaw_json` above rebuilds every mapping as a plain `dict`, so a
             # proxy cannot reach here. A non-mapping element can, from a
-            # hand-edited log, and is kept rather than dropped: losing a block is
-            # the thing this comparison exists to catch.
+            # hand-edited log. It is kept and not dropped, because a lost block
+            # is what this comparison exists to catch.
             message["content"] = [
                 {**block, "content": None} if isinstance(block, dict) else block for block in blocks
             ]
@@ -348,8 +358,10 @@ def _plan(
 
 
 def _replace_reads_the_batch(events: Sequence[SessionEvent]) -> bool:
-    """Whether a replace in `events` follows a member that moved the surface — the
-    one case whose plan depends on the batch's own effects (`validate_batch`)."""
+    """Whether a replace in `events` follows a member that moved the surface.
+
+    That is the one case in which the plan depends on the effects of the batch
+    itself (`validate_batch`)."""
     moved = False
     for event in events:
         op = _surface_op_of(event)
@@ -367,14 +379,14 @@ def _apply(
         return None
     if isinstance(plan, _ReplacePlan):
         # `shadowed_seqs` is in surface order, so its first element is the
-        # earliest node this takes out — which is where the replacement lands.
-        # Nothing ahead of that was shadowed, so the count of survivors before it
-        # is unchanged and the index needs no adjusting.
+        # earliest node that this takes out, and the replacement lands there.
+        # Nothing before that node was shadowed, so the count of survivors
+        # before it is unchanged and the index needs no adjustment.
         insert_at = state.nodes.index(plan.shadowed_seqs[0])
         if len(plan.shadowed_seqs) == 1:
             # **The common case, and the one that must stay O(1).** Every
             # `truncate_arguments`, every offloaded tool result and every elided
-            # paste is one node standing in for one node, so rebuilding the whole
+            # paste is one node that stands in for one node. To rebuild the whole
             # list for those is work proportional to the surface per rewrite.
             state.nodes[insert_at] = plan.seq
         else:
@@ -389,8 +401,9 @@ def _apply(
 def fold_surface(events: Sequence[SessionEvent]) -> SurfaceFoldResult:
     """Replay a complete log through the canonical surface fold.
 
-    The offline counterpart of `SurfaceManager`: an external reconstructor folds
-    the same rules over a stored log and must reach the same nodes.
+    This is the offline counterpart of `SurfaceManager`. An external
+    reconstructor folds the same rules over a stored log and must reach the
+    same nodes.
     """
     state = _FoldState()
     replacements: list[SurfaceFoldReplacement] = []
@@ -404,8 +417,9 @@ def fold_surface(events: Sequence[SessionEvent]) -> SurfaceFoldResult:
 class SurfaceManager:
     """Incremental ordered surface view and append-boundary validator.
 
-    Holds a live reference to the session's log list and folds lazily, so the
-    cost of reading the surface is O(events appended since the last read).
+    The manager holds a live reference to the log list of the session and folds
+    lazily. The cost to read the surface is therefore O(events appended since
+    the last read).
     """
 
     __slots__ = ("_log", "_processed", "_state")
@@ -418,10 +432,11 @@ class SurfaceManager:
     def validate_next(self, event: SessionEvent) -> None:
         """Validate a candidate *before* it enters the log.
 
-        Planning the transition without committing it is what makes a rejected
-        append leave the surface untouched — a partially mutated surface would
-        be unrecoverable. The committed fold re-plans the event once it is in
-        the log; the state is unchanged in between, so the outcome is the same.
+        The transition is planned and not committed. That is why a rejected
+        append leaves the surface untouched. A partially mutated surface could
+        not be recovered. The committed fold plans the event again after it is
+        in the log. The state does not change in between, so the outcome is the
+        same.
         """
         self._process_delta()
         _plan(self._state, event, len(self._log), self._log)
@@ -429,24 +444,29 @@ class SurfaceManager:
     def validate_batch(self, events: Sequence[SessionEvent]) -> None:
         """Validate candidates that will enter the log together (P10-14).
 
-        Each is planned against the state the ones before it would leave, on a
-        **scratch copy** of the fold state, so a member may replace a node an
-        earlier member added and a refusal anywhere leaves the live state as it
-        was. `validate_next` needs no copy because it plans one event and applies
-        nothing; a batch has to apply each plan to plan the next.
+        Each candidate is planned against the state that the candidates before
+        it would leave, on a **scratch copy** of the fold state. A member may
+        therefore replace a node that an earlier member added, and a refusal
+        anywhere leaves the live state as it was. `validate_next` needs no copy
+        because it plans one event and applies nothing. A batch must apply each
+        plan to plan the next.
 
-        **No copy unless a replace can see the batch's own effects**, which almost no
-        batch has. Every step's has no replace at all: the driver takes a prompt from
-        the inbox in one batch with `step/start` and its `user/message` (S3). An
-        append or a record off the surface reads neither the fold state nor the log,
-        so each is planned where it stands — O(members) rather than O(nodes +
-        events), which a batch per step would otherwise pay on a log that grows by
-        one `assistant/chunk` per token. And a replace with nothing ahead of it that
-        moved the surface — the overflow clip's `offload/spilled` beside its
-        rewrite, an elided paste beside its accounting — shadows only committed
-        nodes, so the live state and log answer it exactly as the copy would.
-        Only a replace behind an append or another replace needs the scratch copy:
-        O(nodes) for the state, O(events) for the log its rewrite check may index.
+        **There is no copy unless a replace can see the effects of the batch
+        itself**, and almost no batch has such a replace. The batch of every
+        step has no replace at all: the driver takes a prompt from the inbox in
+        one batch with `step/start` and its `user/message` (S3). An append, or
+        a record that is not on the surface, reads neither the fold state nor
+        the log, so each is planned where it stands. That costs O(members) and
+        not O(nodes + events). A batch per step would otherwise pay the larger
+        cost on a log that grows by one `assistant/chunk` per token.
+
+        A replace with nothing before it that moved the surface shadows only
+        committed nodes. Examples are the `offload/spilled` of the overflow
+        clip beside its rewrite, and an elided paste beside its accounting. The
+        live state and the live log answer such a replace exactly as the copy
+        would. Only a replace behind an append or behind another replace needs
+        the scratch copy: O(nodes) for the state, and O(events) for the log
+        that its rewrite check may index.
         """
         self._process_delta()
         base = len(self._log)
@@ -476,7 +496,7 @@ class SurfaceManager:
         return self.nodes_from(0)
 
     def nodes_from(self, index: int) -> tuple[int, ...]:
-        """The surface from position `index` on — what an incremental reader needs."""
+        """The surface from position `index` on. An incremental reader needs this."""
         self._process_delta()
         return tuple(self._state.nodes[index:])
 

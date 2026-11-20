@@ -1,8 +1,8 @@
-"""Log writers: the one door into a session log (T6).
+"""Log writers: the only way to write a session log (T6).
 
-**Nothing writes a session log except through a writer**, and a writer writes only the
-types its owner is the writer of record for. `Session` has no public `append`: a
-module that writes the log mints its own writer at import —
+**Nothing writes a session log except through a writer.** A writer writes only
+the types for which its owner is the writer of record. `Session` has no public
+`append`. A module that writes the log mints its own writer at import:
 
 ```python
 _LOG = log_writer(__name__)
@@ -10,34 +10,37 @@ _LOG = log_writer(__name__)
 _LOG.append(session, "sandbox/mode", {"mode": mode})
 ```
 
-— and the writer refuses a type that is not its owner's. So the rule
-`known_event_types.WRITERS` states, and `test_log_writers.py` used to hold only
-statically, is also held at the write (F12): a row that reached a session it was
-handed could write any type into it, a posture record included, and nothing stopped
-it at runtime. Now the right to write a type is an object only its owner holds.
+The writer refuses a type that does not belong to its owner.
+`known_event_types.WRITERS` states the rule. `test_log_writers.py` used to check
+the rule only statically, and the writer now also enforces it at the write
+(F12). Before that, a row that reached a session could write any type into it,
+a posture record included, and nothing stopped the row at run time. Now the
+right to write a type is an object that only the owner of the type holds.
 
-**Where the right comes from.** ph-core's table (`known_event_types._WRITTEN_BY`)
-for ph-core's vocabulary, and `declare_log_type(..., owner=)` for a type a package
-declares. `log_writer(owner)` refuses to mint for a module other than the one calling
-it, so the owner cannot be claimed by a module that is not it. A kind's pair is
-written by the journal through the writer of the leaf that declares the kind
-(`IntentKind.writer`), which is how a kind proves it owns both of its types.
+**Where the right comes from.** For the vocabulary of ph-core, it comes from the
+table of ph-core (`known_event_types._WRITTEN_BY`). For a type that a package
+declares, it comes from `declare_log_type(..., owner=)`. `log_writer(owner)`
+refuses to mint a writer for any module other than the module that calls it, so
+a module cannot claim to be an owner that it is not. The journal writes the pair
+of a kind through the writer of the leaf that declares the kind
+(`IntentKind.writer`). That is how a kind proves that it owns both of its types.
 
-**Rule 6 — what this does not enforce.** Python cannot make a writer unforgeable: a
-module can import another's writer, or construct a `LogWriter` directly, or call
-`Session._append`. Each of those is a deliberate, reviewable act, and
-`test_log_writers.py` turns each into a failure. What the runtime holds is the
-honest mistake — a row that appends a type it does not own — which is the one that
-happens.
+**Rule 6: what this does not enforce.** Python cannot make a writer unforgeable.
+A module can import the writer of another module, construct a `LogWriter`
+directly, or call `Session._append`. Each of those is a deliberate act that a
+reviewer can see, and `test_log_writers.py` turns each one into a failure. The
+runtime check stops the accidental mistake: a row that appends a type that it
+does not own. That is the mistake that happens in practice.
 
-**Not a writer: `admit`.** A replica, a seed and a fork mirror a log somebody else
-wrote; they admit records, and write none.
+**`admit` is not a writer.** A replica, a seed and a fork each mirror a log that
+some other writer wrote. They admit records, and they write none.
 
-**`revises` is reserved.** A record stamped with it says which surface replacements it
-explains, and `Session.records_of` pairs the two by it, so only the revision door
-(`ph.session.revise`) stamps it: `append` refuses a payload carrying the key, and the
-door writes a producer's record through `_append_revising`, with the producer's own
-writer, since the type is the producer's.
+**`revises` is reserved.** A record that carries this key says which surface
+replacements it explains, and `Session.records_of` pairs the record with those
+replacements by the key. Only the revision module (`ph.session.revise`)
+therefore stamps the key. `append` refuses a payload that carries it. The
+revision module writes the record of a producer through `_append_revising`,
+with the writer of the producer, because the type belongs to the producer.
 
 @module ph.session.writers
 """
@@ -59,8 +62,9 @@ if TYPE_CHECKING:
 __all__ = ["REVISES", "LogWriteError", "LogWriter", "log_writer", "scaffolding_writer"]
 
 REVISES = "revises"
-"""The payload key the revision door stamps on a producer's record: the seqs of the
-replacements it explains. Reserved: no other write may carry it."""
+"""The payload key that the revision module stamps on the record of a producer. Its
+value is the seqs of the replacements that the record explains. The key is reserved:
+no other write may carry it."""
 
 
 class LogWriteError(ValueError):
@@ -69,17 +73,18 @@ class LogWriteError(ValueError):
 
 @dataclass(frozen=True, slots=True, eq=False)
 class LogWriter:
-    """The right to write one owner's types into a session log.
+    """The right to write the types of one owner into a session log.
 
-    Minted by `log_writer`, never constructed elsewhere. Compared by identity: two
-    writers for one owner are two objects, and neither is the other's.
+    `log_writer` mints a writer. Other code must not construct one. Writers are
+    compared by identity: two writers for one owner are two objects, and neither
+    is the other.
     """
 
     owner: str
     types: frozenset[str]
-    """The ph-core types ph-core's table grants `owner`. Types `owner` declared are
-    checked at the write rather than copied here, since a module may mint its writer
-    before its declarations run."""
+    """The ph-core types that the table of ph-core grants to `owner`. The types that
+    `owner` declared are checked at the write and are not copied here, because a
+    module may mint its writer before its declarations run."""
 
     def owns(self, event_type: str) -> bool:
         """Whether this writer may write `event_type`."""
@@ -92,21 +97,23 @@ class LogWriter:
         data: Mapping[str, JsonValue],
         surface: SurfaceIntent | None = None,
     ) -> SessionEvent:
-        """Append one event to `log` — a session, or a batch open on one.
+        """Append one event to `log`, which is a session or a batch that is open on one.
 
-        **One method call and a set lookup** on the way to the append itself, since
-        this is on the agent loop's hot path (`assistant/chunk`, per streamed token);
-        `test_log_writers.py` holds a benchmark to it.
+        The cost before the append itself is **one method call and a set lookup**.
+        This method is on the hot path of the agent loop (`assistant/chunk`, one
+        for each streamed token), and `test_log_writers.py` has a benchmark that
+        checks the cost.
 
-        :raises LogWriteError: when `event_type` is not this writer's, or `data` carries
-            the reserved `revises`.
+        :raises LogWriteError: when `event_type` does not belong to this writer, or
+            `data` carries the reserved `revises`.
         """
         if event_type not in self.types and not self.owns(event_type):
             raise _not_the_writer(self.owner, event_type)
         try:
             stamped = REVISES in data
         except TypeError:
-            # A payload that is not an object is the session's to refuse, saying so.
+            # The session refuses a payload that is not an object, with an error
+            # that says so.
             stamped = False
         if stamped:
             raise LogWriteError(
@@ -122,7 +129,8 @@ class LogWriter:
         data: Mapping[str, JsonValue],
         revises: Sequence[int],
     ) -> SessionEvent:
-        """`data`, stamped with the replacements it explains. `ph.session.revise`'s alone."""
+        """Append `data`, stamped with the replacements that it explains. Only
+        `ph.session.revise` calls this method."""
         if not self.owns(event_type):
             raise _not_the_writer(self.owner, event_type)
         return log._append(event_type, {**data, REVISES: list(revises)}, None)
@@ -137,12 +145,13 @@ def _not_the_writer(owner: str, event_type: str) -> LogWriteError:
 
 
 def log_writer(owner: str) -> LogWriter:
-    """The calling module's writer: `_LOG = log_writer(__name__)`, at module top.
+    """Return the writer of the calling module: `_LOG = log_writer(__name__)`, at module top.
 
-    **Refused for any owner but the caller**, read off the calling frame: a module
-    naming another as its owner would claim that module's types. A module no table
-    names and that declared nothing gets a writer that refuses every type — the
-    runtime refusal a third-party row meets when it writes a type it does not own.
+    **The function refuses any owner other than the caller.** It reads the caller
+    from the calling frame. A module that named another module as its owner would
+    claim the types of that module. A module that no table names, and that
+    declared nothing, gets a writer that refuses every type. A third-party row
+    meets that refusal at run time when it writes a type that it does not own.
 
     :raises LogWriteError: when `owner` is not the calling module.
     """
@@ -156,12 +165,13 @@ def log_writer(owner: str) -> LogWriter:
 
 
 def scaffolding_writer() -> LogWriter:
-    """A writer for every type this build reads — for `ph.testing`, and nothing else.
+    """Return a writer for every type that this build reads. Only `ph.testing` may call it.
 
-    Tests build logs by hand: a crashed turn, an ask nobody answered, a log a newer
-    build wrote. They are not writers of record for anything, and a writer that
-    could write only its owner's types could build none of them. Refused outside
-    `ph.testing`, so a shipped module cannot reach for it.
+    Tests build logs by hand: a crashed turn, an ask that nobody answered, a log
+    that a newer build wrote. A test is not a writer of record for anything, and
+    a writer that could write only the types of its owner could build none of
+    these logs. The function refuses a caller outside `ph.testing`, so a shipped
+    module cannot use it.
 
     :raises LogWriteError: when called from outside `ph.testing`.
     """
@@ -173,8 +183,9 @@ def scaffolding_writer() -> LogWriter:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class _Scaffolding(LogWriter):
-    """`scaffolding_writer`'s: it owns every type, and the session still refuses one
-    this build cannot read back (F11) — the refusal a test of that wants to meet."""
+    """The writer that `scaffolding_writer` returns. It owns every type. The session
+    still refuses a type that this build cannot read back (F11), and a test of that
+    refusal needs to meet it."""
 
     def owns(self, event_type: str) -> bool:
         return True

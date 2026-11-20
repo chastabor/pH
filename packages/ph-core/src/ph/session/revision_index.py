@@ -1,8 +1,9 @@
-"""Which records explain a replacement, and what a node stands for: the index behind
-`Session.records_of` and `Session.history`.
+"""Which records explain a replacement, and what a node stands for. This is the
+index behind `Session.records_of` and `Session.history`.
 
-Apart from `ph.session.revise`, which writes what this reads, so `Session` can hold
-one without importing the door that imports it.
+The index is in a module apart from `ph.session.revise`, which writes what this
+module reads. So `Session` can hold an index without importing the revision
+module, which imports `Session`.
 
 @module ph.session.revision_index
 """
@@ -19,8 +20,9 @@ __all__ = ["RevisionIndex", "revises_of"]
 
 
 def revises_of(record: SessionEvent) -> tuple[int, ...]:
-    """The replacements the door stamped `record` with, in the order it named them:
-    empty for a record no revision wrote."""
+    """The replacements that a revision function (`ph.session.revise`) stamped on
+    `record`, in the order in which it named them. Empty for a record that no
+    revision wrote."""
     revised = record.data.get(REVISES)
     if not isinstance(revised, Sequence) or isinstance(revised, str):
         return ()
@@ -28,17 +30,19 @@ def revises_of(record: SessionEvent) -> tuple[int, ...]:
 
 
 class RevisionIndex:
-    """Each replacement's records, by the `revises` the door stamped on them, and each
-    node's history: the index behind `Session.records_of` and `Session.history`, extended
-    as the log grows rather than rescanned."""
+    """The records of each replacement, by the `revises` key that a revision
+    function stamped on them, and the history of each node. This is the index
+    behind `Session.records_of` and `Session.history`. It is extended as the log
+    grows and is not rebuilt by a new scan."""
 
     __slots__ = ("_by_node", "_history", "_seen")
 
     def __init__(self) -> None:
         self._by_node: dict[int, tuple[SessionEvent, ...]] = {}
         self._history: dict[int, tuple[SessionEvent, ...]] = {}
-        """Kept for good once worked out, for a node with any: what a node stands for
-        is fixed when it is written, so its history never changes."""
+        """Kept permanently after it is worked out, for a node that has any
+        history. What a node stands for is fixed when the node is written, so
+        its history never changes."""
         self._seen = 0
 
     def read(self, log: Sequence[SessionEvent], seq: int) -> tuple[SessionEvent, ...]:

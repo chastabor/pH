@@ -1,36 +1,49 @@
-"""Intents: an act the log records before it happens, and settles after.
+"""Intents: an act that the log records before it happens, and settles after.
 
-Pairs of records worked this way before this module did — `approval/asked` and
-`approval/decided`, `question/asked` and `question/answered`, `shell/command` and
-`shell/result`, `tool/call` and `tool/result`, a Code Mode dispatch and its result,
-a daemon verb and its outcome, a workspace tree acquired and disposed. Each had its
-own fold of "opened and never settled", and three different places settled the
-orphans a crash leaves. Each fold was correct; what was missing was **one
-statement** of the rule that repair, the dedupe index and every reader share.
+Pairs of records worked this way before this module existed: `approval/asked`
+and `approval/decided`, `question/asked` and `question/answered`,
+`shell/command` and `shell/result`, `tool/call` and `tool/result`, a Code Mode
+dispatch and its result, a daemon verb and its outcome, and a workspace tree
+that was acquired and disposed. Each pair had its own fold of "opened and never
+settled", and three different places settled the orphans that a crash leaves.
+Each fold was correct. What was missing was **one statement** of the rule that
+repair, the dedupe index and every reader share.
 
-This module is that statement, and nothing else: declarations and pure functions
-over a sequence of events. No service — `ctx.intents` (P10-06) is where appending,
-flushing and deduping live. Pure for `folds.py`'s reason: repair folds a log while
-it is being rebuilt, and the trajectory view folds a stored one with nothing
-mounted, so a fold attached to a live `Session` could answer neither.
+This module is that statement and nothing else. It holds declarations and pure
+functions over a sequence of events. It holds no service: `ctx.intents`
+(P10-06) does the appending, the flushing and the deduping. The functions are
+pure for the same reason as the functions of `folds.py`. Repair folds a log
+while the log is being rebuilt, and the trajectory view folds a stored log with
+nothing mounted. A fold that was attached to a live `Session` could serve
+neither.
 
-**Keys stay in the payloads.** A kind reads its key off its records: the opening
-record's own seq for the asks and the shell (whose settles carry it back as
-`askSeq` and `commandSeq`, T3), a dispatch's `subCallId`, an effect's key, a
-daemon verb's command id. Those fields are data their readers already use, and a
-second copy on the envelope would be a second carrier of one fact.
+**Keys stay in the payloads.** A kind reads its key from its records:
 
-**Kinds are declared in leaves** (T4): ph-core's in `ph.session.kinds`, which this
-package imports, and a package's in its own `kinds`, which that package imports.
-`declared_intents` lists them. Not every pair above is one: `tool/call` and
-`tool/result`, and a workspace tree, keep their own folds.
+* the seq of the opening record, for the asks and the shell (their settles carry
+  the seq back as `askSeq` and `commandSeq`, T3)
+* the `subCallId` of a dispatch
+* the key of an effect
+* the command id of a daemon verb
 
-**One fold, `fold_intents`**: per key, the latest intent opened under it and the
-settle that closed it. `open_intents` and the journal's `Prior` are both read off it,
-so "open" and "settled" cannot come to mean two different things. Its rule: an open of
-a key replaces the intent before it (the later one is the live one), a settle closes
-only its own key, a record whose key cannot be read is not part of the pair, and open
-intents come back in the order they were opened.
+The readers of those records already use these fields as data. A second copy on
+the envelope would be a second carrier of one fact.
+
+**Kinds are declared in leaves** (T4). The kinds of ph-core are in
+`ph.session.kinds`, which this package imports. The kinds of another package are
+in its own `kinds` module, which that package imports. `declared_intents` lists
+them. Not every pair above is a kind: `tool/call` and `tool/result`, and a
+workspace tree, keep their own folds.
+
+**There is one fold, `fold_intents`.** For each key, it gives the latest intent
+that was opened under the key and the settle that closed it. `open_intents` and
+the `Prior` of the journal both read from this fold, so "open" and "settled"
+cannot come to mean two different things. The rule of the fold:
+
+* An open of a key replaces the intent before it. The later intent is the live
+  one.
+* A settle closes only its own key.
+* A record whose key cannot be read is not part of the pair.
+* Open intents come back in the order in which they were opened.
 
 @module ph.session.intents
 """
@@ -74,63 +87,76 @@ __all__ = [
 ]
 
 Unsettled: TypeAlias = Literal["outcome-unknown", "not-started"]
-"""What a settle written by anyone but the act itself says: that it may have
-happened, or that it cannot have. Passed to a kind's `closer`."""
+"""What a settle says when something other than the act itself wrote it: that the
+act may have happened, or that it cannot have happened. The value is passed to the
+`closer` of a kind."""
 
 IntentOrphan: TypeAlias = Literal[Unsettled, "owner-settles"]
-"""What an intent a crash left open means, and so who settles it (decision 2).
+"""What an intent that a crash left open means, and therefore who settles it
+(decision 2).
 
-* `outcome-unknown` — the act may have happened. Repair writes the settle saying
-  so, which is the one honest thing a log can say about an effect it did not see
-  finish: a shell command, a daemon verb, an approval or a question a crash cut
-  short. Every kind repair settles is declared this way.
-* `not-started` — the act cannot have happened without its settle, and repair
-  writes it as not started. No kind is declared this way: `not-started` is
-  written by the journal, for a durable kind whose opening record could not be
-  flushed (`IntentJournal.open`), so nobody was asked and nothing ran.
-* `owner-settles` — repair leaves it. The owning seam can *look* and reconciles
-  on open: a credential hold, whose resume check sees whether the name has
-  arrived. A guess from repair would be worse than the owner's look.
+* `outcome-unknown`: the act may have happened. Repair writes a settle that says
+  so. That is the only correct thing that a log can say about an effect that it
+  did not see finish: a shell command, a daemon verb, or an approval or a
+  question that a crash cut short. Every kind that repair settles is declared
+  this way.
+* `not-started`: the act cannot have happened without its settle, and repair
+  writes the settle as not started. No kind is declared this way. The journal
+  writes `not-started` for a durable kind whose opening record could not be
+  flushed (`IntentJournal.open`). In that case nobody was asked and nothing ran.
+* `owner-settles`: repair leaves the intent open. The seam that owns it can
+  *look*, and it reconciles on open. An example is a credential hold, whose
+  resume check sees whether the name has arrived. A guess from repair would be
+  worse than that check by the owner.
 """
 
 Barrier: TypeAlias = Literal["durable", "buffered", "tools-body"]
 """When the opening record must be on disk (decision 3).
 
-* `durable` — before the act: the journal flushes before handing out the claim,
-  and refuses the claim if the flush fails. Or, opened with `open_deferred`, the
-  act's own durable intent flushes it, for an opener whose act carries one.
-* `buffered` — whenever the next flush happens: accounting, where losing the
-  record in a crash loses a line of history and never an act.
-* `tools-body` — the checkpoint policy's barrier before a tool's body
-  (`tools/body`), which runs *after* every pre-execute gate and every
-  `tools/execute` wrapper. The two tool kinds declare it so the journal does not
-  place a second one; it is placed where it already is.
+* `durable`: before the act. The journal flushes before it hands out the claim,
+  and it refuses the claim if the flush fails. An opener whose act carries a
+  durable intent of its own can open with `open_deferred` instead. The durable
+  intent of the act then flushes the record.
+* `buffered`: at the next flush, whenever that happens. This is for accounting,
+  where a crash that loses the record loses a line of history and never an act.
+* `tools-body`: at the barrier that the checkpoint policy places before the body
+  of a tool (`tools/body`). That barrier runs *after* every pre-execute gate and
+  every `tools/execute` wrapper. The two tool kinds declare this value so that
+  the journal does not place a second barrier. The barrier stays where it
+  already is.
 """
 
 
 Outcome: TypeAlias = Literal["done", "failed", "outcome-unknown", "not-started"]
-"""What became of an intent, read the same way by every consumer (T2).
+"""What became of an intent. Every consumer reads it the same way (T2).
 
-`done` — the act settled it. `failed` — the act settled it and said it failed, so a
-retry is its own decision (`IntentKind.failed`). `outcome-unknown` and `not-started`
-— somebody other than the act settled it, and these say which half is known
-(`Unsettled`)."""
+* `done`: the act settled the intent.
+* `failed`: the act settled the intent and said that it failed, so a retry is a
+  decision of its own (`IntentKind.failed`).
+* `outcome-unknown` and `not-started`: something other than the act settled the
+  intent. The value says which half is known (`Unsettled`).
+"""
 
 SettledBy: TypeAlias = Literal["repair", "process"]
-"""Who wrote a settle the act did not: `repair`, on resume, for an intent a dead
-process left open; or the live `process` on the act's behalf — a barrier that
-failed, a body that raised or was canceled."""
+"""Who wrote a settle that the act did not write.
+
+* `repair`: on resume, for an intent that a dead process left open.
+* `process`: the live process, on behalf of the act, after a barrier failed or
+  after a body raised or was canceled.
+"""
 
 UNSETTLED = "unsettled"
-"""The payload field every settle **not written by the act** carries, and nothing
-else does: `{"unsettled": {"why": <Unsettled>, "by": <SettledBy>}}`.
+"""The name of the marker: a payload field that every settle **not written by the
+act** carries, and that nothing else carries. Its shape is
+`{"unsettled": {"why": <Unsettled>, "by": <SettledBy>}}`.
 
-One field for every kind, written by the journal and repair rather than by each
-closer, so "did this finish?" has one reader (`outcome_of`) instead of the four
-spellings Phase 10 grew — `interrupted: why`, `interrupted: true`,
-`outcome: "unknown"`, `failed: true`. A closer still writes its kind's own payload
-(an approval's `outcome`, a question's `resolution`), which readers of that kind
-use; this is the part every reader of every kind shares."""
+There is one field for every kind. The journal and repair write it, and the
+closers do not. The question "did this finish?" therefore has one reader
+(`outcome_of`). Phase 10 had grown four spellings of it: `interrupted: why`,
+`interrupted: true`, `outcome: "unknown"` and `failed: true`. A closer still
+writes the payload of its own kind (the `outcome` of an approval, the
+`resolution` of a question), and the readers of that kind use it. This field is
+the part that every reader of every kind shares."""
 
 
 _UNSETTLED_WHY: Mapping[str, Unsettled] = literal_lookup(Unsettled)
@@ -142,7 +168,7 @@ def unsettled(why: Unsettled, by: SettledBy) -> JsonObject:
 
 
 def unsettled_why(data: JsonObject) -> Unsettled | None:
-    """The marker's reason, or `None` for a settle the act wrote itself."""
+    """The reason in the marker, or `None` for a settle that the act wrote itself."""
     return _UNSETTLED_WHY.get(as_str(as_obj(data.get(UNSETTLED)).get("why")))
 
 
@@ -152,20 +178,21 @@ class IntentError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class IntentKind:
-    """One pair: the record that opens an intent, and the one that settles it.
+    """One pair: the record that opens an intent, and the record that settles it.
 
-    `closer(opened, why)` builds a settle payload from the opening record for a
-    settle the act did not write: repair's for an orphan (`why` is the kind's
-    `orphan`), and the journal's for an intent whose barrier failed
-    (`"not-started"`) or whose body raised (`"outcome-unknown"`). It must carry
-    the key where `settled_key` reads it. Required unless the kind is
-    `owner-settles`, since repair must be able to write *something* for every
-    orphan it is told to settle.
+    `closer(opened, why)` builds a settle payload from the opening record, for a
+    settle that the act did not write. Repair uses it for an orphan (`why` is
+    the `orphan` of the kind). The journal uses it for an intent whose barrier
+    failed (`"not-started"`) or whose body raised (`"outcome-unknown"`). The
+    payload must carry the key where `settled_key` reads it. A closer is
+    required unless the kind is `owner-settles`, because repair must be able to
+    write *something* for every orphan that it is told to settle.
 
-    `writer` is the declaring leaf's own (`log_writer(__name__)`), and the journal
-    writes the pair through it (T6): so a kind is declared only by a module that is
-    the writer of record for both of its types, and the journal writes nothing a
-    kind's declarer could not.
+    `writer` is the writer of the leaf that declares the kind
+    (`log_writer(__name__)`), and the journal writes the pair through it (T6).
+    A kind can therefore be declared only by a module that is the writer of
+    record for both of its types, and the journal writes nothing that the
+    declarer of a kind could not write.
     """
 
     opened: str
@@ -176,38 +203,41 @@ class IntentKind:
     barrier: Barrier = "durable"
     closer: Callable[[SessionEvent, Unsettled], JsonObject] | None = None
     failed: Callable[[SessionEvent], bool] | None = None
-    """Whether the act's own settle says the act failed — read by `outcome_of`. `None`
-    for a kind whose act, once it settles, has done what it does: a shell command
-    that exits non-zero still ran."""
+    """Whether the settle that the act wrote says that the act failed. `outcome_of`
+    reads it. `None` for a kind whose act has done its work when it settles: a
+    shell command that exits non-zero still ran."""
     reopen: frozenset[Outcome] = frozenset()
-    """What a prior may be, for `open` to open the key again rather than answer
-    with the prior (T2). A tool effect that failed, or never started, is worth
-    another attempt; one that was done is answered from the log; one whose outcome
-    is unknown is its caller's to decide (`reconcile` first). Empty — the default —
-    answers every prior."""
+    """The outcomes of a prior for which `open_once` opens the key again and does
+    not answer with the prior (T2). A tool effect that failed, or never started,
+    is worth another attempt. An effect that was done is answered from the log.
+    For an effect whose outcome is unknown, the caller decides (`reconcile`
+    first). Empty, the default, answers every prior."""
     reconciled: Callable[[SessionEvent, tuple[JsonValue, ...]], JsonObject] | None = None
-    """The settle for an intent whose tool said, after a crash, that it happened
-    (L6b): given the opening record and the content the tool rendered. Declaring it is
-    what makes a kind's open intents worth asking its tool about on resume. It must
-    carry the key where `settled_key` reads it, as the closer's does. A tool that says
-    the act did *not* happen gets the closer, as `not-started`. `None` for a kind no
-    tool is asked about."""
+    """Builds the settle for an intent whose tool said, after a crash, that the act
+    happened (L6b). It is given the opening record and the content that the tool
+    rendered. A kind that declares it has open intents that are worth asking its
+    tool about on resume. The payload must carry the key where `settled_key`
+    reads it, as the payload of the closer does. When a tool says that the act
+    did *not* happen, the closer writes the settle, as `not-started`. `None` for
+    a kind that no tool is asked about."""
     within: Callable[[SessionEvent], tuple[str, str] | None] | None = None
-    """The top-level call an intent was opened inside, and what to call it there: a
-    Code Mode dispatch's `rootCallId` and tool name (L6b). The call's own repaired
-    result names what the intents inside it were found to have done, since that
-    result is what the model reads. `None` for a kind no call contains."""
+    """The top-level call that an intent was opened inside, and the name of the
+    intent there: the `rootCallId` and the tool name of a Code Mode dispatch
+    (L6b). The repaired result of that call names what the intents inside it
+    were found to have done, because the model reads that result. `None` for a
+    kind that no call contains."""
     _: KW_ONLY
     writer: LogWriter
 
     @property
     def owner(self) -> str:
-        """The module that declares the pair — its writer's owner."""
+        """The module that declares the pair: the owner of its writer."""
         return self.writer.owner
 
 
 def outcome_of(kind: IntentKind, settled: SessionEvent) -> Outcome:
-    """What a settle says became of its intent — the one reader of it (T2)."""
+    """What a settle says became of its intent. This function is the only reader of
+    that answer (T2)."""
     why = unsettled_why(settled.data)
     if why is not None:
         return why
@@ -215,12 +245,13 @@ def outcome_of(kind: IntentKind, settled: SessionEvent) -> Outcome:
 
 
 def abandoned(kind: IntentKind, opened: SessionEvent, why: Unsettled, by: SettledBy) -> JsonObject:
-    """The settle of an intent its act did not settle: the kind's closer, marked.
+    """Build the settle of an intent that its act did not settle: the payload of the
+    closer of the kind, with the marker.
 
-    The one spelling of it, for repair (`by="repair"`) and for the journal's own
-    settles on an act's behalf (`by="process"`).
+    This is the one spelling of that settle. Repair uses it (`by="repair"`), and
+    the journal uses it when it settles on behalf of an act (`by="process"`).
 
-    :raises IntentError: when the kind has no closer to write it with.
+    :raises IntentError: when the kind has no closer to write the settle with.
     """
     if kind.closer is None:
         raise IntentError(f'"{kind.opened}" has no closer, so nothing can settle it but its owner')
@@ -237,11 +268,11 @@ class OpenIntent:
 
 @dataclass(frozen=True, slots=True)
 class IntentRecord:
-    """One key's latest intent: the record that opened it, and its settle, if any.
+    """The latest intent of one key: the record that opened it, and its settle, if any.
 
-    A settle under a key nothing opened is not an intent, and is not folded: there is
-    nothing open for it to close. The journal writes none, but a log need not have
-    come from this journal.
+    A settle under a key that nothing opened is not an intent, and the fold skips
+    it, because there is nothing open for it to close. The journal writes no such
+    settle, but a log need not have come from this journal.
     """
 
     opened: SessionEvent
@@ -249,28 +280,30 @@ class IntentRecord:
 
 
 _KINDS: dict[str, IntentKind] = {}
-"""Every declared kind, by the type that opens it. Import-time facts, like
-`known_event_types._DECLARED`, so a test that declares one swaps this out."""
+"""Every declared kind, by the type that opens it. These are import-time facts, like
+`known_event_types._DECLARED`, so a test that declares a kind swaps this dict out."""
 
 
 def declare_intent(kind: IntentKind) -> IntentKind:
-    """Declare a pair. Call at import, in a package's `kinds` leaf (T4).
+    """Declare a pair. Call it at import, in the `kinds` leaf of a package (T4).
 
-    Refused:
+    The function refuses:
 
-    * a type the vocabulary does not know — a pair this build could write and
-      refuse to read back is F11 one level up;
-    * a second kind opened by the same type — one record, one meaning;
-    * a kind repair is told to settle with no `closer` to settle it with;
-    * the same type opening and settling — no record can be both;
-    * a settle the model sees (`SURFACE_EVENT_TYPES`) — it needs a surface placement
-      the journal does not write and provider rules repair keeps for the turn it
-      closes, so such a pair belongs to the turn repair, not to a kind;
-    * a writer that may not write both types (T6) — the journal writes the pair
-      through it, so a kind cannot carry writes its declarer could not make.
+    * A type that the vocabulary does not know. A pair that this build could
+      write and then refuse to read back is F11 one level up.
+    * A second kind that the same type opens. One record has one meaning.
+    * A kind that repair is told to settle, with no `closer` to settle it with.
+    * One type that both opens and settles. No record can be both.
+    * A settle that the model sees (`SURFACE_EVENT_TYPES`). Such a settle needs a
+      surface placement, which the journal does not write, and provider rules,
+      which repair keeps for the turn that it closes. Such a pair therefore
+      belongs to the turn repair and not to a kind.
+    * A writer that may not write both types (T6). The journal writes the pair
+      through the writer, so a kind cannot carry writes that its declarer could
+      not make.
 
-    Declaring the same kind twice returns the first, so a module imported twice
-    does not refuse itself.
+    A second declaration of the same kind returns the first one, so a module that
+    is imported twice does not refuse itself.
     """
     for name in (kind.opened, kind.settled):
         if not is_known(name):
@@ -303,7 +336,7 @@ def declare_intent(kind: IntentKind) -> IntentKind:
 
 
 def declared_intents() -> tuple[IntentKind, ...]:
-    """Every declared kind, in declaration order — what repair walks (P10-07)."""
+    """Every declared kind, in declaration order. Repair walks this tuple (P10-07)."""
     return tuple(_KINDS.values())
 
 
@@ -317,15 +350,16 @@ def fold_intents(
     kind: IntentKind,
     since: Mapping[str, IntentRecord] | None = None,
 ) -> Mapping[str, IntentRecord]:
-    """Per key, the latest intent of `kind` this log opened, and how it settled.
+    """For each key, the latest intent of `kind` that this log opened, and how it settled.
 
-    `since` is this fold of an earlier prefix, and `events` the rest of the log
-    after it: extending from a prefix equals folding the whole log, which is the
-    law `SessionFoldCache`'s `extend` needs and `ph.testing.folds` checks. The
-    prefix's value is copied, never changed, and returned as it was when the
-    slice holds nothing of this kind. A cache that owns its value and hands it to
-    nobody extends it in place instead (`extend_index`), and so pays for the slice
-    rather than for every key it holds.
+    `since` is this fold of an earlier prefix, and `events` is the rest of the log
+    after that prefix. Extending from a prefix equals folding the whole log. The
+    `extend` of `SessionFoldCache` needs that law, and `ph.testing.folds` checks
+    it. The function copies the value of the prefix and never changes it. When
+    the slice holds nothing of this kind, the function returns the value of the
+    prefix as it was. A cache that owns its value and hands it to no other code
+    extends the value in place instead (`extend_index`). Such a cache pays for
+    the slice, and not for every key that it holds.
     """
     index: dict[str, IntentRecord] | None = None
     for event in events:
@@ -341,7 +375,7 @@ def fold_intents(
 def extend_index(
     index: dict[str, IntentRecord], events: Iterable[SessionEvent], kind: IntentKind
 ) -> None:
-    """`fold_intents`, applied to `index` in place — for a cache that owns it."""
+    """`fold_intents`, applied to `index` in place. For a cache that owns `index`."""
     for event in events:
         _fold(index, event, kind)
 
@@ -360,18 +394,21 @@ def _fold(index: dict[str, IntentRecord], event: SessionEvent, kind: IntentKind)
 
 
 def opened_seq(event: SessionEvent) -> str:
-    """An intent keyed by the seq of the record that opened it: unique by construction.
+    """The key of an intent that is keyed by the seq of the record that opened it.
+    Such a key is unique by construction.
 
-    Here rather than in a kinds leaf, because every leaf keys some kind this way and
-    a leaf may not import another (T4) — two copies of a key rule are two chances
-    for a settle to stop matching the record it closes.
+    The function is here and not in a kinds leaf, because every leaf keys some
+    kind this way and a leaf may not import another leaf (T4). Two copies of a
+    key rule are two chances for a settle to stop matching the record that it
+    closes.
     """
     return str(event.seq)
 
 
 def seq_field(event: SessionEvent, name: str) -> str | None:
-    """The opening record's seq a settle carries under `name`, as a key — `None`
-    when it carries none (a `bool` is not a seq, though Python calls it an `int`)."""
+    """The seq of the opening record that a settle carries under `name`, as a key.
+    `None` when the settle carries none. A `bool` is not a seq, although Python
+    calls it an `int`."""
     seq = event.data.get(name)
     return str(seq) if isinstance(seq, int) and not isinstance(seq, bool) else None
 
@@ -379,10 +416,12 @@ def seq_field(event: SessionEvent, name: str) -> str | None:
 def key_of(
     read: Callable[[SessionEvent], str | None], event_type: str, data: JsonObject, seq: int
 ) -> str | None:
-    """The key `read` finds in a record not yet in the log, as the fold would read it.
+    """The key that `read` finds in a record that is not yet in the log, as the fold
+    would read it.
 
-    A shallow probe: key functions read a field or two off `data`, so it is handed
-    as given rather than frozen first — the append that follows freezes it once.
+    This is a shallow probe. Key functions read one or two fields of `data`, so
+    `data` is passed as given and is not frozen first. The append that follows
+    freezes it one time.
     """
     return read(SessionEvent(type=event_type, seq=seq, time=0, data=data))
 
@@ -390,9 +429,9 @@ def key_of(
 def open_intents(
     events: Iterable[SessionEvent] | Mapping[str, IntentRecord], kind: IntentKind
 ) -> tuple[OpenIntent, ...]:
-    """The intents of `kind` this log opened and never settled, in opening order.
+    """The intents of `kind` that this log opened and never settled, in opening order.
 
-    Handed a log, or the `fold_intents` of one — the journal's cached index."""
+    `events` is a log, or the `fold_intents` of a log: the cached index of the journal."""
     index = events if isinstance(events, Mapping) else fold_intents(events, kind)
     found = [
         OpenIntent(key=key, opened=record.opened)

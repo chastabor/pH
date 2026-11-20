@@ -1,8 +1,9 @@
-"""`ph.session` — the append-only log, the surface, and the derived history.
+"""`ph.session`: the append-only log, the surface, and the derived history.
 
-**ph-core's intent kinds are declared by importing this package** (T4): `kinds` is
-imported below, statically, so no process can hold a session log without the kinds
-repair must settle in it. See `ph.session.kinds` for why they live in a leaf.
+**Importing this package declares the intent kinds of ph-core** (T4). `kinds`
+is imported below, statically, so no process can hold a session log without the
+kinds that repair must settle in it. See `ph.session.kinds` for why they are in
+a leaf.
 """
 
 from __future__ import annotations

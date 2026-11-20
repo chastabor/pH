@@ -1,18 +1,18 @@
-"""The append-only session log and its derived model history.
+"""The append-only session log and the model history that is derived from it.
 
-Three invariants live in this file:
+Three invariants are kept in this file:
 
-* **I3 — model-visible means logged.** Anything reaching a model request is
-  reconstructable from `Session.events` through `derive_messages()`.
-* **I4 — the log is append-only; the surface is what changes.** Compaction and
-  offload append a `replace`; nothing rewrites history.
-* **A1 — `seq == len(log)`.** The contiguity contract every backend relies on.
+* **I3: model-visible means logged.** Anything that reaches a model request
+  can be rebuilt from `Session.events` through `derive_messages()`.
+* **I4: the log is append-only, and the surface is what changes.** Compaction
+  and offload append a `replace`. Nothing rewrites history.
+* **A1: `seq == len(log)`.** Every backend relies on this contiguity contract.
 
-`_append` is the acceptance boundary, reached only through a writer
-(`ph.session.writers`, T6): it validates and freezes the payload,
+`_append` is the acceptance boundary. It is reached only through a writer
+(`ph.session.writers`, T6). It validates and freezes the payload, then
 validates the surface transition *before* the push, and only then publishes.
-A failure therefore leaves the log and the surface untouched, and a publication
-failure cannot un-append what is already committed.
+A failure therefore leaves the log and the surface untouched. A publication
+failure cannot remove an event that is already committed.
 
 Ported from dsh `packages/core/session/src/index.ts`.
 
@@ -52,27 +52,27 @@ from .surface import SurfaceManager, fold_surface
 __all__ = ["Session", "SessionBatch", "SessionHeader", "SessionObserver", "cwd_tag", "family_for"]
 
 CWD_TAG_LENGTH = 6
-"""Hex characters of the cwd digest that tag a lineage directory.
+"""The number of hex characters of the cwd digest that tag a lineage directory.
 
-Six — 24 bits — because this is a **filter, not an identity**: it lets a listing
-skip a directory without opening anything in it, and the header's own `cwd` is
-what confirms a match. Two repos that collide cost one extra directory scan and
-no wrong answer, so buying more characters would buy nothing and make every path
-longer.
+The value is six (24 bits) because the tag is a **filter, not an identity**. It
+lets a listing skip a directory without opening anything in it, and the `cwd`
+of the header confirms a match. Two repos that collide cost one extra directory
+scan and never give a wrong answer. More characters would add no benefit and
+would make every path longer.
 """
 
 
 def cwd_tag(cwd: str) -> str:
-    """The short digest of a working directory, as a lineage directory wears it."""
+    """The short digest of a working directory, as it appears in a lineage directory name."""
     return sha256(cwd.encode("utf-8")).hexdigest()[:CWD_TAG_LENGTH]
 
 
 def family_for(session_id: str, cwd: str | None) -> str:
-    """The lineage directory for a new root: `<cwd-tag>-<id>`, or bare `<id>`.
+    """The lineage directory for a new root: `<cwd-tag>-<id>`, or the bare `<id>`.
 
-    **Bare when there is no cwd**, which is the honest answer rather than a
-    placeholder tag: a session that belongs to no directory should not be found
-    by a search for one, and an unfiltered listing still sees it.
+    The name is **bare when there is no cwd**. That is the correct answer, and
+    a placeholder tag would not be. A search for one directory must not find a
+    session that belongs to no directory. An unfiltered listing still sees it.
     """
     return f"{cwd_tag(cwd)}-{session_id}" if cwd else session_id
 
@@ -83,21 +83,23 @@ SessionObserver = Callable[["Session", SessionEvent], None]
 
 
 SessionKind: TypeAlias = Literal["fork", "segment"]
-"""Why a log has a parent: a **branch**, or the same session continued.
+"""Why a log has a parent: it is a **branch**, or it continues the same session.
 
-Named because six sites spell it — the header, `SessionStore._branch`, two test
-builders and two listing rows — and a bare `str` at any of them turns a typo
-("segement") into a value that validates and never matches.
+The type has a name because six sites spell it: the header,
+`SessionStore._branch`, two test builders and two listing rows. With a bare
+`str` at any of them, a typo ("segement") becomes a value that validates and
+never matches.
 """
 
 
 class SessionHeader(WireModel):
     """Immutable storage metadata, kept *outside* the conversation log.
 
-    A storage concern, not replayable conversation state — which is why it lives
-    beside the log rather than in it. Every constraint is on the field, so a
-    header is valid the moment it exists; the one cross-object check — does it
-    belong to *this* session — is `validated()`.
+    The header is a storage concern and not conversation state that can be
+    replayed. That is why it is stored beside the log and not in it. Every
+    constraint is on a field, so a header is valid as soon as it exists. The
+    one check across objects is `validated()`, which asks whether the header
+    belongs to *this* session.
     """
 
     version: int = SESSION_FORMAT_VERSION
@@ -108,58 +110,61 @@ class SessionHeader(WireModel):
     seed_length: NonNegativeInt | None = None
     """How many leading events were inherited through a seed.
 
-    Persisting this boundary is what lets resume and replay tell parent history
-    from child work — a fork otherwise looks like a session that simply started
-    with a long conversation.
+    Because this boundary is persisted, resume and replay can tell the history
+    of the parent from the work of the child. Without it, a fork looks like a
+    session that started with a long conversation.
     """
     family: str = Field(
-        # `data.get`, not `data["id"]`: a stored header with no `id` at all is
-        # something a listing meets rather than something that cannot happen, and
-        # a `KeyError` out of a default factory is not a `ValidationError` — so
-        # it escaped every caller that was catching one, and one hand-edited line
-        # took the whole `stored()` listing down with it. Empty fails
-        # `min_length` instead, which is the refusal this field already has.
+        # `data.get` and not `data["id"]`: a listing can meet a stored header
+        # with no `id` at all. A `KeyError` from a default factory is not a
+        # `ValidationError`, so it escaped every caller that caught one, and
+        # one hand-edited line made the whole `stored()` listing fail. With
+        # `data.get`, a header with no `id` fails validation in the ordinary
+        # way: the empty family fails `min_length`, or the missing `id` is
+        # refused as a required field.
         default_factory=lambda data: family_for(as_str(data.get("id")), data.get("cwd")),
         min_length=1,
     )
-    """Which lineage this log belongs to, and **where that lineage was worked**.
+    """The lineage that this log belongs to, and **where that lineage was worked**.
 
-    The directory a log lives in: `sessions/<family>/<id>.jsonl`. Every fork, segment
-    and subagent beneath a root inherits its value, so one conversation and everything
-    it spawned is one directory — which is what lets "is anything in here orphaned" be
-    answered by listing one directory.
+    It is the directory that holds the log: `sessions/<family>/<id>.jsonl`.
+    Every fork, segment and subagent below a root inherits the value. One
+    conversation and everything that it spawned is therefore one directory, so
+    a listing of one directory answers "is anything in here orphaned".
 
-    **A root's is `<cwd-tag>-<id>`** (format 1). The tag is six hex of the working
-    directory's digest, so "which sessions belong to this repo" is answerable from
-    the *directory names alone* — a listing skips a whole lineage without opening a
-    file, where before it read the header of every log in the store. It is a filter
-    and not an identity: 24 bits collide, and the header's own `cwd` is what confirms
-    a match, so a collision costs a directory scan and never a wrong row.
+    **The family of a root is `<cwd-tag>-<id>`** (since format 1). The tag is
+    six hex characters of the digest of the working directory. The *directory
+    names alone* therefore answer "which sessions belong to this repo". A
+    listing skips a whole lineage without opening a file. Before, it read the
+    header of every log in the store. The tag is a filter and not an identity:
+    24 bits collide, and the `cwd` of the header confirms a match. A collision
+    costs a directory scan and never gives a wrong row.
 
-    The tag is fixed when the root is created and inherited unchanged, which is the
-    only behaviour that keeps a lineage in one place — a session `cd`s nowhere, and
-    a fork of a session worked in `/a` belongs with it even if the person has since
-    moved.
+    The tag is fixed when the root is created, and it is inherited unchanged.
+    No other behavior keeps a lineage in one place. A session never changes its
+    working directory, and a fork of a session that was worked in `/a` belongs
+    with that session even if the user has moved since.
 
-    **Never absent.** `min_length=1` makes an explicit empty string a refusal rather
-    than something quietly rewritten. Stored rather than derived, because deriving it
-    means walking `parent_session` to the root, and walking needs paths, and the path
-    is what the family is for.
+    **Never absent.** `min_length=1` makes an explicit empty string a refusal,
+    and not a value that is silently rewritten. The value is stored and not
+    derived. To derive it, the code would walk `parent_session` to the root.
+    The walk needs paths, and the family is what gives the path.
     """
 
     kind: SessionKind | None = None
-    """Why this log has a parent: a **branch**, or the same session continued.
+    """Why this log has a parent: it is a **branch**, or it continues the same session.
 
-    Structurally the two are identical — `roll` is `fork` at the tip — so nothing on
-    disk could tell them apart, and every reader of `parent_session` had to guess
-    "branch". `None` means a **root**; every log with a `parent_session` has a kind,
-    set by whichever call made it.
+    The two are identical in structure, because `roll` is `fork` at the tip.
+    Nothing on disk could tell them apart, and every reader of `parent_session`
+    had to guess "branch". `None` means a **root**. Every log with a
+    `parent_session` has a kind, and the call that made the log sets it.
 
-    On the **child's** header, where the backward link already lives, because that is
-    the half every consumer reads from a one-line peek. The forward half has to stay
-    an event (`session/segmented`) for a mechanical reason: JSONL writes a header once
-    and never rewrites it, so a `continued_by` on the *parent* would be durable under
-    Turso and silently lost under JSONL.
+    The kind is on the header of the **child**, where the backward link already
+    is, because every consumer reads that half from a one-line peek. The
+    forward half must stay an event (`session/segmented`) for a mechanical
+    reason. JSONL writes a header one time and never rewrites it. A
+    `continued_by` on the *parent* would therefore be durable under Turso and
+    silently lost under JSONL.
     """
 
     origin: Literal["subagent"] | None = None
@@ -167,23 +172,24 @@ class SessionHeader(WireModel):
 
     @property
     def is_subagent(self) -> bool:
-        """Whether this is a sub-agent's log, which runs on its root's mount.
+        """Whether this is the log of a sub-agent, which runs on the mount of its root.
 
-        By `origin`, not by `parent_session`: a fork and a segment name their parent
-        too, and each is a session of its own — started by a person, with start
-        options to log and a version of its profile to adopt — where a child is
-        neither (session profiles, S7)."""
+        The answer comes from `origin` and not from `parent_session`. A fork and
+        a segment name their parent too, and each is a session of its own: a
+        person started it, and it has start options to log and a version of its
+        profile to adopt. A child is neither (session profiles, S7)."""
         return self.origin == "subagent"
 
     @property
     def delegating_parent(self) -> str | None:
-        """The agent that spawned this one — the family link messaging and the roster
-        read (C7) — or `None` for a session a person started.
+        """The agent that spawned this one, or `None` for a session that a person started.
 
-        `parent_session` for a sub-agent's log, and nothing for a fork or a segment,
-        whose `parent_session` is the log it continues rather than an agent that
-        delegated to it: a forked root is a root, a sibling of the other roots, and
-        not a child of the session it was cut from."""
+        This is the family link that messaging and the roster read (C7). It is
+        `parent_session` for the log of a sub-agent. It is `None` for a fork or
+        a segment, whose `parent_session` is the log that it continues and not
+        an agent that delegated to it. A forked root is a root. It is a sibling
+        of the other roots, and not a child of the session that it was cut
+        from."""
         return self.parent_session if self.is_subagent else None
 
     agent_preset: str | None = None
@@ -191,8 +197,8 @@ class SessionHeader(WireModel):
     @field_validator("version")
     @classmethod
     def _current_format_only(cls, value: int) -> int:
-        # Checked on load and never migrated: while pH is unreleased an
-        # incompatible log is rejected rather than half-understood.
+        # The version is checked on load and never migrated. While pH is
+        # experimental, an incompatible log is rejected and not half-understood.
         if value != SESSION_FORMAT_VERSION:
             raise ValueError(
                 f"session header version must be {SESSION_FORMAT_VERSION}, got {value}"
@@ -208,10 +214,11 @@ class SessionHeader(WireModel):
 
     @property
     def first_own_seq(self) -> int:
-        """Where this log's own work begins: past what it inherited, or 0.
+        """Where the own work of this log begins: after what it inherited, or 0.
 
-        The question a fold asks when a fork's seed is its source's history and not
-        its own: a splice, a goal or a resume in that seed belongs to the source."""
+        A fold asks this when the seed of a fork is the history of its source
+        and not its own. A splice, a goal or a resume in that seed belongs to
+        the source."""
         return self.seed_length or 0
 
     def validated(self, session_id: str) -> SessionHeader:
@@ -223,21 +230,21 @@ class SessionHeader(WireModel):
 
 
 def _the_event(event: SessionEvent) -> SessionEvent:
-    """The parser `latest` folds with: the event itself, read as itself.
+    """The parser that `latest` folds with: it returns the event itself.
 
-    Module level, and that is the whole point. As an inline `lambda` it was a
-    new object on every `latest()` call — which is a new registry key, a new
-    fold and a fresh walk of the log each time, per `Session.projection`.
+    The function is at module level on purpose. As an inline `lambda` it was a
+    new object on every `latest()` call. In `Session.projection`, a new object
+    is a new registry key, a new fold and a fresh walk of the log each time.
     """
     return event
 
 
 type _Key = tuple[str, Callable[[SessionEvent], object]]
-"""What identifies a fold: the event type it watches and the parser that reads it.
+"""What identifies a fold: the event type that it watches and the parser that reads it.
 
-Both halves are load-bearing. The type alone would collide the moment two seams
-read different things off one event; the parser alone cannot distinguish two
-folds of the same function over different types."""
+Both halves are needed. With the type alone, two seams that read different
+things from one event would collide. With the parser alone, two folds of the
+same function over different types could not be told apart."""
 
 
 class _LatestFold[T]:
@@ -252,13 +259,15 @@ class _LatestFold[T]:
         self.value: T | None = None
 
     def read(self, log: list[SessionEvent]) -> T | None:
-        """The projection as of now, parsing only what has arrived since.
+        """The current projection. Only the events that arrived since the last
+        read are parsed.
 
-        A cursor and `fold_latest`, not a second copy of it: this held its own
-        backwards walk for a while so it could avoid the `log[self._seen:]` copy
-        a slice makes per read per fold — one loop's worth of duplication to
-        dodge one allocation, with the rule it implements documented in the
-        other file. `since=` gets both.
+        This method is a cursor plus `fold_latest`, and not a second copy of
+        that function. For a time it had its own backward walk, to avoid the
+        `log[self._seen:]` copy that a slice makes for each read of each fold.
+        That duplicated one loop to avoid one allocation, and the rule that the
+        loop implements is documented in the other file. `since=` gives both
+        benefits.
         """
         self.value = fold_latest(log, self._event_type, self._parse, self.value, since=self._seen)
         self._seen = len(log)
@@ -300,12 +309,13 @@ class Session:
         self._events_snapshot: tuple[SessionEvent, ...] | None = None
         self._observers: tuple[SessionObserver, ...] = ()
         self._on_disposed: dict[Callable[[Session], None], None] | None = {}
-        """What waits for the store to let this session go (`when_disposed`), in the
-        order it asked; `None` once it has. A dict, so one callback asks once."""
+        """The callbacks that wait for the store to let this session go
+        (`when_disposed`), in the order that they asked. `None` after the store
+        has let it go. It is a dict so that one callback registers one time."""
         self._publishing = False
         self._batch: SessionBatch | None = None
-        """The batch whose block is open, if any — one at a time, and the only one
-        whose `_append` still stamps."""
+        """The batch whose block is open, if any. Only one batch is open at a
+        time, and it is the only one whose `_append` still stamps."""
         self._batch_open: BatchRef | None = None
         self._derived: tuple[Message, ...] = ()
         self._derived_nodes = 0
@@ -314,35 +324,37 @@ class Session:
         self._revisions = RevisionIndex()
 
         if seed is not None:
-            # Validate the seed to the SAME invariants `_append` enforces. A
-            # replay or fork must not be able to construct a live log that no
-            # backend could store — otherwise a bad seed surfaces later as a
+            # Validate the seed to the SAME invariants that `_append` enforces.
+            # A replay or a fork must not be able to construct a live log that
+            # no backend could store. Otherwise a bad seed shows later as a
             # flush rejection or, worse, as a silent divergence from disk.
             #
-            # Through `admit`, which is that rule with a name on it: a seed event
-            # is already stamped, exactly like one arriving over a wire. Written
-            # inline here once, which made the rule two statements a screen apart
-            # — and this loop the copy without the docstring. The publish inside
-            # is a no-op here by construction: `_observers` is empty until the
-            # constructor returns, so nothing can be watching a session that does
-            # not exist yet.
+            # The loop goes through `admit`, which is that rule with a name. A
+            # seed event is already stamped, exactly like an event that arrives
+            # over a wire. The rule was written inline here at one time. It was
+            # then two statements a screen apart, and this loop was the copy
+            # without the docstring. The publish inside `admit` does nothing
+            # here by construction: `_observers` is empty until the constructor
+            # returns, so nothing can watch a session that does not exist yet.
             for source in seed:
                 try:
                     self.admit(source)
                 except ValueError as error:
-                    # The index the caller can act on. `_readmit` names it too, so
-                    # only the surface's errors gain it — theirs say what is wrong
-                    # with the event, this says which one.
+                    # Add the index, which the caller can act on. `_readmit`
+                    # names it too, so only the errors of the surface gain it.
+                    # Those errors say what is wrong with the event. This one
+                    # says which event.
                     raise ValueError(
                         f"invalid seed event at index {len(self._log)}: {error}"
                     ) from error
             if self._batch_open is not None:
-                # **A seed may not end inside a batch** (P10-15). A reader drops a
-                # batch a torn write cut short before it gets here, so an
-                # unfinished one reaching a seed is damage, and seeding it would
-                # hand every reader half of something that only means anything
-                # whole. The check is the seed path's alone: a replica admitting
-                # a batch member by member is mid-batch between frames, legitimately.
+                # **A seed may not end inside a batch** (P10-15). A reader
+                # drops a batch that a torn write cut short before the batch
+                # gets here. An unfinished batch that reaches a seed is
+                # therefore damage. To seed it would give every reader half of
+                # something that has meaning only when it is whole. Only the
+                # seed path makes this check: a replica that admits a batch
+                # member by member is legitimately mid-batch between frames.
                 opened = self._batch_open
                 raise ValueError(
                     f"the seed ends inside the batch at seq {opened.first} "
@@ -350,41 +362,43 @@ class Session:
                 )
 
         self.durable_length = durable
-        """How many leading events a **store already holds**; 0 unless declared.
+        """How many leading events a **store already holds**. 0 unless declared.
 
-        Read by a backend to tell what it still owes from what is already
-        written: a store queues at least `events[durable_length:]`, and may
-        measure its own medium for more — see `SessionPersistence.track`.
+        A backend reads it to tell what it still owes from what is already
+        written. A store queues at least `events[durable_length:]`, and it may
+        measure its own medium for more. See `SessionPersistence.track`.
 
-        **A constructor argument, not an attribute set afterwards.** Publishing a session
-        is what makes a store queue it — `session/created` reaches `track` synchronously
-        — so a boundary assigned one line after construction is one line too late, and
-        the window is invisible: the store simply writes more than it needed to.
+        **It is a constructor argument, and not an attribute that is set
+        afterwards.** A store queues a session when the session is published:
+        `session/created` reaches `track` synchronously. A boundary that is
+        assigned one line after construction is one line too late. The window
+        is invisible, because the store only writes more than it needed to.
 
-        Two callers declare it and they mean different numbers: `resume_session` passes
-        the stored log's length, `SessionStore.create` passes a fork's inherited prefix.
-        Deriving one from the other would be wrong — a resumed fork's
-        `header.seed_length` is its *original* fork boundary.
+        Three callers declare it, and they mean two different numbers.
+        `resume_session` and `stored_session` pass the length of the stored
+        log. `SessionStore.create` passes the inherited prefix of a fork. It
+        would be wrong to derive one number from the other: the
+        `header.seed_length` of a resumed fork is its *original* fork boundary.
 
-        **Not `first_live_seq`.** A resume seeds the stored events *plus* the repair
-        closers, which are in the log and have never been written — so what a store
-        holds is a number only the caller knows, never one inferred from what happens
-        to be present at `track` time.
+        **It is not `first_live_seq`.** A resume seeds the stored events *plus*
+        the repair closers. The closers are in the log and have never been
+        written. So only the caller knows what a store holds, and the number is
+        never inferred from what is present at `track` time.
 
-        A plain attribute rather than a header field because it describes *this
-        process's* relationship to *one* store, not the session. `seed_length` next door
-        is the durable fork boundary and travels with the log; this is neither durable nor
-        a property of the log.
+        It is a plain attribute and not a header field because it describes the
+        relationship of *this process* to *one* store, and not the session.
+        `seed_length` beside it is the durable fork boundary and travels with
+        the log. This value is not durable and is not a property of the log.
         """
         self.first_live_seq = len(self._log)
-        """The first seq appended IN THIS PROCESS.
+        """The first seq that was appended IN THIS PROCESS.
 
-        Events below it entered through construction — replay, fork, resume —
-        and were never published on the `session/event` firehose, so a consumer
-        replaying the log as a publication substitute starts here. Distinct from
-        `header.seed_length`, which is the durable *fork lineage* boundary: a
-        resumed session's constructor seed is its whole stored log, while its
-        header still carries the original fork value.
+        Events below it entered through construction (replay, fork, resume)
+        and were never published on the `session/event` firehose. A consumer
+        that replays the log as a substitute for publication starts here. It is
+        distinct from `header.seed_length`, which is the durable *fork lineage*
+        boundary. The constructor seed of a resumed session is its whole stored
+        log, while its header still carries the original fork value.
         """
 
         base = header or SessionHeader(id=session_id, created_at=now_ms())
@@ -415,34 +429,34 @@ class Session:
     def events_from(self, index: int, limit: int | None = None) -> tuple[SessionEvent, ...]:
         """The events appended at or after `index`, at most `limit` of them.
 
-        The accessor an incremental fold wants. `events` caches one snapshot of
-        the *whole* log and rebuilds it whenever the log grew — right for a
-        reader that wants all of it, and quadratic for one that runs per event
-        and only ever looks at the tail. A `SessionFoldCache` extender reads
-        through here.
+        This is the accessor for an incremental fold. `events` caches one
+        snapshot of the *whole* log and rebuilds it whenever the log grew. That
+        is right for a reader that wants all of the log. It is quadratic for a
+        reader that runs for each event and only looks at the tail. A
+        `SessionFoldCache` extender reads through here.
 
-        `limit` exists because slicing the result copies the tail *first*: a
-        pager taking 2048 events from a 50 000-event log built a 50 000-element
-        tuple to discard 48 000 of it, once per page, which is quadratic in the
-        length of the session it is paging.
+        `limit` exists because a slice of the result copies the tail *first*. A
+        pager that took 2048 events from a 50 000-event log built a
+        50 000-element tuple and discarded 48 000 of it, one time per page.
+        That is quadratic in the length of the session that it pages.
         """
         stop = len(self._log) if limit is None else index + limit
         return tuple(self._log[index:stop])
 
     @property
     def seq(self) -> int:
-        """The next event's sequence number — always the log length (A1)."""
+        """The sequence number of the next event. It is always the log length (A1)."""
         return len(self._log)
 
     def at(self, seq: int) -> SessionEvent | None:
         """The event with this sequence number, or `None` if there is none.
 
-        A1 is what makes this a lookup rather than a search: `seq` is assigned as
-        the log length at append, so it *is* the index. The accessor exists
-        because the two obvious spellings are both wrong for a caller running
-        once per event — `events[seq]` rebuilds the whole-log cache, and
-        `events_from(seq)` copies the entire tail — and `source_event_seqs` is a
-        link readers are meant to follow.
+        A1 makes this a lookup and not a search: `seq` is assigned as the log
+        length at append, so it *is* the index. The accessor exists because the
+        two obvious spellings are both wrong for a caller that runs one time
+        per event. `events[seq]` rebuilds the whole-log cache, and
+        `events_from(seq)` copies the entire tail. Readers are also meant to
+        follow the `source_event_seqs` link.
         """
         return self._log[seq] if 0 <= seq < len(self._log) else None
 
@@ -456,12 +470,14 @@ class Session:
         return self._on_disposed is None
 
     def when_disposed(self, callback: Callable[[Session], None]) -> bool:
-        """Have `callback(self)` run once, when the store holding this session lets it
-        go (`SessionStore.dispose`). `False`, and nothing kept, once it has.
+        """Register `callback(self)` to run one time, when the store that holds
+        this session lets it go (`SessionStore.dispose`). After the store has
+        let it go, the answer is `False` and nothing is kept.
 
-        The session is the scope of what a row keeps about it (`SessionTable`), so
-        the release rides the session rather than the row: a table needs no context
-        to follow, and asking a second time is one registration, not two.
+        The session is the scope of what a row keeps about it (`SessionTable`).
+        The release is therefore registered on the session and not on the row.
+        A table needs no context to follow, and a second request with the same
+        callback is one registration, not two.
         """
         if self._on_disposed is None:
             return False
@@ -469,8 +485,9 @@ class Session:
         return True
 
     def mark_disposed(self) -> tuple[Callable[[Session], None], ...]:
-        """Record that the store has let this session go, and hand back what was
-        waiting for that, for the store to run. Only `SessionStore.dispose` calls it."""
+        """Record that the store has let this session go. Return the callbacks
+        that waited for that, for the store to run. Only `SessionStore.dispose`
+        calls it."""
         waiting = tuple(self._on_disposed or ())
         self._on_disposed = None
         return waiting
@@ -478,9 +495,9 @@ class Session:
     def observe(self, observer: SessionObserver) -> Callable[[], None]:
         """Subscribe to the post-commit append feed.
 
-        Observers are invoked with per-listener containment: a failing observer
-        is logged and cannot un-append a committed event, nor stop the ones
-        after it from seeing it.
+        Each observer is contained separately. A failing observer is logged. It
+        cannot remove a committed event, and it cannot stop the observers after
+        it from seeing the event.
         """
         self._observers = (*self._observers, observer)
 
@@ -495,28 +512,30 @@ class Session:
         data: Mapping[str, JsonValue],
         surface: SurfaceIntent | None = None,
     ) -> SessionEvent:
-        """Append one event and synchronously notify observers — **through a writer**
-        (`ph.session.writers`), which is the only caller outside this package (T6).
+        """Append one event and notify observers synchronously. Call it **through
+        a writer** (`ph.session.writers`), which is the only caller outside this
+        package (T6).
 
-        `data` is a `Mapping` of JSON values, and that is the producer's half of
-        A1 said in the type: a payload carrying a `Path`, a dataclass or a set is
-        an error here, at the call, where `freeze_json_value` would have raised
-        at runtime. The runtime gate stays — a type is not a proof about a value
-        that arrived as `Any` — but a producer that can be checked is.
+        `data` is a `Mapping` of JSON values. The type states the producer's
+        half of A1. A payload that carries a `Path`, a dataclass or a set is a
+        type error at the call. Without the type, `freeze_json_value` would
+        raise at runtime. The runtime gate stays, because a type is not a proof
+        about a value that arrived as `Any`. But a producer that can be checked
+        is checked.
 
-        The hot path never blocks on I/O — persistence reads what it owes off
+        The hot path never blocks on I/O. Persistence reads what it owes from
         this log on `session/flush`.
 
-        Whether the event is `ignorable` — skippable by a *different* build that
-        does not know its type — is a property of the type, read from the
-        vocabulary rather than passed here, so no two call sites can disagree
-        about one type.
+        An event is `ignorable` when a *different* build that does not know its
+        type may skip it. That is a property of the type. It is read from the
+        vocabulary and not passed here, so no two call sites can disagree about
+        one type.
 
-        **The type must be one this build reads** (F11): ph-core's own, or one a
-        package declared with `declare_log_type`. The read door refuses an
-        unknown required type on every seed, so a write door that accepted one
-        wrote a log that resumed nowhere — the same asymmetry the `Mapping` check
-        below closes for payloads, one field over.
+        **The type must be one that this build reads** (F11): a type of ph-core,
+        or one that a package declared with `declare_log_type`. The read path
+        refuses an unknown required type on every seed. A write path that
+        accepted one wrote a log that could not be resumed anywhere. The
+        `Mapping` check in `_event` closes the same asymmetry for payloads.
 
         :raises UnknownEventTypeError: when `event_type` is in no vocabulary.
         :raises InvalidJsonValueError: when `data` is not losslessly JSON, or
@@ -528,7 +547,7 @@ class Session:
 
     @contextmanager
     def batch(self) -> Iterator[SessionBatch]:
-        """Append several events as one: all of them land, or none of them do (P10-14).
+        """Append several events as one: all of them land, or none of them (P10-14).
 
         ```python
         with session.batch() as batch:
@@ -536,32 +555,35 @@ class Session:
             _LOG.append(batch, "user/message", summary, SurfaceIntent(...))
         ```
 
-        For records that only mean something together — an accounting record and
-        the replacement it describes. Appended one at a time, a later member the
-        surface refuses leaves the earlier ones in the log, describing a
-        replacement that never landed.
+        A batch is for records that have meaning only together, such as an
+        accounting record and the replacement that it describes. If they are
+        appended one at a time and the surface refuses a later member, the
+        earlier members stay in the log and describe a replacement that never
+        landed.
 
         **Nothing is committed until the block exits.** Each member is stamped
-        when `batch.append` is called — its seq is its place in the batch, so a
-        later member may cite an earlier one — and on exit every member is planned
-        against the surface together (`SurfaceManager.validate_batch`); only if
-        all of them pass are they pushed and published, in order, under one
-        reentrancy guard, so no observer can append between two members. An
-        exception inside the block, a refused type or payload, or a refused plan
-        pushes nothing. That is the whole of in-process failure: there is nothing
-        to roll back, because nothing was committed.
+        when a writer appends it to the batch (`SessionBatch._append`). Its seq
+        is its place in the batch, so a later member may cite an earlier one.
+        On exit, all members are planned against the surface together
+        (`SurfaceManager.validate_batch`). Only if all of them pass are they
+        pushed and published, in order, under one reentrancy guard, so no
+        observer can append between two members. An exception inside the block,
+        a refused type or payload, or a refused plan pushes nothing. That is
+        all of in-process failure: there is nothing to roll back, because
+        nothing was committed.
 
         **Synchronous by contract.** An `await` inside the block lets another
-        task append, and the members were stamped against a log that has since
-        moved; the batch is then refused whole rather than landed at seqs that
-        belong to someone else. Not enforced: that the block awaits nothing —
-        only its consequence is caught.
+        task append. The members were then stamped against a log that has
+        moved. The whole batch is refused, and it does not land at seqs that
+        belong to another writer. The rule that the block awaits nothing is not
+        enforced. Only its consequence is caught.
 
-        Not nested: one batch at a time per session.
+        Batches do not nest: one batch at a time for each session.
 
         :raises RuntimeError: when a batch is already open, when the log moved
-            while this one was, or when re-entered during publication.
-        :raises SurfaceError: when any member's surface transition is refused.
+            while this one was open, or when re-entered during publication.
+        :raises SurfaceError: when the surface transition of any member is
+            refused.
         """
         if self._batch is not None:
             raise RuntimeError("a session batch cannot be opened inside another")
@@ -579,7 +601,7 @@ class Session:
         surface: SurfaceIntent | None,
         seq: int,
     ) -> SessionEvent:
-        """Build the event `_append` would commit at `seq`, refusing what it refuses."""
+        """Build the event that `_append` would commit at `seq`, with the same refusals."""
         if not is_known(event_type):
             raise UnknownEventTypeError(
                 f'"{event_type}" is not a session event type this build can read back; '
@@ -588,12 +610,13 @@ class Session:
         if not isinstance(data, Mapping):
             # `_EventWire` refuses a non-object payload on the way *in* from
             # disk, and `SessionEvent.data` is declared a `JsonObject`. Without
-            # this the two doors disagree: a producer that reached here as `Any`
-            # — a test tree outside mypy, a plugin built against an older
-            # signature — appends a list, the bytes reach disk, and the session
-            # becomes unloadable at the next resume. A log that cannot be
-            # reconstructed is the one failure A1 exists to prevent, so the
-            # write door refuses what the read door refuses, in its vocabulary.
+            # this check, the write path and the read path disagree. A producer
+            # that reached here as `Any` (a test tree outside mypy, or a plugin
+            # built against an older signature) appends a list. The bytes reach
+            # disk, and the session cannot be loaded at the next resume. A log
+            # that cannot be reconstructed is the one failure that A1 exists to
+            # prevent. So the write path refuses what the read path refuses, in
+            # its own vocabulary.
             raise InvalidJsonValueError(
                 "", f"an event payload must be a JSON object, not {type(data).__name__}"
             )
@@ -608,27 +631,31 @@ class Session:
         )
 
     def admit(self, event: SessionEvent) -> SessionEvent:
-        """Append an event that already carries its `seq` and `time` — a replica's path.
+        """Append an event that already carries its `seq` and `time`. This is the
+        path of a replica.
 
-        `_append` is for the process that *owns* a log: it mints the seq and stamps
-        the clock. A front end mirroring a daemon's session over the wire owns
-        nothing; it receives events the daemon already stamped and must keep them
-        as they are — re-stamping `time` would put this client's clock on the
-        daemon's record, and the trajectory's timings read `event.time`. So the
-        mirror admits rather than appends, and the mirror is a real `Session`: the
-        same surface fold, the same `stale()` check, the same `cursor_of` as the
-        log it copies, rather than a list of events rebuilt into a `Session` from
-        scratch at every read.
+        `_append` is for the process that *owns* a log: it assigns the seq and
+        stamps the clock. A front end that mirrors the session of a daemon over
+        the wire owns nothing. It receives events that the daemon already
+        stamped, and it must keep them as they are. To stamp `time` again would
+        put the clock of this client on the record of the daemon, and the
+        timings of the trajectory read `event.time`. So the mirror admits and
+        does not append. The mirror is a real `Session`, with the same surface
+        fold, the same `stale()` check and the same `cursor_of` as the log that
+        it copies. It is not a list of events that is rebuilt into a `Session`
+        at every read.
 
-        Held to the seed path's rules, through the seed path's function: `_readmit`
-        refuses a seq that is not the next index — a replica that skipped a frame
-        must stop rather than admit a log with a hole in it — and an unrecognized
-        required type. Then the surface is validated and the event published, the
-        same tail `_append` uses, so an observer cannot tell which door an event
+        `admit` is held to the rules of the seed path, through the function of
+        the seed path. `_readmit` refuses a seq that is not the next index: a
+        replica that skipped a frame must stop, and must not admit a log with a
+        hole in it. `_readmit` also refuses an unrecognized required type. Then
+        the surface is validated and the event is published. `_append` uses the
+        same tail, so an observer cannot tell which of the two methods an event
         came through.
 
-        :raises ValueError: when `event.seq` is not `len(self)`, or its type is
-            unknown and not `ignorable`.
+        :raises ValueError: when `event.seq` is not the next index, when its type
+            is unknown and not `ignorable`, or when it breaks an open batch
+            (`_within_batch`).
         :raises SurfaceError: when the surface metadata is wrong for this type.
         :raises RuntimeError: when re-entered during publication.
         """
@@ -639,18 +666,18 @@ class Session:
         return committed
 
     def _commit(self, event: SessionEvent) -> SessionEvent:
-        """Validate against the surface, push, and publish — `_append` and `admit`'s
-        one tail.
+        """Validate against the surface, push, and publish. This is the one tail
+        of `_append` and `admit`.
 
-        Validated BEFORE the push: a rejected candidate must leave both the log
-        and the surface exactly as they were.
+        Validation comes BEFORE the push: a rejected candidate must leave both
+        the log and the surface exactly as they were.
 
-        The re-entrancy guard is here rather than on each door, because
-        `_publishing` is this method's own flag: a reentrant commit would land a
-        seq inside another event's publication, so observers would see the log
-        grow underneath them. Stated once, so a third door cannot arrive without
-        it — and so the two doors cannot disagree about the sentence, which they
-        briefly did.
+        The re-entrancy guard is here and not on each caller, because
+        `_publishing` is the flag of this method. A reentrant commit would land
+        a seq inside the publication of another event, so observers would see
+        the log grow under them. The guard is stated one time, so a third
+        caller cannot arrive without it. The two callers also cannot disagree
+        about the rule, which they did for a short time.
         """
         self._refuse_reentry()
         self._surface.validate_next(event)
@@ -658,7 +685,7 @@ class Session:
         return event
 
     def _commit_batch(self, batch: SessionBatch) -> None:
-        """`_commit` for several events planned together; see `batch`."""
+        """`_commit` for several events that are planned together. See `batch`."""
         self._refuse_reentry()
         if len(self._log) != batch.base:
             raise RuntimeError(
@@ -670,9 +697,9 @@ class Session:
         if not events:
             return
         if len(events) > 1:
-            # Every member says which batch it is in (P10-15), so a reader can tell
-            # one a torn write cut short from one that is whole. One event is not
-            # stamped: there is nothing to keep together.
+            # Every member says which batch it is in (P10-15). A reader can then
+            # tell a batch that a torn write cut short from a whole one. A single
+            # event is not stamped, because there is nothing to keep together.
             ref = BatchRef(first=batch.base, count=len(events))
             events = tuple(replace(event, batch=ref) for event in events)
         self._surface.validate_batch(events)
@@ -685,7 +712,8 @@ class Session:
             )
 
     def _push(self, events: Sequence[SessionEvent]) -> None:
-        """Push and publish validated events, each seen with the log ending at it."""
+        """Push and publish validated events. An observer sees each event when
+        the log ends at that event."""
         self._publishing = True
         try:
             for event in events:
@@ -704,7 +732,7 @@ class Session:
     # --------------------------------------------------------------- folds --
 
     def request_header(self) -> EpochHeader | None:
-        """The header the NEXT request will be compared against."""
+        """The header that the NEXT request is compared against."""
         return self.projection("request/header", parse_request_header)
 
     def request_context(self) -> RequestContext | None:
@@ -716,23 +744,29 @@ class Session:
     def stale(self) -> list[str]:
         """Every incremental projection of the log that no longer equals its fold (I6).
 
-        Three of them, each maintained lazily and each a way for a reader to be
-        told about a log that no longer exists: `events` (a snapshot invalidated on
-        append), the surface (`SurfaceManager`, folded from where it left off), and
-        `derive_messages` (memoized per node — the projection I3 compares every
-        request against, so a drift here is one `agent-loop-invariant` would pass).
-        `fold_surface` is the canonical replay of the same rules over the whole log;
-        the manager's own docstring says an external reconstructor "must reach the
-        same nodes", and this is where that is asked rather than assumed.
+        There are three. Each is maintained lazily, and each can tell a reader
+        about a log that no longer exists:
 
-        Here rather than in the invariant row that declares it, for
-        `ToolRuntime.stale_views`' reason: these caches are this class's own secret,
-        and a check written against `_log` from outside is one a rename disables
-        without anybody noticing. Every trip path is a writer that bypassed `_append`
-        — which is what these caches exist to be invalidated by, and what only a
-        check inside the class can honestly detect.
+        * `events`, a snapshot that an append invalidates.
+        * The surface (`SurfaceManager`), which is folded from where it stopped.
+        * `derive_messages`, which is memoized per node. I3 compares every
+          request against this projection, so `agent-loop-invariant` would pass
+          a drift here.
 
-        O(events) per call — the fold is the point — so polled, never run on append.
+        `fold_surface` is the canonical replay of the same rules over the whole
+        log. Its docstring says that an external reconstructor must reach the
+        same nodes. This method checks that claim and does not assume it.
+
+        The check is here and not in the invariant row that declares it, for
+        the reason that `ToolRuntime.stale_views` gives. These caches are
+        private to this class, and a rename silently disables a check that is
+        written against `_log` from outside. Every way to trip the check is a
+        writer that bypassed `_append`. An append is what invalidates these
+        caches, and only a check inside the class can detect a write that
+        skipped it.
+
+        Each call is O(events), because it runs the whole fold. So the check is
+        polled, and never run on append.
         """
         found: list[str] = []
         if len(self.events) != len(self._log):
@@ -746,9 +780,9 @@ class Session:
                 f"session {self.id}: the surface projects {len(self._surface.nodes)} node(s) "
                 f"where its fold gives {len(canonical)}"
             )
-            # The derivation is memoized *over* the surface, so with the surface
-            # wrong it is wrong for the surface's reason — and forcing it would
-            # index the log at nodes the log no longer has.
+            # The derivation is memoized *over* the surface. When the surface
+            # is wrong, the derivation is wrong for the same reason. To force
+            # it would index the log at nodes that the log no longer has.
             return found
         derived = tuple(
             message
@@ -765,14 +799,15 @@ class Session:
     def derive_messages(self) -> tuple[Message, ...]:
         """The LLM message history, derived from the ordered surface.
 
-        The surface is the single source of derived history: an event with no
-        `surfaceOp` (a chunk, a turn boundary) is correctly absent, and a
-        compaction `replace` removes the shadowed nodes from the derivation
-        while leaving them in the log.
+        The surface is the single source of derived history. An event with no
+        `surfaceOp` (a chunk, a turn boundary) is correctly absent. A compaction
+        `replace` removes the shadowed nodes from the derivation and leaves
+        them in the log.
 
-        Cached per node. A surface rewrite bumps `replace_generation` and
-        rebuilds; ordinary appends cost O(new nodes). The result is a tuple, so
-        a holder's copy structurally cannot grow under them.
+        The result is cached per node. A surface rewrite increases
+        `replace_generation` and causes a rebuild. Ordinary appends cost O(new
+        nodes). The result is a tuple, so the copy that a holder has cannot
+        grow.
         """
         surface = self._surface
         generation = surface.replace_generation
@@ -796,103 +831,115 @@ class Session:
     def latest(self, event_type: str) -> SessionEvent | None:
         """The most recent event of one type, folded incrementally.
 
-        The shape every "current policy" question takes — approval policy,
-        sandbox mode, permission preset — and one a per-call check must not
-        answer by scanning a log that is mostly `assistant/chunk`s.
+        Every "current policy" question has this shape: approval policy,
+        sandbox mode, permission preset. A check that runs on every call must
+        not answer it with a scan of a log that is mostly `assistant/chunk`
+        events.
         """
         return self.projection(event_type, _the_event)
 
     def records_of(self, seq: int) -> tuple[SessionEvent, ...]:
-        """The records that explain the replacement at `seq`, in log order: what its
-        producer wrote through the revision door (`ph.session.revise`), stamped with
-        it. Empty for a node no revision put there, and for a replacement written
-        before the door stamped its records.
+        """The records that explain the replacement at `seq`, in log order.
 
-        Indexed as the log grows, so a reader asking of every node pays once.
+        The producer of the replacement wrote these records through the
+        revision functions (`ph.session.revise`), which stamped them with the
+        replacement. The result is empty for a node that no revision put there.
+        It is also empty for a replacement that was written before the revision
+        functions stamped their records.
+
+        The index is built as the log grows, so a reader that asks about every
+        node pays one time.
         """
         return self._revisions.read(self._log, seq)
 
     def history(self, seq: int) -> tuple[SessionEvent, ...]:
-        """Every replacement that led to node `seq` as it is now, oldest first: the node
-        itself when it is one, and every replacement among what it stands for, followed
-        through `shadowed_by`. Unlike git's one line per file, it merges: a summary of
-        five revised nodes has their five revisions behind it, and its own.
+        """Every replacement that led to node `seq` as it is now, oldest first.
 
-        Kept per node once worked out, since what a node stands for is fixed when it is
-        written.
+        The result holds the node itself when it is a replacement, and every
+        replacement among the nodes that it stands for, followed through
+        `shadowed_by`. Git keeps one line of history per file. This history
+        merges: a summary of five revised nodes has their five revisions behind
+        it, and its own.
+
+        The result is kept per node after it is worked out, because what a node
+        stands for is fixed when the node is written.
         """
         return self._revisions.history(self.at, seq)
 
     def projection[T](self, event_type: str, parse: Callable[[SessionEvent], T | None]) -> T | None:
         """Any "latest event of type X, read as Y" question, folded incrementally.
 
-        **The registry `latest` already was, opened to the seams.** Reported
-        usage arrived here as a method plus a `__slots__` entry plus a private
-        parser, which made `Session` learn `TokenUsage` so that a *seam* could
-        read it — the Consumer editing the Definition (I5), and the shape every
-        next metric would have repeated. A seam now keeps its own parser and
-        asks with it:
+        **This is the registry that `latest` already had, opened to the seams.**
+        Reported usage first arrived here as a method, a `__slots__` entry and a
+        private parser. `Session` had to learn `TokenUsage` so that a *seam*
+        could read it. That is the Consumer editing the Definition (I5), and
+        every next metric would have repeated the shape. A seam now keeps its
+        own parser and asks with it:
 
             usage = session.projection("assistant/message", reported_usage)
 
-        **The parser is half the key, so nothing has to be named.** This took a
-        `name` first, and then a guard to check that two callers sharing a name
-        meant the same thing — which computed `(event_type, parse)`, the real
-        identity, purely to police a string a human typed. Keying on it directly
-        deletes the guard, the collision error, the "prefix it with the row that
-        owns it" convention and the constants each caller kept for its own name;
-        two rows cannot collide because two rows are not the same function.
+        **The parser is half the key, so nothing needs a name.** This method
+        first took a `name`, and then a guard that checked that two callers
+        with one name meant the same thing. The guard computed
+        `(event_type, parse)`, the real identity, only to police a string that
+        a human typed. The key is now that pair. That removes the guard, the
+        collision error, the "prefix it with the row that owns it" convention
+        and the constant that each caller kept for its own name. Two rows
+        cannot collide, because two rows are not the same function.
 
-        **So `parse` must be stable across calls**, which is what every caller
-        already passes: a module-level function or a bound method is the same
-        key each time, and a frozen dataclass hashes by value — which is how
-        `workspace.latest_checkpoint` gets one fold *per agent* out of one
-        parser class, where a name would have had to carry the agent id. An
-        inline `lambda` is the one thing that does not work: it is a new key per
-        call, so it would build a fold per call and reparse the log each time.
-        `_the_event` exists for exactly that reason.
+        **So `parse` must be stable across calls**, and every caller already
+        passes a stable one. A module-level function or a bound method is the
+        same key each time. A frozen dataclass hashes by value, which is how
+        `workspace.latest_checkpoint` gets one fold *per agent* from one parser
+        class, where a name would have had to carry the agent id. An inline
+        `lambda` is the one thing that does not work. It is a new key on each
+        call, so it would build a fold on each call and parse the log again
+        each time. `_the_event` exists for exactly that reason.
 
-        `parse` returning `None` means "this event carries nothing of that", and
-        the fold keeps what it had — see `fold_latest`.
+        When `parse` returns `None`, it means "this event carries nothing of
+        that", and the fold keeps what it had. See `fold_latest`.
         """
         key = (event_type, parse)
         fold = self._latest.get(key)
         if fold is None:
             fold = self._latest[key] = _LatestFold[object](event_type, parse)
-        # Sound because the parser is in the key: the fold found here was built
-        # from *this* parse, so what it holds is what this parse returns.
+        # The cast is sound because the parser is in the key. The fold found
+        # here was built from *this* parse, so it holds what this parse returns.
         return cast("T | None", fold.read(self._log))
 
     @property
     def last_event(self) -> SessionEvent | None:
         """The most recently appended event, or `None` for an empty log.
 
-        The unfiltered form of `last_event_of`, and the accessor a "when did this session
-        last do anything" question wants (P5-05's passivation sweeper). `events[-1]`
-        answers it too, at the cost of materializing a snapshot of the entire log to read
-        one element — and the sweeper asks it of every root on every pass.
+        This is the unfiltered form of `last_event_of`. It is the accessor for a
+        "when did this session last do anything" question (the passivation
+        sweeper of P5-05). `events[-1]` answers that too, but it materializes a
+        snapshot of the entire log to read one element, and the sweeper asks
+        the question of every root on every pass.
         """
         return self._log[-1] if self._log else None
 
     def select(self, *patterns: str) -> tuple[SessionEvent, ...]:
         """Every event under one or more namespace selectors, in log order (P6-33).
 
-        `session.select("workspace")` is all five `workspace/*` types;
-        `session.select("workspace/acquired")` is the one. The vocabulary is `log`, so a
-        bare pattern needs no prefix and `bus:tools` is **refused** rather than answered
-        emptily — an empty result would read as "there are none".
+        `session.select("workspace")` is every `workspace/*` type.
+        `session.select("workspace/acquired")` is that one type. The vocabulary
+        is `log`, so a bare pattern needs no prefix. `bus:tools` is **refused**
+        and not answered with an empty result, because an empty result would
+        read as "there are none".
 
-        Namespace-aware where `last_event_of` is exact: that one takes whole type names
-        and answers with the newest. Both stay, because "every workspace record" should
-        not be spelled as a list of five literals a new type would silently fall out of.
+        `select` is namespace-aware, where `last_event_of` is exact: that method
+        takes whole type names and answers with the newest event. Both stay,
+        because "every workspace record" must not be spelled as a list of
+        literals that a new type would silently be missing from.
 
-        No patterns returns the whole log.
+        With no patterns, the result is the whole log.
         """
         selectors = parse_all(patterns, vocabulary="log")
         return tuple(event for event in self._log if matches_any(event.type, selectors))
 
     def last_event_of(self, *types: str) -> SessionEvent | None:
-        """The most recent event of any of `types`. One type: prefer `latest()`."""
+        """The most recent event of any of `types`. For one type, prefer `latest()`."""
         for event in reversed(self._log):
             if event.type in types:
                 return event
@@ -900,10 +947,10 @@ class Session:
 
 
 class SessionBatch:
-    """The events one `Session.batch()` block will append; see there.
+    """The events that one `Session.batch()` block will append. See that method.
 
-    Holds stamped events and nothing else — it never touches the log, so dropping
-    one (an exception out of the block) needs no cleanup.
+    A batch holds stamped events and nothing else. It never touches the log, so
+    a batch that is dropped (an exception out of the block) needs no cleanup.
     """
 
     __slots__ = ("_events", "_session", "base")
@@ -912,12 +959,12 @@ class SessionBatch:
         self._session = session
         self._events: list[SessionEvent] = []
         self.base = base
-        """The seq the first member takes: the log's length when the batch opened."""
+        """The seq that the first member takes: the length of the log when the batch opened."""
 
     @property
     def events(self) -> tuple[SessionEvent, ...]:
-        """The members as stamped. The log holds them as committed, with the batch's
-        membership on each."""
+        """The members as stamped. The log holds them as committed, with the
+        batch membership on each."""
         return tuple(self._events)
 
     def _append(
@@ -926,15 +973,17 @@ class SessionBatch:
         data: Mapping[str, JsonValue],
         surface: SurfaceIntent | None = None,
     ) -> SessionEvent:
-        """Stamp an event for this batch, refused as `Session._append` would refuse it —
-        through a writer, as every write is (T6).
+        """Stamp an event for this batch. The event is refused as `Session._append`
+        would refuse it. Call it through a writer, as for every write (T6).
 
-        Returned so a later member can cite its seq; **not yet in the log**, and
-        not in it at all if the batch is refused.
+        The event is returned so that a later member can cite its seq. It is
+        **not yet in the log**, and it never enters the log if the batch is
+        refused.
         """
         if self._session._batch is not self:
-            # The block has exited, landed or not: a member stamped now would belong
-            # to no commit, so it is refused rather than dropped.
+            # The block has exited, whether the batch landed or not. A member
+            # stamped now would belong to no commit, so it is refused and not
+            # silently dropped.
             raise RuntimeError("this session batch has closed; open another to append")
         event = self._session._event(event_type, data, surface, self.base + len(self._events))
         self._events.append(event)
@@ -942,12 +991,14 @@ class SessionBatch:
 
 
 def _within_batch(open_batch: BatchRef | None, event: SessionEvent) -> BatchRef | None:
-    """Hold `event` to the batch the log is inside, and say which it is inside after.
+    """Hold `event` to the batch that the log is inside, and return the batch that
+    the log is inside after it.
 
-    A batch's members are contiguous and each carries the same ref: the first is at
-    `first`, and nothing unstamped, and no other batch, falls before its last. Asked
-    of every event that arrives already stamped — seed, fork, resume, a replica —
-    since an owner's own `batch()` stamps its members correctly by construction.
+    The members of a batch are contiguous, and each carries the same ref. The
+    first member is at `first`. No unstamped event and no other batch comes
+    before the last member. The check runs for every event that arrives already
+    stamped (seed, fork, resume, a replica). The `batch()` of an owner stamps
+    its members correctly by construction, so it needs no check.
 
     :raises ValueError: when the event breaks a batch or starts one out of place.
     """
@@ -967,12 +1018,12 @@ def _within_batch(open_batch: BatchRef | None, event: SessionEvent) -> BatchRef 
 
 
 def _readmit(source: SessionEvent, index: int) -> SessionEvent:
-    """Hold a seeded event to the acceptance rules a live append meets.
+    """Hold a seeded event to the acceptance rules that a live append meets.
 
-    The known-types refusal lives here, on the one path every seed takes —
-    fork, resume, replay, import — rather than in one storage backend. An
-    unrecognized *required* event may change how the rest of the log is read,
-    so skipping it would reconstruct a wrong session, not a partial one.
+    The refusal of unknown types is here, on the one path that every seed takes
+    (fork, resume, replay, a replica), and not in one storage backend. An
+    unrecognized *required* event may change how the rest of the log is read.
+    To skip it would reconstruct a wrong session, not a partial one.
     """
     if source.seq != index:
         raise ValueError(
