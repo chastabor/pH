@@ -53,9 +53,9 @@ refused as `invalid_params` before the store is asked whether it holds one, so
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from ph.llm.types import AttachmentRef
 from ph.seams.models import ModelChoice
@@ -92,19 +92,20 @@ __all__ = [
 class InitializeParams(WireModel):
     """`initialize` / `daemon/hello`: what this *client* can do (P5-13)."""
 
-    capabilities: list[str] = Field(default_factory=list)
+    capabilities: list[Stated] = Field(default_factory=list)
 
 
 class BrowseParams(WireModel):
     """`sessions/browse`: which sessions to list.
 
-    **Every field has a default, and that is the compatibility claim.** A client
-    that sends `{}` gets what it got before, and every client that was written
-    before this model existed sends that. The wire therefore did not move, and
-    neither did `PROTOCOL_VERSION`.
+    **Every field has a default.** A client that sends `{}` gets every session,
+    as it did before this model existed. When the model was added, the wire
+    therefore did not move, and neither did `PROTOCOL_VERSION`.
 
     `cwd` is `None` for every session. A client with no directory to filter on
     omits the field. An empty string is not a directory, and it is refused.
+    That refusal is new in protocol 11: a 0.12 client sent `cwd: ""` for an
+    unfiltered browse (see `PROTOCOL_VERSION`).
 
     `cwd` is compared with the string that the header of a session recorded,
     with no `resolve()`. The daemon may be on another machine and may not have
@@ -180,10 +181,22 @@ class MutationParams(SessionParams):
 
     An empty string is not an id, and it is refused. A call that sent one as
     its `command_id` would otherwise claim a key that every other such call
-    shares, and each call after the first would be answered as a repeat."""
+    shares, and each call after the first would be answered as a repeat.
+
+    **A `command_id` needs a `client_id`**, for the same reason. A command id is
+    unique only within one client. Two clients that each sent `commandId: "1"`
+    with no client id would claim one key, and the second prompt would be
+    dropped as a repeat of the first. A `client_id` alone is legal: it names
+    no command, so the call is unkeyed."""
 
     client_id: Stated | None = None
     command_id: Stated | None = None
+
+    @model_validator(mode="after")
+    def _keyed_by_a_client(self) -> Self:
+        if self.command_id is not None and self.client_id is None:
+            raise ValueError("commandId needs a clientId: a command id is unique only per client")
+        return self
 
 
 class PromptParams(MutationParams):
@@ -314,6 +327,6 @@ class ResumeParams(WireModel):
     spent is skipped unless `force` is set, because mounting it would be one
     more attempt for each restart."""
 
-    sessions: list[str] = Field(default_factory=list)
+    sessions: list[SessionId] = Field(default_factory=list)
     all_owed: bool = False
     force: bool = False

@@ -18,7 +18,7 @@ a root is mounted for it.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import get_args
+from typing import get_args, get_origin
 
 import pytest
 from daemon_helpers import running
@@ -467,15 +467,27 @@ def test_a_param_that_a_client_does_not_have_is_left_out_of_its_frame() -> None:
     assert BrowseParams().to_wire() == {}
 
 
+def _loose(annotation: object) -> bool:
+    """Whether a field accepts `""` where its type says "a name, or none": an
+    optional `str`, or a collection of plain `str` items."""
+    if get_origin(annotation) in (list, tuple, set, frozenset):
+        return any(_loose(item) or item is str for item in get_args(annotation))
+    return set(get_args(annotation)) == {str, type(None)}
+
+
 def test_every_optional_text_param_is_stated() -> None:
-    """A text param that a client may leave out is `Stated | None`, so an empty
-    string is refused and never read as "absent".
+    """A text param that a client may leave out is `Stated | None`, and a list of
+    names holds `Stated` or `SessionId` items, so an empty string is refused and
+    never read as "absent" or as a name.
 
     The rule is a type (`ph_app.protocol.Stated`), and this gate holds every
-    params model of `ph_app` to it, so a new optional text field cannot bring
-    the empty string back by its default declaration.
+    params model of `ph_app` to it, so a new field cannot bring the empty string
+    back by its default declaration. The gate first matched only `str | None`,
+    and `ResumeParams.sessions: list[str]` passed it: `sessions/resume` with an
+    empty id mounted a new root and reported it as resumed.
 
-    Sabotage: declare `BrowseParams.cwd` as `str | None`, and this names it.
+    Sabotage: declare `BrowseParams.cwd` as `str | None`, or
+    `ResumeParams.sessions` as `list[str]`, and this names it.
     """
     loose = [
         f"{model.__name__}.{name}"
@@ -484,7 +496,7 @@ def test_every_optional_text_param_is_stated() -> None:
         and issubclass(model, BaseModel)
         and model.__module__.startswith("ph_app")
         for name, info in model.model_fields.items()
-        if set(get_args(info.annotation)) == {str, type(None)}
+        if _loose(info.annotation)
     ]
     assert loose == [], f"these accept an empty string as a value: {loose}"
 
@@ -498,6 +510,8 @@ def test_every_optional_text_param_is_stated() -> None:
         ("sessions/browse", {"cwd": ""}, "cwd"),
         ("attachment/put", {"sessionId": "empty", "contentB64": "", "name": ""}, "name"),
         ("schedule/cancel", {"sessionId": "empty", "scheduleId": ""}, "scheduleId"),
+        ("sessions/resume", {"sessions": [""]}, "sessions"),
+        ("session/prompt", {"sessionId": "empty", "prompt": "x", "commandId": "1"}, "clientId"),
         ("session/prompt", {"sessionId": "empty", "prompt": "x", "commandId": ""}, "commandId"),
         (
             "session/prompt",
@@ -512,6 +526,8 @@ def test_every_optional_text_param_is_stated() -> None:
         "browse-cwd",
         "attachment-name",
         "schedule-id",
+        "resume-session",
+        "command-id-alone",
         "command-id",
         "client-id",
     ],

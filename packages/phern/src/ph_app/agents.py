@@ -376,6 +376,10 @@ class _Follow:
     that was already idle when the attach arrived: its only status is the attach
     reply, which `Followed.seed` delivers through the same handler.
     """
+    failed: bool = False
+    """Whether the follower stopped because the root failed. A failed root does
+    not go idle by itself, so it is the other status that releases
+    `--until-idle`, and the command then exits 1."""
     done: anyio.Event = field(default_factory=anyio.Event)
     feed: Followed = field(init=False)
 
@@ -402,7 +406,14 @@ class _Follow:
         # on.
         ended = f" · last turn {last}" if status == "idle" and last and last != "completed" else ""
         console.print(f"[dim]· {status}{ended}[/dim]")
-        if self.until_idle and status == "idle":
+        if not self.until_idle:
+            return
+        if status == "failed":
+            # A root whose recovery ladder is spent reports `failed` and does
+            # not go idle again by itself, so a wait for `idle` would not end.
+            self.failed = True
+            self.done.set()
+        elif status == "idle":
             self.last_turn = last
             self.done.set()
 
@@ -507,7 +518,10 @@ def attach(
         bool,
         typer.Option(
             "--until-idle",
-            help="Stop once the root goes idle; exit 1 if its last turn errored.",
+            help=(
+                "Stop once the root goes idle or fails; exit 1 if it failed or its last "
+                "turn errored."
+            ),
         ),
     ] = False,
     everything: Annotated[
@@ -599,6 +613,8 @@ def attach(
                 await client.call(verbs.SESSION_DETACH, SessionParams(session_id=session))
         if client.closed.is_set():
             raise DaemonGone
+        if follow.failed:
+            fail(f"[red]{session}: the root failed, and its recovery attempts are spent[/red]")
         if follow.last_turn == "error":
             # This runs after the detach above, so that the refusal does not
             # leave a subscription behind on a daemon that is still running.

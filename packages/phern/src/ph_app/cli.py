@@ -188,6 +188,7 @@ def default(
         typer.Option(
             "--keep-alive",
             help='Keep a daemon this UI starts up for this long after it detaches ("5m").',
+            callback=nonblank,
         ),
     ] = None,
     new: Annotated[
@@ -868,6 +869,7 @@ def daemon(
         typer.Option(
             "--keep-alive",
             help='Stay up this long after the last client leaves ("5m"); implies --ephemeral.',
+            callback=nonblank,
         ),
     ] = "0",
     ephemeral: Annotated[
@@ -1092,8 +1094,14 @@ def tab_command(
 
 def _keep_alive_argv(seconds: float) -> tuple[str, str]:
     """`--keep-alive` as a command line that pH composes spells it: a bare number
-    of seconds, which `keep_alive_seconds` reads back with no unit to guess."""
-    return ("--keep-alive", f"{seconds:g}")
+    of seconds, which `keep_alive_seconds` reads back with no unit to guess.
+
+    The number is written exactly. A whole number of seconds is written with no
+    decimal point, and any other number in full (`repr`). The `:g` format kept
+    six significant digits, so a long window was rounded on its way to the
+    daemon."""
+    text = str(int(seconds)) if seconds.is_integer() else repr(seconds)
+    return ("--keep-alive", text)
 
 
 def spawn_command(

@@ -292,14 +292,24 @@ and `kind`, and a row for a live root that the disk has not seen omits
 `modified` and `size` too. In the other direction, a client omits `clientId`
 and `commandId` from an unkeyed mutation, `trust`, `profile` and `cwd` from
 `session/new`, and `cwd` from `sessions/browse`. An 11 daemon refuses an empty
-string in any of those as `invalid_params`. A 0.12 client sends `trust: ""`
-from a trusted directory and `cwd: ""` for an unfiltered browse, so both calls
-are refused. It also requires `updated`, `modified`, `size` and the `key` of
-`startsOn`, and refuses a reply that omits one. A 0.13 client that reads a 0.12
-daemon takes each empty string as a value. It reads the `status: ""` of a
-footer frame as a status, shows an empty profile note at attach, and refuses the
-`kind: ""` of a `sessions/browse` row. Restarting the daemon on the same
-release fixes both.
+string in any of those as `invalid_params`. It also refuses an empty string in
+the `name` and `mime` of `attachment/put`, in the `scheduleId` of
+`schedule/create` and `schedule/cancel`, in an item of the `sessions` of
+`sessions/resume`, and in an item of the `capabilities` of `initialize`. It
+refuses a `commandId` sent without a `clientId`, because a command id is unique
+only per client, and two clients without one shared a key. A 0.12 client sends
+`trust: ""` from a trusted directory and `cwd: ""` for an unfiltered browse, so
+both calls are refused. It also requires `updated`, `modified`, `size` and the
+`key` of `startsOn`, and refuses a reply that omits one. A 0.13 client that
+reads a 0.12 daemon takes each empty string as a value. It reads the
+`status: ""` of a footer frame as a status, shows an empty profile note at
+attach, and refuses the `kind: ""` of a `sessions/browse` row. Restarting the
+daemon on the same release fixes both.
+
+One value still travels with empty strings: the `choice` of `session/new` and
+`session/model` (`ModelChoice`, whose `key`, `provider` and `model` are `""`
+when not chosen). It is a type of `ph-core`, and it changes with the other
+`ph-core` types that spell absence as `""`.
 
 **Nothing refuses on this number, and the place that declares the number should
 say so.** The number is reported in the capability block of `daemon/hello` and

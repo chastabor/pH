@@ -301,15 +301,15 @@ def _repeat_outcome(prior: Prior) -> RepeatOutcome:
 def _command_key(params: MutationParams) -> str | None:
     """The idempotence key of a client, joined at the wire edge and only here.
     `None` when the client offered no command id, and so wants no deduplication.
-    A command id with no client id is a key with an empty client part.
+    A command id always comes with a client id (`MutationParams` refuses one
+    without the other), so the key is never shared between clients.
 
     Every method in `MUTATIONS` takes one. Earlier the f-string was written in
     two handlers, `session/prompt` and `session/command`, although a comment
     three lines above one of them claimed that this was not the case."""
-    if params.command_id is None:
+    if params.command_id is None or params.client_id is None:
         return None
-    client = "" if params.client_id is None else params.client_id
-    return f"{client}:{params.command_id}"
+    return f"{params.client_id}:{params.command_id}"
 
 
 CAPABILITIES = (

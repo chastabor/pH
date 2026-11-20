@@ -272,8 +272,8 @@ def test_an_empty_cwd_is_a_filter_and_not_the_absence_of_one(tmp_path: Path) -> 
     """`None` is "no filter". An empty string is a directory like any other.
 
     No session recorded an empty working directory, so the filter finds nothing.
-    The daemon turns the `""` of the wire into `None` before it asks
-    (`_sessions_browse`), so a client that sends `""` still gets every session.
+    The daemon never asks with `""`: `BrowseParams.cwd` is `Stated | None`, so
+    a client that sends `""` is refused before the fold runs.
 
     Sabotage: add `cwd = cwd or None` as the first line of `session_summaries`,
     and the empty string lists both sessions.

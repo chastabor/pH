@@ -62,7 +62,7 @@ from ph.session_profile import (
 )
 from ph.text import count_of
 
-from .console import detail, fail
+from .console import detail, fail, nonblank
 from .named_profiles import NamedProfile, parse_named_profile, render_named_profile
 
 __all__ = [
@@ -528,7 +528,7 @@ def _composed_as(documents: Sequence[ProfileDocument], profile: str) -> Profile:
 DEFAULT_PROFILE = "headless"
 
 ProfileOption: TypeAlias = Annotated[
-    str, typer.Option("--profile", help="Profile name or path to a .yaml.")
+    str, typer.Option("--profile", help="Profile name or path to a .yaml.", callback=nonblank)
 ]
 """Declared one time, so that two commands cannot come to disagree about what
 `--profile` means, or about what an unknown profile costs. The second nearly

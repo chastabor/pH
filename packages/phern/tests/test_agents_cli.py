@@ -1002,6 +1002,30 @@ def _cells(printed: str, first: str) -> list[str]:
     raise AssertionError(f"no row for {first} in:\n{printed}")
 
 
+def test_until_idle_ends_on_a_failed_root(capsys: pytest.CaptureFixture[str]) -> None:
+    """A root whose recovery ladder is spent reports `failed` and does not go
+    idle again by itself.
+
+    `--until-idle` waited for `idle` alone, so on a failed root it never
+    returned. It now stops on `failed` too, and the command exits 1 for it.
+
+    Sabotage: drop the `failed` branch from `_Follow._status`, and the wait
+    stands.
+    """
+    from ph_app.agents import _Follow
+    from ph_app.payloads import StatusFacts
+
+    follow = _Follow(session_id="s", until_idle=True)
+
+    follow._status(StatusFacts(status="retrying"))
+    assert not follow.done.is_set(), "a root between attempts is not done"
+
+    follow._status(StatusFacts(status="failed"))
+
+    assert follow.done.is_set() and follow.failed
+    assert capsys.readouterr().out.splitlines()[-1].strip() == "· failed"
+
+
 def test_a_followed_frame_that_states_no_status_prints_nothing(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

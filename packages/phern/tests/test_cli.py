@@ -1192,6 +1192,9 @@ def test_a_launchs_lifetime_choice_reaches_its_tabs() -> None:
         ["workspaces", "gc", "--session", ""],
         ["profiles", "diff", "headless", "--session", ""],
         ["profiles", "adopt", "headless", "--session", "", "--yes"],
+        ["-p", "hi", "--profile", ""],
+        ["--mode", "web", "--keep-alive", ""],
+        ["daemon", "--keep-alive", ""],
     ],
     ids=lambda argv: " ".join(arg or '""' for arg in argv),
 )
@@ -1243,6 +1246,25 @@ def test_a_typed_keep_alive_reaches_the_tabs_of_a_web_launch() -> None:
     daemon = spawn_command(profile="tui", keep_alive=300.0)
     assert daemon[daemon.index("--keep-alive") + 1] == "300"
     assert "--keep-alive" not in spawn_command(profile="tui")
+
+
+def test_a_forwarded_keep_alive_is_written_exactly() -> None:
+    """The window crosses a command line as a number of seconds, and it must
+    arrive as the number that was typed.
+
+    It was written with `:g`, which keeps six significant digits, so a window
+    of 1234567 seconds arrived as 1234570.
+
+    Sabotage: format the seconds with `:g` in `_keep_alive_argv`, and the long
+    window is rounded.
+    """
+    from ph_app.cli import keep_alive_seconds, tab_command
+
+    for typed in (1234567.0, 1.5, 300.0):
+        argv = tab_command(session="s", profile="tui", keep_alive=typed)
+        sent = argv[argv.index("--keep-alive") + 1]
+        assert keep_alive_seconds(sent) == typed, f"{typed} arrived as {sent}"
+    assert argv[argv.index("--keep-alive") + 1] == "300", "a whole number has no decimal point"
 
 
 def test_one_parser_reads_both_duration_flags() -> None:
