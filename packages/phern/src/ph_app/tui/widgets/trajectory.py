@@ -240,7 +240,7 @@ class TrajectoryPanel(Vertical):
         if table is None:
             return False
         row = index_at_or_before((record.source_seq for record in self.visible_records), seq)
-        if row < 0:
+        if row is None:
             return False
         table.move_cursor(row=row)
         return True

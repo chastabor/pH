@@ -82,7 +82,8 @@ class TrajectoryScreen(Screen[None]):
         self.notice = ""
         """The words of the last action, kept so that a test can read what the
         user was told. `notify` tells the user, and this is the record of it."""
-        self._opening_seq = -1
+        self._opening_seq: int | None = None
+        """The log seq to open at, when `reveal` named one before the mount."""
 
     # ---------------------------------------------------------------- shape --
 
@@ -93,7 +94,7 @@ class TrajectoryScreen(Screen[None]):
     def on_mount(self) -> None:
         self.panel.focus_table()
         self._show_header()
-        if self._opening_seq >= 0:
+        if self._opening_seq is not None:
             # After a refresh, because the panel fills its table in its own
             # `on_mount`, and a cursor that is moved before the rows exist
             # lands nowhere.

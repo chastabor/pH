@@ -607,7 +607,8 @@ class TranscriptView(GutterScroll, VerticalScroll):
 
     def seq_in_view(self) -> int | None:
         """Return the seq of the topmost row on screen. Return `None` when no row
-        is on screen, or when that row has no position in the log.
+        is on screen, or when that row has no position in the log
+        (`ChatItem.seq`).
 
         This gives "where the reader is" without inventing a focus for each row.
         Rows are widgets in a scroll, not a table with a cursor. So the correct
@@ -618,10 +619,7 @@ class TranscriptView(GutterScroll, VerticalScroll):
         for widget in self._rows.values():
             region = widget.region
             if region.height and region.bottom > top:
-                # `ChatItem.seq` is `-1` for a row that the log has no position
-                # for. That is not a position that a screen can open at.
-                seq = int(widget.item.seq)
-                return seq if seq >= 0 else None
+                return widget.item.seq
         return None
 
     def _row_for_seq(self, seq: int) -> RowWidget | None:
@@ -633,7 +631,7 @@ class TranscriptView(GutterScroll, VerticalScroll):
         """
         rows = list(self._rows.values())
         index = index_at_or_before((row.item.seq for row in rows), seq)
-        return rows[index] if index >= 0 else None
+        return rows[index] if index is not None else None
 
 
 def _slug(key: str) -> str:

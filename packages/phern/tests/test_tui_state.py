@@ -63,6 +63,7 @@ from ph_app.tui.config import (
 )
 from ph_app.tui.modals.login import credential_choices
 from ph_app.tui.modals.pickers import session_choices
+from ph_app.tui.state import ChatItem, PromptRecord, TuiState
 
 # ------------------------------------------------------------------- settings --
 
@@ -452,3 +453,21 @@ def test_credential_choices_mark_what_is_already_set() -> None:
     assert [one.value for one in choices] == ["PH_PRESENT_KEY", "PH_ABSENT_KEY"]
     assert [one.marked for one in choices] == [True, False]
     assert [one.detail for one in choices] == ["set", "not set"]
+
+
+def test_a_row_with_no_log_position_is_not_in_the_prompt_history() -> None:
+    """A history record is a position in the log, and the picker reveals it.
+
+    `ChatItem.seq` is `None` for a row that the log has no position for. Such a
+    row was listed with the seq `-1`. The picker keys its rows by seq, so two
+    such rows shared one key, and the transcript could not reveal either. The
+    history now holds only rows that the log has.
+
+    Sabotage: drop `item.seq is None` from `prompt_history`, and the type check
+    refuses the record before this test runs.
+    """
+    state = TuiState()
+    state.add(ChatItem(key="u1", role="user", text="first", seq=3, turn=1))
+    state.add(ChatItem(key="u2", role="user", text="not in the log", turn=2))
+
+    assert state.prompt_history() == [PromptRecord(text="first", seq=3, turn=1)]

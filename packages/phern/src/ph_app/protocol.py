@@ -230,7 +230,7 @@ model name and its `cache` reading beside the context gauge, and spells the latt
 refuses the readings a newer daemon stamps with either; restarting the daemon on
 the same release fixes that.
 
-**11 (after 0.12.0): the status of a root says when the root compacts, and
+**11 (0.13.0): the status of a root says when the root compacts, and
 `daemon/config` is gone.** `RootDescription` and `StatusFacts` gain `compaction`
 (`CompactionFacts`). Its `triggerFraction` is the share of the context window at
 which the root compacts on its own, and it is absent when nothing compacts on

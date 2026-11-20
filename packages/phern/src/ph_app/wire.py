@@ -207,8 +207,10 @@ def matches_terms(haystack: str, query: str) -> bool:
     return all(term in haystack.lower() for term in query.lower().split())
 
 
-def index_at_or_before(seqs: Iterable[int], target: int) -> int:
-    """The position of the last seq at or before `target`, or `-1`.
+def index_at_or_before(seqs: Iterable[int | None], target: int) -> int | None:
+    """The position of the last seq at or before `target`, or `None` when no entry
+    is that early. An entry whose seq is `None` has no position in the log, and
+    it is never the answer.
 
     The one definition of the join between the two projections (P4-17). Both
     readers need the *nearest preceding* entry rather than an exact hit, because
@@ -221,12 +223,13 @@ def index_at_or_before(seqs: Iterable[int], target: int) -> int:
     the two views come to disagree about which row that is. The sequence is in
     log order, so this stops at the first entry past the target.
     """
-    found = -1
+    found: int | None = None
     for index, value in enumerate(seqs):
+        if value is None:
+            continue
         if value > target:
             break
-        if value >= 0:
-            found = index
+        found = index
     return found
 
 

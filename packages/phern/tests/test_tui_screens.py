@@ -33,7 +33,7 @@ import ph_app.tui
 from ph.keys import TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
 from ph.session import SessionEvent, substitute
-from ph.testing import revision_record
+from ph.testing import not_none, revision_record
 from ph_app.daemon.supervisor import Root
 from ph_app.revisions import Revision
 from ph_app.screen_rows import DIFF_KEY
@@ -45,6 +45,7 @@ from ph_app.tui.modals.pickers import command_choices
 from ph_app.tui.remote import LOCAL_SCREENS
 from ph_app.tui.trajectory_screen import SCREEN_ID, TRAJECTORY_KEY, TrajectoryScreen
 from ph_app.tui.widgets.prompt import PromptInput
+from ph_app.wire import index_at_or_before
 
 pytestmark = pytest.mark.anyio
 
@@ -324,6 +325,24 @@ async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeAp
 # ------------------------------------------------------- cross-navigation --
 
 
+def test_the_nearest_row_rule_skips_a_row_with_no_log_position() -> None:
+    """`index_at_or_before` is the one rule of the join between the views: the
+    last entry at or before the target.
+
+    An entry whose seq is `None` has no position in the log, so it is never the
+    answer, and it does not end the search. "No entry is that early" is `None`
+    too, and not an index of `-1`, which Python would read as the last row.
+
+    Sabotage: return `-1` for "none", and `rows[index]` in a caller that forgot
+    the check silently picks the last row.
+    """
+    assert index_at_or_before([1, None, 4, 9], 5) == 2
+    assert index_at_or_before([1, None, 4], 3) == 0, "the row with no position was chosen"
+    assert index_at_or_before([4, 9], 4) == 0, "an exact hit is at or before"
+    assert index_at_or_before([None, 4], 3) is None
+    assert index_at_or_before([], 3) is None
+
+
 async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> None:
     """The gate, over the join that P3-24 stored and nothing read: the
     `source_seq` of a record and the `seq` of a transcript row are the same
@@ -331,20 +350,22 @@ async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> No
     async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
-        first_user = next(item for item in app.front.state.items if item.role == "user")
+        first_user = not_none(
+            next(item.seq for item in app.front.state.items if item.role == "user")
+        )
 
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
         screen = app.screen
         assert isinstance(screen, TrajectoryScreen)
-        assert screen.panel.select_seq(first_user.seq)
+        assert screen.panel.select_seq(first_user)
         await pilot.pause()
-        assert screen.panel.selected().source_seq == first_user.seq  # type: ignore[union-attr]
+        assert screen.panel.selected().source_seq == first_user  # type: ignore[union-attr]
 
         await pilot.press("enter")
         await until(pilot, lambda: not isinstance(app.screen, TrajectoryScreen))
 
-        assert app._view.seq_in_view() == first_user.seq, "the jump landed elsewhere"
+        assert app._view.seq_in_view() == first_user, "the jump landed elsewhere"
 
 
 async def test_a_transcript_row_opens_the_record_beside_it(make_tui_app: MakeApp) -> None:
@@ -354,7 +375,7 @@ async def test_a_transcript_row_opens_the_record_beside_it(make_tui_app: MakeApp
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
         last_user = [item for item in app.front.state.items if item.role == "user"][-1]
-        app._view.scroll_to_seq(last_user.seq)
+        app._view.scroll_to_seq(not_none(last_user.seq))
         await pilot.pause()
 
         await pilot.press(TRAJECTORY_KEY)
@@ -375,13 +396,13 @@ async def test_a_seq_with_no_row_lands_on_the_nearest_one_before_it(
     async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
-        rows = [item for item in app.front.state.items if item.seq >= 0]
-        between = rows[1].seq + 1
-        assert all(item.seq != between for item in rows), "pick a seq no row owns"
+        seqs = [item.seq for item in app.front.state.items if item.seq is not None]
+        between = seqs[1] + 1
+        assert between not in seqs, "pick a seq no row owns"
 
         assert app._view.scroll_to_seq(between)
         await pilot.pause()
-        assert app._view.seq_in_view() == rows[1].seq
+        assert app._view.seq_in_view() == seqs[1]
 
 
 def test_the_terminal_never_reaches_past_the_front_session() -> None:
@@ -518,7 +539,9 @@ async def test_opened_from_the_chat_it_starts_at_the_nearest_change_before_the_r
         first, second = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
         assert app.front is not None and app._view is not None
         between = next(
-            item.seq for item in app.front.state.items if first.seq < item.seq < second.seq
+            item.seq
+            for item in app.front.state.items
+            if item.seq is not None and first.seq < item.seq < second.seq
         )
 
         for reading, expected in ((between, first), (second.seq, second)):

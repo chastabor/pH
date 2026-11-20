@@ -171,7 +171,10 @@ class ChatItem:
     streaming: bool = False
     tool: ToolCard | None = None
     turn: int = 0
-    seq: int = -1
+    seq: int | None = None
+    """The log position of the event that this row shows, or `None` for a row
+    that the log has no position for. The adapter gives every row that it folds
+    the seq of its event."""
     shadowed: bool = False
     """Whether a compaction summary replaced this row. This is distinct from
     `role == "compaction"`, which is the summary itself. The summary is what the
@@ -195,12 +198,13 @@ class PromptRecord:
 
     This is a projection of the `user` rows of `TuiState.items` and not a second
     store: see `TuiState.prompt_history`. With `seq`, a chosen row can be
-    *revealed* in the transcript, which a history file could not do. `seq` is
-    `-1` for a row that the log has no position for.
+    *revealed* in the transcript, which a history file could not do. Every
+    record has a `seq`: a row that the log has no position for is not a prompt
+    of this session, and `TuiState.prompt_history` leaves it out.
     """
 
     text: str
-    seq: int = -1
+    seq: int
     turn: int = 0
 
 
@@ -437,7 +441,7 @@ class TuiState:
         """
         history: list[PromptRecord] = []
         for item in reversed(self.items):
-            if item.role != "user" or not item.text.strip():
+            if item.role != "user" or not item.text.strip() or item.seq is None:
                 continue
             if history and history[-1].text == item.text:
                 continue

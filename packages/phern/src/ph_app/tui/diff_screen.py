@@ -88,7 +88,8 @@ class DiffScreen(Screen[None]):
         self.session_id = session_id
         self.whole = False
         """Whether the details show the whole history and not each edit."""
-        self._opening_seq = -1
+        self._opening_seq: int | None = None
+        """The log seq to open at, when `reveal` named one before the mount."""
 
     # ---------------------------------------------------------------- shape --
 
@@ -118,7 +119,7 @@ class DiffScreen(Screen[None]):
             )
         if not self.groups:
             self.show_details(None)
-        elif self._opening_seq >= 0:
+        elif self._opening_seq is not None:
             # The cursor moves here, and not after a refresh as in the
             # trajectory. This method adds the rows itself, so they exist
             # already. The first `add_row` posted a highlight for row 0. If it
@@ -157,7 +158,7 @@ class DiffScreen(Screen[None]):
         them too.
         """
         row = index_at_or_before((group.seq for group in self.groups), seq)
-        if row < 0:
+        if row is None:
             return False
         self.table.move_cursor(row=row)
         return True
