@@ -1,30 +1,33 @@
 """What the terminal needs from a harness, and what draws its modals.
 
-Two protocols and no implementation. `ph_app.tui.remote.DaemonSession` is the
-one that ships: after P5-14 the harness runs in the daemon, so a front end is a
-protocol client and every member here is answered over a socket. The in-process
-`HarnessSession` that used to live below was deleted with 2c — it mounted pH in
-the terminal, which is precisely the thing that made closing the terminal end
-the turn.
+This module holds two protocols and no implementation.
+`ph_app.tui.remote.DaemonSession` is the implementation that ships. After
+P5-14 the harness runs in the daemon, so a front end is a protocol client, and
+every member here is answered over a socket. The in-process `HarnessSession`
+that used to be below was deleted with 2c. It mounted pH in the terminal, and
+that is exactly what made closing the terminal end the turn.
 
-Kept as a protocol rather than folded into its one implementation because the
-*second* one is the point: P7-07's HTML renderer consumes this, the AST gate in
-`test_tui_screens.py` holds the terminal to reading nothing else, and every
-member is shaped around what the screen needs rather than which service supplies
-it — `providers()` and not `ctx.llm` — which is what made the move possible at
-all.
+`FrontSession` stays a protocol, and is not folded into its one implementation,
+because the *second* implementation is the purpose:
 
-Two decisions worth reading before changing this file.
+- The HTML renderer of P7-07 consumes this protocol.
+- The AST gate in `test_tui_screens.py` holds the terminal to reading nothing
+  else.
+- Every member is shaped around what the screen needs, and not around which
+  service supplies it: `models()` and not `ctx.llm`. That is what made the move
+  possible at all.
 
-**The transcript is rebuilt from `session.events`.** Not from
-`derive_messages()`. The derivation is the *model's* view and compaction shadows
-what it replaced; rebuilding a human's transcript from it would delete
-conversation the person already read (P2-01).
+Read these two decisions before you change this file.
+
+**The transcript is rebuilt from `session.events`**, and not from
+`derive_messages()`. The derivation is the view of the *model*, and compaction
+shadows what it replaced. A transcript for a human that was rebuilt from it
+would delete conversation that the user already read (P2-01).
 
 **A modal is awaited in a worker, never on the message pump.**
-`push_screen_wait` is illegal anywhere else, and the daemon's asks arrive on a
-read loop. `ModalHost` exists so that stays a property of the caller rather than
-a rule someone has to remember.
+`push_screen_wait` is illegal anywhere else, and the asks of the daemon arrive
+on a read loop. `ModalHost` exists so that this stays a property of the caller,
+and is not a rule that someone has to remember.
 
 @module ph_app.tui.frontend
 """
@@ -53,15 +56,15 @@ __all__ = ["FrontSession", "ModalHost"]
 
 
 class ModalHost(Protocol):
-    """What the front-end needs from whatever is drawing it."""
+    """What the front end needs from whatever draws it."""
 
     async def ask_approval(
         self, request: ApprovalRequest, *, ask: AskKey | None = None
     ) -> tuple[ApprovalAnswer, str]:
         """Put the approval modal up and wait. Must be called from a worker.
 
-        `ask` is what `withdraw_ask` takes it down by. Optional so an in-process
-        caller with no wire ask can leave it out.
+        `ask` is the key by which `withdraw_ask` takes the modal down. It is
+        optional so that an in-process caller with no wire ask can leave it out.
         """
         ...
 
@@ -74,115 +77,122 @@ class ModalHost(Protocol):
     async def ask_profile(
         self, name: str, listing: str, *, ask: AskKey | None = None
     ) -> ProfileDecision:
-        """Show how a session's named profile moved, and ask which version it runs on
-        (S6). Must be called from a worker."""
+        """Show how the named profile of a session changed, and ask which version
+        the session runs on (S6). Must be called from a worker."""
         ...
 
     def withdraw_ask(self, ask: AskKey, *, reason: str = "") -> None:
         """Take down a modal that can no longer be answered here (H1).
 
-        The daemon asks *every* attached front end and keeps the first answer,
-        then publishes `ask.settled` to the rest. Nothing consumed it: the second
-        terminal's modal stayed up, and the person answering it was told nothing
-        — their answer went to a daemon that had already decided, was discarded
-        in silence, and the modal they had just dismissed was the only evidence
-        they had that anything happened.
+        The daemon asks *every* attached front end and keeps the first answer.
+        It then publishes `ask.settled` to the others. Nothing used to consume
+        that notice. The modal of the second terminal stayed up, and the user
+        who answered it was told nothing. Their answer went to a daemon that
+        had already decided, and it was discarded in silence. The modal that
+        they had just dismissed was their only evidence that anything happened.
 
-        Sync, and safe to call for an ask this host has never seen: a client that
-        was not asked still receives the notice. `reason` is what the person is
-        told; empty says nothing, for a caller with a better sentence of its own.
+        This is sync, and safe to call for an ask that this host has never seen:
+        a client that was not asked still receives the notice. `reason` is what
+        the user is told. An empty `reason` says nothing, for a caller that has
+        a better sentence of its own.
         """
         ...
 
     def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
-        """The state was mutated; redraw when convenient."""
+        """The state was mutated. Redraw when convenient."""
         ...
 
 
 class FrontSession(Protocol):
-    """What the terminal needs from a harness — wherever that harness is.
+    """What the terminal needs from a harness, wherever that harness is.
 
-    **The terminal may not reach past this.** `PHTuiApp` used to read
-    `front.ctx` in nine places — the command registry, the screen registry, the
-    llm routes, the persistence store, the permission presets, the credentials —
-    and every one of them is a service lookup that exists only when the harness
-    is in *this process*. Once a front end can be a socket client (P5-14) those
-    reads have no answer, so each becomes a method here and each implementation
-    answers it however it can: in-process by resolving the seam, remotely by
-    asking the daemon.
+    **The terminal may not reach past this protocol.** `PHTuiApp` used to read
+    `front.ctx` in nine places: the command registry, the screen registry, the
+    llm routes, the persistence store, the permission presets, the credentials.
+    Each one is a service lookup that exists only when the harness is in *this
+    process*. When a front end can be a socket client (P5-14), those reads have
+    no answer. So each one becomes a method here, and each implementation
+    answers it in the way that it can: in process by resolving the seam,
+    remotely by asking the daemon.
 
-    So the protocol is deliberately shaped around **what the screen needs**
-    rather than which service supplies it: `providers()` and not `ctx.llm`,
-    `credential_held(name)` and not `ctx.credentials`. A member that handed back
-    a service would be a `ctx` reach-through wearing a different name, and the
-    remote implementation could not satisfy it.
+    The protocol is therefore deliberately shaped around **what the screen
+    needs**, and not around which service supplies it: `models()` and not
+    `ctx.llm`, `refresh_credentials()` and not `ctx.credentials`. A member that
+    returned a service would be a `ctx` reach-through under a different name,
+    and the remote implementation could not satisfy it.
 
-    `session` stays, and is not a leak: both implementations have a real
-    `Session` — in-process it is the live one, and a remote front end rebuilds
-    one from the snapshot pages it already needs for the transcript. A screen is
-    a fold of a log (`ScreenDefinition.build(session)`), which is exactly what
-    survives the move.
+    `session` stays, and it is not a leak. Both implementations have a real
+    `Session`. In process it is the live one. A remote front end keeps a mirror
+    of the log, which it builds from the events that it already needs for the
+    transcript. A screen is a fold of a log (`ScreenDefinition.build(session)`),
+    and that is exactly what survives the move.
     """
 
     state: TuiState
 
     @property
     def session(self) -> Session:
-        """The log this front end can fold — read-only, because a remote one
-        rebuilds it from the snapshot pages rather than holding the live one."""
+        """The log that this front end can fold. It is read-only, because a remote
+        front end holds a mirror of the log and not the live one."""
         ...
 
     @property
     def session_id(self) -> str:
         """The id on its own, because it is read on every redraw and `session` is
-        not free everywhere: a remote front end rebuilds its `Session` from the
-        log it has, and a sidebar asking for `.session.id` thirty times a second
-        would rebuild it thirty times a second during a streaming turn."""
+        not free everywhere. A remote front end used to rebuild its `Session`
+        from the log on every read. A sidebar that asked for `.session.id`
+        thirty times a second then rebuilt it thirty times a second during a
+        streaming turn. `DaemonSession` now keeps its mirror incrementally, and
+        the id stays separate so that the sidebar never asks for the whole log."""
         ...
 
     def status_readings(self) -> list[StatusReading]: ...
     async def submit(self, text: str) -> None: ...
 
     async def attach(self, paths: Sequence[str]) -> list[AttachmentRef]:
-        """Stage these files for the next prompt; return everything now staged.
+        """Stage these files for the next prompt, and return everything now staged.
 
-        **The front end reads the bytes**, wherever it is: in process that is
-        this machine's filesystem, and over a socket it is the client's, which is
-        the only thing a browser tab could do and the only reading I-9 lets a
-        person's own attach do. The daemon never learns a path.
+        **The front end reads the bytes**, wherever it is. In process, that is
+        the filesystem of this machine. Over a socket, it is the filesystem of
+        the client. That is the only thing that a browser tab could do, and the
+        only reading that I-9 allows for an attach by the user. The daemon
+        never learns a path.
         """
         ...
 
     async def shell(self, command: str, *, surface: bool = False) -> None:
-        """Run the person's own shell command in the session's workspace.
+        """Run a shell command of the user in the workspace of the session.
 
-        `surface` is `!` rather than `!!` (`ph_app.shell` has the difference).
+        `surface` is true for `!` and false for `!!`. `ph_app.shell` explains
+        the difference.
 
-        Nothing is returned: the command and its output reach every attached
-        front end as `shell/*` events, so the person who typed it reads it back
-        off the same log as everybody else — one rendering path, not two."""
+        Nothing is returned. The command and its output reach every attached
+        front end as `shell/*` events. The user who typed the command therefore
+        reads it from the same log as everybody else: one rendering path, and
+        not two."""
         ...
 
     def queue(self, text: str) -> None: ...
     def cancel(self) -> None: ...
-    async def flush(self) -> None: ...
     async def close(self) -> None: ...
 
     def attach_surfaces(self, app: AppSurface) -> list[Callable[[], None]]:
-        """Register this front end's own verbs and screens; return their disposers."""
+        """Attach the verbs and screens of this front end to `app`. Return their
+        disposers."""
         ...
 
     def commands(self) -> list[CommandDefinition]:
-        """The slash commands this front end offers: one per screen it can draw, and
-        the daemon's. The terminal's own verbs are the app's (`PHTuiApp.commands`),
-        so they answer with no front end at all.
+        """The slash commands that this front end offers: one for each screen that
+        it can draw, and those of the daemon. The verbs of the terminal belong
+        to the app (`PHTuiApp.commands`), so they answer with no front end at
+        all.
 
-        Definitions and not `Any`: the palette reads `name`, `argument_hint` and
-        `summary` off these, and the picker that renders them had to take
-        `Iterable[Any]` to accept the answer — so a renamed field on the seam
-        reached the terminal as an `AttributeError` at the moment somebody
-        pressed `/`, which is the failure this whole layer types itself to move
-        forward to import.
+        The return type is definitions and not `Any`. The palette reads `name`,
+        `argument_hint` and `summary` from them. The picker that renders them
+        used to take `Iterable[Any]` to accept the answer. A renamed field on
+        the seam then reached the terminal as an `AttributeError` at the moment
+        when somebody pressed `/`. This whole layer is typed so that such a
+        failure moves forward to import time.
         """
         ...
 
@@ -192,13 +202,15 @@ class FrontSession(Protocol):
 
     @property
     def diverged(self) -> bool:
-        """Whether this front end's view of the log has stopped matching the harness's.
+        """Whether the view of the log that this front end holds has stopped
+        matching the log of the harness.
 
-        On the Protocol rather than probed for, because everything the terminal
-        reads off its harness has to be something a *remote* one can answer — the
-        rule `test_the_terminal_never_reaches_past_the_front_session` enforces. A
-        `getattr(front, "diverged", False)` slipped past it precisely by not being
-        an attribute access.
+        It is on the protocol and is not probed for. Everything that the
+        terminal reads from its harness must be something that a *remote*
+        harness can answer, which is the rule that
+        `test_the_terminal_never_reaches_past_the_front_session` enforces. A
+        `getattr(front, "diverged", False)` passed that test precisely because
+        it is not an attribute access.
         """
         ...
 
@@ -208,8 +220,9 @@ class FrontSession(Protocol):
 
     @property
     def arrival(self) -> str:
-        """What the person should know about this session as they arrive, once — a
-        named profile that moved past the version it runs on (S6) — or `""`."""
+        """What the user should know about this session as they arrive, told one
+        time: a named profile that moved past the version that the session runs
+        on (S6). `""` when there is nothing to tell."""
         ...
 
     async def choose_model(self, choice: ModelChoice) -> RootDescription:
@@ -217,56 +230,56 @@ class FrontSession(Protocol):
         ...
 
     async def browse_sessions(self, *, cwd: str = "") -> list[SessionSummary]:
-        """Every session a person could open here — stored and live, in one list.
+        """Every session that a user could open here, stored and live, in one list.
 
-        `cwd` narrows it to the sessions whose header recorded that directory;
-        `""` is everything, which is what `/sessions` asks for. The filter runs on
-        the harness, before its own row limit, so a directory worked in long ago
-        is still found on a machine with newer work elsewhere.
+        `cwd` narrows the list to the sessions whose header recorded that
+        directory. `""` means everything, which is what `/sessions` asks for.
+        The filter runs on the harness, before its own row limit, so a
+        directory that was worked in long ago is still found on a machine with
+        newer work elsewhere.
 
-        Folded by the harness, which is the only place that can see both halves:
-        the logs are its disk and which roots are mounted is its own state. A
-        front end reads no session file, so one that is not on the harness's
-        machine — or has no filesystem — is offered the same list.
+        The harness folds the list, because only the harness can see both
+        halves: the logs are on its disk, and which roots are mounted is its
+        own state. A front end reads no session file. A front end that is not
+        on the machine of the harness, or that has no filesystem, is therefore
+        offered the same list.
 
-        Replaced `sessions_directory()`, which handed back a *path* for the
+        This replaced `sessions_directory()`, which returned a *path* for the
         client to walk. That worked only while the two shared a machine, and it
         let them disagree about which `$PH_HOME` they meant.
         """
         ...
 
     async def refresh_credentials(self) -> Mapping[str, bool]:
-        """Re-read which credentials the harness names, and which it holds.
+        """Read again which credentials the harness names, and which of them it
+        holds.
 
-        On the protocol because the login screen has to *await* it before it can
-        draw: `credential_held` is synchronous, so somebody has to have asked.
-        Left off it, the remote implementation answered `False` for every
-        credential and the picker showed a deployment with none set.
+        This is on the protocol because the login screen must *await* it before
+        it can draw. When it was not on the protocol, the only question was a
+        synchronous one about a single name. The remote implementation answered
+        that with `False` for every credential, and the picker showed a
+        deployment with none set.
 
-        No names to pass, because working out which credentials exist is the
-        harness's job: it composed the profile. The front end used to hold that
-        profile — a `config_rows` member on this protocol — purely so a modal
-        could walk it for `apiKeyEnv` keys, which is a service artifact reaching
-        a screen through a member shaped like a screen's need.
+        It takes no names, because to work out which credentials exist is the
+        job of the harness: it composed the profile. The front end used to hold
+        that profile, as a `config_rows` member on this protocol, only so that
+        a modal could walk it for `apiKeyEnv` keys. That was a service artifact
+        that reached a screen through a member shaped like the need of a screen.
 
-        Answers with the map as well as caching it: the picker draws every row
-        at once, and `credential_held` remains for the single-name question a
-        caller asks *after* storing one.
+        It returns the whole map, because the picker draws every row at the
+        same time.
         """
         ...
 
     def set_preset(self, name: PresetName) -> None:
-        """Switch the permission preset. The service records it; the log carries it."""
+        """Switch the permission preset. The service records it, and the log carries it."""
         ...
 
     async def presets(self) -> list[PresetSchema]:
         """The permission postures, with the live one marked."""
         ...
 
-    def credential_held(self, name: str) -> bool:
-        """Whether this credential is already available to the harness."""
-        ...
-
-    def store_credential(self, name: str, value: str) -> bool:
-        """Provide a secret for this session. `False` when there is nowhere to put it."""
+    def store_credential(self, name: str, value: str) -> None:
+        """Provide a secret for this session. The harness reports a refusal in its
+        own log, because the answer arrives after this returns."""
         ...

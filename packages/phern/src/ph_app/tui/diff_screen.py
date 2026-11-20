@@ -1,25 +1,28 @@
-"""The diff screen: every change the log records, grouped as git groups commits by file
-(`/diff`).
+"""The diff screen: every change that the log records, grouped as git groups commits by
+file (`/diff`).
 
-The row that contributes it is `ph_app.screen_rows`; what it lists is
-`ph_app.tui.diffs`, which this screen draws without knowing where a group came
-from. **Meant to grow more kinds**: context revisions are the one kind today, and
-another is a source function there and nothing here. The `kind` column is already
-in the table so a mixed list reads as one.
+The row that contributes it is `ph_app.screen_rows`. What it lists comes from
+`ph_app.tui.diffs`, and this screen draws a group without knowing where the
+group came from. **Meant to grow more kinds.** Context revisions are the one
+kind today, and another kind is a source function in that module and nothing
+here. The `kind` column is already in the table, so a mixed list reads as one
+list.
 
-A table of groups, one per thing as it is now, over the selected group's details. They
-show **each edit**, newest first with its producer's records field by field and its own
-diff, as `git log -p -- file` does; or, after `w`, **the whole history** against the
-original, as `git diff A..B -- file` does. Only the row on screen is rendered, and its
-text is let go when the row changes, so opening the screen over a long log costs one
-row's diffs and holds one row's text. The size column shows what the latest change's
-producer recorded; a change with no recorded size has its characters counted when it
-is shown.
+The screen is a table of groups, one for each thing as it is now, above the
+details of the selected group. The details show **each edit**, newest first,
+with the records of its producer field by field and with its own diff, as
+`git log -p -- file` does. After `w` they show **the whole history** against the
+original, as `git diff A..B -- file` does. Only the row on screen is rendered,
+and its text is released when the row changes. Opening the screen over a long
+log therefore costs the diffs of one row and holds the text of one row. The
+size column shows what the producer of the latest change recorded. A change
+with no recorded size has its characters counted when it is shown.
 
-**Enter goes to the thing in the transcript.** A substitution is its own row, and a
-rewrite shows on the row it rewrote, since a rewrite draws no row of its own. It is the
-same join the trajectory uses (`RevealSeq`, `Revealing`). Opened from the chat, the
-screen starts on the nearest group at or before where the reader is.
+**Enter goes to the thing in the transcript.** A substitution is its own row. A
+rewrite shows on the row that it rewrote, because a rewrite draws no row of its
+own. It is the same join that the trajectory uses (`RevealSeq`, `Revealing`).
+When the screen is opened from the chat, it starts on the nearest group at or
+before the position of the reader.
 
 @module ph_app.tui.diff_screen
 """
@@ -47,9 +50,9 @@ from .screens import RevealHost, RevealSeq
 __all__ = ["CLIENT_SIDE", "DIFF_LINES", "DiffScreen"]
 
 DIFF_LINES = 400
-"""Diff lines drawn for one group before a line saying how many were left out.
-The diffs are computed whole, so nothing is missed; only the drawing is bounded, as
-pi-clm bounds its edits page."""
+"""Diff lines drawn for one group before a line that says how many were left out.
+The diffs are computed whole, so nothing is missed. Only the drawing is bounded,
+as pi-clm bounds its edits page."""
 
 EDIT_LABELS = ("before", "after")
 WHOLE_LABELS = ("as first written", "now")
@@ -75,15 +78,16 @@ class DiffScreen(Screen[None]):
         Binding("escape", "back", "back", id="back"),
         Binding("w", "whole", "each edit / whole history", id="whole"),
     ]
-    """`escape` and `w` are the screen's own. The table owns the arrows and `enter`,
-    and `tab` moves focus to the details so a long diff can be scrolled."""
+    """`escape` and `w` belong to the screen. The table owns the arrows and
+    `enter`, and `tab` moves focus to the details so that a long diff can be
+    scrolled."""
 
     def __init__(self, groups: list[DiffGroup], *, session_id: str = "") -> None:
         super().__init__()
         self.groups = groups
         self.session_id = session_id
         self.whole = False
-        """Whether the details show the whole history rather than each edit."""
+        """Whether the details show the whole history and not each edit."""
         self._opening_seq = -1
 
     # ---------------------------------------------------------------- shape --
@@ -115,11 +119,12 @@ class DiffScreen(Screen[None]):
         if not self.groups:
             self.show_details(None)
         elif self._opening_seq >= 0:
-            # Here, not after a refresh as the trajectory does: the rows are this
-            # method's own, so they exist already. The first `add_row` posted a
-            # highlight for row 0, and handled after a later move it would compute
-            # row 0's diff for nobody. Moved now, that highlight draws the row the
-            # cursor is on.
+            # The cursor moves here, and not after a refresh as in the
+            # trajectory. This method adds the rows itself, so they exist
+            # already. The first `add_row` posted a highlight for row 0. If it
+            # were handled after a later move, it would compute the diff of
+            # row 0 for nobody. Because the cursor moves now, that highlight
+            # draws the row that the cursor is on.
             self.select_seq(self._opening_seq)
         table.focus()
         changes = sum(len(group.entries) for group in self.groups)
@@ -144,11 +149,12 @@ class DiffScreen(Screen[None]):
         return min(self.table.cursor_row, len(self.groups) - 1)
 
     def select_seq(self, seq: int) -> bool:
-        """Put the cursor on the group at `seq`, or the nearest one before it.
+        """Put the cursor on the group at `seq`, or on the nearest one before it.
 
-        `index_at_or_before` is the join's one rule for "nearest", shared with the
-        trajectory and the transcript. Moving the cursor posts `RowHighlighted`,
-        which draws the details, so this does not draw them too.
+        `index_at_or_before` is the one rule of the join for "nearest", shared
+        with the trajectory and the transcript. Moving the cursor posts
+        `RowHighlighted`, which draws the details, so this method does not draw
+        them too.
         """
         row = index_at_or_before((group.seq for group in self.groups), seq)
         if row < 0:
@@ -157,8 +163,8 @@ class DiffScreen(Screen[None]):
         return True
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        """Draw the change the cursor is on *now*, which is not always the row the
-        message names: see `on_mount`."""
+        """Draw the change that the cursor is on *now*, which is not always the row
+        that the message names: see `on_mount`."""
         event.stop()
         self.show_details(self.selected())
 
@@ -167,16 +173,16 @@ class DiffScreen(Screen[None]):
     def reveal(self, seq: int) -> None:
         """Open positioned at a log seq (the `Revealing` protocol).
 
-        Recorded rather than applied: the shell calls this before the screen is
-        pushed, when there is no table to move a cursor in.
+        The seq is recorded and not applied. The shell calls this before the
+        screen is pushed, when there is no table to move a cursor in.
         """
         self._opening_seq = seq
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """A chosen group asks its host for the transcript row that shows it.
 
-        A message, and the host asked structurally, for `TrajectoryScreen`'s
-        reasons: this screen does not know what pushed it.
+        It is a message, and the host is checked structurally, for the reasons
+        that `TrajectoryScreen` gives: this screen does not know what pushed it.
         """
         event.stop()
         group = self.selected()
@@ -188,13 +194,14 @@ class DiffScreen(Screen[None]):
         self.post_message(RevealSeq(group.reveal, screen_id=DIFF_SCREEN_ID))
 
     def action_whole(self) -> None:
-        """Between each edit and the whole history, for every group from here on."""
+        """Switch between each edit and the whole history, for every group from now on."""
         self.whole = not self.whole
         self.show_details(self.selected())
 
     def action_back(self) -> None:
         if self.app.screen_stack and self is not self.app.screen_stack[0]:
-            # Asked as "am I the one underneath", for the trajectory's reason.
+            # The test is "am I the one underneath", for the reason that the
+            # trajectory gives.
             self.dismiss()
 
     # -------------------------------------------------------------- details --
@@ -230,9 +237,10 @@ class DiffScreen(Screen[None]):
 
 
 def _edits(group: DiffGroup) -> Content:
-    """Each edit in a group, newest first, each with its own diff, within one budget of
-    drawn lines: an edit past it is counted, not rendered, since a summary's group holds
-    every older summary and each one's before can be most of a conversation."""
+    """Each edit in a group, newest first, each with its own diff, within one
+    budget of drawn lines. An edit past the budget is counted and not rendered,
+    because the group of a summary holds every older summary, and the before of
+    each one can be most of a conversation."""
     parts: list[Content] = []
     left = DIFF_LINES
     newest_first = list(reversed(group.entries))
@@ -252,12 +260,12 @@ def _edits(group: DiffGroup) -> Content:
 
 
 def _counted(before: str, after: str) -> str:
-    """A size counted here, in characters, for a change no record sized."""
+    """A size counted here, in characters, for a change that no record sized."""
     return RevisionSize("chars", len(before), len(after)).label() + ", counted here"
 
 
 def _entry(entry: DiffEntry, size: str) -> Content:
-    """One edit's heading: what it was, who wrote it, and its records field by field."""
+    """The heading of one edit: what it was, who wrote it, and its records field by field."""
     parts: list[str | tuple[str, str]] = [
         (f"{entry.title} · seq {entry.seq} · {size}", "bold $ph-accent"),
         "\n",
@@ -278,7 +286,8 @@ def _entry(entry: DiffEntry, size: str) -> Content:
 
 
 def _diff(lines: tuple[str, ...], budget: int) -> Content:
-    """A diff's lines, at most `budget` of them, then a line saying how many were left."""
+    """The lines of a diff, at most `budget` of them, then a line that says how many
+    were left."""
     if not lines:
         return Content.assemble(("no text change", "$ph-muted"), "\n")
     parts: list[str | tuple[str, str]] = []
@@ -290,7 +299,7 @@ def _diff(lines: tuple[str, ...], budget: int) -> Content:
 
 
 def _style(line: str) -> str:
-    """A unified diff line's color, by its first characters."""
+    """The color of a unified diff line, by its first characters."""
     if line.startswith(("---", "+++")):
         return "bold $ph-muted"
     if line.startswith("@@"):
@@ -314,6 +323,6 @@ CLIENT_SIDE = ScreenDefinition(
     key=DIFF_KEY,
     build=_build,
 )
-"""This screen as the front end draws it. The daemon's `screens/list` supplies the
-label, order and key at attach time, so the copies here are defaults
-(`trajectory_screen.CLIENT_SIDE` says why `build` cannot travel)."""
+"""This screen as the front end draws it. The `screens/list` of the daemon
+supplies the label, order and key at attach time, so the copies here are
+defaults. `trajectory_screen.CLIENT_SIDE` says why `build` cannot travel."""

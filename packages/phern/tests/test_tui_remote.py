@@ -1,21 +1,24 @@
-"""P5-14 — the terminal over a socket, against a real daemon.
+"""P5-14: the terminal over a socket, against a real daemon.
 
-`DaemonSession` is the second implementation of `FrontSession`, and the claim
-being tested is *equality*: the app above it cannot tell which one it has, so a
-person gets the same layout, the same fold and the same verbs at a tty or in a
-browser tab. Every test here drives the front end directly with a `StubHost`,
-the way `test_tui_frontend.py` drives the in-process one — no terminal, so a
-failure is about the protocol rather than about Textual.
+`DaemonSession` is the implementation of `FrontSession` that ships. It was
+written as the second implementation, and the in-process one has since been
+deleted. The app above it reads only the protocol, so a user gets the same
+layout, the same fold and the same verbs at a tty or in a browser tab. Every
+test here drives the front end directly with a `StubHost`. There is no
+terminal, so a failure is about the protocol and not about Textual.
 
 The daemon is in-process (`daemon_helpers.running`) and the socket is real. That
-combination is deliberate: an in-memory double for the wire would pass for a
-design whose frames never round-trip, and the defects this file exists to catch —
-a snapshot page and a live frame both drawing the same event, a status word the
-screen has no room for, a verb sent to the end that has never heard of it — are
-all about what actually crosses.
+combination is deliberate. An in-memory double for the wire would pass for a
+design whose frames never make the round trip. The defects that this file exists
+to catch are all about what crosses the wire:
 
-**The gate the whole increment is named for is the last one**: a turn started
-here finishes after this front end is gone.
+- A snapshot page and a live frame both draw the same event.
+- The daemon sends a status word that the screen has no room for.
+- A verb is sent to the end that does not know it.
+
+**The gate that the whole increment is named for is
+`test_a_turn_started_here_finishes_after_this_front_end_is_gone`**: a turn that
+starts here finishes after this front end is gone.
 """
 
 from __future__ import annotations
@@ -63,10 +66,10 @@ async def _front(
 ) -> tuple[DaemonSession, StubHost]:
     """One attached `DaemonSession` and the host behind it.
 
-    Typed rather than `Any`, which is what makes `StubApp` have to be a real
-    `AppSurface`: while this returned `Any`, `attach_surfaces(object())`
-    type-checked and the double got away with implementing one of three members
-    because the other two happened not to be reached.
+    The return type is `DaemonSession` and not `Any`. That is why `StubApp` has
+    to be a real `AppSurface`. While this function returned `Any`,
+    `attach_surfaces(object())` type-checked. The double then implemented one of
+    three members without a failure, because no test reached the other two.
     """
     host = host or StubHost()
     client = await daemon.client()
@@ -75,13 +78,16 @@ async def _front(
 
 
 def _detached(session_id: str, *, client: Any = None) -> DaemonSession:  # noqa: ANN401
-    """A `DaemonSession` with no daemon behind it, for the folds.
+    """A `DaemonSession` with no daemon behind it, for the tests of the folds.
 
-    **One `TuiState` between the adapter and the front end**, as `attach_session`
-    builds it: the adapter folds into the state the screen reads, and a test with
-    two of them asserts on an object nothing draws. Written out at each call site
-    the two variants had already diverged, and `DaemonSession` gains constructor
-    arguments (`generation` did) that then have to be added five times.
+    **The adapter and the front end share one `TuiState`**, as `attach_session`
+    builds them. The adapter folds into the state that the screen reads. A test
+    with two states asserts on an object that nothing draws.
+
+    This is one function because the construction was written out at each call
+    site, and the two variants had already diverged. `DaemonSession` also gains
+    constructor arguments, as it gained `generation`, and each one then has to
+    be added five times.
     """
     state = TuiState()
     return DaemonSession(
@@ -99,9 +105,9 @@ def _detached(session_id: str, *, client: Any = None) -> DaemonSession:  # noqa:
 async def test_a_turn_reaches_the_transcript_over_the_socket(tmp_path: Path) -> None:
     """The whole path: prompt in, events back, one fold, one state.
 
-    `submit` waits for the root to go idle rather than for the reply, because the
-    reply lands as soon as the prompt is *in the inbox* — which is what makes it
-    survive this client dying, and the reason the two are separate.
+    `submit` waits for the root to go idle and not for the reply. The reply
+    arrives as soon as the prompt is *in the inbox*. That is why the prompt
+    survives the death of this client, and why the two waits are separate.
     """
     async with running(tmp_path) as daemon:
         front, host = await _front(daemon)
@@ -117,11 +123,12 @@ async def test_a_turn_reaches_the_transcript_over_the_socket(tmp_path: Path) -> 
 async def test_a_fresh_session_is_named_by_the_daemon_and_never_searched_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A front end opening a fresh session sends no id, and the daemon names it as it
-    opens (protocol 8), so neither the start's read nor the open searches the store
-    for a log that cannot exist. The TUI minted one and sent it, which the daemon
-    could not tell from a stored id, and searched for twice. Every call after uses
-    the id the reply carried.
+    """A front end that opens a new session sends no id, and the daemon names the
+    session as it opens (protocol 8). So neither the read at the start nor the
+    open searches the store for a log that cannot exist. The TUI used to make an
+    id and send it. The daemon could not tell that id from a stored one, and it
+    searched the store for it two times. Every later call uses the id that the
+    reply carried.
 
     Sabotage: mint the id in `_new_session` and pass it on, and the store is searched.
     """
@@ -145,10 +152,11 @@ async def test_a_front_end_attaching_to_a_finished_turn_rebuilds_it_exactly(
     """Catch-up alone: the snapshot pages rebuild what the live stream showed.
 
     Two front ends on one session reach byte-identical transcripts by two
-    different routes — one folded the turn as it happened, the other paged it
-    afterwards. That the two routes agree is the property `session/attach`'s
-    no-replay rule depends on; the *overlap* between them is the next test,
-    because this one cannot create it.
+    different routes. One folded the turn as it happened, and the other paged it
+    afterwards. The no-replay rule of `session/attach` depends on the agreement
+    of the two routes. This test cannot create the *overlap* between them, so
+    the overlap is the subject of
+    `test_an_event_arriving_on_both_routes_is_folded_once`.
     """
     async with running(tmp_path) as daemon:
         first, _ = await _front(daemon, "shared")
@@ -162,14 +170,15 @@ async def test_a_front_end_attaching_to_a_finished_turn_rebuilds_it_exactly(
 
 
 async def test_the_front_ends_log_is_a_live_mirror_not_a_rebuild(tmp_path: Path) -> None:
-    """**The TUI is a log reader of the same shape as the daemon's (P6-44).**
+    """**The TUI is a log reader of the same shape as the daemon (P6-44).**
 
-    It used to hold a list of events and rebuild `Session(seed=…)` from it on every
-    screen open — re-validating the whole log each time, and with a
-    `session/end-seed` marker on the end that the daemon's log does not have. Now
-    it keeps one `Session` and admits each event as it arrives, so the object a
-    screen builds from is the same object across a turn, holds exactly what the
-    daemon holds, and passes the same `stale()` check the daemon's own log does.
+    The front end used to hold a list of events and rebuild `Session(seed=…)`
+    from it each time a screen opened. That validated the whole log again each
+    time, and it put a `session/end-seed` marker on the end that the log of the
+    daemon does not have. Now the front end keeps one `Session` and admits each
+    event as it arrives. So the object that a screen builds from is the same
+    object across a turn. It holds exactly what the daemon holds, and it passes
+    the same `stale()` check as the log of the daemon.
     """
     from ph_app.protocol import cursor_of
 
@@ -183,22 +192,25 @@ async def test_the_front_ends_log_is_a_live_mirror_not_a_rebuild(tmp_path: Path)
         assert front.session.seq == root.session.seq
         assert [e.type for e in front.session.events] == [e.type for e in root.session.events]
         assert front.session.stale() == [], "the client's incremental fold agrees with its replay"
-        # The daemon's own timestamps, not this client's clock.
+        # The timestamps are those of the daemon, and not the clock of this client.
         assert [e.time for e in front.session.events] == [e.time for e in root.session.events]
-        # Keyed to the daemon's generation by `begin`, so a cursor made here is one
-        # `resume_at` will honor rather than treat as another log's.
+        # The mirror is built on the header of the daemon, so it has the same
+        # `cursor_of` as the daemon. A cursor that is made here is therefore one
+        # that `resume_at` honors, and does not treat as the cursor of another log.
         assert cursor_of(front.session) == cursor_of(root.session)
 
 
 def test_the_mirror_is_built_on_the_daemons_header() -> None:
-    """The mirror is keyed at birth, on the root's own header.
+    """The mirror is keyed when it is built, on the header of the root itself.
 
-    `session/new` answers with it *before* the front end is built, so it is in hand
-    at construction. It arrived as a `begin()` that swapped the `Session` afterwards
-    and raised if anything had been admitted first — a runtime guard against an
-    ordering that need not exist. And it was a header of the client's own, keyed by
-    the reply's generation, so a forked root's mirror had no `seed_length`: every
-    fold of the log's own events counted the fork's inherited history as its own.
+    `session/new` answers with the header *before* the front end is built, so
+    the header is available at construction. It used to arrive in a `begin()`
+    that replaced the `Session` afterwards and raised if anything had been
+    admitted first. That was a runtime guard against an ordering that need not
+    exist. The header was also one that the client made, keyed by the generation
+    of the reply. So the mirror of a forked root had no `seed_length`, and every
+    fold over the events that the log itself owns counted the inherited history
+    of the fork as part of them.
 
     Sabotage: build the mirror's header from the id and a generation again, and the
     fork's boundary is gone.
@@ -223,11 +235,15 @@ def test_the_mirror_is_built_on_the_daemons_header() -> None:
 
 
 def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> None:
-    """Either refusal desynchronizes the mirror permanently — a skipped frame makes
-    every later seq non-contiguous — so `diverged` is the fact, and the screen path
-    is what must ask. Under the rebuild this replaced, the same skip refused loudly
-    at screen-open time; keeping the mirror incrementally moved the refusal earlier,
-    and this is what keeps it from becoming silent."""
+    """A frame that will not rebuild and a frame that the mirror will not admit
+    both desynchronize the mirror permanently, because a skipped frame makes
+    every later seq non-contiguous. So `diverged` is the fact, and the path that
+    opens a screen is the one that must ask about it.
+
+    Under the rebuild that this replaced, the same skip was refused loudly when
+    a screen opened. Keeping the mirror incrementally moved the refusal earlier,
+    and this is what stops the refusal from becoming silent.
+    """
 
     front = _detached("d")
     assert not front.diverged
@@ -242,15 +258,15 @@ def test_a_mirror_that_missed_a_frame_says_so_rather_than_serving_a_prefix() -> 
 def test_a_short_mirror_still_draws_what_arrives_after_the_hole() -> None:
     """The mirror and the transcript are two objects with two rules (H4).
 
-    A *log* with a gap in it is a worse artifact than a short one, so the mirror
-    refuses — but the refusal used to skip the adapter as well, and the adapter
-    has no contiguity to keep. Every frame after the hole was then refused for
-    following the one that was dropped, so one unreadable frame froze the
-    transcript for the rest of the session: no rows, no error on screen, and a
-    single log line as the whole account.
+    A *log* with a gap in it is a worse artifact than a short log, so the mirror
+    refuses the frame. But the refusal used to skip the adapter as well, and the
+    adapter has no contiguity to keep. Every frame after the hole was then
+    refused because it followed the dropped frame. So one unreadable frame froze
+    the transcript for the rest of the session. No rows were drawn, no error was
+    on screen, and a single log line was the whole account.
 
-    `diverged` is how a screen that rebuilds *from the log* learns it cannot, and
-    it is still set. What changes is that the person keeps seeing the
+    `diverged` is how a screen that rebuilds *from the log* learns that it
+    cannot, and it is still set. The change is that the user keeps seeing the
     conversation.
     """
     front = _detached("d")
@@ -286,14 +302,14 @@ def test_a_short_mirror_still_draws_what_arrives_after_the_hole() -> None:
 
 
 async def test_an_event_arriving_on_both_routes_is_folded_once() -> None:
-    """The buffer's whole purpose, and the one window that can double an event.
+    """The purpose of the buffer, and the one window that can show an event twice.
 
     `session/attach` subscribes *before* the history is paged, so live frames
-    arrive while `session/snapshot` is still running — and an event at the head
-    of the log can come down both routes. Driven against `_Feed` directly,
-    because a real turn against the fake provider finishes faster than the
-    overlap it would have to be caught in: an integration test here would pass
-    whether or not the rule existed, which is what it did before this was
+    arrive while `session/snapshot` is still running. An event at the head of
+    the log can therefore arrive by both routes. The test drives `Followed`
+    directly, because a real turn against the fake provider finishes faster
+    than the overlap in which it must be caught. An integration test here would
+    pass whether or not the rule existed, and it did so before this test was
     written.
 
     Sabotage: drop the `at <= self.seen` check in `Followed`, and seq 2 folds twice.
@@ -351,19 +367,20 @@ async def test_a_feed_that_has_shown_nothing_shows_the_first_event() -> None:
 async def test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live(
     tmp_path: Path,
 ) -> None:
-    """Which phase an event arrived in, told to the fold rather than assumed.
+    """The fold is told in which phase an event arrived, and does not assume it.
 
-    `TuiEventAdapter` has taken `Frame(live=…)` since P3 because a transcript
-    being *rebuilt* is not one being *streamed*: a page of history holds a turn's
-    `assistant/chunk` records and the `assistant/message` that superseded them,
-    so a fold told they were live builds a streaming row and then replaces it
-    inside a single pass — which in Textual is a widget mount inside a widget
-    mount, and surfaced as `MountError` from an unrelated test.
+    `TuiEventAdapter` has taken `Frame(live=…)` since P3, because a transcript
+    that is *rebuilt* is not a transcript that is *streamed*. A page of history
+    holds the `assistant/chunk` records of a turn and the `assistant/message`
+    that superseded them. A fold that was told that they were live builds a
+    streaming row and then replaces it inside a single pass. In Textual that is
+    a widget mount inside a widget mount, and it appeared as a `MountError` from
+    an unrelated test.
 
-    Asserted on the contract rather than on the symptom, because the symptom is a
-    race: the burst has to be big enough and the frame boundary has to fall in
-    the wrong place. Sabotage: pass `True` from `catch_up`, and this fails every
-    time while the resume test passes most of the time.
+    The assertion is on the contract and not on the symptom, because the symptom
+    is a race: the burst has to be big enough, and the frame boundary has to
+    fall in the wrong place. Sabotage: pass `True` from `catch_up`, and this
+    fails every time while the resume test passes most of the time.
     """
     async with running(tmp_path) as daemon:
         seen: list[bool] = []
@@ -385,11 +402,11 @@ async def test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live(
 
 
 async def test_the_second_front_end_sees_the_first_ones_prompt(tmp_path: Path) -> None:
-    """The multiplex rule: a submitted prompt is a log entry everyone sees.
+    """The multiplex rule: a submitted prompt is a log entry that everyone sees.
 
-    Not the composer — un-submitted text never leaves a client — but pressing
-    enter is an act in the session, so it reaches every attached front end by the
-    one route everything else does.
+    The composer is not shared, and text that was not submitted never leaves a
+    client. But pressing enter is an act in the session, so the prompt reaches
+    every attached front end by the one route that everything else uses.
     """
     async with running(tmp_path) as daemon:
         first, _ = await _front(daemon, "both")
@@ -404,25 +421,25 @@ async def test_the_second_front_end_sees_the_first_ones_prompt(tmp_path: Path) -
 
 
 async def test_a_queued_prompt_is_counted_once_and_by_the_log() -> None:
-    """The footer counts the inbox, and the inbox is counted by the log (H6).
+    """The footer shows the count of the inbox, and the log supplies that count (H6).
 
-    `queue` bumped the count itself *as well*, so a person's own prompt was
-    counted twice — once optimistically on the keystroke and once when
-    `agent/inbox/spliced` came back — and the footer read "2 queued" for one
-    pending message, then fell to 1 when the turn claimed it.
+    `queue` used to increase the count itself *as well*, so the prompt of the
+    user was counted two times: optimistically on the keystroke, and again when
+    `agent/inbox/spliced` came back. The footer read "2 queued" for one pending
+    message, and then fell to 1 when the turn claimed it.
 
-    Driven at the seam rather than through a live turn, because the two halves
-    have to be told apart: what the keystroke does, and what the event does. A
-    real root claims an idle session's prompt in the same breath it inserts it,
-    which is a race, not a reading.
+    The test drives the seam and not a live turn, because the two halves have to
+    be told apart: what the keystroke does, and what the event does. A real root
+    claims the prompt of an idle session at the moment when it inserts it. That
+    is a race and not a reading.
     """
 
     front = _detached("counted", client=StubClient())
 
     async with anyio.create_task_group() as tasks:
-        # An app that runs what it is given, so the prompt is actually sent —
-        # `StubApp` closes it, which would leave the wrapper's inner coroutine
-        # unawaited.
+        # This app runs the work that it is given, so the prompt is really sent.
+        # `StubApp` closes the work, which would leave the inner coroutine of
+        # the wrapper unawaited.
         front.attach_surfaces(WorkingApp(tasks))
         front.queue("while you are at it")
 
@@ -451,13 +468,13 @@ async def test_a_queued_prompt_is_counted_once_and_by_the_log() -> None:
 
 
 async def test_a_root_parked_on_a_person_is_not_shown_as_running(tmp_path: Path) -> None:
-    """Five root states, one field, and a bool the widgets actually read.
+    """Every status word of the root is in one field, and the widgets read a bool.
 
-    `TuiState.status` carries the root's own word — `waiting` and `retrying`
-    included — and `TuiState.busy` is what drives the spinner. The alternative
-    was a second status field on the remote front end kept in step by hand:
-    three writers of one fact, and an in-process screen that could never show
-    `retrying` because its type had no room for it.
+    `TuiState.status` carries the status word of the root itself, `waiting` and
+    `retrying` included. `TuiState.busy` is what drives the spinner. The
+    alternative was a second status field on the remote front end, kept in step
+    by hand. That made three writers of one fact, and an in-process screen that
+    could never show `retrying` because its type had no room for it.
 
     Sabotage: make `busy` `status == "running"`, and a retry shows as idle.
     """
@@ -475,12 +492,13 @@ async def test_a_root_parked_on_a_person_is_not_shown_as_running(tmp_path: Path)
 
 
 async def test_the_footer_arrives_beside_the_status(tmp_path: Path) -> None:
-    """Readings are pushed with the status, not polled on the 30 Hz tick.
+    """The readings are pushed with the status, and not polled on the 30 Hz tick.
 
-    A reading is a fold of the log, so the moment worth re-reading them is the
-    moment the agent moved. Rebuilt through `model_validate` rather than field by
-    field, so a reading that grows a field reaches a browser tab with no edit at
-    this end — the same argument `to_wire` makes in the other direction.
+    A reading is a fold of the log, so the moment to read the readings again is
+    the moment when the agent moved. They are rebuilt through `model_validate`
+    and not field by field. A reading that gains a field therefore reaches a
+    browser tab with no edit at this end. `to_wire` makes the same argument in
+    the other direction.
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
@@ -495,18 +513,18 @@ async def test_the_footer_arrives_beside_the_status(tmp_path: Path) -> None:
 
 
 async def test_the_posture_is_read_from_the_attach_reply_not_guessed(tmp_path: Path) -> None:
-    """A front end draws the posture the daemon resolved, from the first frame.
+    """A front end draws the posture that the daemon resolved, from the first frame.
 
-    `TuiState` held `"read-only"` and moved only on a `sandbox/mode` event —
-    which is appended when somebody *switches* and never at the start — so a
-    session under a row that says otherwise drew the wrong posture until
-    somebody changed it. The rows contribute readings now, and the attach reply
-    already carries readings, so the client has the right answer before it has
-    folded a single event.
+    `TuiState` used to hold `"read-only"`, and it changed only on a
+    `sandbox/mode` event. That event is appended when somebody *switches* the
+    mode and never at the start. So a session under a row that says otherwise
+    drew the wrong posture until somebody changed it. The rows now contribute
+    readings, and the attach reply already carries readings. The client
+    therefore has the right answer before it has folded a single event.
 
-    **The row says it and the log does not**, which is the only arrangement
-    that gates the seed: a mode somebody changed is an event the client would
-    have folded anyway.
+    **The row says the posture and the log does not.** That is the only
+    arrangement that tests the seed, because a mode that somebody changed is an
+    event that the client would have folded anyway.
     """
     writable = Profile.from_documents(
         [
@@ -531,13 +549,13 @@ async def test_the_posture_is_read_from_the_attach_reply_not_guessed(tmp_path: P
 async def test_the_catalogs_are_read_at_attach_and_carry_their_descriptions(
     tmp_path: Path,
 ) -> None:
-    """What fills the context window, read once, for two renderings.
+    """What fills the context window is read one time, for two renderings.
 
-    The panel draws the names and `/tools` draws the descriptions, so both have
-    to arrive — an earlier draft projected names alone and the command had
-    nothing to say that the sidebar had not already said. Against the seams'
-    own answers in the same mount, which is `test_daemon_projections`' rule
-    applied at the other end of the wire.
+    The panel draws the names and `/tools` draws the descriptions, so both must
+    arrive. An earlier draft projected the names alone, and the command then had
+    nothing to say that the sidebar had not already said. The check is against
+    the answers of the seams themselves in the same mount. That is the rule of
+    `test_daemon_projections`, applied at the other end of the wire.
     """
     async with running(tmp_path) as daemon:
         root = await daemon.root("remote")
@@ -563,12 +581,13 @@ async def test_the_catalogs_are_read_at_attach_and_carry_their_descriptions(
 async def test_a_front_end_offers_the_daemon_s_verbs_and_not_the_terminal_s(
     tmp_path: Path,
 ) -> None:
-    """One list to a person, two owners underneath.
+    """The user sees one list, and two owners are behind it.
 
-    `/model` and `/theme` change *this* client's display and mean nothing to a
-    daemon serving three of them; `/compact` is the harness's. The terminal's own
-    are the app's, so they answer with no front end at all (H3); a front end
-    offers the daemon's, and the app puts the two together (`PHTuiApp.commands`).
+    `/model` and `/theme` change the display of *this* client, and they mean
+    nothing to a daemon that serves three clients. `/compact` belongs to the
+    harness. The verbs of the terminal belong to the app, so they answer with no
+    front end at all (H3). A front end offers the verbs of the daemon, and the
+    app puts the two lists together (`PHTuiApp.commands`).
 
     Sabotage: build `local_commands(app)` back into `_wire_screens`, and the
     terminal's verbs are offered twice once a front end attaches.
@@ -586,21 +605,21 @@ async def test_a_front_end_offers_the_daemon_s_verbs_and_not_the_terminal_s(
 
 
 async def test_a_daemon_verb_is_dispatched_over_the_wire(tmp_path: Path) -> None:
-    """The remote half of the merge: a daemon verb's body *is* `session/command`.
+    """The remote half of the merge: the body of a daemon verb *is* `session/command`.
 
-    A command registered in the daemon's `ctx.commands` cannot be executed here —
-    its body closes over services in another process — so the definition this
-    client holds for it has a `run` that sends the line across. That is what
-    lets `run_command` dispatch every verb the same way.
+    A command that is registered in the `ctx.commands` of the daemon cannot be
+    executed here, because its body closes over services in another process. So
+    the definition that this client holds for it has a `run` that sends the line
+    across. That is what lets `run_line` dispatch every verb in the same way.
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon)
         local = {verb.name for verb in TUI_VERBS}
         remote = next(one for one in front.commands() if one.name not in local)
 
-        # One kind of thing in the palette, dispatched one way, whichever end
-        # executes it: `run_line` reaches the remote proxy's `run` exactly as it
-        # reaches a local verb's.
+        # The palette holds one kind of thing, and it is dispatched in one way,
+        # whichever end executes it. `run_line` reaches the `run` of the remote
+        # proxy exactly as it reaches the `run` of a local verb.
         await run_line(front.commands(), f"/{remote.name}")
         root = daemon.running.supervisor.roots["remote"]
         assert any(one.type == "command/run" for one in root.session.events)
@@ -617,8 +636,8 @@ async def test_a_local_verb_never_reaches_the_daemon(tmp_path: Path) -> None:
         app = StubApp()
         front.attach_surfaces(app)
 
-        # The list `PHTuiApp.commands` dispatches through: the app's own, then the
-        # front end's.
+        # This is the list that `PHTuiApp.commands` dispatches through: the
+        # commands of the app, then the commands of the front end.
         await run_line([*local_commands(app), *front.commands()], "/model")
 
         assert app.ran == ["open_models"]
@@ -632,12 +651,13 @@ async def test_a_local_verb_never_reaches_the_daemon(tmp_path: Path) -> None:
 async def test_the_screens_offered_are_the_ones_this_client_can_draw(
     tmp_path: Path,
 ) -> None:
-    """`build` is the one thing that cannot travel, so the sets are intersected.
+    """`build` is the one thing that cannot travel, so the two sets are intersected.
 
-    The daemon says which screens its profile mounted; `LOCAL_SCREENS` says which
-    this build knows how to draw. An id in the first and not the second is
-    dropped rather than listed and then failing to open — and a screen that *is*
-    in both is built here, from the log this client already holds.
+    The daemon says which screens its profile mounted. `LOCAL_SCREENS` says
+    which screens this build can draw. An id that is in the first set and not in
+    the second is dropped. It is not listed and then left to fail when it is
+    opened. A screen that *is* in both sets is built here, from the log that
+    this client already holds.
     """
     async with running(tmp_path, profile=None) as daemon:
         front, _ = await _front(daemon)
@@ -649,16 +669,18 @@ async def test_the_screens_offered_are_the_ones_this_client_can_draw(
 
 
 async def test_the_picker_reads_no_session_file(tmp_path: Path) -> None:
-    """The list is folded on the daemon; this client touches no disk.
+    """The daemon folds the list, and this client touches no disk.
 
-    Both halves come back from one call: the session this front end is on is
-    *live*, so its row carries the status the daemon calls it and the `cwd` from
-    its own header — the repo it belongs to — even though its log is still in a
-    write buffer and has never been on disk.
+    Both halves come back from one call. The session that this front end is on
+    is *live*. So its row carries the status that the daemon reports for it and
+    the `cwd` from its own header, which is the repo that it belongs to. That
+    holds although its log is still in a write buffer and has never been on
+    disk.
 
-    That is what makes the client filesystem-free. Before this, the daemon handed
-    over a *directory* and the client walked it, which held only while the two
-    shared a machine and let them disagree about which `$PH_HOME` they meant.
+    That is what makes the client independent of the filesystem. Before this,
+    the daemon handed over a *directory* and the client walked it. That worked
+    only while the two shared a machine, and it let them disagree about which
+    `$PH_HOME` they meant.
 
     Sabotage: fold the live roots out of `browse_of` and a person cannot find the
     session they are sitting in.
@@ -678,17 +700,17 @@ async def test_the_picker_reads_no_session_file(tmp_path: Path) -> None:
 
 
 async def test_an_approval_from_the_daemon_reaches_this_screen(tmp_path: Path) -> None:
-    """The ask direction, end to end, and the decision recorded once.
+    """The ask direction, end to end, with the decision recorded one time.
 
-    The handler runs on the read loop, so it hands off to `ModalHost` — the same
-    contract the in-process answerer lives under. `reason` travels back on the
-    wire rather than being steered from here: the daemon holds the agent, and a
-    client steering a turn it does not own would be writing into somebody else's
-    session.
+    The handler runs on the read loop, so it hands the ask to `ModalHost`. That
+    is the same contract that the in-process answerer works under. `reason` goes
+    back on the wire, and this client does not steer with it. The daemon holds
+    the agent, and a client that steered a turn which it does not own would
+    write into the session of somebody else.
     """
     async with running(tmp_path) as daemon:
-        # Held, not discarded: this front end being attached is what makes the
-        # desk have somebody to ask.
+        # The front end is held and not discarded. The desk has somebody to ask
+        # because this front end is attached.
         _front_end, host = await _front(daemon)
         root = daemon.running.supervisor.roots["remote"]
 
@@ -706,22 +728,23 @@ async def test_an_approval_from_the_daemon_reaches_this_screen(tmp_path: Path) -
 async def test_a_second_terminals_modal_comes_down_when_the_first_answers(
     tmp_path: Path,
 ) -> None:
-    """One question, one decision, and **every** terminal told (H1).
+    """One question, one decision, and **every** terminal is told (H1).
 
-    The desk asks every attached front end and keeps whichever answer arrives
-    first; the rest are discarded, on purpose — pH appends the decision it acted
-    on, and a second would be a log claiming two. `ask.settled` exists to tell
-    the losers, and nothing consumed it: the other terminal's modal stayed up,
-    and the person answering it had their answer dropped in silence. They were
-    left believing they had refused a call that had already been allowed.
+    The desk asks every attached front end and keeps the answer that arrives
+    first. It discards the others on purpose: pH appends the decision that it
+    acted on, and a second decision would make the log claim two. `ask.settled`
+    exists to tell the front ends whose answers were discarded, and nothing
+    consumed it. The modal of the other terminal stayed up, and the answer of
+    the person who answered it was dropped silently. That person was left to
+    believe that they had refused a call which had already been allowed.
 
-    The slow host is what makes the order a fact rather than a race: the fast one
-    answers, the desk settles, and the notice reaches the slow one while its
-    modal is still up — which is exactly the state the fix is about.
+    The slow host makes the order a fact and not a race. The fast host answers,
+    the desk settles, and the notice reaches the slow host while its modal is
+    still up. That is exactly the state that the fix is about.
     """
 
     class SlowHost(StubHost):
-        """A front end whose person has not answered yet."""
+        """A front end whose user has not answered yet."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -737,8 +760,8 @@ async def test_a_second_terminals_modal_comes_down_when_the_first_answers(
             return "rejected", "too late"
 
     async with running(tmp_path) as daemon:
-        # The local keeps the narrow type: `_front` answers `StubHost`, and this
-        # test reaches for the subclass's own `release`.
+        # The local variable keeps the narrow type. `_front` returns a
+        # `StubHost`, and this test needs the `release` of the subclass.
         slow = SlowHost()
         _slow_front, _ = await _front(daemon, "remote", host=slow)
         _fast_front, fast = await _front(daemon, "remote")
@@ -757,17 +780,17 @@ async def test_a_second_terminals_modal_comes_down_when_the_first_answers(
             what="the other terminal to be told its modal is moot",
         )
         assert slow.withdrawn == slow.asked_under, "the modal it was asked under"
-        # And the decision is recorded once, whatever the slow one does next.
+        # The decision is recorded one time, whatever the slow host does next.
         slow.release.set()
         assert [one.type for one in root.session.events].count("approval/decided") == 1
 
 
 async def test_a_question_from_the_daemon_reaches_this_screen(tmp_path: Path) -> None:
-    """The other ask, and the attendance rule it turns on.
+    """The other ask, and the attendance rule that it depends on.
 
     A `DaemonSession` declares `asks` at `initialize` and attaches, so the desk
-    counts it as a front end — which is what makes `ctx.user_questions.attended`
-    true and the question loggable at all (P7-09).
+    counts it as a front end. That is what makes `ctx.user_questions.attended`
+    true, and what lets the question be logged at all (P7-09).
     """
     async with running(tmp_path) as daemon:
         # Held for the same reason: `attended` is true because this is attached.
@@ -790,17 +813,17 @@ async def test_a_question_from_the_daemon_reaches_this_screen(tmp_path: Path) ->
 async def test_a_turn_started_here_finishes_after_this_front_end_is_gone(
     tmp_path: Path,
 ) -> None:
-    """P5-01's promise, driven through the thing that makes it visible.
+    """The promise of P5-01, driven through the thing that makes it visible.
 
     A prompt is queued, this front end closes *without* waiting, and the root
-    goes on working — then a second front end attaches and finds the finished
-    turn in the transcript it rebuilds. That is the whole reason the harness moved
-    into the daemon, and it is the one behavior the in-process front end cannot
-    have at all.
+    goes on working. Then a second front end attaches and finds the finished
+    turn in the transcript that it rebuilds. That is the reason why the harness
+    moved into the daemon, and it is the one behavior that the in-process front
+    end could not have at all.
 
-    `close()` detaches and does not flush or shut down: this front end is
-    leaving, not ending the session. Sabotage: cancel the turn in `close`, and
-    the second front end finds no assistant message.
+    `close()` detaches, and it does not flush or shut down: this front end is
+    leaving, and it is not ending the session. Sabotage: cancel the turn in
+    `close`, and the second front end finds no assistant message.
     """
     async with running(tmp_path) as daemon:
         front, _ = await _front(daemon, "outlives")
@@ -818,7 +841,8 @@ async def test_a_turn_started_here_finishes_after_this_front_end_is_gone(
 
 
 async def test_closing_a_front_end_leaves_the_root_running(tmp_path: Path) -> None:
-    """Detach, not shutdown — and the root is still there to attach to.
+    """A close detaches and does not shut down. The root is still there to
+    attach to.
 
     Sabotage: send `shutdown` from `close`, and one person closing their terminal
     stops every other person's session.
@@ -833,22 +857,25 @@ async def test_closing_a_front_end_leaves_the_root_running(tmp_path: Path) -> No
 
 
 # ---------------------------------------------- the daemon's own lifetime --
-# P9-07. Three claims: a front end learns why its daemon is still running at
-# attach, it is *told* when that changes, and the sidebar renders the answer as
-# the sentence a person actually wants — what happens if they close this window.
+# P9-07. Three claims:
+# - A front end learns at attach why its daemon is still running.
+# - It is *told* when that changes.
+# - The sidebar renders the answer as the sentence that a person wants: what
+#   happens if they close this window.
 
 
 def test_the_sidebar_names_the_reason_a_daemon_is_held() -> None:
-    """Four shapes, and `client` dropped from every one of them.
+    """Four shapes. `client` is dropped unless another client is connected.
 
-    A pure fold, tested as one: the rendering is the whole of what a person sees
-    of this row, and driving it through a terminal would assert on a picture
-    where the claim is about a sentence.
+    This is a pure fold, and it is tested as one. The rendering is everything
+    that a person sees of this row. To drive it through a terminal would assert
+    on a picture, where the claim is about a sentence.
 
-    `client` is always in `holds` here — this *is* the client — so a line that
-    printed it would spend a row of a 32-column panel telling somebody they have
-    a window open. What survives the filter is exactly what survives their
-    leaving, which is the question the line answers.
+    `client` is always in `holds` here, because this *is* the client. A line
+    that always printed it would spend a row of a 32-column panel to tell
+    somebody that they have a window open. With one client connected, what
+    passes the filter is exactly what remains after that person leaves, and
+    that is the question that the line answers.
 
     Sabotage: keep `client` among the reasons, and every ephemeral daemon reads
     as `held · client` forever — the line that can never say anything else.
@@ -858,9 +885,9 @@ def test_the_sidebar_names_the_reason_a_daemon_is_held() -> None:
     assert daemon_line(DaemonLifetime(mode="ephemeral", holds=["client"], clients=1)) == [
         "daemon  exits on detach"
     ]
-    # The same `holds`, and the opposite sentence: somebody else is on it, so
-    # closing this window does not end anything. Without `clients` on the frame
-    # these two are indistinguishable and one of them is a lie.
+    # The same `holds`, and the opposite sentence. Somebody else is on the
+    # daemon, so closing this window does not end anything. Without `clients` on
+    # the frame, the two cases look the same and one of the two lines is false.
     assert daemon_line(DaemonLifetime(mode="ephemeral", holds=["client"], clients=2)) == [
         "daemon  held · client"
     ]
@@ -873,12 +900,12 @@ def test_the_sidebar_names_the_reason_a_daemon_is_held() -> None:
 
 
 async def test_a_client_reads_the_lifetime_at_attach(tmp_path: Path) -> None:
-    """Read, not waited for — which is why there is a verb as well as a notice.
+    """Read, and not waited for. That is why there is a verb as well as a notice.
 
-    `daemon.lifetime` is sent when the answer *moves*, so a front end that only
-    listened would draw nothing at all until something happened: open a terminal
-    on a quiet daemon and the row that says whether it stays would stay blank,
-    which is exactly when a person is asking.
+    `daemon.lifetime` is sent when the answer *changes*. A front end that only
+    listened would therefore draw nothing until something happened. On a quiet
+    daemon, the row that says whether the daemon stays would be blank in a new
+    terminal, which is exactly when a person asks.
 
     Sabotage: drop the read from `attach_session` and this is `None`.
     """
@@ -894,13 +921,13 @@ async def test_a_client_reads_the_lifetime_at_attach(tmp_path: Path) -> None:
 async def test_a_lifetime_notice_reaches_a_client_watching_another_session(
     tmp_path: Path,
 ) -> None:
-    """The frame with no owner, delivered to everyone.
+    """The frame with no owner is delivered to everyone.
 
-    A turn on *some other* root is what changes this daemon's lifetime, and the
-    notice that says so carries no `sessionId` — there is no session it is about.
-    Every other notification is filtered on that field before it is parsed, which
-    is right for a client watching one root among several and would drop this one
-    as belonging to nobody.
+    A turn on *some other* root is what changes the lifetime of this daemon. The
+    notice that says so carries no `sessionId`, because it is about no session.
+    Every other notification is filtered on that field before it is parsed. That
+    is right for a client that watches one root among several, but the filter
+    would drop this notice because it belongs to nobody.
 
     Sabotage: route it through the `sessionId` filter — move the
     `DaemonLifetime` branch below `params.get("sessionId") != self.session_id`
@@ -923,12 +950,13 @@ async def test_a_lifetime_notice_reaches_a_client_watching_another_session(
 async def test_a_second_terminal_arriving_tells_the_first_it_is_not_alone(
     tmp_path: Path,
 ) -> None:
-    """The arrival is a lifetime transition too, and it was the unannounced one.
+    """An arrival is a lifetime transition too, and it was the unannounced one.
 
-    `holds` cannot carry this on its own: it says `client` whenever anybody is
-    connected, so it reads the same with one terminal and with two, while the
-    sentence a person needs — "does closing this end it?" — flips. `clients` is
-    the count that separates them, and a client arriving is when it moves.
+    `holds` cannot carry this alone. It says `client` whenever anybody is
+    connected, so it reads the same with one terminal and with two. But the
+    answer to the question that a person asks ("does closing this end it?")
+    changes. `clients` is the count that separates the two cases, and it changes
+    when a client arrives.
 
     Sabotage: leave the announcement to the *departure* alone, as it was, and
     the first terminal goes on promising `exits on detach` with a second one
@@ -951,17 +979,18 @@ async def test_a_second_terminal_arriving_tells_the_first_it_is_not_alone(
 async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
     tmp_path: Path,
 ) -> None:
-    """The third term of `holds`, and the only one a client changes by asking.
+    """The third term of `holds`, and the only one that a client changes by asking.
 
-    `schedule` moves when somebody creates or cancels one, and nothing about
-    that arrives as an agent status or a connection — so the schedule watch says
-    so itself, from the log, whichever path wrote the record. Left to anything
-    else, a person who had just set an appointment would watch the row go on
-    claiming their daemon leaves when they close the window, having been told
-    otherwise by the command they just ran.
+    `schedule` changes when somebody creates or cancels a schedule. Nothing
+    about that arrives as an agent status or a connection. So the schedule watch
+    reports it itself, from the log, whichever path wrote the record. Otherwise
+    a person who had just set an appointment would see the row still claim that
+    the daemon leaves when they close the window, after the command that they
+    had just run told them the opposite.
 
-    The cancel is the half with teeth: it is a claim being *withdrawn*, and on a
-    daemon whose only hold it was, the withdrawal is what lets the process go.
+    The cancel is the half with the larger consequence. It is a claim that is
+    *withdrawn*. On a daemon whose only hold was that claim, the withdrawal is
+    what lets the process go.
 
     Sabotage: drop `_recheck()` from `Supervisor._watch_schedules`, and each
     `until` here waits out its ten seconds.
@@ -997,9 +1026,10 @@ async def test_setting_and_clearing_an_appointment_moves_the_line_at_once(
 async def test_a_re_sent_command_whose_outcome_is_unknown_says_so(
     outcome: RepeatOutcome, said: bool
 ) -> None:
-    """P10-10. A repeat of a command that finished says nothing — the person
-    already saw it run. One whose first attempt the daemon cannot vouch for says
-    so, because the person is the one who can check whether it happened."""
+    """P10-10. A repeat of a command that finished says nothing, because the user
+    already saw it run. A repeat of a command whose first attempt the daemon
+    cannot vouch for says so, because the user is the one who can check whether
+    it happened."""
 
     class Repeating:
         async def mutate(self, verb: object, params: object) -> MutationRepeated:

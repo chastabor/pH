@@ -1,15 +1,19 @@
-"""Pilot tests: every modal driven by keystrokes, as a person would.
+"""Pilot tests: keystrokes drive every modal, as a user would.
 
-Phase 2's definition of done is "pilot tests drive every modal", and the reason
-is narrower than coverage. A TUI's failure modes are not wrong values, they are
-*wrong plumbing*: a key that reaches nothing because the binding was compared
-literally, a modal awaited on the message pump so the app deadlocks, a picker
-whose callback never fires. None of that shows up in a unit test of the widget.
+The definition of done for Phase 2 is "pilot tests drive every modal", and the
+reason is narrower than coverage. A TUI does not fail with wrong values. It
+fails with *wrong plumbing*:
 
-The approval test is the one to read: it asserts the round trip through the
-**log** — `approval/asked` then `approval/decided` — rather than the modal's
-return value, because pH's claim is that the decision is recorded, not that a
-dialog appeared.
+- A key reaches nothing, because the binding was compared literally.
+- A modal is awaited on the message pump, so the app deadlocks.
+- The callback of a picker never fires.
+
+A unit test of the widget shows none of that.
+
+Read the approval test first. It asserts the round trip through the **log**,
+`approval/asked` and then `approval/decided`, and not the return value of the
+modal. The claim of pH is that the decision is recorded, and not that a dialog
+appeared.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 from tui_helpers import MakeApp, root_of, running, tui_app, turn_done, until
 
-from ph.keys import APPROVAL, COMMANDS, CREDENTIALS, TOOLS
+from ph.keys import APPROVAL, COMMANDS, COMPACTION, CREDENTIALS, TOOLS
 from ph.persistence.jsonl import HEADER_LINE_TYPE, session_path
 from ph.seams.approval import ApprovalRequest, Edited, Responded
 from ph.seams.commands import CommandDefinition
@@ -47,7 +51,7 @@ from ph_app.tui.modals.approval import ApprovalModal
 from ph_app.tui.modals.ask_user import AskUserModal
 from ph_app.tui.modals.base import Answers, Choice, ChoicePicker, ConfirmModal
 from ph_app.tui.modals.pickers import NEW_SESSION
-from ph_app.tui.modals.trust import plan_review_modal, project_trust_modal
+from ph_app.tui.modals.trust import project_trust_modal
 from ph_app.tui.state import ChatItem
 from ph_app.tui.themes import fallback_variables, load_theme_profile
 from ph_app.tui.trajectory_app import run_trajectory
@@ -58,14 +62,14 @@ pytestmark = pytest.mark.anyio
 
 
 def _command(name: str = "tidy") -> CommandDefinition:
-    """A command registered by the test, under a name nothing ships.
+    """A command that the test registers, under a name that nothing ships.
 
-    It was `compact` until every shipped profile began carrying the stabilize
-    bundle, at which point `command-compact` had already claimed that name and
-    `ctx.commands` refused the second registration — correctly, and the tests
-    that read the completion list failed with it. A fixture whose name can
-    collide with a real row is a fixture that will, so this one is a word no
-    row uses.
+    The name was `compact` until every shipped profile began to carry the
+    stabilize bundle. By then `command-compact` had already claimed that name,
+    and `ctx.commands` refused the second registration. The refusal was correct,
+    and the tests that read the completion list failed with it. A fixture whose
+    name can collide with a real row will collide with one, so this name is a
+    word that no row uses.
     """
     return CommandDefinition(name=name, summary="Tidy the workspace", run=lambda *_: None)
 
@@ -89,9 +93,9 @@ async def test_typing_and_submitting_runs_a_turn(make_tui_app: MakeApp, tui_daem
 async def test_a_fresh_tui_session_takes_the_id_the_daemon_gives_it(
     make_tui_app: MakeApp, tui_daemon: Daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A TUI opening a new session sends no id, and works on the one `session/new`
-    replied with. It minted one and sent it, which the daemon could not tell from a
-    stored id, and searched its store for twice.
+    """A TUI that opens a new session sends no id, and works on the id that
+    `session/new` replied with. It used to mint an id and send it. The daemon
+    could not tell that id from a stored id, and searched its store for it twice.
 
     Sabotage: mint the id in `PHTuiApp._open` again, and the store is searched.
     """
@@ -155,10 +159,10 @@ async def test_a_rebound_key_is_honored(make_tui_app: MakeApp, tmp_path: Path) -
 
 
 async def test_a_global_key_does_not_also_edit_the_prompt(make_tui_app: MakeApp) -> None:
-    """`ctrl+k` is the palette *and* TextArea's delete-to-end-of-line.
+    """`ctrl+k` is the palette *and* the delete-to-end-of-line of `TextArea`.
 
-    Priority bindings mean the app claims it first; before them the key did
-    both, silently.
+    With priority bindings, the app claims the key first. Before them the key
+    did both, silently.
     """
     async with running(make_tui_app()) as (app, pilot):
         prompt = app.query_one(PromptInput)
@@ -180,11 +184,11 @@ async def _decide(
     *,
     arguments: Any = None,  # noqa: ANN401
 ) -> list[Any]:
-    """Put one approval on screen and hand back the list the answer lands in.
+    """Put one approval on screen and return the list that the answer lands in.
 
-    Takes the daemon-side `root`, not the front end: the approval is raised where
-    the harness is, and the modal appears where the person is — which after P5-14
-    is the two ends of a socket. That separation is the thing under test.
+    This takes the daemon-side `root`, not the front end. The approval is raised
+    where the harness is, and the modal appears where the user is. After P5-14
+    those are the two ends of a socket. That separation is what is tested.
     """
     answers: list[Any] = []
 
@@ -209,8 +213,8 @@ async def test_the_modal_answers_in_the_tools_voice(
 ) -> None:
     """`respond` (P4-05): the body never runs and the model reads an answer.
 
-    A person who knows the answer should not have to reject a call and then
-    explain — the round trip is the cost this decision removes.
+    A user who knows the answer should not have to reject a call and then
+    explain. This decision removes the cost of that round trip.
     """
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -219,8 +223,8 @@ async def test_the_modal_answers_in_the_tools_voice(
 
         await pilot.click("#approval-respond")
         await pilot.pause()
-        # Enter in the box, which is the gesture a person actually makes after
-        # typing — the button stays a second route for the mouse.
+        # Enter in the box is the gesture that a user makes after typing. The
+        # button stays as a second route for the mouse.
         app.screen.query_one("#approval-why", Input).value = "the port is 8080"
         await pilot.press("enter")
         await until(pilot, lambda: bool(answers))
@@ -235,11 +239,11 @@ async def test_the_modal_corrects_the_call_rather_than_refusing_it(
     make_tui_app: MakeApp,
     tui_daemon: Daemon,
 ) -> None:
-    """`edit` (P4-05), opening on the call as it stands.
+    """`edit` (P4-05), which opens with the call as it stands.
 
-    Prefilled because a person correcting one wrong path should not retype the
-    whole argument object — and because what they are editing is the model's
-    own request, which they need to see.
+    The box is prefilled because a user who corrects one wrong path should not
+    retype the whole argument object. The user also needs to see what they
+    edit, which is the request of the model itself.
     """
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -258,8 +262,8 @@ async def test_the_modal_corrects_the_call_rather_than_refusing_it(
         assert answers[0].arguments == {"path": "notes.md"}
         decided = next(e for e in root.session.events if e.type == "approval/decided")
         assert decided.data["arguments"] == {"path": "notes.md"}
-        # The ask itself does not carry them: `tool/call` already did, and two
-        # copies of one fact in the log are two that can disagree.
+        # The ask itself does not carry them, because `tool/call` already did.
+        # Two copies of one fact in the log are two copies that can disagree.
         asked = next(e for e in root.session.events if e.type == "approval/asked")
         assert "arguments" not in asked.data
 
@@ -267,8 +271,8 @@ async def test_the_modal_corrects_the_call_rather_than_refusing_it(
 async def test_a_mistyped_edit_keeps_the_box_open(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """Not a refusal: the person meant to edit and mistyped, and rejecting the
-    call on a stray comma would be the harness deciding for them."""
+    """This is not a refusal. The user meant to edit and mistyped. To reject the
+    call because of a stray comma would be the harness deciding for the user."""
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
@@ -316,7 +320,7 @@ async def test_rejecting_asks_for_a_reason_then_steers_with_it(make_tui_app: Mak
         await until(pilot, lambda: isinstance(app.screen, ApprovalModal))
         await pilot.click("#approval-reject")
         await pilot.pause()
-        # First press reveals the reason field rather than deciding.
+        # The first press shows the reason field and does not decide.
         assert app.screen.has_class("-explaining")
         await pilot.press(*"use the helper")
         await pilot.press("enter")
@@ -325,7 +329,7 @@ async def test_rejecting_asks_for_a_reason_then_steers_with_it(make_tui_app: Mak
 
 
 async def test_escape_denies_rather_than_leaving_it_open(make_tui_app: MakeApp) -> None:
-    """Absence is not consent — dismissing the modal is a refusal."""
+    """Absence is not consent: dismissing the modal is a refusal."""
     async with running(make_tui_app()) as (app, pilot):
         answers: list[Any] = []
 
@@ -340,13 +344,16 @@ async def test_escape_denies_rather_than_leaving_it_open(make_tui_app: MakeApp) 
 
 
 async def test_an_ask_is_withdrawn_by_its_root_and_its_name(make_tui_app: MakeApp) -> None:
-    """Two roots' asks, both named `ask-1`, up at once, and the lower one withdrawn.
+    """Asks of two roots, both named `ask-1`, are up at the same time, and the
+    lower one is withdrawn.
 
-    Each root's desk counts its own asks, so a terminal attached to two can be
-    asked `ask-1` by both. Filed by the name alone, the second took the first's
-    entry, and `ask.settled` for one root's ask took the other root's modal down.
-    And `dismiss` pops whichever screen is on top, so withdrawing a modal with
-    another above it took the upper one down instead, and its ask never heard back.
+    The desk of each root counts its own asks, so a terminal that is attached to
+    two roots can be asked `ask-1` by both. When asks were filed by the name
+    alone, the second took the entry of the first, and `ask.settled` for the ask
+    of one root took down the modal of the other root. Also, `dismiss` pops
+    whichever screen is on top. To withdraw a modal that had another above it
+    therefore took the upper one down instead, and the upper ask never got an
+    answer.
 
     Sabotage: file `_open_asks` by `ask.ask_id` alone, or withdraw with a plain
     `dismiss`, and the upper ask is not the one left up.
@@ -448,9 +455,10 @@ async def test_the_command_palette_inserts_a_command(
         front = app.front
         assert front is not None
         root.ctx.require(COMMANDS).register(_command())
-        # A command registered on the daemon reaches this palette as a
-        # `session.commands` notification, so it is there a frame later rather
-        # than at once — the honest cost of the list living one socket away.
+        # A command that is registered on the daemon reaches this palette as a
+        # `session.commands` notification. It is therefore there one frame
+        # later and not at once. That is the real cost of a list that is one
+        # socket away.
         await until(pilot, lambda: any(one.name == "tidy" for one in front.commands()))
         await pilot.press(app.keys.command_palette)
         await pilot.pause()
@@ -462,7 +470,7 @@ async def test_the_command_palette_inserts_a_command(
 
 
 async def test_a_picker_blocks_the_other_global_keys(make_tui_app: MakeApp) -> None:
-    """With one picker open, another picker's key must not stack a second on top."""
+    """While one picker is open, the key of another must not stack a second one on top."""
     async with running(make_tui_app()) as (app, pilot):
         await pilot.press(app.keys.theme_picker)
         await pilot.pause()
@@ -478,8 +486,10 @@ async def test_the_model_picker_lists_the_profile_s_models_and_moves_the_root(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
     """`/model` was cosmetic: it rewrote the footer and nothing ran on it. Now the
-    picker offers the profile's keys, and the free text a whole route, and the
-    choice is the daemon's — the root's agent moves, then the footer follows.
+    picker offers the keys of the profile, and the free text offers a whole
+    route. The choice belongs to the daemon: the agent of the root moves, and
+    then the footer follows.
+
     Sabotage: set the footer in `_set_model` again and skip the daemon, and the
     root stays on `fake-1` while the footer says otherwise."""
     async with running(make_tui_app()) as (app, pilot):
@@ -502,17 +512,19 @@ async def test_the_model_picker_lists_the_profile_s_models_and_moves_the_root(
 async def test_the_terminal_s_own_route_rides_its_session_new(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """`phern --mode tui --model …` moves this terminal's session, not the daemon:
-    `spawn_command` carries no route, and `session/new` carries this one. Refused,
-    the start fails with the daemon's sentence — the way `phern -p --model` exits —
-    rather than opening on a route the person did not ask for."""
+    """`phern --mode tui --model …` moves the session of this terminal, not the
+    daemon: `spawn_command` carries no route, and `session/new` carries this
+    one. When the route is refused, the start fails with the sentence of the
+    daemon, in the way that `phern -p --model` exits. It does not open on a
+    route that the user did not ask for."""
     chosen = ModelChoice(provider="fake", model="fake-5")
     async with running(make_tui_app(model_choice=chosen)) as (app, pilot):
         await until(pilot, lambda: root_of(tui_daemon).agent.options.model == "fake-5")
         assert not_none(app.front).state.model == "fake-5"
 
-    # The same session again, now asking for a key the profile does not list.
-    # `run_test` rather than `running`, which waits for an attach this must not get.
+    # The same session again, now with a request for a key that the profile does
+    # not list. This uses `run_test` and not `running`, because `running` waits
+    # for an attach that this must not get.
     refused = make_tui_app(model_choice=ModelChoice(key="nope"))
     async with refused.run_test() as pilot:
         await pilot.pause()
@@ -529,7 +541,7 @@ async def test_the_terminal_s_own_route_rides_its_session_new(
 
 
 def _refused_start(app: App[Any]) -> str:
-    """The sentence on the modal a failed start put up — what a person reads."""
+    """The sentence on the modal that a failed start put up, which is what the user reads."""
     modal = app.screen
     assert isinstance(modal, ConfirmModal), f"no modal is up; the screen is {modal!r}"
     return modal.body_text
@@ -543,9 +555,10 @@ def _status_line(app: PHTuiApp, part: str = "line") -> str:
 async def _submit(app: PHTuiApp, pilot: Pilot[str | None], line: str) -> None:
     """Type `line` and send it.
 
-    A slash line opens the completion popup, which claims enter: tab accepts, then
-    enter submits. Plain text opens none, and tab with no popup is the text area's
-    own — it moves focus — so it is pressed only when there is a list to accept.
+    A slash line opens the completion popup, which claims enter. Tab accepts,
+    and then enter submits. Plain text opens no popup. Tab with no popup belongs
+    to the text area, where it moves focus. Tab is therefore pressed only when
+    there is a list to accept.
     """
     await pilot.press(*line)
     await pilot.pause()
@@ -557,17 +570,18 @@ async def _submit(app: PHTuiApp, pilot: Pilot[str | None], line: str) -> None:
 async def test_a_start_that_fails_stays_said_and_the_terminal_still_answers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The bug this guards: a daemon that would not start was reported in a toast,
-    and a toast lasts five seconds. What it left was a terminal with its headings
-    drawn and nothing behind them — every line typed swallowed, `/quit` included,
-    because every slash command went through the front end that was never built.
-    The person who met it read it as a hang.
+    """The bug that this guards against: a daemon that would not start was
+    reported in a toast, and a toast lasts five seconds. It left a terminal with
+    its headings drawn and nothing behind them. Every typed line was swallowed,
+    `/quit` included, because every slash command went through the front end,
+    which was never built. The user who met it read it as a hang.
 
-    No daemon listens on this test's `$PH_RUNTIME` and `spawn=False` refuses to
-    start one, so the open fails the way a daemon that exits on the way up fails
-    it. Sabotage: put the bare `return` back under `if front is None` in
-    `on_prompt_input_submitted`, and `/theme` opens nothing; drop `show_refusal`,
-    and Esc leaves a blank footer over the same dead prompt.
+    No daemon listens on the `$PH_RUNTIME` of this test, and `spawn=False`
+    refuses to start one. The open therefore fails in the way that it fails for
+    a daemon that exits while it starts. Sabotage: put the bare `return` back
+    under `if front is None` in `on_prompt_input_submitted`, and `/theme` opens
+    nothing; drop `show_unattached`, and Esc leaves a blank footer over the same
+    dead prompt.
     """
     private_runtime(tmp_path, monkeypatch)
     app = tui_app(home=tmp_path)
@@ -608,15 +622,17 @@ async def test_a_start_that_fails_stays_said_and_the_terminal_still_answers(
 async def test_try_again_reruns_the_open_after_a_refused_start(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """**Try again** is for the person whose fix is in another terminal — a daemon
-    started by hand, an install put right — who should not have to reopen the
-    terminal to find out. The open runs whole, and the refusal is withdrawn.
+    """**Try again** is for the user whose fix is in another terminal: a daemon
+    that was started by hand, or an install that was repaired. That user should
+    not have to reopen the terminal to find out. The whole open runs again, and
+    the refusal is withdrawn.
 
-    A refused route stands in for the daemon that would not start: it is the
-    other way an open fails after `ensure_daemon`, and the one a test can turn on
-    and off. The connection the first attempt opened is dropped before the second
-    — and dropped quietly: the watcher that reports a daemon *going away* must
-    not fire for a socket this terminal closed on purpose.
+    A refused route stands in for the daemon that would not start. It is the
+    other way in which an open fails after `ensure_daemon`, and it is the one
+    that a test can turn on and off. The connection that the first attempt
+    opened is dropped before the second attempt, and it is dropped quietly. The
+    watcher that reports a daemon *going away* must not fire for a socket that
+    this terminal closed on purpose.
     """
     app = make_tui_app(model_choice=ModelChoice(key="nope"))
     async with app.run_test() as pilot:
@@ -645,9 +661,9 @@ async def test_the_theme_picker_previews_and_applies(make_tui_app: MakeApp, tmp_
         await pilot.press("enter")
         await pilot.pause()
         assert app.theme != before
-        # And remembered: the next launch opens in the chosen theme. In
-        # `$PH_HOME/themes/theme-profile.yaml`, which this pick is what creates —
-        # before it there is no theme file at all (P9-02).
+        # And remembered: the next launch opens in the chosen theme. The choice
+        # is in `$PH_HOME/themes/theme-profile.yaml`, which this pick creates.
+        # Before the pick there is no theme file at all (P9-02).
         assert load_theme_profile(tmp_path).chosen == app.theme
 
 
@@ -680,29 +696,26 @@ async def test_the_permission_picker_records_the_posture(
         assert presets, "the service records the posture, not the front-end"
         chosen = presets[-1].data["preset"]
 
-        # And the picker reads the posture back from the seam rather than from a
-        # fold of its own: it marked nothing on a session somebody had already
-        # switched, because a client that attached afterwards has no event to
-        # fold. Asked again, the mark is on what the log now says.
+        # The picker also reads the posture back from the seam, and not from a
+        # fold of its own. It used to mark nothing on a session that somebody
+        # had already switched, because a client that attached afterwards has no
+        # event to fold. When the picker asks again, the mark is on what the log
+        # now says.
         marked = [one.name for one in await front.presets() if one.active]
         assert marked == [chosen]
 
 
 async def test_the_session_picker_lists_and_reopens(make_tui_app: MakeApp) -> None:
-    """Choosing a stored session exits with its id; `run_tui` reopens it."""
+    """Choosing a stored session exits with its id, and `run_tui` reopens it."""
     async with running(make_tui_app(session_id="earlier")) as (app, pilot):
         assert app.front is not None
         await pilot.press(*"remember this")
         await pilot.press(app.keys.submit)
         await until(pilot, turn_done(app))
-        await app.front.flush()
 
     app = make_tui_app(session_id="later")
     async with running(app) as (app, pilot):
         assert app.front is not None
-        # The store buffers until a flush, so the current session reaches the
-        # directory the picker lists only after one.
-        await app.front.flush()
         await pilot.press(app.keys.session_picker)
         await pilot.pause()
         picker = app.screen
@@ -770,7 +783,7 @@ async def test_project_trust_is_remembered_outside_the_project(tmp_path: Path) -
     assert store.trusted(project) is False
     store.trust(project)
     assert TrustStore(path=tmp_path / "trust.json").trusted(project) is True
-    # Nothing was written into the project — a repo cannot vouch for itself.
+    # Nothing was written into the project. A repo cannot vouch for itself.
     assert list(project.iterdir()) == []
 
 
@@ -784,15 +797,35 @@ async def test_the_trust_modal_offers_three_answers(make_tui_app: MakeApp, tmp_p
         assert chosen == ["once"]
 
 
+async def test_dismissing_the_trust_modal_does_not_load_the_project(
+    make_tui_app: MakeApp, tmp_path: Path
+) -> None:
+    """The cancel key answers "Don't load it". A dismissal must never be read as
+    consent to run the configuration of a project.
+
+    Sabotage: drop `cancel_value="no"` from `project_trust_modal`, and the
+    dismissal answers `None`.
+    """
+    async with running(make_tui_app()) as (app, pilot):
+        chosen: list[Any] = []
+        app.push_screen(project_trust_modal(tmp_path), chosen.append)
+        await pilot.pause()
+        await pilot.press(app.keys.cancel)
+        await pilot.pause()
+        assert chosen == ["no"]
+
+
 async def test_the_trust_dialog_is_walked_by_tab_and_the_arrows(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """Opened on "this session only", and every answer reachable from the keyboard.
+    """The dialog opens on "this session only", and the keyboard reaches every
+    answer.
 
-    Tab and Shift+Tab are Textual's, routed to app actions — which the app
-    refused behind a dialog while its own keys were bound on the app and kept
-    quiet by a check, so focus could not leave the first button and Enter meant
-    "trust it forever". The arrows are the dialog's own, to the same actions.
+    Tab and Shift+Tab belong to Textual, which routes them to app actions. The
+    app refused those actions behind a dialog, while its own keys were bound on
+    the app and kept quiet by a check. Focus therefore could not leave the first
+    button, and Enter meant "trust it forever". The arrows belong to the dialog
+    and lead to the same actions.
 
     Sabotage: give `PHTuiApp` a `check_action` that refuses every action but
     quit while a dialog is up, and Tab leaves focus where it was.
@@ -821,8 +854,9 @@ async def test_the_trust_dialog_is_walked_by_tab_and_the_arrows(
 async def test_the_chat_s_keys_are_quiet_behind_a_dialog_and_quit_is_not(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """A dialog keeps the chat's keys out of reach by being on top — they are
-    bound on the chat's own screen — and quit, bound on the app, still works.
+    """A dialog keeps the keys of the chat out of reach by being on top, because
+    they are bound on the screen of the chat itself. Quit is bound on the app
+    and still works.
 
     Sabotage: bind the chat's keys on the app (`PHTuiApp.BINDINGS =
     screen_bindings(...)`), and the theme picker opens over the trust dialog.
@@ -844,10 +878,10 @@ async def test_the_chat_s_keys_are_quiet_behind_a_dialog_and_quit_is_not(
 async def test_the_approval_dialog_is_walked_by_the_arrows_and_its_box_keeps_them(
     make_tui_app: MakeApp,
 ) -> None:
-    """The arrows move among the decisions — and only there: once a decision
-    opens the reason box, Left and Right move its cursor and Up does not throw
-    focus out of it. The box handles Left and Right itself; Up is the key that
-    escapes when the arrows are bound wider than the answers.
+    """The arrows move among the decisions, and only there. After a decision
+    opens the reason box, Left and Right move the cursor of the box, and Up does
+    not move focus out of it. The box handles Left and Right itself. Up is the
+    key that escapes when the arrows are bound wider than the answers.
 
     Sabotage: bind the arrows on the dialog (`app.focus_next`, `app.focus_previous`)
     rather than on `Answers`, and Up in the open box moves focus out of it.
@@ -890,8 +924,9 @@ async def test_the_approval_dialog_is_walked_by_the_arrows_and_its_box_keeps_the
 async def test_a_dialog_s_answers_are_a_centered_column(
     make_tui_app: MakeApp, tmp_path: Path, dialog: str
 ) -> None:
-    """Each answer's middle is the dialog's middle, whatever its label's length —
-    in every dialog with answers, since they share one `Answers` column.
+    """The middle of each answer is the middle of the dialog, whatever the
+    length of its label. That holds in every dialog with answers, because they
+    share one `Answers` column.
 
     Sabotage: build `Answers`' children without their `Center`, and the answers
     line up on the left edge with different middles.
@@ -911,16 +946,6 @@ async def test_a_dialog_s_answers_are_a_centered_column(
             assert abs(offset) <= 0.5, f"{button.id} is {offset} columns off center"
 
 
-async def test_plan_review_defaults_to_rejecting_on_dismissal(make_tui_app: MakeApp) -> None:
-    async with running(make_tui_app()) as (app, pilot):
-        chosen: list[Any] = []
-        app.push_screen(plan_review_modal("1. do the thing"), chosen.append)
-        await pilot.pause()
-        await pilot.press(app.keys.cancel)
-        await pilot.pause()
-        assert chosen == ["reject"]
-
-
 async def test_a_picker_filters_on_typed_text(make_tui_app: MakeApp) -> None:
     async with running(make_tui_app()) as (app, pilot):
         chosen: list[Any] = []
@@ -938,19 +963,22 @@ async def test_a_picker_filters_on_typed_text(make_tui_app: MakeApp) -> None:
 
 class _Picking(App[None]):
     """A bare app to open a picker on. `PHTuiApp` would bring a daemon, a socket
-    and a mount with it, and a picker needs none of them — only the `$ph-*`
-    variables its CSS names, which Textual refuses to parse without."""
+    and a mount with it, and a picker needs none of them. It needs only the
+    `$ph-*` variables that its CSS names. Textual refuses to parse the CSS
+    without them."""
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return fallback_variables()
 
 
 async def test_a_row_that_cannot_be_chosen_leaves_the_picker_open() -> None:
-    """P11-08: a row can be seen and not taken — a sub-agent's log among the sessions.
+    """P11-08: a row can be seen and not taken, such as the log of a sub-agent
+    among the sessions.
 
-    Choosing it says why and answers nothing, so no caller is handed an id it would
-    send only to have it refused; the rows around it answer as before. Runs without
-    a daemon, so it holds in a sandbox that has no sockets.
+    Choosing the row says why and answers nothing. No caller therefore receives
+    an id that it would send only to have it refused. The rows around it answer
+    as before. The test runs without a daemon, so it holds in a sandbox that has
+    no sockets.
 
     Sabotage: dismiss with an unavailable row's value, and `chosen` holds it.
     """
@@ -984,7 +1012,7 @@ async def test_a_row_that_cannot_be_chosen_leaves_the_picker_open() -> None:
 async def test_typing_a_slash_offers_registered_commands(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """Completion sources are pH's registries, not a second list (I7)."""
+    """The completion sources are the registries of pH, not a second list (I7)."""
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
         assert app.front is not None
@@ -1007,9 +1035,9 @@ async def test_a_disposed_command_leaves_the_completion_list(
         assert app.front is not None
         dispose = root.ctx.require(COMMANDS).register(_command())
         prompt = app.query_one(PromptInput)
-        # A prefix that matches *only* the fixture command: `/comp` now also
+        # A prefix that matches *only* the fixture command. `/comp` now also
         # matches the shipped `/compact`, so the list would stay open after the
-        # disposal and the gate would pass for the wrong reason.
+        # disposal, and the gate would pass for the wrong reason.
         await pilot.press(*"/tid")
         await pilot.pause()
         assert prompt.has_class("-completing")
@@ -1034,22 +1062,23 @@ async def test_escape_closes_the_completion_list_before_interrupting(
         await pilot.press(app.keys.cancel)
         await pilot.pause()
         assert not prompt.has_class("-completing")
-        # And the typed text survives — escape closed the popup, not the prompt.
+        # And the typed text survives: escape closed the popup, not the prompt.
         assert prompt.area.text == "/comp"
 
 
 async def test_the_idle_prompt_is_one_row_with_its_text_in_the_transcripts_column(
     make_tui_app: MakeApp,
 ) -> None:
-    """No frame, no hint row: an empty prompt costs the terminal one line, and
-    what is typed into it starts where the conversation's text does.
+    """No frame and no hint row: an empty prompt costs the terminal one line, and
+    the typed text starts where the text of the conversation starts.
 
-    Asked while the prompt has focus, because focus is what brought a border
-    back: Textual's `TextArea:focus` rule outranks a plain type selector, so a
-    `border: none` that held for a blurred box failed for the only state a
-    person ever sees it in. Measured against a real transcript row rather than
-    a column number, because the alignment is the point and either side can
-    move — the transcript's gutter is about to.
+    This is asked while the prompt has focus, because focus is what brought a
+    border back. The `TextArea:focus` rule of Textual outranks a plain type
+    selector. A `border: none` that held for a blurred box therefore failed for
+    the only state in which a user ever sees the box. The measurement is against
+    a real transcript row and not a column number, because the alignment is the
+    purpose and either side can move. The gutter of the transcript is about to
+    move.
 
     Sabotage: drop `compact=True` from the `PromptArea` in `PromptInput.compose`,
     and the box is three rows tall.
@@ -1072,8 +1101,8 @@ async def test_the_idle_prompt_is_one_row_with_its_text_in_the_transcripts_colum
 async def test_the_completion_list_and_its_hint_line_up_with_the_prompt(
     make_tui_app: MakeApp,
 ) -> None:
-    """Every row under the box starts its text where the box does, and the hint
-    is there exactly as long as the list is.
+    """Every row under the box starts its text where the box starts its text,
+    and the hint is there exactly as long as the list is.
 
     Sabotage: remove `padding-left: 1` from `#completions`, and the list starts a
     column left of the text it completes.
@@ -1089,8 +1118,9 @@ async def test_the_completion_list_and_its_hint_line_up_with_the_prompt(
 
         assert listing.content_region.x == column, "the list is not under the prompt's text"
         assert hint.display and hint.content_region.x == column
-        # The shipped commands outnumber the list's six rows, so it scrolls — in
-        # the same gutter the transcript has, one column, at its left.
+        # The shipped commands outnumber the six rows of the list, so the list
+        # scrolls. Its scrollbar is in the same gutter that the transcript has:
+        # one column, at the left.
         assert listing.max_scroll_y > 0, "the list fit; the scrollbar is untested"
         assert listing.vertical_scrollbar.region.x == listing.region.x
         assert listing.vertical_scrollbar.region.width == 1
@@ -1108,12 +1138,12 @@ async def test_a_slash_line_dispatches_instead_of_prompting(
 ) -> None:
     """A command spends no model turn, and the log says who decided.
 
-    A **harness** verb, deliberately. A client-side one — `/theme`, `/model` —
-    changes this terminal's own display and is not an act in the session, so it
-    is dispatched here and appears in no log: another attached UI rendering
-    "somebody opened a theme picker" would be reporting a fact about a screen it
-    cannot see. What the log records is what the *session* did, and that is what
-    this asserts.
+    This uses a **harness** verb, deliberately. A client-side verb, such as
+    `/theme` or `/model`, changes the display of this terminal and is not an act
+    in the session. It is therefore dispatched here and appears in no log. If
+    another attached UI rendered "somebody opened a theme picker", it would
+    report a fact about a screen that it cannot see. The log records what the
+    *session* did, and that is what this test asserts.
     """
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -1123,7 +1153,8 @@ async def test_a_slash_line_dispatches_instead_of_prompting(
         await until(pilot, lambda: any(one.name == "tidy" for one in front.commands()))
         await pilot.press(*"/tidy")
         await pilot.pause()
-        # The completion popup claims enter first; tab accepts, then submit.
+        # The completion popup claims enter first. Tab accepts, and then enter
+        # submits.
         await pilot.press(app.keys.accept_completion)
         await pilot.press(app.keys.submit)
         await until(pilot, lambda: "command/run" in [e.type for e in root.session.events])
@@ -1148,8 +1179,8 @@ async def test_an_unknown_command_is_reported_not_prompted(
 
 
 def _bound_ids(app: PHTuiApp) -> set[str]:
-    """Every key binding id the chat answers to: the app's (quit, which works
-    behind a dialog) and its base screen's (the rest)."""
+    """Every key binding id that the chat answers to: those of the app (quit,
+    which works behind a dialog) and those of its base screen (the rest)."""
     declared = [*app.BINDINGS, *ChatScreen.BINDINGS]
     return {binding.id for binding in declared if isinstance(binding, Binding) and binding.id}
 
@@ -1157,23 +1188,24 @@ def _bound_ids(app: PHTuiApp) -> set[str]:
 async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
     make_tui_app: MakeApp,
 ) -> None:
-    """One table, three routes: a verb missing any of them is a half-wired verb.
+    """One table, three routes: a verb that lacks any of them is half wired.
 
-    Every row is a command and an action again, because `/view`'s keyed
-    spellings moved out to `VIEW_KEYS` — they were never verbs, and holding
-    them here made every consumer of this table filter. That table is checked
-    below instead: a binding id it names must be remappable and must fire an
-    action that exists.
+    Every row is a command and an action again, because the keyed spellings of
+    `/view` moved out to `VIEW_KEYS`. They were never verbs, and while they were
+    held here, every consumer of this table had to filter. `VIEW_KEYS` is
+    checked below instead: a binding id that it names must be remappable and
+    must fire an action that exists.
     """
     from ph_app.tui.commands import TUI_VERBS, VIEW_KEYS, VIEWABLE
 
     async with running(make_tui_app()) as (app, _pilot):
         front = app.front
         assert front is not None
-        # `app.commands()`, not the daemon's registry: after P5-14 a verb that
-        # changes *this* client's display is built client-side and never
-        # registered anywhere, so the list a person sees is the merge of both
-        # ends — which is the thing "reachable as a command" has to mean now.
+        # `app.commands()`, not the registry of the daemon. After P5-14 a verb
+        # that changes the display of *this* client is built client-side and is
+        # never registered anywhere. The list that a user sees is therefore the
+        # merge of both ends, which is what "reachable as a command" must mean
+        # now.
         registered = {definition.name for definition in app.commands()}
         bound = _bound_ids(app)
         for verb in TUI_VERBS:
@@ -1190,16 +1222,17 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
 async def test_view_toggles_each_panel_and_all_resolves_a_disagreement(
     make_tui_app: MakeApp,
 ) -> None:
-    """`/view` — and the one case where a toggle has no honest single answer.
+    """`/view`, and the one case where a toggle has no single correct answer.
 
     Two independent flags cannot be *toggled* together when they disagree, so
-    `all` shows both: somebody typing it at a half-hidden sidebar is asking for
-    everything, not for the inverse of each. Both halves are asserted, because
-    the rule only earns its comment in the mixed case.
+    `all` shows both. A user who types it at a half-hidden sidebar asks for
+    everything, and not for the inverse of each flag. Both halves are asserted,
+    because the rule only needs its comment in the mixed case.
 
-    Persisted, unlike `/view sidebar`: a panel's visibility is a preference and
-    the window's is this window's, which is the line `TuiSettings` already
-    draws between `show_*` and the sidebar position.
+    The setting is persisted, unlike `/view sidebar`. The visibility of a panel
+    is a preference, and the visibility of the sidebar belongs to this window.
+    `TuiSettings` already draws that line between `show_*` and the sidebar
+    position.
     """
     async with running(make_tui_app()) as (app, _pilot):
         assert app.settings.show_tools and app.settings.show_skills, "visible by default"
@@ -1218,10 +1251,11 @@ async def test_view_toggles_each_panel_and_all_resolves_a_disagreement(
         await app.run_action("view('skills')")
         assert app.settings.show_skills and not app.settings.show_tools
 
-        # The two transcript toggles, which `all` deliberately does not touch:
-        # `all` is about the panels, and rebuilding the transcript is not what
-        # somebody asking to see the sidebar meant. Asserted concretely because
-        # the table no longer carries a reader to check them generically.
+        # The two transcript toggles, which `all` deliberately does not touch.
+        # `all` is about the panels, and a user who asks to see the sidebar did
+        # not ask for a rebuild of the transcript. They are asserted concretely
+        # because the table no longer carries a reader that could check them
+        # generically.
         for word, field in (("results", "show_tool_results"), ("thinking", "show_thinking")):
             before = getattr(app.settings, field)
             await app.run_action(f"view({word!r})")
@@ -1231,9 +1265,9 @@ async def test_view_toggles_each_panel_and_all_resolves_a_disagreement(
 async def test_view_keeps_the_keys_the_old_toggles_had(make_tui_app: MakeApp) -> None:
     """`ctrl+o` and `ctrl+t` still do what they did, under a name that moved.
 
-    The binding *id* is what `tui.json` remaps, so a person who rebound
-    `toggle_tool_results` keeps their key across this rename — which is the whole
-    reason those rows still exist rather than the keys hanging off `/view`.
+    `tui.json` remaps the binding *id*, so a user who rebound
+    `toggle_tool_results` keeps their key across this rename. That is the reason
+    why those rows still exist, and why the keys do not hang off `/view`.
     """
     async with running(make_tui_app()) as (app, pilot):
         before = app.settings.show_tool_results
@@ -1257,7 +1291,7 @@ async def test_login_stores_a_secret_without_logging_it(
         await app.run_action("open_login")
         await pilot.pause()
         # No adapter row declares a key in the headless profile, so the name is
-        # typed — which is the free-text path the picker offers.
+        # typed. That is the free-text path that the picker offers.
         await pilot.press(*"PH_TEST_KEY")
         await pilot.press(app.keys.submit)
         await until(pilot, lambda: isinstance(app.screen, LoginModal))
@@ -1273,37 +1307,64 @@ async def test_login_stores_a_secret_without_logging_it(
         assert "s3cret" not in repr([event.data for event in root.session.events])
         assert "s3cret" not in repr(resolved)
 
-        # **And the picker knows it is set now.** `credential_held` is a
-        # synchronous member answered from the last `credentials/held` reply, so
-        # something has to have asked — which is why `action_open_login` does the
-        # asking before it builds the picker (on a worker, H7). Without that the
-        # remote front end answered `False` for every credential and a deployment
-        # with all of them set looked like one with none: no test noticed,
+        # **And the picker knows that it is set now.** `refresh_credentials`
+        # asks the daemon, and `action_open_login` awaits it before it builds
+        # the picker (on a worker, H7). The front end once answered a
+        # synchronous question about one name from a cache that nothing had
+        # filled. It then said `False` for every credential, and a deployment
+        # with all of them set looked like one with none. No test noticed,
         # because nothing asserted the marker.
         assert app.front is not None
-        await app.front.refresh_credentials()
-        assert app.front.credential_held("PH_TEST_KEY"), "the front end cannot see its own store"
+        held = await app.front.refresh_credentials()
+        assert held["PH_TEST_KEY"] is True, "the front end cannot see its own store"
 
 
 # ------------------------------------------------------------------- status --
 
 
-async def test_the_context_gauge_warns_from_the_compaction_threshold(
-    make_tui_app: MakeApp,
+async def test_the_context_gauge_warns_from_the_share_the_root_compacts_at(
+    make_tui_app: MakeApp, tui_daemon: Daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The number a user needs to see coming is the one where pH will act."""
-    from ph_app.tui.widgets.status import COMPACTION_THRESHOLD
+    """The number a user needs to see coming is the one where pH will act.
 
+    That number belongs to the root. The compaction seam of the root answers it,
+    the daemon states it in the status of the root, and the gauge reads it from
+    there. The terminal used to hold a copy of the default (0.85). The gauge
+    then turned amber at 85% for a root that compacts at another share, and for
+    a root that never compacts.
+
+    Sabotage: compare with a constant 0.85 in `StatusBar.show`, and the gauge of
+    a root that compacts at half its window is not amber at 55%.
+    """
     async with running(make_tui_app()) as (app, pilot):
-        front = app.front
-        assert front is not None
-        front.state.context_window = 1_000
-        front.state.tokens = int(1_000 * COMPACTION_THRESHOLD) + 10
-        app.state_changed()
-        await pilot.pause(0.1)
-        rendered = _status_line(app)
-        assert "context 86%" in rendered
-        assert "fake-1" in rendered
+        front = not_none(app.front)
+        root = root_of(tui_daemon)
+        line = app.query_one(StatusBar).query_one("#status-line")
+        seam = root.ctx.require(COMPACTION)
+        assert front.state.compacts_at == seam.trigger_fraction(), "attach did not state the share"
+
+        async def compacting_at(share: float | None) -> None:
+            """The seam answers `share`, and the root tells its watchers."""
+            monkeypatch.setattr(type(seam), "trigger_fraction", lambda _seam: share)
+            root.publish(root.status_notice())
+            await until(pilot, lambda: front.state.compacts_at == share)
+
+        async def gauge_at(tokens: int) -> None:
+            front.state.context_window = 1_000
+            front.state.tokens = tokens
+            app.state_changed()
+            await pilot.pause(0.1)
+
+        await compacting_at(0.5)
+        await gauge_at(450)
+        plain = _ink(line, "fake-1")
+        assert _ink(line, "context 45%") == plain, "the gauge warned before the share"
+        await gauge_at(550)
+        assert _ink(line, "context 55%") != plain, "the gauge did not warn at the share"
+
+        await compacting_at(None)
+        await gauge_at(990)
+        assert _ink(line, "context 99%") == plain, "a root that never compacts has no warning"
 
 
 async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
@@ -1311,11 +1372,14 @@ async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
 ) -> None:
     """`● fake-1/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`.
 
-    Hand-built readings rather than the seam's, so what is under test is the
-    footer's own shape: one `·` between categories with a single space each side,
-    `/` within one, the `model` and `context` readings on the figure they qualify
-    wherever the registry ordered them, and a `session` reading nowhere on the
-    line at all.
+    The readings are built by hand and do not come from the seam, so the test is
+    about the shape of the footer itself:
+
+    - One `·` between categories, with a single space on each side.
+    - `/` within one category.
+    - The `model` and `context` readings on the figure that they qualify,
+      wherever the registry ordered them.
+    - A `session` reading nowhere on the line at all.
     """
     async with running(make_tui_app()) as (app, _pilot):
         front = app.front
@@ -1329,8 +1393,8 @@ async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
             StatusReading(id="sandbox-mode", slot="session", text="workspace-write"),
             StatusReading(id="cache", slot="context", text="cache 28.8k(98%)"),
         ]
-        # Drawn and read with no await between, so no frame of the app's own
-        # can redraw the line from the seam's readings in the gap.
+        # Drawn and read with no await between the two, so no frame of the app
+        # itself can redraw the line from the readings of the seam in the gap.
         app.query_one(StatusBar).show(front.state, readings)
 
         assert _status_line(app) == (
@@ -1341,9 +1405,10 @@ async def test_the_footer_joins_what_qualifies_a_figure_and_separates_the_rest(
 async def test_every_reading_slot_is_drawn(make_tui_app: MakeApp) -> None:
     """Each `ReadingSlot` value lands on the status line or in the session panel.
 
-    The check `in_slot` no longer makes at runtime: a slot ph-core adds that no
-    widget here asks for would otherwise draw nowhere, silently. Drawn into the
-    widgets by hand, so what is measured is placement and not which rows mount.
+    This is the check that `in_slot` no longer makes at runtime. Without it, a
+    slot that ph-core adds and that no widget here asks for would draw nowhere,
+    silently. The readings are drawn into the widgets by hand, so the test
+    measures placement and not which rows mount.
 
     Sabotage: drop the `in_slot(readings, "context")` read from `StatusBar.show`,
     and the failure names `context`.
@@ -1364,7 +1429,7 @@ async def test_every_reading_slot_is_drawn(make_tui_app: MakeApp) -> None:
 async def test_a_spinner_frame_moves_the_glyph_and_leaves_the_line_alone(
     make_tui_app: MakeApp,
 ) -> None:
-    """A frame is one cell: the glyph spins, the line beside it is not rebuilt.
+    """A frame is one cell: the glyph spins, and the line beside it is not rebuilt.
 
     Sabotage: have `StatusBar.tick` call `show`, and the line is rebuilt (and
     the layout re-run) thirty times a second to move one glyph; or have it leave
@@ -1390,13 +1455,17 @@ async def test_a_spinner_frame_moves_the_glyph_and_leaves_the_line_alone(
 
 async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) -> None:
     """Between the conversation and the box: the glyph at the left, the text at
-    the right, a rule between them.
+    the right, and a rule between them.
 
-    Positions rather than a picture, so a theme or a font cannot pass it by
-    accident: the row ends where the prompt begins, the glyph is the row's first
-    cell, the text ends one column short of the row — the space that keeps it
-    off the side panel's border — and the rule runs from one column past the
-    glyph to one column short of the text.
+    The test checks positions and not a picture, so a theme or a font cannot
+    pass it by accident:
+
+    - The row ends where the prompt begins.
+    - The glyph is the first cell of the row.
+    - The text ends one column short of the row. That space keeps the text off
+      the border of the side panel.
+    - The rule runs from one column past the glyph to one column short of the
+      text.
 
     Sabotage: yield `StatusBar` after `PromptInput` in `PHTuiApp.compose`, and the
     first assertion names the order.
@@ -1417,11 +1486,12 @@ async def test_the_status_line_is_the_prompts_top_edge(make_tui_app: MakeApp) ->
 
 
 def _ink(widget: Widget, text: str) -> object:
-    """The foreground a widget actually draws `text` in, off its first row.
+    """The foreground that a widget actually draws `text` in, from its first row.
 
-    Read from the rendered strip rather than from `styles.color`, because most of
-    the status line's color is *inherited*: a span that named a color of its own
-    would pass a check of the widget's style and still draw in something else.
+    It is read from the rendered strip and not from `styles.color`, because most
+    of the color of the status line is *inherited*. A span that named a color of
+    its own would pass a check of the style of the widget and still draw in
+    another color.
     """
     for segment in widget.render_line(0):
         if text in segment.text and segment.style is not None:
@@ -1430,11 +1500,12 @@ def _ink(widget: Widget, text: str) -> object:
 
 
 async def test_the_status_line_draws_in_the_headings_color(make_tui_app: MakeApp) -> None:
-    """Rule and text in the color of the side panel's section titles — a theme
-    role, so this holds for whichever theme is on — and a warning still not.
+    """The rule and the text are in the color of the section titles of the side
+    panel. That color is a theme role, so this holds for whichever theme is on.
+    A warning is still in another color.
 
-    Sabotage: give `piece` in `StatusBar.show` back its `$ph-muted` span, and the
-    reading is drawn in a different color from the heading.
+    Sabotage: give `_piece`, which `StatusBar.show` calls, back its `$ph-muted`
+    span, and the reading is drawn in a different color from the heading.
     """
     async with running(make_tui_app()) as (app, pilot):
         front = app.front
@@ -1449,8 +1520,9 @@ async def test_the_status_line_draws_in_the_headings_color(make_tui_app: MakeApp
                 StatusReading(id="limits", text="budget 95%", level="warning"),
             ],
         )
-        # One layout pass: the text sizes to its content, so until it runs the
-        # widget still has the old line's width and crops the new line's end.
+        # One layout pass. The text sizes to its content, so until the pass
+        # runs, the widget still has the width of the old line and crops the
+        # end of the new line.
         await pilot.pause()
         line = bar.query_one("#status-line")
         assert "budget 95%" in _status_line(app), "the app redrew the line from the seam"
@@ -1465,16 +1537,17 @@ async def test_the_status_line_draws_in_the_headings_color(make_tui_app: MakeApp
 async def test_a_narrow_terminal_crops_the_status_line_rather_than_wrapping_it(
     make_tui_app: MakeApp,
 ) -> None:
-    """Too narrow for the whole line: one row still, and the start kept.
+    """Too narrow for the whole line: it is still one row, and the start is kept.
 
-    The start is the glyph and the model — what a person glances for — and the
-    end is the posture, which the session panel's neighbors can live without.
-    A wrapped line would grow the bar to two rows and push the prompt down, the
-    space this layout exists to save.
+    The start is the glyph and the model, which are what a user glances for.
+    The end is the posture, which the neighbors of the session panel can live
+    without. A wrapped line would grow the bar to two rows and push the prompt
+    down. That is the space that this layout exists to save.
 
-    **What is visible is the bar's slice of the line**, not `render_line`, which
-    draws the whole of a widget however much of it its container shows. The
-    line keeps its own width and runs past the bar, and the bar clips it.
+    **What is visible is the slice of the line that the bar shows**, not
+    `render_line`. `render_line` draws the whole of a widget, however much of it
+    its container shows. The line keeps its own width and runs past the bar, and
+    the bar clips it.
     """
     # The sidebar keeps its 32 columns, so this leaves the line about 27.
     async with running(make_tui_app(), size=(60, 24)) as (app, pilot):
@@ -1496,29 +1569,29 @@ async def test_a_narrow_terminal_crops_the_status_line_rather_than_wrapping_it(
 async def test_resuming_rebuilds_the_transcript_from_the_log(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """The P2-01 gate at the app level: a stored session comes back readable.
+    """The P2-01 gate at the level of the app: a stored session comes back
+    readable.
 
-    The adapter test proves live and replay agree. This proves the app actually
-    takes that path — that `--resume` reaches `session.events` and puts the
-    conversation on screen before the person types anything.
+    The adapter test proves that live and replay agree. This test proves that
+    the app actually takes that path: `--resume` reaches `session.events` and
+    puts the conversation on screen before the user types anything.
     """
     async with running(make_tui_app()) as (app, pilot):
         assert app.front is not None
         await pilot.press(*"remember this")
         await pilot.press(app.keys.submit)
         await until(pilot, turn_done(app))
-        await app.front.flush()
         before = [(item.role, item.text) for item in app.front.state.visible_items()]
 
     # **Released before reopening**, which is what makes this a resume at all.
-    # The daemon keeps the root, so attaching again would otherwise just find it
-    # still there — the P5-01 promise, and the opposite of what this test is
-    # about. Passivated, the next attach mounts from the log and the harness
-    # appends `session/resumed`, which is the notice asserted below.
+    # The daemon keeps the root, so a second attach would otherwise find it
+    # still there. That is the P5-01 promise, and the opposite of what this
+    # test is about. After passivation, the next attach mounts from the log and
+    # the harness appends `session/resumed`, which is the notice asserted below.
     #
-    # The wait is for the *subscription* to go: a watcher is its own claim on a
-    # root's life, and the closed terminal's socket tears down a moment after
-    # the `async with` above returns.
+    # The wait is for the *subscription* to go. A watcher is its own claim on
+    # the life of a root, and the socket of the closed terminal is torn down a
+    # moment after the `async with` above returns.
     root = root_of(tui_daemon)
     await daemon_until(lambda: not root.subscribers, what="the first terminal to detach")
     await tui_daemon.sweep()
@@ -1528,10 +1601,10 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(
         assert resumed.front is not None
         after = [(item.role, item.text) for item in resumed.front.state.visible_items()]
 
-    # The conversation comes back whole, plus two lines accounting for the gap:
-    # the release and the resume. A person who did not know a previous run
-    # existed should not have to infer either from the scrollback — and the
-    # *released* notice is new here, because before P5-14 nothing but this
+    # The conversation comes back whole, plus two lines that account for the
+    # gap: the release and the resume. A user who did not know that a previous
+    # run existed should not have to infer either from the scrollback. The
+    # *released* notice is new here, because before P5-14 nothing except this
     # terminal could have let the session go.
     assert [item for item in after if item[0] != "notice"] == before
     assert sum("Resumed" in text for role, text in after if role == "notice") == 1
@@ -1542,18 +1615,19 @@ async def test_resuming_rebuilds_the_transcript_from_the_log(
 async def _verbs_done(app: Any) -> None:  # noqa: ANN401
     """Wait for the verb workers, and only those.
 
-    A verb carrying `@work` schedules and returns (H7), so the work it was asked
-    for has not happened when the call does. Waited for rather than paused past:
-    a `pause` that happens to be long enough is a test that passes on timing,
-    and both attach tests did.
+    A verb that carries `@work` schedules and returns (H7), so the work has not
+    happened when the call returns. The test waits for the work and does not
+    pause past it. A `pause` that happens to be long enough is a test that
+    passes on timing, and both attach tests did.
 
-    `wait_for_complete()` with no argument waits for *every* worker, and this app
-    keeps long-lived ones — the daemon watch, the pump — so the bare call hangs
-    forever rather than failing. **An empty list does the same**: its body is
-    `workers or self`, so a filter that matches nothing falls back to all of
-    them. Hence the early return rather than passing the list straight through.
+    `wait_for_complete()` with no argument waits for *every* worker. This app
+    keeps long-lived workers, such as the daemon watch and the pump, so the bare
+    call hangs forever and does not fail. **An empty list does the same.** The
+    body is `workers or self`, so a filter that matches nothing falls back to
+    all of them. That is why this returns early and does not pass the list
+    straight through.
 
-    `startswith`, because the group is per verb (`verb:attach`) — one shared
+    `startswith`, because the group is per verb (`verb:attach`). One shared
     group would make `exclusive` cancel across verbs.
     """
     waiting = [one for one in app.workers if one.group.startswith(VERB_GROUP)]
@@ -1565,13 +1639,14 @@ async def _verbs_done(app: Any) -> None:  # noqa: ANN401
 async def test_a_typed_attach_reaches_the_verb_with_its_argument(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """`/attach <path>` goes through the one route every verb takes, argument included.
+    """`/attach <path>` goes through the one route that every verb takes, with its
+    argument.
 
-    The verb used to be caught by name ahead of the command table — the string
-    re-dispatch `commands.py` forbids — because `_RunAction` dropped what
-    followed the name. It forwards it now, so the argument arrives at
-    `action_attach` through `run_command` like any other verb's body, and this
-    pins that it does: the file ends up staged.
+    The verb used to be caught by name ahead of the command table, which is the
+    string re-dispatch that `commands.py` forbids. The reason was that
+    `_RunAction` dropped what followed the name. `_RunAction` forwards it now,
+    so the argument arrives at `action_attach` through `run_line`, like the body
+    of any other verb. This test checks that it does: the file ends up staged.
     """
     picture = tmp_path / "diagram.png"
     picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
@@ -1588,13 +1663,14 @@ async def test_a_typed_attach_reaches_the_verb_with_its_argument(
 
 
 async def test_a_quoted_attach_path_is_one_path(make_tui_app: MakeApp, tmp_path: Path) -> None:
-    """H7 — `argument.split()` on a path a person quoted.
+    """H7: `argument.split()` on a path that a user quoted.
 
-    A space in a path is the ordinary case on a Mac — `~/Library/Application
-    Support/...` — and whitespace-splitting turned one `/attach "my notes.md"`
-    into two filenames that do not exist, reported as two failures naming
-    neither of the things the person typed. Quoting is what they reach for, and
-    what the shell they typed it into would have honored.
+    A space in a path is the ordinary case on a Mac, as in `~/Library/Application
+    Support/...`. Splitting on whitespace turned one `/attach "my notes.md"`
+    into two filenames that do not exist. They were reported as two failures
+    that named neither of the things that the user typed. Quoting is what a user
+    reaches for, and it is what the shell that they typed it into would have
+    honored.
     """
     picture = tmp_path / "my diagram.png"
     picture.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
@@ -1611,22 +1687,23 @@ async def test_a_quoted_attach_path_is_one_path(make_tui_app: MakeApp, tmp_path:
 
 
 async def test_the_trajectory_viewer_keeps_its_own_way_out() -> None:
-    """H7 — `q` was bound under the id `quit`, which the keymap then remaps.
+    """H7: `q` was bound under the id `quit`, which the keymap then remaps.
 
-    `set_keymap` rebinds by binding id, and the ids are a namespace shared across
-    apps: the trajectory viewer's `q` and the chat app's quit are not the same
-    binding, but they had the same id, so `tui.json`'s `quit: ctrl+d` moved the
-    viewer's only documented way out onto a key its footer does not mention.
+    `set_keymap` rebinds by binding id, and the ids are a namespace that all
+    apps share. The `q` of the trajectory viewer and the quit of the chat app
+    are not the same binding, but they had the same id. The `quit: ctrl+d` of
+    `tui.json` therefore moved the only documented way out of the viewer onto a
+    key that its footer does not mention.
 
-    Asserted on the binding table rather than through a pilot, because what went
-    wrong is the *identity* — a pilot pressing `q` would pass against a build
-    where the default keymap happened to leave it alone.
+    The assertion is on the binding table and not through a pilot, because what
+    went wrong is the *identity*. A pilot that pressed `q` would pass against a
+    build where the default keymap happened to leave the key alone.
     """
     from ph_app.tui.config import TuiKeybindings
     from ph_app.tui.trajectory_app import TrajectoryApp
 
-    # `BINDINGS` is declared as a union that admits bare tuples; every entry
-    # here is a `Binding`, and narrowing says so rather than asserting it.
+    # `BINDINGS` is declared as a union that admits bare tuples. Every entry
+    # here is a `Binding`, and the narrowing says so without an assertion.
     declared = [one for one in TrajectoryApp.BINDINGS if isinstance(one, Binding)]
     keys = {one.id: one.key for one in declared}
     remapped = set(TuiKeybindings().as_map())
@@ -1642,17 +1719,16 @@ async def test_the_trajectory_viewer_keeps_its_own_way_out() -> None:
 async def test_a_turn_started_in_the_tui_finishes_after_the_tui_is_gone(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """**The gate this whole plan is named for** (P5-01, P5-14).
+    """**The gate that this whole plan is named for** (P5-01, P5-14).
 
-    A person submits a prompt, closes the terminal, and the work carries on —
-    because the harness is not in the terminal any more. Then a second terminal
-    opens the same session and finds the finished turn in the transcript it
+    A user submits a prompt and closes the terminal, and the work continues,
+    because the harness is no longer in the terminal. Then a second terminal
+    opens the same session and finds the finished turn in the transcript that it
     rebuilds from the log.
 
-    Driven through `PHTuiApp` rather than through `DaemonSession`, which is the
-    difference from `test_tui_remote.py`'s version: what is asserted here is that
-    the *app* takes that path — that closing it detaches rather than ending
-    anything.
+    The test drives `PHTuiApp` and not `DaemonSession`, which is the difference
+    from the version in `test_tui_remote.py`. The assertion here is that the
+    *app* takes that path: closing the app detaches and ends nothing.
 
     Sabotage: have the app's `on_unmount` shut the daemon down, or have
     `DaemonSession.close` cancel the turn, and the second terminal finds no
@@ -1661,10 +1737,10 @@ async def test_a_turn_started_in_the_tui_finishes_after_the_tui_is_gone(
     async with running(make_tui_app()) as (app, pilot):
         assert app.front is not None
         await pilot.press(*"keep going")
-        # Submitted and then left. **Not** waited on: the fake provider answers
-        # in microseconds, so waiting for `busy` is a race a test cannot win —
-        # and what is being pinned is not who wins it. It is that the root and
-        # its work are not this terminal's to end.
+        # Submitted and then left. **Not** waited on. The fake provider answers
+        # in microseconds, so to wait for `busy` is a race that a test cannot
+        # win, and who wins it is not what is tested. The test is that the root
+        # and its work are not this terminal's to end.
         await pilot.press(app.keys.submit)
         await pilot.pause()
 
@@ -1687,10 +1763,10 @@ async def test_two_terminals_on_one_session_share_the_log_and_not_the_composer(
 ) -> None:
     """The multiplex rule, through two real apps on one root.
 
-    Un-submitted text never leaves the client — it is not an act in the session —
-    but pressing enter is, so it reaches the other terminal by the one route
-    everything else does. That asymmetry is the whole of the decision that
-    replaced the takeover/demotion design.
+    Text that is not submitted never leaves the client, because it is not an
+    act in the session. Pressing enter is an act, so it reaches the other
+    terminal by the one route that everything else takes. That asymmetry is the
+    whole decision that replaced the takeover/demotion design.
     """
     async with (
         running(make_tui_app()) as (first, first_pilot),
@@ -1723,10 +1799,10 @@ async def test_two_terminals_on_one_session_share_the_log_and_not_the_composer(
 def _sent(app: PHTuiApp, *prompts: str) -> None:
     """Put `prompts` in the mirror as sent, oldest first.
 
-    Seeded rather than submitted: history is a fold of the `user` rows, and a
-    turn per entry would spend a model call to produce the one row this reads.
-    What the keystrokes below then drive is the whole real path — the app's
-    source, the widget's walk, the box.
+    The rows are seeded and not submitted. History is a fold of the `user` rows,
+    and a turn for each entry would spend a model call to produce the one row
+    that this reads. The keystrokes below then drive the whole real path: the
+    source of the app, the walk of the widget, and the box.
     """
     front = not_none(app.front)
     for index, text in enumerate(prompts):
@@ -1754,18 +1830,19 @@ async def test_up_arrow_recalls_the_previous_prompt(make_tui_app: MakeApp) -> No
 async def test_up_arrow_inside_a_multi_line_draft_still_moves_the_cursor(
     make_tui_app: MakeApp,
 ) -> None:
-    """The behavior a prompt box may not trade away to gain history.
+    """The behavior that a prompt box may not give up to gain history.
 
     Sabotage: claim `history_previous` without asking `cursor_at_first_line`, and
     the draft is replaced instead of navigated.
     """
     async with running(make_tui_app()) as (app, pilot):
-        # The sent prompt **starts with** the draft below, so a walk would have
-        # something to recall. Without that the filter alone stops the recall and
-        # this test passes even with the cursor check removed — which it did.
+        # The sent prompt **starts with** the draft below, so that a walk would
+        # have something to recall. Without that, the filter alone stops the
+        # recall, and this test passes even with the cursor check removed. It
+        # did.
         _sent(app, "first line\nsecond line and then more")
         prompt = not_none(app._prompt)
-        # Set rather than typed: `enter` is submit here, so a newline cannot be
+        # Set and not typed: `enter` is submit here, so a newline cannot be
         # keyed into the box at all.
         prompt.area.text = "first line\nsecond line"
         prompt.area.move_cursor(prompt.area.document.end)
@@ -1776,11 +1853,11 @@ async def test_up_arrow_inside_a_multi_line_draft_still_moves_the_cursor(
         assert prompt.area.text == "first line\nsecond line", "the draft is untouched"
         assert prompt.area.cursor_location[0] == 0, "and the cursor moved up a line"
 
-        # What the *next* press does is not asserted here, and deliberately: the
+        # What the *next* press does is deliberately not asserted here. The
         # draft is the filter, so a two-line draft is a prefix of nothing and
-        # recalls nothing. Recall from the first line is
-        # `test_up_arrow_recalls_the_previous_prompt`'s subject; this one is about
-        # the key the editor keeps.
+        # recalls nothing. Recall from the first line is the subject of
+        # `test_up_arrow_recalls_the_previous_prompt`. This test is about the
+        # key that the editor keeps.
 
 
 async def test_the_draft_survives_a_walk_through_history(make_tui_app: MakeApp) -> None:
@@ -1816,7 +1893,7 @@ async def test_a_typed_prefix_filters_the_walk(make_tui_app: MakeApp) -> None:
 async def test_history_search_reveals_the_chosen_prompt_in_the_transcript(
     make_tui_app: MakeApp,
 ) -> None:
-    """The second half of the ask: the conversation moves behind the picker.
+    """The second half of the request: the conversation moves behind the picker.
 
     Sabotage: drop `on_highlight` from `action_open_history` and nothing is
     revealed as the cursor moves.
@@ -1851,8 +1928,9 @@ async def test_a_diverged_client_says_so_rather_than_offering_a_short_history(
 ) -> None:
     """A mirror that missed a frame is a prefix of unknown length.
 
-    The key declines quietly — a keystroke has nowhere to say why — and the verb
-    says it out loud, which is the same split `action_open_screen` already makes.
+    The key declines quietly, because a keystroke has nowhere to say why. The
+    verb says it in a notification. `action_open_screen` already makes the same
+    split.
     """
     async with running(make_tui_app()) as (app, pilot):
         _sent(app, "sent before the gap")
@@ -1872,7 +1950,7 @@ async def test_a_diverged_client_says_so_rather_than_offering_a_short_history(
 async def test_a_rebound_history_key_is_the_one_that_works(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """The rule `prompt.py` exists to enforce, asserted rather than assumed."""
+    """The rule that `prompt.py` exists to enforce, asserted and not assumed."""
     (tmp_path / "tui.json").write_text(
         json.dumps({"keybindings": {"history_previous": "ctrl+up"}}), encoding="utf-8"
     )
@@ -1894,20 +1972,20 @@ async def test_a_rebound_history_key_is_the_one_that_works(
 
 
 def _stored(home: Path, session_id: str, cwd: str) -> None:
-    """A session on the daemon's disk, in `cwd`.
+    """A session on the disk of the daemon, in `cwd`.
 
-    **A header and no events**, which is both the shortest valid log and the only
-    one worth hand-writing: the envelope invariants are real — an event needs
-    `seq`, `time`, a log must start at seq 0, and a surface-eligible one needs its
-    `surfaceOp` marker — so a hand-rolled transcript is a race against rules that
-    exist to keep logs readable. A header-only session lists (the picker labels it
-    by id, having no first prompt to quote) and resumes, which is all these tests
-    ask of it.
+    **A header and no events.** That is the shortest valid log, and the only one
+    worth writing by hand. The envelope invariants are real: an event needs
+    `seq` and `time`, a log must start at seq 0, and a surface-eligible event
+    needs its `surfaceOp` marker. A hand-written transcript would therefore
+    compete with rules that exist to keep logs readable. A header-only session
+    lists and resumes, which is all that these tests ask of it. The picker
+    labels it by id, because it has no first prompt to quote.
     """
-    # Through `SessionHeader` rather than hand-spelled JSON: `createdAt` is
-    # camelCase the model already owns, and — since format 1 — so is the
-    # `<cwd-tag>-<id>` family that decides which *directory* the log lands in.
-    # A fixture that built that name itself would be re-deriving the layout.
+    # Through `SessionHeader` and not hand-written JSON. `createdAt` is
+    # camelCase that the model already owns. Since format 1, the model also owns
+    # the `<cwd-tag>-<id>` family that decides which *directory* the log lands
+    # in. A fixture that built that name itself would derive the layout again.
     header = SessionHeader(id=session_id, created_at=0, cwd=cwd)
     path = session_path(home / "sessions", session_id, header.family)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1921,8 +1999,8 @@ def _stored(home: Path, session_id: str, cwd: str) -> None:
 async def _starting(app: PHTuiApp) -> AsyncIterator[tuple[PHTuiApp, Pilot[str | None]]]:
     """Drive an app through startup **without** waiting for an attach.
 
-    `running` waits for `app.front`, which the startup picker is deliberately
-    standing in front of — so a test about the picker cannot use it.
+    `running` waits for `app.front`, and the startup picker deliberately stands
+    in front of that. A test about the picker therefore cannot use `running`.
     """
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
@@ -1932,7 +2010,7 @@ async def _starting(app: PHTuiApp) -> AsyncIterator[tuple[PHTuiApp, Pilot[str | 
 async def test_a_directory_with_no_history_opens_straight_into_a_new_session(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """A first run must not meet a modal listing nothing.
+    """A first run must not meet a modal that lists nothing.
 
     Sabotage: push the picker without checking that `sessions` is non-empty.
     """
@@ -1946,7 +2024,7 @@ async def test_a_directory_with_no_history_opens_straight_into_a_new_session(
 async def test_enter_on_the_first_row_starts_a_new_session(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """One keystroke gets the behavior a person had before this picker existed."""
+    """One keystroke gives the behavior that a user had before this picker existed."""
     project = tmp_path / "work"
     project.mkdir()
     _stored(tmp_path, "older", str(project))
@@ -1974,7 +2052,7 @@ async def test_choosing_a_stored_session_attaches_to_it(
 
 
 async def test_the_picker_lists_only_this_directory(make_tui_app: MakeApp, tmp_path: Path) -> None:
-    """P9-04's filter, seen from the screen it was added for."""
+    """The filter of P9-04, seen from the screen that it was added for."""
     project = tmp_path / "work"
     project.mkdir()
     _stored(tmp_path, "ours", str(project))
@@ -1989,7 +2067,7 @@ async def test_the_picker_lists_only_this_directory(make_tui_app: MakeApp, tmp_p
 
 
 async def test_new_skips_the_picker(make_tui_app: MakeApp, tmp_path: Path) -> None:
-    """`--new` is for the person who never wants to be asked."""
+    """`--new` is for the user who never wants to be asked."""
     project = tmp_path / "work"
     project.mkdir()
     _stored(tmp_path, "older", str(project))
@@ -2002,8 +2080,8 @@ async def test_new_skips_the_picker(make_tui_app: MakeApp, tmp_path: Path) -> No
 async def test_escape_starts_a_new_session_rather_than_exiting(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """The failure mode worth pinning: a picker that quits the app on escape is a
-    worse first run than no picker at all."""
+    """The failure that this test guards against: a picker that quits the app on
+    escape is a worse first run than no picker at all."""
     project = tmp_path / "work"
     project.mkdir()
     _stored(tmp_path, "older", str(project))
@@ -2020,17 +2098,18 @@ async def test_escape_starts_a_new_session_rather_than_exiting(
 async def test_a_terminal_answers_its_exit_code_without_exiting_the_process(
     monkeypatch: pytest.MonkeyPatch, code: int
 ) -> None:
-    """M4 — `run_tui` answers the exit code rather than raising `SystemExit`.
+    """M4: `run_tui` returns the exit code and does not raise `SystemExit`.
 
-    Raising it made this the CLI's only exit-code mechanism — nothing else in
-    `cli.py` calls `sys.exit` — so the next command needing one would have
-    invented a second, and a caller wanting to know what happened had to catch
-    `SystemExit` to find out. `cli.py` now raises the `typer.Exit` it owns.
+    Raising it made this the only exit-code mechanism of the CLI, because
+    nothing else in `cli.py` calls `sys.exit`. The next command that needed an
+    exit code would have invented a second mechanism, and a caller that wanted
+    to know what happened had to catch `SystemExit` to find out. `cli.py` now
+    raises the `typer.Exit` that it owns.
 
-    H3's property is the reason the value matters and is asserted both ways: a
-    terminal that *crashed* must not be indistinguishable from one the person
-    quit, or a supervisor scripting `phern --mode tui` cannot tell whether to
-    restart it.
+    The property of H3 is the reason why the value matters, and it is asserted
+    both ways. A terminal that *crashed* must be distinguishable from one that
+    the user quit. Otherwise a supervisor that scripts `phern --mode tui` cannot
+    tell whether to restart it.
 
     Sabotage: `raise SystemExit(app.return_code)` and the call never returns.
     """
@@ -2052,9 +2131,10 @@ async def test_the_trajectory_viewer_answers_its_exit_code_too(
 ) -> None:
     """The same hole, one branch up in the same function (M4).
 
-    `--mode trajectory` is the CLI's other Textual app and its `return_code`
-    was discarded, so a viewer that crashed exited 0 — the property `run_tui`
-    had just had restored, still broken beside it.
+    `--mode trajectory` is the other Textual app of the CLI, and its
+    `return_code` was discarded. A viewer that crashed therefore exited 0. The
+    property that had just been restored for `run_tui` was still broken beside
+    it.
 
     Sabotage: drop `return app.return_code or 0` and a crash reads as success.
     """

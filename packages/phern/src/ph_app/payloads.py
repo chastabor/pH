@@ -77,10 +77,10 @@ __all__ = [
     "AttachmentStored",
     "ChildRow",
     "CommandShown",
+    "CompactionFacts",
     "ConfigRow",
     "CredentialStored",
     "CredentialsHeldReply",
-    "DaemonConfigReply",
     "DaemonLifetime",
     "DaemonMode",
     "DaemonNotice",
@@ -163,6 +163,17 @@ class _CarriesJson(WireModel):
 # ------------------------------------------------------------------ status --
 
 
+class CompactionFacts(WireModel):
+    """What a front end is told about automatic compaction on a root."""
+
+    trigger_fraction: float | None = None
+    """The share of the context window at which the root compacts on its own, or
+    `None` when nothing compacts on pressure. It is the answer of the compaction
+    seam of the root (`CompactionSeam.trigger_fraction`), so a front end warns at
+    the share that the profile of the root configures, and not at a copy of the
+    default."""
+
+
 class StatusFacts(WireModel):
     """What a frame may say about where a root is, all of it optional.
 
@@ -186,6 +197,10 @@ class StatusFacts(WireModel):
     model: str | None = None
     model_key: str | None = None
     """The session's name for the route, or `""` for one its list does not hold."""
+    compaction: CompactionFacts | None = None
+    """When the root compacts on its own. `None` here means that this frame does
+    not say, like every other field. A frame that says "nothing compacts on
+    pressure" carries a `CompactionFacts` with no `trigger_fraction`."""
 
 
 # ----------------------------------------------------------------- replies --
@@ -241,6 +256,8 @@ class RootDescription(SessionScoped):
     wording (`ph_app.profiles.kept_note`, naming `/profile` commands), with whose the
     settings are, or why a start took the new version back — or `""` when it has
     not moved, and while the root is held on that very question (`profile/ask`)."""
+    compaction: CompactionFacts = Field(default_factory=CompactionFacts)
+    """When this root compacts on its own, as its compaction seam answers it."""
 
     def facts(self) -> StatusFacts:
         """This description as the status half of it.
@@ -255,6 +272,7 @@ class RootDescription(SessionScoped):
             provider=self.provider,
             model=self.model,
             model_key=self.model_key,
+            compaction=self.compaction,
         )
 
 
@@ -461,29 +479,15 @@ class DaemonStatusReply(CapabilityBlock):
 
 
 type ConfigRow = JsonObject
-"""One row of the composed profile, as `daemon/config` sends it.
+"""One row of a composed profile, in the shape of `Row.to_dump()`.
 
-Named here, beside the reply that carries it, rather than in the front end that
-reads it: a second front end — or `phern agents` — should not import a TUI module to
-name a shape the daemon serializes. It began in `tui/frontend.py` and restated
-`DaemonConfigReply.rows`' argument almost verbatim, which was the tell.
+The daemon reads these rows to find the credentials that a profile names
+(`ph_app.daemon.projections.credentials_named`). The rows do not cross the
+socket. The `daemon/config` verb used to send the whole composed profile to
+every front end, and it was removed when nothing asked for it any more.
 
-`JsonObject` and not a hand-written `Mapping[str, JsonValue]`, which was the
-third spelling of that in the tree."""
-
-
-class DaemonConfigReply(_CarriesJson):
-    """`daemon/config` — the composed profile, row by row.
-
-    `rows` stays wire JSON rather than becoming a model: it is `Row.to_dump()`'s
-    shape, a heterogeneous dict whose `config` is whatever a person wrote in
-    their profile, and re-declaring it here would be the second spelling of
-    `ph.cordis.loader`'s own dump. Same rule as `SessionEventNotice.event` —
-    handed on to something that knows it.
-    """
-
-    BY_REFERENCE: ClassVar[frozenset[str]] = frozenset({"rows"})
-    rows: list[dict[str, Any]] = Field(default_factory=list)
+It is `JsonObject` and not a hand-written `Mapping[str, JsonValue]`, which was
+the third spelling of that in the tree."""
 
 
 class CredentialsHeldReply(SessionScoped):

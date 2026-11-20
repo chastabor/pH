@@ -126,12 +126,12 @@ def commands_of(root: Root) -> list[CommandSchema]:
 def screens_of(root: Root) -> list[ScreenSchema]:
     """The screens that this deployment contributes, without their bodies.
 
-    `build(session)` stays in the client, and runs against the session that the
-    client rebuilt from its own snapshot. That is enough while the client *is*
-    the TUI, as it is under textual-serve. A declarative screen body on the wire
-    is the other half of P5-15, and is deferred to P7-07. This docstring says so
-    on purpose, because a projection that silently dropped `build` would look
-    complete.
+    `build(session)` stays in the client, and runs against the mirror of the
+    log that the client keeps (`DaemonSession.session`). That is enough while
+    the client *is* the TUI, as it is under textual-serve. A declarative screen
+    body on the wire is the other half of P5-15, and is deferred to P7-07. This
+    docstring says so on purpose, because a projection that silently dropped
+    `build` would look complete.
     """
     registry = root.ctx.get(TUI_SCREENS)
     if registry is None:

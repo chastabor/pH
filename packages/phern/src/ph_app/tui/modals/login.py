@@ -1,15 +1,16 @@
-"""Interactive login: a credential named, typed, and never written down.
+"""Interactive login: a credential that is named, typed, and never written down.
 
-`CredentialService.provide_value` exists for exactly this — "a test or an
-interactive login" — so the modal's whole job is to get a value into the
-process. Three things it deliberately does not do: echo the value, put it in the
-session log, or write it to disk. A secret typed here lives as long as the
-process and no longer, which is the honest contract for a value pH did not
-persist and cannot rotate.
+`CredentialService.provide_value` exists for exactly this: "a test or an
+interactive login". The only task of the modal is therefore to take a value for
+the process that will hold it, which is the daemon. The modal deliberately does
+not do three things: echo the value, put it in the session log, or write it to
+disk. A secret that is typed here lives as long as that process and no longer.
+That is the correct contract for a value that pH did not persist and cannot
+rotate.
 
-The candidate names come from the composed configuration rather than a list kept
-here: an adapter row declares its own `apiKeyEnv`, so a provider added by a
-plugin shows up without this module changing (I7).
+The candidate names come from the profile that the root is mounted on, and not
+from a list that is kept here. An adapter row declares its own `apiKeyEnv`, so a
+provider that a plugin adds appears without a change to this module (I7).
 
 @module ph_app.tui.modals.login
 """
@@ -29,7 +30,8 @@ __all__ = ["LoginModal", "credential_choices"]
 
 
 class LoginModal(PhModal[str | None]):
-    """Take one secret. Masked, and gone when the process ends."""
+    """Take one secret. The input is masked, and the secret is gone when the
+    process that holds it ends."""
 
     DEFAULT_CSS = """
     LoginModal { align: center middle; background: $background 60%; }
@@ -53,7 +55,7 @@ class LoginModal(PhModal[str | None]):
                 Content.from_markup("[b]$name[/b]", name=self.credential), id="login-title"
             )
             yield Static(
-                Content("Held in this process only — not logged, not written to disk."),
+                Content("Held in memory by the daemon only — not logged, not written to disk."),
                 id="login-note",
             )
             yield Input(password=True, placeholder="paste the key", id="login-value")
@@ -67,13 +69,13 @@ class LoginModal(PhModal[str | None]):
 
 
 def credential_choices(held: Mapping[str, bool]) -> list[Choice]:
-    """The credentials pH could use, marked with the ones it already has.
+    """The credentials that pH could use, with a mark on those that it already holds.
 
-    A `{name: held}` map, in the daemon's row order, and that is the whole input:
-    `credential_names` used to live here and walk the composed profile for
-    `apiKeyEnv` keys, which meant every attached front end was sent the entire
-    configuration so that a modal could mine it. `credentials_of` answers both
-    halves now — see `ph_app.daemon.projections`.
+    The whole input is a `{name: held}` map, in the row order of the daemon.
+    `credential_names` used to be here, and it walked the composed profile for
+    `apiKeyEnv` keys. Every attached front end was therefore sent the entire
+    configuration so that a modal could search it. `credentials_of` now answers
+    both halves. See `ph_app.daemon.projections`.
     """
     return [
         Choice(value=name, label=name, detail="set" if is_held else "not set", marked=is_held)

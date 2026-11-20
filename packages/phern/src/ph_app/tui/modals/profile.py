@@ -1,10 +1,11 @@
-"""A session's named profile changed since it started — take the new version?
+"""The named profile of a session changed since it started: take the new version?
 
-Asked when a session starts and the person's own profile file moved since the
-version the session runs on (session profiles, S6): the daemon holds the session
-and puts the change to whoever is attached. The body is the daemon's account of
-it — each setting with its old and new value, and whose it is — so every front
-end shows the same list, and the choice is the person's.
+The question is asked when a session starts and the profile file of the user
+has moved since the version that the session runs on (session profiles, S6).
+The daemon holds the session and puts the change to whoever is attached. The
+body is the account that the daemon gives of the change: each setting with its
+old value and its new value, and whose setting it is. Every front end therefore
+shows the same list, and the choice belongs to the user.
 
 @module ph_app.tui.modals.profile
 """
@@ -38,5 +39,5 @@ def profile_changed_modal(name: str, listing: str) -> ConfirmModal:
 
 
 def decision_of(answer: str | None) -> ProfileDecision:
-    """The modal's answer as a decision; a dismissal is `later`."""
+    """The answer of the modal as a decision. A dismissal is `later`."""
     return _DECISIONS.get(answer or "", "later")

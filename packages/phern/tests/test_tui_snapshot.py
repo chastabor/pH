@@ -1,12 +1,13 @@
-"""Snapshot tests: what the four transcript shapes actually look like.
+"""Snapshot tests: what the four transcript shapes look like.
 
-Streaming, a settled tool card, an error, and a compaction marker — the four
-things a person reads a transcript for. Snapshots are the only test that catches
-a *rendering* regression: a card that lost its glyph, a theme variable that
-stopped resolving, a row that started rendering its markup instead of showing it.
+The four shapes are streaming, a settled tool card, an error, and a compaction
+marker. They are the four things that a person reads a transcript for.
+Snapshots are the only tests that catch a *rendering* regression: a card that
+lost its glyph, a theme variable that stopped resolving, a row that started
+rendering its markup instead of showing it.
 
-Each app is fed a state directly rather than driven through a model, so the
-snapshot is stable: no timing, no token order, no session ids in the frame.
+Each app receives a state directly and is not driven through a model. That keeps
+the snapshot stable: no timing, no token order, and no session ids in the frame.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def test_a_failed_tool_card_and_an_error_row(snap_compare: Any) -> None:  # noqa
 
 
 def test_a_code_mode_card_lists_its_dispatches(snap_compare: Any) -> None:  # noqa: ANN401
-    """Forty writes are forty rows (C2) — here, two."""
+    """Forty writes are forty rows (C2). Here there are two."""
     card = ToolCard(
         call_id="c1",
         name="run_code",
@@ -109,11 +110,11 @@ def test_a_code_mode_card_lists_its_dispatches(snap_compare: Any) -> None:  # no
 def test_a_code_cell_shows_its_program_and_what_it_cost(snap_compare: Any) -> None:  # noqa: ANN401
     """P3-19: the program is the interesting half of a cell.
 
-    Every other card is a header and a body, because its input fits on the header
-    line. A cell's input is the code the model wrote. The facts line under it
-    carries what the collapsible does not — the dispatch count is the
-    collapsible's, from the fold that owns those rows, so one number is never
-    rendered twice from two folds inside one widget (A11).
+    Every other card is a header and a body, because its input fits on the
+    header line. The input of a cell is the code that the model wrote. The facts
+    line under it carries what the collapsible does not. The dispatch count
+    belongs to the collapsible, from the fold that owns those rows. So one
+    number is never rendered two times from two folds inside one widget (A11).
     """
     card = ToolCard(
         call_id="c1",
@@ -168,7 +169,8 @@ class _DiffSnapshot(App[None]):
 
 
 def _rewritten_then_summarized() -> tuple[Session, int]:
-    """A rewrite and the stand-in over it, one node's two edits; and where it is."""
+    """A log with a rewrite and the stand-in over it, which are the two edits of
+    one node. The second value is the seq of the stand-in."""
     session, _, replied, result = revisable("# a\nfirst line\nsecond line")
     cut = rewritten(session, result, "# a\n(2 lines cut)")
     with isolated_log_types():
@@ -184,8 +186,9 @@ def _rewritten_then_summarized() -> tuple[Session, int]:
 def test_the_diff_screen_shows_a_change_its_records_and_its_diff(
     snap_compare: Any,  # noqa: ANN401
 ) -> None:
-    """One node's group: the table, then each edit newest first, the stand-in's record
-    with its recorded size and its diff against what it replaced."""
+    """The group of one node: the table, then each edit with the newest first.
+    The record of the stand-in is shown with its recorded size and with its diff
+    against what it replaced."""
     session, at = _rewritten_then_summarized()
     assert snap_compare(_DiffSnapshot(session, at), terminal_size=(100, 32))
 
@@ -193,14 +196,14 @@ def test_the_diff_screen_shows_a_change_its_records_and_its_diff(
 def test_the_diff_screen_shows_a_node_s_whole_history(
     snap_compare: Any,  # noqa: ANN401
 ) -> None:
-    """After `w`: the node as first written against the node now, one diff over both
-    edits."""
+    """After `w`: the node as first written against the node now, as one diff
+    over both edits."""
     session, at = _rewritten_then_summarized()
     assert snap_compare(_DiffSnapshot(session, at), press=["w"], terminal_size=(100, 32))
 
 
 def test_markup_in_user_text_renders_literally(snap_compare: Any) -> None:  # noqa: ANN401
-    """The P2-06 gate, as a picture. `[bold]` must appear, not take effect."""
+    """The gate of P2-06, as a picture. `[bold]` must appear and must not take effect."""
     items = rows_of(
         ChatItem(key="u1", role="user", text="check foo[0] and [bold]this[/bold]", seq=1),
         ChatItem(key="a1", role="assistant", text="Values like [1, 2] are fine too.", seq=2),
@@ -222,26 +225,26 @@ def test_the_full_app_shell(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Prompt, status bar and sidebar together — the chrome, once.
+    """Prompt, status bar and sidebar together: the chrome, one time.
 
-    Built by hand rather than from `make_tui_app`, because that fixture is async
-    now — the terminal attaches to a daemon (P5-14) — and `snap_compare` drives
-    its own event loop, so it can neither await a fixture nor share one. The
-    daemon therefore runs in a thread and the app reaches it over the socket,
-    which is the only boundary between them and closer to production than the
-    shared-loop fixture is.
+    The app is built with `tui_app` directly and not from `make_tui_app`. That
+    fixture is async now, because the terminal attaches to a daemon (P5-14).
+    `snap_compare` drives its own event loop, so it can neither await a fixture
+    nor share one. The daemon therefore runs in a thread and the app reaches it
+    over the socket. The socket is the only boundary between them, and that is
+    closer to production than the fixture with a shared loop.
 
-    `project=` is pinned because the sidebar prints it: taken from `Path.cwd()`
-    this snapshot recorded the developer's own checkout and failed on every
-    other machine, CI included.
+    `project=` is fixed because the sidebar prints it. When it was taken from
+    `Path.cwd()`, this snapshot recorded the checkout of the developer and
+    failed on every other machine, CI included.
     """
     with daemon_in_thread(tmp_path) as socket:
         monkeypatch.setenv("PH_RUNTIME", str(socket.parent))
         app = tui_app(home=tmp_path, project=Path("/w/project"), session_id="snapshot")
 
         async def attached(pilot: Any) -> None:  # noqa: ANN401
-            # The attach happens in a worker so the shell paints first; the
-            # frame under test is the one after it has.
+            # The attach happens in a worker so that the shell paints first. The
+            # frame under test is the frame after the attach.
             await until(pilot, lambda: app.front is not None)
             await pilot.pause(0.1)
 
@@ -249,17 +252,17 @@ def test_the_full_app_shell(
 
 
 def test_no_snapshot_records_this_machine() -> None:
-    """A snapshot that embeds the developer's paths is one only they can pass.
+    """A snapshot that embeds the paths of the developer is one that only the developer can pass.
 
-    `test_the_full_app_shell` did: the sidebar prints `PHTuiApp.project`, which
-    is `Path.cwd()`, so the recorded frame said `~/Projects/pH` and CI — whose
-    checkout is `~/work/pH/pH` — failed on it and only on it. Nothing caught
-    that here, because here it was true.
+    `test_the_full_app_shell` did. The sidebar prints `PHTuiApp.project`, which
+    is `Path.cwd()`, so the recorded frame said `~/Projects/pH`. The checkout of
+    CI is `~/work/pH/pH`, so CI failed on that snapshot and only on that one.
+    Nothing caught it here, because here it was true.
 
-    So the check is for the *class*, not for that path: any home directory,
-    working directory or user name appearing in a recorded frame makes the
-    snapshot unportable, whatever produced it. A test that wants to render a
-    path pins a fixed one — `make_tui_app(project=Path("/w/project"))`.
+    So the check is for the *class*, and not for that path. Any home directory,
+    working directory or user name in a recorded frame makes the snapshot
+    unportable, whatever produced it. A test that wants to render a path sets a
+    fixed one: `make_tui_app(project=Path("/w/project"))`.
     """
     directory = Path(__file__).parent / "__snapshots__"
     machine = {
@@ -271,8 +274,8 @@ def test_no_snapshot_records_this_machine() -> None:
         f"{recorded.relative_to(directory)} records {what}"
         for recorded in sorted(directory.rglob("*.raw"))
         for value, what in machine.items()
-        # A one-character or otherwise trivial user name would match half the
-        # file by accident; only a value with something to it can be evidence.
+        # A user name of one character, or another trivial value, would match
+        # half the file by accident. Only a value of some length can be evidence.
         if len(value) > 3 and value in recorded.read_text(encoding="utf-8")
     ]
     assert offenders == [], "\n".join(offenders)

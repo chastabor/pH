@@ -1,23 +1,23 @@
 """The code cell and the subagent panel (P3-19).
 
-Both are consumers of records that existed before they did: `CellDetails`
-was written at P3-09 with nothing to draw it, and the children's records sat in
-the adapter's `RECORDLESS` set naming *this* row as the reason they were
-classified rather than rendered.
+Both consume records that existed before they did. `CellDetails` was written at
+P3-09 with nothing to draw it. The records of the children were in the
+`RECORDLESS` set of the adapter, which named *this* row as the reason why they
+were classified and not rendered.
 
-The claim under both is the P2-01 one, one layer down: everything drawn comes
-from the settled record, so a replayed cell is the cell that ran and a resumed
-session's panel is the family the parent left — which, since each session owns its
-log (Phase 11), is read from each child's own log by the daemon and sent as
-`session.children` (P11-09).
+The claim under both is the claim of P2-01, one layer down: everything drawn
+comes from the settled record. So a replayed cell is the cell that ran, and the
+panel of a resumed session is the family that the parent left. Each session owns
+its log (Phase 11), so the daemon reads that family from the log of each child
+and sends it as `session.children` (P11-09).
 
 ## Why the cell card does not print the dispatch count
 
-The collapsible below it already reports the count, from the
-`tool/code-dispatch-start` fold that owns those rows. Two projections of one number
-in one widget can disagree — which is what A11 forbids, and what the first draft of
-this card did: a snapshot showing **"3 governed calls" over a section titled "1
-governed call"**.
+The collapsible below the card already reports the count, from the
+`tool/code-dispatch-start` fold that owns those rows. Two projections of one
+number in one widget can disagree, which A11 forbids. The first draft of this
+card did exactly that: a snapshot showed **"3 governed calls" over a section
+titled "1 governed call"**.
 """
 
 from __future__ import annotations
@@ -75,8 +75,9 @@ def cell() -> ToolCard:
 
 
 def test_only_facts_that_are_true_are_shown() -> None:
-    """A cell that dispatched nothing and truncated nothing has nothing to say,
-    and a line of `0 governed calls · not truncated` would say it anyway."""
+    """A cell that dispatched nothing and truncated nothing has nothing to
+    report. A line of `0 governed calls · not truncated` would report it
+    anyway."""
     assert _cell_facts({}) == ""
     assert _cell_facts({"dispatches": 0, "truncated": False, "reset": False}) == ""
 
@@ -86,9 +87,9 @@ def test_the_facts_line_carries_what_the_collapsible_does_not() -> None:
     assert "2 attachments" in facts
     assert "output truncated" in facts
     assert "kernel restarted" in facts
-    # The dispatch *count* is the collapsible's, from the fold that owns those
-    # rows: rendering it here too put two projections of one number in one
-    # widget, able to disagree (A11).
+    # The dispatch *count* belongs to the collapsible, from the fold that owns
+    # those rows. Rendering it here too put two projections of one number in
+    # one widget, and they could disagree (A11).
     assert "40" not in facts
 
 
@@ -98,9 +99,9 @@ def test_one_of_something_is_not_pluralized() -> None:
 
 
 def test_a_field_this_build_does_not_know_is_ignored() -> None:
-    """Read as a mapping, not as ph-rlm's model — ph-app does not depend on the
-    bundle, so a tool can enrich its own card without the transcript learning
-    its schema."""
+    """The details are read as a mapping, and not as the model of ph-rlm. The
+    module `ph_app` does not import the bundle, so a tool can enrich its own
+    card without the transcript learning its schema."""
     assert _cell_facts({"attachments": 1, "somethingNewer": "ignored"}) == "1 attachment"
 
 
@@ -108,8 +109,9 @@ def test_a_field_this_build_does_not_know_is_ignored() -> None:
 
 
 def test_the_terminal_kind_gets_the_cell_widget() -> None:
-    """The card kind is what selects the widget, so a tool declaring `terminal`
-    gets this rendering without the view knowing which tool it was."""
+    """The card kind selects the widget. A tool that declares `terminal`
+    therefore gets this rendering, and the view does not know which tool it
+    was."""
     view = TranscriptView()
     assert isinstance(view._build(ChatItem(key="t1", role="tool", tool=cell())), CodeCellWidget)
 
@@ -120,8 +122,9 @@ def test_the_terminal_kind_gets_the_cell_widget() -> None:
 
 
 def test_the_program_is_what_the_call_view_offered() -> None:
-    """`ToolCallView.body`, not the raw arguments: the JSON the model emitted may
-    not even parse, and a widget must not be the thing that discovers that."""
+    """The program is `ToolCallView.body`, not the raw arguments. The JSON that
+    the model emitted may not parse, and a widget must not be the thing that
+    discovers that."""
     widget = CodeCellWidget(ChatItem(key="t1", role="tool", tool=cell()))
     assert widget._program() == "x = 1\nprint(x)"
 
@@ -132,9 +135,9 @@ def test_the_program_is_what_the_call_view_offered() -> None:
 
 
 def test_the_cell_redraws_when_its_program_or_facts_change() -> None:
-    """The memo that stops every settled row re-laying-out per frame has to
-    include the two things this widget adds, or a streamed cell would freeze at
-    its first snapshot."""
+    """A memo stops every settled row from running its layout again on each
+    frame. The memo must include the two things that this widget adds, or a
+    streamed cell would freeze at its first snapshot."""
     card = cell()
     widget = CodeCellWidget(ChatItem(key="t1", role="tool", tool=card))
     before = widget._snapshot()
@@ -149,13 +152,15 @@ def test_the_cell_redraws_when_its_program_or_facts_change() -> None:
 
 # ------------------------------------------------------------- the panel --
 #
-# Fed by the daemon (P11-09): a root's log holds no record of its children, so the
-# panel draws `session.children`, which the daemon reads from each child's own log.
+# The daemon feeds the panel (P11-09). The log of a root holds no record of its
+# children, so the panel draws `session.children`, which the daemon reads from
+# the log of each child.
 
 
 def _front() -> DaemonSession:
-    """A front end on root `lead` with no socket behind it: a test hands it the
-    daemon's frames directly, through the one door real frames take (`dispatch`)."""
+    """A front end on root `lead` with no socket behind it. A test hands it the
+    frames of the daemon directly, through `dispatch`, the one entry that real
+    frames take."""
     state = TuiState()
     return DaemonSession(
         client=cast(DaemonClient, StubClient()),
@@ -208,16 +213,19 @@ def _answer(child: Session) -> None:
 async def test_the_panel_is_the_daemons_children_field_for_field(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A11, from the daemon: the panel is each child's own log, as the daemon read it.
+    """A11, from the daemon: the panel is the log of each child, as the daemon read it.
 
-    Compared field by field against the seam's `ChildState` — the fold the resume
-    sweep, passivation and the budgets read — rather than on two columns, because
-    the divergence this guards against is a *field*: an early panel folded `cause`
-    its own way, and a status-only comparison passed straight over it. Every state
-    a row can be in is here: woken, errored, held for a key a level down, revoked.
+    The rows are compared field by field against the `ChildState` of the seam,
+    which is the fold that the resume sweep, passivation and the budgets read.
+    They are not compared on two columns, because the divergence that this
+    guards against is in a *field*. An early panel folded `cause` in its own
+    way, and a comparison of the status alone did not see it. Every state that a
+    row can be in is here: woken, errored, held for a key one level down, and
+    revoked.
 
-    End to end without a socket: the root's watcher *is* the front end's
-    `dispatch`, so the frame the panel draws is the one the daemon built.
+    The test is end to end without a socket. The watcher of the root *is* the
+    `dispatch` of the front end, so the frame that the panel draws is the frame
+    that the daemon built.
 
     Sabotage: leave `cause` out of `ChildRow.of`, and the woken child disagrees.
     """
@@ -261,13 +269,14 @@ async def test_the_panel_is_the_daemons_children_field_for_field(
 async def test_attributed_usage_is_summed_per_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """What a child spent is its own answers' usage, from its own log (Phase 11).
+    """What a child spent is the usage of its own answers, from its own log (Phase 11).
 
-    Its parent's log used to carry a copy of each answer's usage, which a crash
-    could leave behind the child's own; the copy is gone, and so is the lag. All
-    four terms, as `/autonomous` charges a goal's `children` (P2 review): summing
-    input and output alone left a cache-heavy child's panel disagreeing with the
-    budget — `TokenUsage.total`, which the seam's fold charges each answer by.
+    The log of its parent used to carry a copy of the usage of each answer, and
+    a crash could leave that copy behind the log of the child. The copy is gone,
+    and so is the lag. All four terms are summed, as `/autonomous` charges the
+    `children` of a goal (P2 review). A sum of input and output alone left the
+    panel of a cache-heavy child in disagreement with the budget. The budget is
+    `TokenUsage.total`, by which the fold of the seam charges each answer.
 
     Sabotage: leave `tokens` out of `ChildRow.of`, and the panel reads nothing spent.
     """
@@ -290,11 +299,11 @@ async def test_attributed_usage_is_summed_per_child(
 async def test_a_revoked_child_stays_listed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A tombstone, not a removal: a parent asking what happened to the child it
-    revoked deserves an answer other than the row vanishing.
+    """A tombstone, not a removal. A parent that asks what happened to the child
+    that it revoked needs an answer, and a row that vanishes is not one.
 
-    From the revocation in the child's own log, as the daemon pushes it — the row
-    stays, marked, and the heading stops counting it.
+    The test starts from the revocation in the log of the child, as the daemon
+    pushes it. The row stays, marked, and the heading stops counting it.
 
     Sabotage: skip deleted children in `family_of`, and the row vanishes.
     """
@@ -317,15 +326,16 @@ async def test_a_revoked_child_stays_listed(
 
 
 def test_a_child_admitted_but_not_yet_started_reads_as_queued() -> None:
-    """The first status comes from a detached job, so a reader between admission
-    and that record must not see a child with no status at all."""
+    """The first status comes from a detached job. A reader that arrives between
+    admission and that record must not see a child with no status at all."""
     (row,) = _drawn(_row("r1", "scout")).subagents.values()
     assert (row.child.status, row.glyph) == ("queued", "○")
 
 
 def test_a_woken_child_still_reads_as_running() -> None:
-    """P3-13's `cause`: rehydration is why it is running, not a status of its
-    own — a consumer branching on `running` must still see it."""
+    """The `cause` of P3-13: rehydration is the reason why the child runs, and
+    not a status of its own. A consumer that branches on `running` must still
+    see it."""
     state = _drawn(
         _row("r1", "scout").model_copy(update={"status": "running", "cause": "rehydrated"})
     )
@@ -335,8 +345,8 @@ def test_a_woken_child_still_reads_as_running() -> None:
 
 
 def test_a_grandchild_is_drawn_under_the_child_that_spawned_it() -> None:
-    """The family is a tree, and `parentId` is the edge: a fan-out that delegated
-    again reads as nested rather than as more siblings."""
+    """The family is a tree, and `parentId` is the edge. A fan-out that
+    delegated again reads as nested, and not as more siblings."""
     state = _drawn(
         _row("r1", "scout"),
         _row("g1", "nested", parent="lead-r1"),
@@ -350,15 +360,16 @@ def test_a_grandchild_is_drawn_under_the_child_that_spawned_it() -> None:
 
 
 def test_a_held_child_says_which_key_it_needs() -> None:
-    """`queued` alone reads exactly like a child waiting for a slot, and only one of
-    the two needs a person (T5)."""
+    """`queued` alone reads exactly like a child that waits for a slot, and only
+    one of the two needs a person (T5)."""
     state = _drawn(_row("r1", "scout").model_copy(update={"awaiting": "EXAMPLE_KEY"}))
     assert render_subagents(state) == "○ scout needs EXAMPLE_KEY"
 
 
 def test_a_family_frame_replaces_the_panel_whole() -> None:
-    """Each frame is the whole family, so a row the daemon stops listing leaves the
-    panel — merged, it would stay drawn for good."""
+    """Each frame is the whole family, so a row that the daemon stops listing
+    leaves the panel. If frames were merged, the row would stay drawn for
+    good."""
     front = _front()
     for rows in ([_row("r1"), _row("r2")], [_row("r2")]):
         front.dispatch(
@@ -369,8 +380,9 @@ def test_a_family_frame_replaces_the_panel_whole() -> None:
 
 
 class _Answering(StubClient):
-    """A client whose `session/children` answer is `rows` — overtaken, when `front` is
-    given, by a frame carrying `newer` that lands while the call is in flight."""
+    """A client whose `session/children` answer is `rows`. When `front` is given,
+    a frame that carries `newer` lands while the call is in flight, and it
+    overtakes the answer."""
 
     def __init__(
         self, rows: list[ChildRow], *, front: DaemonSession | None = None, newer: list[ChildRow]
@@ -388,9 +400,9 @@ class _Answering(StubClient):
 
 
 async def test_a_frame_in_flight_is_not_overwritten_by_the_list_asked_before_it() -> None:
-    """`refresh_children` reads the family once at attach — and a change that lands
-    while it is asking arrives as a frame the answer must not be drawn over, since
-    that answer may be the list from before the change.
+    """`refresh_children` reads the family one time at attach. A change that
+    lands while it asks arrives as a frame. The answer must not be drawn over
+    that frame, because the answer may be the list from before the change.
 
     Sabotage: draw the answer whatever arrived meanwhile, and the stale list wins.
     """
@@ -406,14 +418,15 @@ async def test_a_frame_in_flight_is_not_overwritten_by_the_list_asked_before_it(
 
 
 def test_delegation_records_produce_no_transcript_rows() -> None:
-    """A sub-agent's records are its own log's, and a transcript draws none of them.
+    """The records of a sub-agent belong to its own log, and a transcript draws none of them.
 
-    A root's log holds none of them any more (Phase 11), so the "Delegated to …" and
-    "Revoked child …" rows they drew are gone with them: the spawn and the revocation
-    are the root's own tool calls, whose cards already say so. The family is the
-    panel's, from the daemon — so replaying a child's own log moves neither the
-    transcript nor the panel. A child's log is read in the trajectory view, which
-    renders them (`test_trajectory`).
+    The log of a root holds none of them any more (Phase 11). So the "Delegated
+    to …" and "Revoked child …" rows that they drew are gone with them. The
+    spawn and the revocation are tool calls of the root itself, and their cards
+    already say so. The family belongs to the panel, and it comes from the
+    daemon. So a replay of the log of a child moves neither the transcript nor
+    the panel. The log of a child is read in the trajectory view, which renders
+    these records (`test_trajectory`).
     """
     session = Session("lead-r1", header=SessionHeader(id="lead-r1", created_at=1))
     log_event(session, ADMITTED, {"runId": "r1", "name": "scout", "model": "fake-1"})
@@ -433,12 +446,13 @@ def test_an_empty_family_renders_nothing() -> None:
 
 
 def test_the_panel_heading_counts_the_fan_out() -> None:
-    """Eight children is a list somebody has to tally by eye; this is the tally.
+    """Eight children are a list that somebody must tally by eye. This is the tally.
 
     **"pending", not "queued"**: the status bar already says "queued" for the
-    person's *own* prompts waiting on a busy agent, and one word for two counts
-    on one screen is worse than a synonym. The children's vocabulary is untouched —
-    their logs still say `queued` and every other reader still folds it.
+    *own* prompts of the user that wait on a busy agent. One word for two counts
+    on one screen is worse than a synonym. The vocabulary of the children does
+    not change: their logs still say `queued`, and every other reader still
+    folds it.
     """
     rows = [_row(f"r{index}", f"scout-{index}") for index in range(5)]
     rows[0] = rows[0].model_copy(update={"status": "running"})
@@ -452,8 +466,9 @@ def test_the_panel_heading_counts_the_fan_out() -> None:
 
 
 def test_the_heading_counts_only_what_is_still_going() -> None:
-    """A settled or revoked child stays *listed* — a parent asking what happened
-    to it deserves an answer — but "how busy is this fan-out" is about the rest."""
+    """A settled or revoked child stays *listed*, because a parent that asks
+    what happened to it needs an answer. But "how busy is this fan-out" is a
+    question about the other children."""
     state = _drawn(
         _row("r1", "scout").model_copy(update={"status": "done"}),
         _row("r2", "revoked").model_copy(update={"deleted": True, "deleted_reason": "user"}),
@@ -467,17 +482,18 @@ def test_the_heading_counts_only_what_is_still_going() -> None:
 
 
 def test_a_tick_with_work_behind_it_and_one_without_look_different() -> None:
-    """The person-facing half of P7-16's receipt.
+    """The half of the receipt of P7-16 that the user sees.
 
-    `worked` is attached by `tool-todo` when it writes the list — counted from
-    what the harness saw run, never supplied by the model — so a completed entry
-    with a zero in it is a claim with nothing behind it. The tool card says so
-    for one call; this panel is the plan a person watches all session, which is
-    where the difference is worth seeing.
+    `tool-todo` attaches `worked` when it writes the list. The number is counted
+    from what the harness saw run, and the model never supplies it. So a
+    completed entry with a zero in it is a claim with nothing behind it. The
+    tool card says so for one call. This panel is the plan that a user watches
+    for the whole session, and the difference is worth seeing there.
 
-    Read as a *field*, not re-derived: `ph-app` depends on `ph-core` and not on
-    the bundle that owns the tool, so a copy of "what counts as work" on this
-    side is exactly the drift that boundary exists to prevent.
+    The number is read as a *field* and is not derived again. The module
+    `ph_app` imports `ph-core` and does not import the bundle that owns the
+    tool. A copy of "what counts as work" on this side is exactly the drift
+    that the boundary exists to prevent.
 
     Sabotage: render every completed entry the same and a model that ticked a box
     without doing anything is indistinguishable from one that did the work.
@@ -492,17 +508,18 @@ def test_a_tick_with_work_behind_it_and_one_without_look_different() -> None:
 def test_only_a_completion_carries_the_receipt() -> None:
     """An unfinished entry has nothing to be evidence *for* yet.
 
-    A pending step has run no tools by definition, and marking it "no work seen"
-    would read as an accusation about work that was never claimed.
+    By definition a pending step has run no tools. To mark it "no work seen"
+    would read as an accusation about work that nobody claimed.
     """
     assert _todo_line({"content": "gate it", "status": "pending"}) == "○ gate it"
     assert _todo_line({"content": "wire it", "status": "in_progress"}) == "◐ wire it"
 
 
 def test_a_shortened_path_keeps_its_end_whole() -> None:
-    """The sidebar keeps the end of a long path, the part that names it, and
-    cuts between characters: a name a filesystem stored decomposed — "é" as two
-    code points, as macOS writes them — does not lose its accent's letter.
+    """The sidebar keeps the end of a long path, which is the part that names
+    it, and it cuts between characters. A filesystem can store a name
+    decomposed: "é" as two code points, as macOS writes it. Such a name does not
+    lose the letter that its accent belongs to.
 
     Sabotage: cut with `path[-(width - 1):]` again and the shortened path starts
     with a bare combining accent.

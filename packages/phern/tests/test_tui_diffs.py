@@ -1,12 +1,13 @@
-"""`ph_app.tui.diffs`: the projection behind `/diff`, held without a terminal.
+"""`ph_app.tui.diffs`: the projection behind `/diff`, tested without a terminal.
 
-Every surface replacement is one entry, whoever wrote it, classified from the event
-alone, in the group of the node it led to, as git groups commits by file. An entry's
-before is what it replaced, its records are the ones its producer wrote through the
-revision door (`Session.records_of`), shown field by field, and its recorded size is the
-`size` the door wrote. A group's whole history is the node as first written against the
-node now. Building the list renders no text. The screen's half is in
-`test_tui_screens.py`.
+Every surface replacement is one entry, whoever wrote it. The entry is
+classified from the event alone. It is in the group of the node that it led to,
+as git groups commits by file. The before of an entry is what the entry
+replaced. Its records are the records that its producer wrote through the
+revision door (`Session.records_of`), shown field by field. Its recorded size
+is the `size` that the door wrote. The whole history of a group is the node as
+first written against the node now. Building the list renders no text. The half
+that belongs to the screen is in `test_tui_screens.py`.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ def substitute_text(
     form: ContextForm = "compaction",
     record: RevisionRecord | None = None,
 ) -> SessionEvent:
-    """`text` from the probe plugin in place of `shadowed`, its summary saying so."""
+    """Put `text` from the probe plugin in place of `shadowed`. Its summary says so."""
     why = record or revision_record("compaction/summarized")
     return substitute(log, shadowed, stand_in(text, form=form, summary="probe said"), why)
 
@@ -85,8 +86,8 @@ def test_a_substitution_is_one_entry_shown_on_its_own_row() -> None:
 
 
 def test_an_offloaded_paste_is_a_substitution_and_a_summary_a_stand_in() -> None:
-    """`is_stand_in` is the log's own claim, so a relocated paste is never called
-    condensed conversation."""
+    """`is_stand_in` is a claim of the log itself, so a relocated paste is never
+    called condensed conversation."""
     session, asked, replied, _ = revisable(OUTPUT)
 
     substitute_text(session, (asked.seq,), "[pasted text moved]", form="notice")
@@ -117,8 +118,9 @@ def test_an_in_place_rewrite_shows_on_the_row_it_rewrote() -> None:
 
 
 def test_a_revision_of_a_revision_is_diffed_against_what_it_replaced() -> None:
-    """Each edit once: the second entry's before is the first one's after, not the
-    conversation as first written; and both are in the group of the node now."""
+    """Each edit is shown one time. The before of the second entry is the after
+    of the first, and not the conversation as first written. Both entries are in
+    the group of the node as it is now."""
     session, _, replied, result = revisable(OUTPUT)
     landed = rewritten(session, result, "(cut)")
 
@@ -134,11 +136,12 @@ def test_a_revision_of_a_revision_is_diffed_against_what_it_replaced() -> None:
 
 
 def test_a_summary_over_two_edited_sections_holds_both_edits_and_its_whole_history() -> None:
-    """H3's gate, as `git log -p -- file` and `git diff A..B -- file` show a file: a
-    summary over two nodes that had each been edited is one group holding both edits
-    and itself, oldest first, and its whole history is the conversation as first
-    written against the summary. Sabotage: group by the change rather than by the
-    node it led to, or diff the whole against the last edit's before."""
+    """The gate of H3, as `git log -p -- file` and `git diff A..B -- file` show a
+    file. A summary over two nodes that had each been edited is one group. The
+    group holds both edits and the summary itself, oldest first. Its whole
+    history is the conversation as first written against the summary. Sabotage:
+    group by the change rather than by the node it led to, or diff the whole
+    against the last edit's before."""
     session, asked, replied, result = revisable(OUTPUT)
     cut = rewritten(session, result, "(cut)")
     revised = substitute_text(session, (asked.seq,), "the ask, revised", form="recall")
@@ -155,8 +158,9 @@ def test_a_summary_over_two_edited_sections_holds_both_edits_and_its_whole_histo
 
 
 def test_building_the_list_renders_no_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A summary's before can be most of the conversation: the screen renders the
-    row it shows, and the list must not render every row to be built."""
+    """The before of a summary can be most of the conversation. The screen
+    renders the row that it shows, and building the list must not render every
+    row."""
     rendered: list[str] = []
 
     def edit(_revision: Revision) -> tuple[str, str]:
@@ -184,9 +188,10 @@ def test_building_the_list_renders_no_text(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_a_record_is_shown_field_by_field_and_its_size_is_the_entry_s() -> None:
-    """Through a mirror that does not know the record's type, as the TUI holds a
-    log whose bundle it may not import. The size is the door's, whatever the type.
-    Sabotage: read sizes off field names again."""
+    """The record is read through a mirror that does not know its type, as the
+    TUI holds a log whose bundle it may not import. The size is the size that
+    the door wrote, whatever the type. Sabotage: read sizes off field names
+    again."""
     with isolated_log_types():
         declare_log_type("probe/revised", owner="probe", ignorable=True, audit_only=True)
         session, asked, _, _ = revisable(OUTPUT)
@@ -223,8 +228,9 @@ def test_without_a_recorded_size_there_is_none() -> None:
 
 
 def test_several_edits_in_one_batch_each_keep_their_own_record() -> None:
-    """Each edit shows the record written for it, and a record that only shares its
-    batch is no edit's. Sabotage: pair records by where they sit in the batch again."""
+    """Each edit shows the record that was written for it. A record that only
+    shares its batch belongs to no edit. Sabotage: pair records by where they
+    sit in the batch again."""
     session, asked, replied, _ = revisable(OUTPUT)
     with session.batch() as batch:
         substitute_text(
@@ -249,8 +255,9 @@ def test_several_edits_in_one_batch_each_keep_their_own_record() -> None:
 
 
 def test_one_record_for_several_rewrites_is_shown_on_each_and_sizes_none() -> None:
-    """Compaction's one record for every argument it elided: each rewrite shows it,
-    saying it explains them all, and its numbers are none of theirs alone."""
+    """Compaction writes one record for every argument that it elided. Each
+    rewrite shows that record, and the record says that it explains all of them.
+    The numbers of the record are the size of none of the rewrites alone."""
     session, _, replied, result = revisable(OUTPUT)
     reply = editable_message(replied)
     reply["content"][0] = {"type": "text", "text": "reading"}
@@ -272,7 +279,7 @@ def test_one_record_for_several_rewrites_is_shown_on_each_and_sizes_none() -> No
 def test_a_new_kind_is_a_source_function_and_the_groups_merge_by_seq(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """What "meant to grow more kinds" costs: one function in `SOURCES`."""
+    """The cost of "meant to grow more kinds" is one function in `SOURCES`."""
     session, asked, _, _ = revisable(OUTPUT)
     substitute_text(session, (asked.seq,), "q")
     entry = DiffEntry(

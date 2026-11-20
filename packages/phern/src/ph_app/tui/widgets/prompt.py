@@ -1,13 +1,13 @@
 """The prompt row: input, autocomplete, and the paste placeholder.
 
-`PromptInput` deliberately does not decide what a key *means* — it reads the
+`PromptInput` deliberately does not decide what a key *means*. It reads the
 configured binding and posts an intent. A widget that compared
-`event.key == "escape"` would silently ignore a user's rebinding, which is the
-rule prime-agent states and pH adopts (see `ph_app.tui.config`).
+`event.key == "escape"` would silently ignore a rebinding by the user. That is
+the rule that prime-agent states and pH adopts (see `ph_app.tui.config`).
 
-A large paste becomes a placeholder rather than thousands of lines in the box:
-the text is kept, the display is not, because a terminal re-rendering a 200 KB
-paste per keystroke is unusable.
+A large paste becomes a placeholder and not thousands of lines in the box. The
+text is kept and the display is not, because a terminal that renders a 200 KB
+paste again for each keystroke is unusable.
 
 @module ph_app.tui.widgets.prompt
 """
@@ -43,39 +43,40 @@ class _Pasted:
 
 @dataclass(slots=True)
 class _Walk:
-    """A walk through history, and the draft it is standing on.
+    """A walk through history, and the draft that it started from.
 
-    Snapshotted when the walk starts rather than read per keypress: a turn that
-    lands mid-walk would otherwise renumber the entries under the cursor, and the
-    next `up` would move somewhere the person did not ask for.
+    The entries are a snapshot taken when the walk starts. They are not read
+    for each keypress. Otherwise a turn that lands during the walk would
+    renumber the entries under the cursor, and the next `up` would move to a
+    place that the user did not ask for.
 
-    `draft` is what was in the box before the first `up`. It is also the *filter*
-    — a non-empty draft walks only the prompts that start with it, which is what
-    every shell does and the reason the ask said "search" rather than "cycle".
+    `draft` is what was in the box before the first `up`. It is also the
+    *filter*: a non-empty draft walks only the prompts that start with it. Every
+    shell does that, and it is why the request said "search" and not "cycle".
     """
 
     draft: str
     entries: tuple[PromptRecord, ...]
     index: int = -1
-    """`-1` is the draft itself; `0` is the newest prompt."""
+    """`-1` is the draft itself, and `0` is the newest prompt."""
 
 
 class PromptArea(TextArea):
-    """The text box, with the prompt's bindings taking precedence.
+    """The text box, with the bindings of the prompt taking precedence.
 
     A `TextArea` consumes `enter` and `escape` in its own key handler before a
-    parent ever runs, so submit and cancel cannot be handled by the container.
-    They are decided here, in the public `on_key` hook: Textual walks a widget's
-    handlers subclass-first and stops once `prevent_default()` has been called,
-    so a key the prompt claims never reaches the editor, and one it does not
-    claim is edited as usual.
+    parent runs, so the container cannot handle submit and cancel. They are
+    decided here, in the public `on_key` hook. Textual walks the handlers of a
+    widget subclass-first and stops after `prevent_default()` has been called.
+    So a key that the prompt claims never reaches the editor, and a key that it
+    does not claim is edited as usual.
     """
 
     def __init__(self, owner: PromptInput, **kwargs: Any) -> None:  # noqa: ANN401
         super().__init__(**kwargs)
         self.owner = owner
         # `tab` accepts a completion, so it must not insert indentation. With a
-        # completion list open the prompt claims it first; with none open,
+        # completion list open, the prompt claims it first. With none open,
         # moving focus is the sensible remainder.
         self.tab_behavior = "focus"
         self.show_line_numbers = False
@@ -87,29 +88,30 @@ class PromptArea(TextArea):
 class CompletionList(GutterScroll, ListView):
     """The completion list, with its scrollbar in its left padding column.
 
-    The same gutter the transcript has, so a list long enough to scroll keeps
-    its entries in column 1 with the prompt's text, and the bar — one column —
-    appears in column 0 beside them rather than two columns to the right.
+    This is the same gutter that the transcript has. A list that is long enough
+    to scroll keeps its entries in column 1 with the text of the prompt. The
+    bar is one column. It appears in column 0 beside the entries, rather than
+    two columns to the right.
     """
 
 
 class PromptInput(Vertical):
     """A multi-line prompt box with a completion list under it.
 
-    **No frame.** The status line above is the box's top edge (`StatusBar`), and
-    the surface color is what marks the rest of it — a rounded border spent two
-    rows and two columns of a terminal on saying the same thing. The box is a
-    `compact` `TextArea`, Textual's own borderless mode, rather than `border:
-    none` here: the library's `:focus` rule outranks a plain type selector, so
+    **No frame.** The status line above is the top edge of the box (`StatusBar`),
+    and the surface color marks the rest of it. A rounded border spent two rows
+    and two columns of a terminal to say the same thing. The box is a `compact`
+    `TextArea`, which is Textual's own borderless mode, and not `border: none`
+    here. The `:focus` rule of the library outranks a plain type selector, so
     the border came back the moment the prompt took focus.
 
-    **Column 1 is where text starts, in every row of this widget**, which is the
-    column the transcript's text starts in: the box's own padding (Textual's
-    default for a `TextArea`), the list's, and the hint's are each that one
-    column. The list is told apart from the box by its panel color, and the hint
-    is drawn only while there is a list to accept from — empty, it was still a
-    row under the prompt in every frame. Its text is set once: the bindings are
-    this widget's for its whole life.
+    **Text starts in column 1 in every row of this widget**, which is the
+    column where the text of the transcript starts. The padding of the box
+    (Textual's default for a `TextArea`), of the list, and of the hint is each
+    that one column. The panel color of the list tells it apart from the box.
+    The hint is drawn only while there is a list to accept from. When it was
+    empty, it was still a row under the prompt in every frame. Its text is set
+    one time, because the bindings belong to this widget for its whole life.
     """
 
     DEFAULT_CSS = """
@@ -148,15 +150,16 @@ class PromptInput(Vertical):
         self.keys = keybindings
         self.completion_source = completion_source
         self.history_source = history_source
-        """Where the prompts come from, asked when a walk begins.
+        """Where the prompts come from. It is asked when a walk begins.
 
-        A callable for `completion_source`'s reason: the widget draws, and what
-        the person has already sent is the app's to fold. Handed the whole list,
-        not a cursor, so the widget owns only the walking."""
+        It is a callable for the same reason as `completion_source`: the widget
+        draws, and the app folds what the user has already sent. The callable
+        hands over the whole list, not a cursor, so the widget owns only the
+        walking."""
         self._pastes: list[_Pasted] = []
         self._completions: CompletionState | None = None
         self._walk: _Walk | None = None
-        """The walk in progress, or `None` when the box is the person's own."""
+        """The walk in progress, or `None` when the box holds the user's own text."""
 
     def compose(self) -> ComposeResult:
         yield PromptArea(self, id="prompt-input", soft_wrap=True, compact=True)
@@ -177,12 +180,13 @@ class PromptInput(Vertical):
         return text
 
     def replace(self, text: str) -> None:
-        """Put `text` in the box, cursor at the end — the whole prompt, replaced.
+        """Put `text` in the box, with the cursor at the end. It replaces the whole prompt.
 
-        The public sibling of `text()` and `clear()`. `area.text = …` followed by
-        `move_cursor(document.end)` was written in three places, one of them in
-        `app.py` reaching across the widget boundary to do what the widget owns —
-        and that copy was the one that forgot to close the completion list.
+        This is the public sibling of `text()` and `clear()`. `area.text = …`
+        followed by `move_cursor(document.end)` was written in three places. One
+        of them was in `app.py`, which reached across the widget boundary to do
+        what the widget owns. That copy was the one that forgot to close the
+        completion list.
         """
         self._show(text)
 
@@ -206,11 +210,11 @@ class PromptInput(Vertical):
     # ------------------------------------------------------------------ keys --
 
     def intercept_key(self, event: events.Key) -> bool:
-        """Decide the key against the configured bindings; consume it if claimed.
+        """Decide the key against the configured bindings, and consume it if claimed.
 
-        Never compares a key literal, so a rebound submit or cancel works
-        everywhere. (Not named `handle_key` — that is Textual's own dispatch
-        hook on `Widget`, and shadowing it breaks every unclaimed key.)
+        This never compares a key literal, so a rebound submit or cancel works
+        everywhere. (It is not named `handle_key`. That is Textual's own
+        dispatch hook on `Widget`, and shadowing it breaks every unclaimed key.)
         """
         claimed = self._decide(event.key)
         if claimed:
@@ -221,8 +225,8 @@ class PromptInput(Vertical):
     def _decide(self, key: str) -> bool:
         keys = self.keys
         if key == keys.cancel:
-            # An open completion list is what escape closes first; only an
-            # already-closed list means "interrupt the turn".
+            # The cancel key first closes an open completion list. It means
+            # "interrupt the turn" only when the list is already closed.
             if self._completions is not None:
                 self._set_completions(None)
             else:
@@ -238,9 +242,9 @@ class PromptInput(Vertical):
                 self.clear()
             return True
         if self._completions is None:
-            # **Only here**, which is what lets one key mean two things: with a
-            # list open the branches below move the *list*, and `up` reaches
-            # history only once there is no list to move.
+            # **Only here.** That lets one key mean two things: with a list
+            # open, the branches below move the *list*, and `up` reaches history
+            # only when there is no list to move.
             return self._walk_history(key)
         if key == keys.accept_completion:
             self._accept_completion()
@@ -255,41 +259,42 @@ class PromptInput(Vertical):
         return False
 
     async def on_text_area_changed(self, _event: TextArea.Changed) -> None:
-        # Unconditional, because a recall does not reach here at all: `_show`
-        # writes inside `prevent`, so the person typing is the only thing that
-        # posts this. The walk is over — the next `up` starts again from what is
-        # in the box now, which is also the new filter. Editing a recalled prompt
-        # and keeping the walk position would mean `up` jumping from text nobody
-        # can see any more.
+        # Unconditional, because a recall does not reach here at all. `_show`
+        # writes inside `prevent`, so only the user typing posts this. The walk
+        # is over. The next `up` starts again from what is in the box now,
+        # which is also the new filter. If an edit of a recalled prompt kept
+        # the walk position, `up` would jump from text that nobody can see any
+        # more.
         self._walk = None
         self._refresh_completions()
 
     # -------------------------------------------------------------- history --
 
     def _walk_history(self, key: str) -> bool:
-        """Move through what this person has sent. `True` when the key is spent.
+        """Move through what this user has sent. Return `True` when the key is used.
 
-        Claimed **only at the edges of the box**: `up` on the first line, `down`
-        on the last. Anywhere else a multi-line draft still navigates, which is
-        the behavior a prompt box cannot give up to gain history.
+        The key is claimed **only at the edges of the box**: `up` on the first
+        line, `down` on the last. Anywhere else, the key still navigates a
+        multi-line draft. A prompt box cannot give up that behavior to gain
+        history.
         """
         keys = self.keys
         area = self.area
         if key == keys.history_previous and area.cursor_at_first_line:
             return self._step(1)
         if key == keys.history_next and area.cursor_at_last_line and self._walk is not None:
-            # Not claimed when no walk is in progress: `down` on the last line of
-            # an untouched box means nothing, and swallowing it would make the
-            # key feel broken.
+            # Not claimed when no walk is in progress. `down` on the last line
+            # of an untouched box means nothing, and swallowing it would make
+            # the key feel broken.
             return self._step(-1)
         return False
 
     def _step(self, step: int) -> bool:
         """Move `step` entries through the walk. `False` leaves the key alone.
 
-        **An index delta, not a direction**: `+1` is one entry *older*, because
-        that is the way the list runs (newest first) and naming it the other way
-        made both call sites and the body each invert it once.
+        **`step` is an index delta, not a direction.** `+1` is one entry
+        *older*, because the list runs that way (newest first). With the
+        opposite name, both call sites and the body each inverted it one time.
         """
         walk = self._walk
         if walk is None:
@@ -300,12 +305,13 @@ class PromptInput(Vertical):
                 return False
         index = walk.index + step
         if index >= len(walk.entries):
-            # Already at the oldest. Claimed anyway, so the cursor does not
-            # silently jump out of the box at the end of the walk.
+            # Already at the oldest entry. The key is claimed anyway, so that
+            # the cursor does not silently jump out of the box at the end of the
+            # walk.
             return True
         if index < 0:
-            # Back on the draft: the box is the person's again, and the walk ends
-            # rather than sitting on a sentinel.
+            # Back on the draft. The box holds the user's own text again, and
+            # the walk ends and does not stay on a sentinel.
             self._show(walk.draft)
             self._walk = None
             return True
@@ -332,17 +338,18 @@ class PromptInput(Vertical):
     def _show(self, text: str) -> None:
         """Put `text` in the box without ending the walk that asked for it.
 
-        **`prevent` rather than a flag or a remembered value**, which is Textual's
-        own answer to exactly this and is the only one that is not a race: it adds
-        the type to a stack that `post_message` consults *synchronously, at post
-        time*, so the `Changed` message is never queued — where a flag set and
-        cleared around the write is already back by the time a queued handler
-        runs. Its own docstring's example is this line.
+        **This uses `prevent`, not a flag or a remembered value.** `prevent` is
+        Textual's own answer to exactly this problem, and it is the only answer
+        that is not a race. It adds the type to a stack that `post_message`
+        consults *synchronously, at post time*, so the `Changed` message is
+        never queued. A flag that is set and cleared around the write is already
+        cleared by the time a queued handler runs. The example in the docstring
+        of `prevent` is this pattern.
 
         It also makes `_set_completions(None)` mean what it says. Before, the
-        `Changed` handler ran straight afterwards and `_refresh_completions` could
-        re-open a list over a recalled prompt, so a recall had two writers of the
-        completion state and the second one won.
+        `Changed` handler ran straight afterwards, and `_refresh_completions`
+        could open a list again over a recalled prompt. A recall then had two
+        writers of the completion state, and the second one won.
         """
         with self.area.prevent(TextArea.Changed):
             self.area.text = text

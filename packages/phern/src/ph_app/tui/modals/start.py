@@ -1,12 +1,14 @@
-"""The start that did not happen: said once, kept, and answerable.
+"""The start that did not happen: reported one time, kept, and answerable.
 
-A terminal whose daemon would not start, or whose session the daemon refused, has
-nothing behind its prompt. The report of that used to be a toast, and a toast
-lasts five seconds; what it left was a screen with its headings drawn and nothing
-behind them, which reads as a hang. This modal is the report that waits to be
-read, and the answers a person can give it: run the whole open again, for the
-case where the fix is in another terminal; leave; or stay, on this terminal's
-own verbs.
+A terminal has nothing behind its prompt when its daemon would not start, or
+when the daemon refused its session. The report of that used to be a toast, and
+a toast lasts five seconds. It left a screen with its headings drawn and nothing
+behind them, which looks like a hang. This modal is the report that waits until
+the user reads it. It also offers the answers that a user can give:
+
+- Run the whole open again, for the case where the fix is in another terminal.
+- Leave.
+- Stay, on the verbs that belong to this terminal.
 
 @module ph_app.tui.modals.start
 """
@@ -31,7 +33,8 @@ _DECISIONS: Mapping[str, StartDecision] = literal_lookup(StartDecision)
 def could_not_start_modal(reason: str) -> ConfirmModal:
     """Show why there is no session, and ask what to do about it.
 
-    The last paragraph is for Esc, the one answer with no button."""
+    The last paragraph of the body is for Esc, which is the one answer that has
+    no button."""
     return ConfirmModal(
         title="pH could not start",
         body=(
@@ -47,5 +50,5 @@ def could_not_start_modal(reason: str) -> ConfirmModal:
 
 
 def start_decision(answer: str | None) -> StartDecision:
-    """The modal's answer, narrowed: anything but the two buttons is staying."""
+    """The answer of the modal, narrowed. Anything except the two buttons means stay."""
     return _DECISIONS.get(answer or "", "stay")

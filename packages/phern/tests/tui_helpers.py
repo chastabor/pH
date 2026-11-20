@@ -1,9 +1,13 @@
-"""The two waits every pilot test needs, written once.
+"""The two waits that every pilot test needs, written one time.
 
-`running` opens an app and waits for it to attach to a daemon — which happens
-in a worker, so a single `pause()` is not enough. `until` polls a predicate through
-the pilot instead of sleeping, so a test waits exactly as long as the app takes
-and fails loudly rather than hanging when it never does.
+`running` opens an app and waits for it to attach to a daemon. The attach
+happens in a worker, so a single `pause()` is not enough. `until` polls a
+predicate through the pilot and does not sleep. A test therefore waits exactly
+as long as the app takes, and it fails loudly and does not hang when the app
+never reaches the state.
+
+The module also holds the doubles (`StubHost`, `StubApp`, `StubClient`,
+`WorkingApp`), the builders of a log to revise, and `TranscriptApp`.
 """
 
 from __future__ import annotations
@@ -37,18 +41,20 @@ from ph_app.tui.themes import DEFAULT_THEME, fallback_variables, load_catalog
 from ph_app.tui.widgets.transcript import TranscriptView
 
 if TYPE_CHECKING:
-    # Annotation only, and `daemon_helpers` is not free: importing it composes a
-    # profile off disk at module scope. The three modules that use these helpers
-    # without the daemon fixture should not pay for a name the checker reads.
+    # This import is for an annotation only, and `daemon_helpers` has a cost:
+    # importing it composes a profile from disk at module scope. The three
+    # modules that use these helpers without the daemon fixture should not pay
+    # that cost for a name that only the type checker reads.
     from daemon_helpers import Daemon
 
 
 MakeApp = Callable[..., PHTuiApp]
 """`make_tui_app(...)` → an app wired for a test, from `app_fixtures`.
 
-Beside the helpers rather than in each suite: three had written it out, which is
-the sprawl `ph.testing.MountProfile`'s docstring argues against one package up.
-Not in `ph.testing`, because `PHTuiApp` is ph-app's and ph-core may not name it.
+The type is beside the helpers and not in each suite. Three suites had written
+it out, which is the sprawl that the docstring of `ph.testing.MountProfile`
+argues against one package up. It is not in `ph.testing`, because `PHTuiApp`
+belongs to `ph_app` and ph-core may not name it.
 """
 
 
@@ -59,20 +65,21 @@ def tui_app(
     trusted: bool = True,
     **overrides: object,
 ) -> PHTuiApp:
-    """One `PHTuiApp` wired for a test, built in the one place.
+    """One `PHTuiApp` wired for a test, built in one place.
 
-    Two callers: the async `make_tui_app` fixture, and the snapshot suite, which
-    cannot use a fixture because `snap_compare` drives its own event loop. They
-    were two copies of the app's construction contract, and this diff had to edit
-    both when it added `daemon_argv`.
+    There are two callers: the async `make_tui_app` fixture, and the snapshot
+    suite, which cannot use a fixture because `snap_compare` drives its own
+    event loop. They were two copies of the construction contract of the app,
+    and the change that added `daemon_argv` had to edit both.
 
-    `spawn=False`: a test must never start a supervisor. The fixture's socket is
-    already answering, so `ensure_daemon` returns without spawning, and a
-    regression that tried fails as a named `DaemonAbsent`.
+    `spawn=False`: a test must never start a supervisor. The socket of the
+    fixture is already answering, so `ensure_daemon` returns without spawning.
+    A regression that tried to spawn fails as a named `DaemonAbsent`.
 
-    `trusted` writes the file the *daemon* reads — `session/new` is what enforces
-    trust — so trusting here is what lets the mount happen at all. `project` is
-    set before it, because trust is keyed on that path.
+    `trusted` writes the file that the *daemon* reads. `session/new` is what
+    enforces trust, so the mount can happen only because the directory is
+    trusted here. `project` is set before the trust is written, because trust is
+    keyed on that path.
     """
     options: dict[str, Any] = {
         "session_id": "pilot",
@@ -84,8 +91,8 @@ def tui_app(
     app = PHTuiApp(**options)
     if project is not None:
         # `PHTuiApp.project` is `Path.cwd()`, and the sidebar prints it. A
-        # snapshot taken here therefore embedded the developer's checkout and
-        # could never match CI, whose cwd differs.
+        # snapshot that was taken here therefore embedded the checkout of the
+        # developer, and it could never match CI, whose cwd differs.
         app.project = project
     if trusted:
         app.trust.trust(app.project)
@@ -93,26 +100,27 @@ def tui_app(
 
 
 def root_of(daemon: Daemon, session_id: str = "pilot") -> Root:
-    """The daemon-side root a pilot app is attached to.
+    """The root on the daemon side that a pilot app is attached to.
 
-    What `app.front.ctx` used to be. It is deliberately not reachable *through*
-    the front end any more — a socket client has no `ctx`, and the AST gate in
-    `test_tui_screens.py` holds the terminal to that — so a test whose subject is
-    the harness asks the daemon it is attached to instead.
+    This is what `app.front.ctx` used to be. The root is deliberately not
+    reachable *through* the front end any more. A socket client has no `ctx`,
+    and the AST gate in `test_tui_screens.py` holds the terminal to that. So a
+    test whose subject is the harness asks the daemon that the app is attached
+    to.
 
-    A name for the default session id; the lookup is `_Daemon.held`, which owns
-    the supervisor's internals.
+    This function is a name for the default session id. The lookup is
+    `_Daemon.held`, which owns the internals of the supervisor.
     """
     return daemon.held(session_id)
 
 
 async def until[T](pilot: Pilot[T], predicate: Callable[[], bool], *, tries: int = 400) -> None:
-    """Pause until the predicate holds, or give up naming the wait.
+    """Pause until the predicate holds, or give up with an `AssertionError`.
 
-    Generic in the pilot's own type parameter rather than taking
-    `Pilot[object]`: `Pilot` is invariant, so a `Pilot[None]` — what
-    `run_test()` hands an app returning nothing — is not a `Pilot[object]`
-    and every caller of that shape was refused."""
+    The function is generic in the type parameter of the pilot, and it does not
+    take `Pilot[object]`. `Pilot` is invariant, so a `Pilot[None]` is not a
+    `Pilot[object]`. `run_test()` gives a `Pilot[None]` to an app that returns
+    nothing, and every caller of that shape was refused."""
     for _ in range(tries):
         if predicate():
             return
@@ -124,12 +132,13 @@ async def until[T](pilot: Pilot[T], predicate: Callable[[], bool], *, tries: int
 async def running(
     app: PHTuiApp, *, size: tuple[int, int] = (80, 24)
 ) -> AsyncIterator[tuple[PHTuiApp, Pilot[str | None]]]:
-    """`size` for a test that needs the transcript to actually scroll: the
-    default is Textual's own, tall enough to hold a short conversation whole.
+    """`size` is for a test that needs the transcript to scroll. The default is
+    the default of Textual, which is tall enough to hold a short conversation
+    whole.
 
-    Not `None`, which `run_test` reads as "detect the real terminal" — a test
-    whose assertions depend on the viewport must not depend on the window it
-    happened to run in.
+    The default is not `None`, which `run_test` reads as "detect the real
+    terminal". A test whose assertions depend on the viewport must not depend on
+    the window that it ran in.
     """
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
@@ -154,25 +163,22 @@ def turn_done(app: PHTuiApp) -> Callable[[], bool]:
 class StubHost:
     """A `ModalHost` that answers every prompt without drawing anything.
 
-    The one `ModalHost` double in the tree, so a member added to that protocol is
-    added here once.
+    This is the one `ModalHost` double in the tree, so a member that is added to
+    that protocol is added here one time.
     """
 
     def __init__(self) -> None:
         self.approvals: list[ApprovalRequest] = []
         self.questions: list[UserQuestion] = []
-        self.profiles: list[tuple[str, str]] = []
-        self.profile_decision: ProfileDecision = "later"
         self.withdrawn: list[AskKey] = []
         self.redraws = 0
-        self.redrawn = Surface.NOTHING
 
     async def ask_approval(
         self, request: ApprovalRequest, *, ask: AskKey | None = None
     ) -> tuple[ApprovalAnswer, str]:
-        # `ApprovalAnswer`, not `tuple[str, str]`: `ModalHost` promises the
-        # narrowed answer, and the whole reason it is a Protocol is that a
-        # double whose member drifted fails here rather than at the first modal.
+        # The type is `ApprovalAnswer` and not `tuple[str, str]`. `ModalHost`
+        # promises the narrowed answer. It is a Protocol so that a double whose
+        # member drifted fails here and not at the first modal.
         self.approvals.append(request)
         return "allowed-once", ""
 
@@ -185,86 +191,78 @@ class StubHost:
     async def ask_profile(
         self, name: str, listing: str, *, ask: AskKey | None = None
     ) -> ProfileDecision:
-        self.profiles.append((name, listing))
-        return self.profile_decision
+        return "later"
 
     def withdraw_ask(self, ask: AskKey, *, reason: str = "") -> None:
         self.withdrawn.append(ask)
 
     def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
-        # Unioned so a test can assert what a batch did *not* reach.
         self.redraws += 1
-        self.redrawn |= surfaces
 
 
 class StubApp:
-    """An `AppSurface` for a front end driven with no terminal.
+    """An `AppSurface` for a front end that is driven with no terminal.
 
-    The one `AppSurface` double in the tree, for `StubHost`'s reason and beside
-    it: a member added to that protocol is added here once.
+    This is the one `AppSurface` double in the tree, for the same reason as
+    `StubHost` and beside it: a member that is added to that protocol is added
+    here one time.
 
-    All three members, not the one a given test reaches — a double that stubs
-    only what today's path calls stops being one the moment the path changes,
-    silently. That is not hypothetical: this replaced `object()` and a four-line
-    class with a single method, both of which passed because `_front` returned
-    `Any`.
+    It has all three members, and not only the one that a given test reaches. A
+    double that stubs only what the current path calls stops being a double when
+    the path changes, and it does so silently. That has happened: this class
+    replaced `object()` and a four-line class with a single method, and both of
+    those passed because `_front` returned `Any`.
     """
 
     def __init__(self) -> None:
         self.ran: list[str] = []
-        self.bound: list[Binding] = []
 
     def run_worker(self, work: Coroutine[Any, Any, Any]) -> None:
-        # Closed rather than started: there is no app to own it here, and a
-        # coroutine left unawaited warns.
+        # The work is closed and not started. There is no app to own it here,
+        # and a coroutine that is left unawaited warns.
         work.close()
-        return None
 
     def add_binding(self, binding: Binding) -> Callable[[], Any]:
-        self.bound.append(binding)
-        return lambda: self.bound.remove(binding)
+        return lambda: None
 
     async def run_action(self, action: str) -> None:
         self.ran.append(action)
-        return None
 
 
 class StubClient:
     """A `DaemonClient` for a front end with no daemon behind it.
 
-    **All four members `DaemonSession` reaches**, not the one a given test needs
-    — the rule `StubApp`'s docstring states, and the reason: a double that stubs
-    only today's path stops being one the moment the path changes, silently.
-    Recorded rather than dropped, so a test can assert what was asked for.
+    It has **all four members that `DaemonSession` reaches**, and not only the
+    one that a given test needs. The docstring of `StubApp` states the rule and
+    the reason: a double that stubs only the current path stops being a double
+    when the path changes, and it does so silently. The calls answer with
+    nothing and record nothing, because no test asks what was sent.
     """
 
     def __init__(self) -> None:
-        self.prompts: list[tuple[str, str]] = []
-        self.calls: list[str] = []
-        self.mutations: list[str] = []
         self.closed = anyio.Event()
 
     async def prompt(self, session_id: str, text: str) -> None:
-        self.prompts.append((session_id, text))
+        return None
 
     async def call(self, verb: Any, params: Any = None) -> Any:  # noqa: ANN401
-        self.calls.append(getattr(verb, "method", str(verb)))
         return None
 
     async def mutate(self, *arguments: Any, **options: Any) -> Any:  # noqa: ANN401
-        self.mutations.append(str(arguments[:1]))
         return None
 
 
 class WorkingApp(StubApp):
-    """A `StubApp` that actually *runs* what it is handed.
+    """A `StubApp` that *runs* the work that it is given.
 
-    `StubApp` closes the coroutine, which is right for a test asserting on what
-    was asked for — but wrong for one whose subject is the effect of the work.
-    A `queue()` whose frame is never sent cannot be counted at the other end.
+    `StubApp` closes the coroutine. That is right for a test that asserts on
+    what was asked for, and wrong for a test whose subject is the effect of the
+    work. A `queue()` whose frame is never sent cannot be counted at the other
+    end.
 
-    The task group is the caller's, so the work is bounded by the `async with`
-    that owns it rather than outliving the test that started it.
+    The task group belongs to the caller. So the `async with` that owns the
+    group bounds the work, and the work does not outlive the test that started
+    it.
     """
 
     def __init__(self, tasks: anyio.abc.TaskGroup) -> None:
@@ -282,8 +280,8 @@ class WorkingApp(StubApp):
 
 
 def stand_in(text: str, *, form: ContextForm = "compaction", summary: str | None = None) -> Message:
-    """Text a plugin wrote in place of conversation: a summary (`compaction`, a stand-in)
-    or, with another form, a relocated paste's preview."""
+    """Text that a plugin wrote in place of conversation: a summary (`compaction`,
+    a stand-in) or, with another form, the preview of a relocated paste."""
     return create_user_message(
         content=[{"type": "text", "text": text}],
         source=PluginSource(plugin="probe", form=form, summary=summary),
@@ -318,11 +316,11 @@ def rewritten(session: Session, result: SessionEvent, text: str) -> SessionEvent
 
 
 class TranscriptApp(App[None]):
-    """A transcript and nothing else, fed its rows directly.
+    """A transcript and nothing else, with its rows fed to it directly.
 
-    What the snapshot tests draw and what the gutter tests measure: with no
-    model behind it there is no timing, no token order and no session id in the
-    frame, so a diff — or a position — points at the rows.
+    The snapshot tests draw it and the gutter tests measure it. With no model
+    behind it there is no timing, no token order and no session id in the frame.
+    So a diff, or a position, points at the rows.
     """
 
     CSS = """
@@ -347,8 +345,9 @@ class TranscriptApp(App[None]):
 
 
 def rows_of(*items: ChatItem) -> list[ChatItem]:
-    """The rows a `TuiState` holding `items` shows — through the state, so a
-    test's rows are folded and filtered the way the app's are."""
+    """The rows that a `TuiState` which holds `items` shows. They go through the
+    state, so the rows of a test are folded and filtered as the rows of the app
+    are."""
     state = TuiState()
     for item in items:
         state.add(item)

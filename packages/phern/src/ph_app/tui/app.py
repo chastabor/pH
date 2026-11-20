@@ -1,35 +1,38 @@
-"""`PHTuiApp` — widgets, keys, and the worker that drives a turn.
+"""`PHTuiApp`: the widgets, the keys, and the worker that drives a turn.
 
-Everything harness-shaped lives in `frontend.py`; this file is the terminal. It
-satisfies `ModalHost`, so the one rule that cannot be forgotten is enforced by
-where the code sits: turns run in a Textual worker, and only a worker may await
-a modal.
+This file is the terminal. `frontend.py` declares what the terminal needs from
+a harness, and `remote.py` implements it. `PHTuiApp` satisfies `ModalHost`.
+Turns run in a Textual worker, and only a worker may await a modal. The place
+of the code enforces that rule, so nobody can forget it.
 
-Keys are Textual bindings built from `TUI_VERBS` — plus one per screen a row
-contributed through `ctx.tui_screens` (P4-17) — and remapped from `tui.json`
-with one `set_keymap`, screens and modals included, since every binding carries
-an id. `priority=True` puts them ahead of the prompt's `TextArea`, which
-binds `ctrl+k`, `ctrl+y` and others for editing and would otherwise fire as well
-as, or instead of, the app. They are bound on `ChatScreen`, the app's base
-screen, so a dialog or another screen on top takes them out of the key chain;
-quit alone is bound on the app, which every screen's chain reaches.
+Keys are Textual bindings. They are built from `TUI_VERBS` and `VIEW_KEYS`,
+with one more for each screen that a row contributed through `ctx.tui_screens`
+(P4-17). One `set_keymap` call remaps them from `tui.json`, screens and modals
+included, since every binding carries an id. `priority=True` puts them ahead of
+the `TextArea` of the prompt. The `TextArea` binds `ctrl+k`, `ctrl+y` and
+others for editing. Without the priority, its binding would fire as well as the
+binding of the app, or in its place. The keys are bound on `ChatScreen`, the
+base screen of the app. A dialog or another screen on top therefore takes them
+out of the key chain. Only quit is bound on the app, which the key chain of
+every screen reaches.
 
 Redrawing is **coalesced, not polled**. A streaming turn commits an
-`assistant/chunk` every few tokens, and `view.sync` reconciles a widget list
-rather than repainting — Textual's own compositor coalescing does not cover it —
-so drawing per event spends more time laying out than rendering. Instead the
-first change schedules one draw a frame later and every change until then rides
-it: same bounded latency, and **nothing runs while nothing happens.**
+`assistant/chunk` every few tokens. `view.sync` reconciles a widget list and
+does not repaint, so the coalescing in the compositor of Textual does not cover
+it. A draw for each event therefore spends more time on layout than on
+rendering. Instead, the first change schedules one draw a frame later, and that
+one draw shows every change until then. The latency has the same bound, and
+**nothing runs while nothing happens.**
 
-That last part is the reason it is not a 30 Hz interval any more. Per terminal a
-polled flag costs thirty no-op wakeups a second, which is nothing; but
-`phern --mode web` runs *one Textual subprocess per browser tab*, and ten idle tabs
-polling a flag they will find unchanged is thirty times ten processes waking to
-do nothing.
+That last property is the reason why the redraw is not a 30 Hz interval any
+more. For one terminal, a polled flag costs thirty wakeups a second that do
+nothing, which is negligible. But `phern --mode web` runs *one Textual
+subprocess for each browser tab*. Ten idle tabs that poll an unchanged flag are
+ten processes, and each one wakes thirty times a second to do nothing.
 
-The spinner is the one thing that genuinely wants a clock, because it advances on
-wall-clock time rather than on anything arriving — so it gets its own interval,
-started when a turn starts and stopped when it ends.
+The spinner is the one thing that needs a clock, because it advances on
+wall-clock time and not when something arrives. It therefore has its own
+interval, which starts when a turn starts and stops when the turn ends.
 
 @module ph_app.tui.app
 """
@@ -116,28 +119,31 @@ log = logging.getLogger("ph_app.tui.app")
 _P = ParamSpec("_P")
 
 VERB_GROUP = "verb"
-"""The worker-group prefix a verb's harness call runs under.
+"""The prefix of the worker group under which the harness call of a verb runs.
 
-Named because three places agree on it: `verb_work` below, the gate that
-asserts every slow verb carries it, and the pilot tests that wait for one to
-finish rather than pausing and hoping."""
+It has a name because three places must agree on it: `verb_work` below, the
+gate that asserts that every slow verb carries it, and the pilot tests. The
+pilot tests wait for such a worker to finish, and do not pause for a guessed
+time."""
 
 
 def verb_work(
     verb: str,
 ) -> Callable[[Callable[_P, Coroutine[Any, Any, None]]], Callable[_P, Worker[None]]]:
-    """`@work` for a verb that has to reach the harness (H7), read off its row.
+    """`@work` for a verb that must reach the harness (H7). The policy is read
+    from the row of the verb.
 
-    **The policy is `TuiVerb.work`, not an argument here.** Both halves — that
-    this verb schedules at all, and whether a second press supersedes the first
-    — are facts about the verb, and `TUI_VERBS` is where a verb already says
-    what it is. Spelled at the decorator they were a second copy for a new verb
-    to get wrong, and a test had to assert the two agreed.
+    **The policy is `TuiVerb.work`, and not an argument here.** The policy has
+    two halves: whether this verb schedules a worker at all, and whether a
+    second press supersedes the first. Both are facts about the verb, and
+    `TUI_VERBS` is where a verb already says what it is. When they were written
+    at the decorator, they were a second copy that a new verb could get wrong,
+    and a test had to assert that the two agreed.
 
-    **A group per verb, which is what makes `replace` safe.** One shared group
-    with `exclusive=True` would mean opening the session picker cancels an
-    in-flight `/attach` — a different verb's work, and in that case an
-    attachment the person asked for and silently does not get.
+    **Each verb has its own group, and that makes `replace` safe.** With one
+    shared group and `exclusive=True`, opening the session picker would cancel
+    an `/attach` that is in flight. That is the work of a different verb. In
+    that case the user asked for an attachment and silently does not get it.
     """
     row = next((one for one in TUI_VERBS if one.name == verb), None)
     if row is None or row.work is None:  # pragma: no cover - the gate refuses it
@@ -146,40 +152,43 @@ def verb_work(
 
 
 ANSWERED_ELSEWHERE = "Answered in another terminal."
-"""Why a modal went away by itself — the ordinary reason, and the default."""
+"""Why a modal went away by itself. This is the usual reason, and the default."""
 
 FRAME_INTERVAL = 1 / 30
-"""Redraws a second. Fast enough that streaming looks continuous, slow enough
-that a burst of chunks costs one layout instead of forty."""
+"""The time between two redraws, in seconds: at most thirty redraws a second.
+That is fast enough that streaming looks continuous, and slow enough that a
+burst of chunks costs one layout and not forty."""
 
 
 class ChatScreen(Screen[None]):
-    """The app's base screen: the chat, and the keys that belong to it.
+    """The base screen of the app: the chat, and the keys that belong to it.
 
-    A screen of its own only for its bindings (`commands.screen_bindings`): bound
-    here rather than on the app, they are in the key chain exactly while this is
-    the screen on top. The layout is still `PHTuiApp.compose`'s.
+    It is a screen of its own only for its bindings (`commands.screen_bindings`).
+    Because they are bound here and not on the app, they are in the key chain
+    exactly while this screen is on top. The layout still comes from
+    `PHTuiApp.compose`.
     """
 
     BINDINGS: ClassVar[list[BindingType]] = screen_bindings(TuiKeybindings())
-    """Defaults; `PHTuiApp.on_mount` remaps them from the user's settings."""
+    """The defaults. `PHTuiApp.on_mount` remaps them from the settings of the user."""
 
 
 class PHTuiApp(App[str | None]):
     """pH in a terminal.
 
-    The exit value is a session id to reopen, or `None`. Resuming is a restart,
-    not a mutation: the transcript, the agent scope and every registration
-    belong to the session being left, so `run_tui` unwinds this app completely
-    and mounts a new one on the chosen session.
+    The exit value is a session id to reopen, or `None`. To resume is to
+    restart, and not to mutate. The transcript, the agent scope and every
+    registration belong to the session that the user leaves. `run_tui`
+    therefore unwinds this app completely and starts a new one on the chosen
+    session.
     """
 
     ENABLE_COMMAND_PALETTE = False
-    """pH's palette is `ctx.commands`, opened by its own verb."""
+    """pH has its own palette, `PHTuiApp.commands`, which its own verb opens."""
 
     BINDINGS: ClassVar[list[BindingType]] = app_bindings(TuiKeybindings())
-    """The keys that work behind a dialog (quit); `on_mount` remaps them with the
-    rest. The chat's own are `ChatScreen`'s."""
+    """The keys that work behind a dialog, which is only quit. `on_mount` remaps
+    them with the others. The keys of the chat belong to `ChatScreen`."""
 
     CSS = """
     Screen { background: $ph-background; color: $ph-foreground; layers: base; }
@@ -201,109 +210,122 @@ class PHTuiApp(App[str | None]):
     ) -> None:
         super().__init__()
         self.chat = ChatScreen()
-        """The base screen — `get_default_screen`'s, and where a contributed
-        screen's key is bound (`add_binding`)."""
+        """The base screen. `get_default_screen` returns it, and the key of a
+        contributed screen is bound on it (`add_binding`)."""
         self.profile = profile
-        """The profile a session this terminal *creates* runs on (S5); empty is the
-        daemon's own. A session it resumes runs on what that session's log records."""
+        """The profile on which a session that this terminal *creates* runs (S5).
+        Empty means the profile of the daemon. A session that this terminal
+        resumes runs on the profile that the log of that session records."""
         self.model_choice = model_choice
-        """`--provider`/`--model`, carried by `session/new` for the session this opens.
+        """`--provider` and `--model`. `session/new` carries them for the session
+        that this terminal opens.
 
-        This session's, not the daemon's: `spawn_command` carries no route, so a
-        daemon this terminal starts runs every other session on its profile's
-        default, and one already serving keeps them where they are. Refused, it
-        fails the start with the daemon's sentence, as `phern -p --model` would."""
+        The route belongs to this session and not to the daemon. `spawn_command`
+        carries no route, so a daemon that this terminal starts runs every other
+        session on the default of its profile. A daemon that is already serving
+        keeps its other sessions where they are. If the daemon refuses the
+        route, the start fails with the sentence of the daemon, as
+        `phern -p --model` would."""
         self.daemon_argv = tuple(daemon_argv)
-        """What to run when no daemon is listening.
+        """The command to run when no daemon is listening.
 
-        Handed in rather than built here, because it is the *CLI's* command line
-        — `ph_app.cli.spawn_command` spells the options — and a terminal that
-        composed it would be a terminal that knows what a profile is. After
-        P5-14 it does not: the daemon mounts, and this app reads a socket."""
+        The caller passes it in, and this app does not build it, because it is
+        the command line of the *CLI*: `ph_app.cli.spawn_command` spells the
+        options. A terminal that composed it would be a terminal that knows what
+        a profile is. After P5-14 it does not: the daemon mounts, and this app
+        reads a socket."""
         self.spawn = spawn
         """Whether to start a daemon when none is listening (P7-08).
 
-        `--no-spawn` turns it off, for a deployment running `phern daemon` under an
-        init system where a UI-started one would be a second supervisor
-        competing for the same session leases."""
+        `--no-spawn` turns it off. That is for a deployment that runs
+        `phern daemon` under an init system. There, a daemon that a UI started
+        would be a second supervisor that competes for the same session leases."""
         self.offer_sessions = offer_sessions
-        """Whether to offer this directory's sessions before starting a new one.
+        """Whether to offer the sessions of this directory before a new one starts.
 
-        `--new` turns it off. A person who always wants a fresh session should not
-        have to press a key to get one, and a script driving the TUI should not
-        meet a modal it did not ask for."""
+        `--new` turns it off. A user who always wants a fresh session should not
+        have to press a key to get one. A script that drives the TUI should not
+        meet a modal that it did not ask for."""
         self.session_id = session_id
         """The session to open, or `None` for a new one.
 
-        One field, not two: `--resume <id>` and `--session <id>` were separate
-        because mounting a stored session and creating one were different code
-        paths. Over the daemon they are the same call — `session/new` resumes an
-        existing id and `session/attach` pages its log — so a resume is an id and
-        nothing else."""
+        This is one field and not two. `--resume <id>` and `--session <id>` were
+        separate because to mount a stored session and to create one were
+        different code paths. Over the daemon they are the same calls:
+        `session/new` resumes an existing id, `session/attach` subscribes to
+        it, and `session/snapshot` pages its log. A resume is therefore an id
+        and nothing else."""
         self.home = home or resolve_roots().home
         self.settings: TuiSettings = load_tui_settings(self.home)
         self.catalog: ThemeCatalog = load_catalog(self.home)
         self.theme_profile: ThemeProfile = load_theme_profile(self.home)
         """Which theme to open in, and how `/theme` orders its list.
 
-        Its own file rather than a field on `self.settings`: `_save` writes the
-        whole of `tui.json`, so a theme living there would be rewritten by every
-        `/view` toggle and two files would claim one fact (P9-02)."""
+        It has its own file and is not a field on `self.settings`. `_save`
+        writes the whole of `tui.json`. A theme stored there would be rewritten
+        by every `/view` toggle, and two files would claim one fact (P9-02)."""
         self.project = Path.cwd()
         self.trust = TrustStore(path=trust_path(self.home))
         self.front: FrontSession | None = None
         self._client: DaemonClient | None = None
         self.refusal: str | None = None
-        """Why this terminal has no session: the sentence its start failed with,
-        kept until the person retries (H3). `None` before that, and once attached.
+        """Why this terminal has no session: the sentence that its start failed
+        with. It is kept until the user retries (H3). It is `None` before that,
+        and after the terminal is attached.
 
-        Read wherever a person could otherwise be left guessing — the status line,
-        a line typed at the prompt, a verb that needs a session — because the modal
-        that first said it can be dismissed, and a toast is gone in five seconds."""
+        Every place where a user could otherwise be left guessing reads it: the
+        status line, a line typed at the prompt, a verb that needs a session.
+        The modal that first showed the sentence can be dismissed, and a toast
+        is gone in five seconds."""
         self._verbs = local_commands(self)
-        """This terminal's own slash commands, built once: the completion source asks
-        for the list on every keystroke. The app's rather than the front end's, so
-        `/theme` and `/quit` answer whether or not anything is attached (H3)."""
+        """The slash commands of this terminal, built one time, because the
+        completion source asks for the list on every keystroke. They belong to
+        the app and not to the front end, so `/theme` and `/quit` answer whether
+        or not anything is attached (H3)."""
         self.title_writer = TerminalTitle()
         self._paths = PathCompleter(root=str(self.project))
         self._open_asks: dict[AskKey, PhModal[Any]] = {}
-        """Ask modals currently up, by the root and name the daemon asked under (H1).
+        """The ask modals that are up now, keyed by the root and the name under
+        which the daemon asked (H1).
 
-        So that `withdraw_ask` can take one down when another terminal answers
-        first. Empty for an ask with no id — an in-process caller has no second
-        front end to race with."""
+        The map lets `withdraw_ask` take a modal down when another terminal
+        answers first. An ask with no id is not in it: an in-process caller has
+        no second front end to race with."""
         self._dirty = Surface.ALL
         self._draw_timer: Timer | None = None
-        """The one scheduled draw, or `None` when none is pending.
+        """The one scheduled draw, or `None` when no draw is pending.
 
-        Its presence *is* the coalescing: a burst of appends schedules one draw
-        and then finds it already scheduled."""
+        Its presence *is* the coalescing: a burst of appends schedules one draw,
+        and every later append finds that draw already scheduled."""
         self._spinner: Timer | None = None
-        """The frame clock, alive only while a turn is."""
+        """The frame clock. It exists only while a turn runs."""
         self._readings: Sequence[StatusReading] = ()
-        """The footer as of the last draw, which the session panel places too.
+        """The footer as of the last draw. The session panel places these
+        readings too.
 
-        Cached because a reading is a *fold of the log* and the log only changes
-        on an append — which marks the footer dirty and refreshes this. A
-        sidebar-only frame reads it rather than folding the log again; the
-        spinner reads nothing, since its glyph has a cell of its own."""
+        They are cached because a reading is a *fold of the log*, and the log
+        changes only on an append. An append marks the footer dirty, and that
+        refreshes this cache. A frame that draws only the sidebar reads the
+        cache and does not fold the log again. The spinner reads nothing,
+        because its glyph has a cell of its own."""
         self._command_disposers: list[Callable[[], None]] = []
-        # Held rather than queried. `App.query_one` searches the *top* screen,
-        # so every lookup would fail while a modal is up — and the frame timer
-        # runs thirty times a second whether or not one is.
+        # The widgets are held and not queried. `App.query_one` searches the
+        # *top* screen, so every lookup would fail while a modal is up. The
+        # draw timer and the spinner fire whether or not a modal is up.
         self._view: TranscriptView | None = None
         self._status: StatusBar | None = None
         self._sidebar: Sidebar | None = None
         self._prompt: PromptInput | None = None
         self._history_rows: dict[str, str] = {}
-        """The open history picker's prompts, by seq — its *full* text, which the
-        one-line label has truncated.
+        """The prompts of the open history picker, by seq. Each value is the
+        *full* text, which the one-line label has truncated.
 
-        Held because `on_highlight` is handed a `Choice.value` and nothing else.
-        Text rather than whole records: the seq is the key already, so a record
-        would carry a second copy of it. Cleared when the picker closes, so a
-        `--resume` replay — which clears `TuiState.items` in place — cannot leave
-        the previous transcript's prompts pinned here."""
+        The map is held because `on_highlight` receives a `Choice.value` and
+        nothing else. It holds text and not whole records: the seq is already
+        the key, so a record would carry a second copy of it. The map is cleared
+        when the picker closes. A `--resume` replay, which clears
+        `TuiState.items` in place, therefore cannot leave the prompts of the
+        previous transcript held here."""
 
     @property
     def keys(self) -> TuiKeybindings:
@@ -313,21 +335,22 @@ class PHTuiApp(App[str | None]):
         return fallback_variables()
 
     def get_default_screen(self) -> ChatScreen:
-        """The chat's own screen, holding the chat's own keys — see `ChatScreen`."""
+        """The screen of the chat, which holds the keys of the chat. See `ChatScreen`."""
         return self.chat
 
     def add_binding(self, binding: Binding) -> Callable[[], None]:
-        """Bind a key on the chat's screen, and hand back its removal.
+        """Bind a key on the screen of the chat, and return a function that
+        removes it.
 
-        Here rather than in `screens.py` because this is the one place that
-        reaches into Textual's internals, and it belongs beside the other
-        binding concerns — `BINDINGS`, `set_keymap`, `check_action` — where a
-        Textual upgrade will be looked for.
+        This is here and not in `screens.py` because it is the one place that
+        reaches into the internals of Textual. It belongs beside the other
+        binding code, `BINDINGS` and `set_keymap`, which is where someone will
+        look after a Textual upgrade.
 
-        Written against `BindingsMap.key_to_bindings` rather than the public
-        `bind()`, which drops the `id`: the id is what `apply_keymap` matches
-        on, so without it a contributed screen's key would be the one key in
-        the app a user could not rebind.
+        It writes to `BindingsMap.key_to_bindings` and does not call the public
+        `bind()`, because `bind()` drops the `id`. `apply_keymap` matches on the
+        id. Without it, the key of a contributed screen would be the one key in
+        the app that a user could not rebind.
         """
         table = self.chat._bindings.key_to_bindings
         table.setdefault(binding.key, []).append(binding)
@@ -345,10 +368,10 @@ class PHTuiApp(App[str | None]):
         return remove
 
     def _refresh_bindings(self) -> None:
-        """Tell the app its bindings moved, if there is still an app to tell.
+        """Tell the app that its bindings changed, if the app is still running.
 
-        Teardown reaches here: unwinding a row's scope removes its key after the
-        app has stopped, and `refresh_bindings` walks the screen stack.
+        Teardown reaches this method. The key of a screen can be removed after
+        the app has stopped, and `refresh_bindings` walks the screen stack.
         """
         if self.is_running:
             self.refresh_bindings()
@@ -362,8 +385,9 @@ class PHTuiApp(App[str | None]):
             with Vertical(id="main"):
                 yield TranscriptView(id="transcript")
                 with Vertical(id="chrome"):
-                    # The status line first: it is the prompt's top edge (see
-                    # `StatusBar`), so it sits between the conversation and the box.
+                    # The status line comes first. It is the top edge of the
+                    # prompt (see `StatusBar`), so it sits between the
+                    # conversation and the box.
                     yield StatusBar()
                     yield PromptInput(
                         self.keys,
@@ -382,41 +406,42 @@ class PHTuiApp(App[str | None]):
         self._sidebar = self.query_one(Sidebar)
         self._prompt = self.query_one(PromptInput)
         self._sidebar.display = self.settings.sidebar != "off"
-        # The first draw is scheduled like every other one. `__init__` cannot:
-        # `set_timer` needs a running app.
+        # The first draw is scheduled like every other draw. `__init__` cannot
+        # schedule it, because `set_timer` needs a running app.
         self.state_changed()
         self._prompt.area.focus()
         if self.trust.trusted(self.project):
             self.run_worker(self._open(""), group="open")
             return
-        # Asked before mounting, because mounting is what reads the project's
-        # AGENTS.md, its hooks and its configured plugins. `push_screen` with a
-        # callback, never awaited: this runs on the message pump.
+        # The question comes before the mount, because the mount is what reads
+        # the `AGENTS.md` of the project, its hooks and its configured plugins.
+        # `push_screen` takes a callback and is never awaited, because this
+        # runs on the message pump.
         self.push_screen(project_trust_modal(self.project), self._answer_trust)
 
     def _answer_trust(self, answer: TrustAnswer | str | None) -> None:
-        """Carry the person's answer to the daemon, which is what enforces it.
+        """Carry the answer of the user to the daemon, which enforces it.
 
-        Not written down here — the file has one writer, on the side that
-        mounts. `ph_app.trust` says why.
+        The answer is not written down here. The file has one writer, on the
+        side that mounts. `ph_app.trust` says why.
         """
         if answer in ("always", "once"):
-            # Narrowed by the check above; `push_screen`'s callback is typed by
-            # the modal's result, which is any of its action names.
+            # The check above narrows the value. The callback of `push_screen` is
+            # typed by the result of the modal, which is any of its action names.
             self.run_worker(self._open(cast("TrustAnswer", answer)), group="open")
             return
         self.exit()
 
     async def _open(self, trust: TrustAnswer) -> None:
-        """Get a daemon, attach to a session on it, and read it. In a worker.
+        """Get a daemon, attach to a session on it, and read it. Runs in a worker.
 
-        The harness is in the daemon now (P5-14), so this connects rather than
-        mounts — and starts one first if nothing is listening, because making a
-        person run `phern daemon` before `phern` would put a second command in front
-        of the ordinary case.
+        The harness is in the daemon now (P5-14), so this connects and does not
+        mount. It starts a daemon first if nothing is listening. If a user had
+        to run `phern daemon` before `phern`, the ordinary case would need a
+        second command.
 
-        The pump is a worker of its own and outlives this one: `attach_session`
-        makes calls that only complete once something is reading replies.
+        The pump is a worker of its own and outlives this one. `attach_session`
+        makes calls that complete only when something reads the replies.
         """
         try:
             started = await ensure_daemon(
@@ -426,8 +451,8 @@ class PHTuiApp(App[str | None]):
             client = await DaemonClient.connect(started.path)
             self._client = client
             self.run_worker(client.pump(), group="pump", exclusive=False)
-            # Started before the attach, because the attach itself is a call that
-            # a dead daemon never answers.
+            # The watcher starts before the attach, because the attach is itself
+            # a call that a dead daemon never answers.
             self.run_worker(self._watch_daemon(client), group="daemon", exclusive=False)
             chosen = await self._offer_sessions(client)
             self.front = await attach_session(
@@ -444,41 +469,46 @@ class PHTuiApp(App[str | None]):
             log.exception("ph_app.tui: could not attach to a daemon")
             await self._could_not_start(str(error), trust)
             return
-        # A screen a row contributed gets its verb, its key and its palette
-        # entry from here — but each of those unwinds with the *row*, not with
-        # this list, which is what makes unloading one take all three with it.
+        # A screen that a row contributed gets its verb, its key and its palette
+        # entry from this call. This list releases them only when the app
+        # unmounts. When a row unloads, the daemon sends the new screen list,
+        # and the front end releases all three and builds them again for the
+        # screens that remain (`DaemonSession._wire_screens`).
         self._command_disposers = self.front.attach_surfaces(self)
         self.state_changed()
         if self.front.arrival:
             self.notify(self.front.arrival, title="profile", markup=False)
 
     async def _offer_sessions(self, client: DaemonClient) -> str | None:
-        """The session this person picked to resume, or `None` for a fresh one.
+        """The session that the user picked to resume, or `None` for a fresh one.
 
-        **Answers rather than assigning `self.session_id`**, which it did first:
-        that field is documented as the *CLI's* input, so writing a modal's output
-        into it made what the field meant depend on when you read it.
+        **It returns the answer and does not assign `self.session_id`**, which
+        it did at first. That field is documented as the input of the *CLI*. To
+        write the output of a modal into it made the meaning of the field
+        depend on when it was read.
 
-        **Between the daemon and the attach**, which is the only place it fits:
-        the list is the daemon's to fold, and the attach is what it decides.
-        Trust comes before both — mounting is what reads the project's
-        `AGENTS.md`, its hooks and its configured plugins, so a person who has not
-        trusted the directory is not asked which of its sessions to open.
+        **It runs between the daemon and the attach**, which is the only place
+        where it fits. The daemon folds the list, and the answer decides what
+        the attach opens. Trust comes before both. The mount is what reads the
+        `AGENTS.md` of the project, its hooks and its configured plugins, so a
+        user who has not trusted the directory is not asked which of its
+        sessions to open.
 
-        Awaiting a modal is legal here because `_open` runs in a worker, which is
-        the rule this whole class is shaped around.
+        It is legal to await a modal here because `_open` runs in a worker. This
+        whole class is built around that rule.
 
-        Silent in the two cases that matter: a directory nobody has worked in, and
-        a run that already knows its session (`--session`, `--resume`, `--new`).
-        A first run must not meet a modal listing nothing.
+        It is silent in the two cases that matter: a directory that nobody has
+        worked in, and a run that already knows its session (`--session`,
+        `--resume`, `--new`). A first run must not meet a modal that lists
+        nothing.
         """
         if self.session_id is not None or not self.offer_sessions:
             return None
         try:
             sessions = await browse_on(client, cwd=str(self.project))
         except Exception:
-            # A picker is a convenience; failing to build one must not stop the
-            # session it was offering to open.
+            # A picker is a convenience. A failure to build one must not stop
+            # the session that it offered to open.
             log.warning("ph_app.tui: could not list this directory's sessions", exc_info=True)
             return None
         if not sessions:
@@ -490,29 +520,34 @@ class PHTuiApp(App[str | None]):
                 free_text="session id",
             )
         )
-        # `None` is escape and `NEW_SESSION` is the first row: one answer, because
-        # both mean "not one of these".
+        # `None` is escape and `NEW_SESSION` is the first row. They are one
+        # answer, because both mean "not one of these".
         return None if chosen == NEW_SESSION else chosen
 
     async def _could_not_start(self, reason: str, trust: TrustAnswer) -> None:
-        """There is no session, and this is why — kept on screen, and answerable (H3).
+        """Report that there is no session, and why. The reason stays on screen,
+        and the user can answer it (H3).
 
-        A toast was the whole report, and a toast lasts five seconds. What it left
-        was a terminal with its headings drawn and nothing behind them: a prompt
-        that swallowed every line, and `/quit` doing nothing, because every slash
-        command was dispatched through the front end that had not been built. The
-        person who met it read it as a hang, and the sentence that would have told
-        them otherwise had already gone.
+        A toast used to be the whole report, and a toast lasts five seconds. It
+        left a terminal with its headings drawn and nothing behind them. The
+        prompt swallowed every line. `/quit` did nothing, because every slash
+        command was dispatched through the front end, which had not been built.
+        The user who met it read it as a hang, and the sentence that would have
+        explained it was already gone.
 
-        So the sentence stays — on the status line, and under every line typed at
-        the prompt — and a modal asks what to do about it. **Retry** runs the whole
-        open again, for the case where the fix is in another terminal: a daemon
-        that would not start, an install put right. **Quit** leaves, with the exit
-        code `action_quit` gives a start that never happened. Esc stays, with this
-        terminal's own verbs still answering (`run_command`).
+        So the sentence stays, on the status line and under every line typed at
+        the prompt, and a modal asks what to do about it:
 
-        Awaiting the modal is legal here for `_offer_sessions`'s reason: this runs
-        in the `_open` worker, never on the message pump.
+        - **Retry** runs the whole open again. That is for the case where the
+          fix is in another terminal: a daemon that would not start, or an
+          install that was repaired.
+        - **Quit** leaves, with the exit code that `action_quit` gives a start
+          that never happened.
+        - Esc stays, and the verbs of this terminal still answer (`run_line`).
+
+        It is legal to await the modal here for the same reason as in
+        `_offer_sessions`: this runs in the `_open` worker, never on the message
+        pump.
         """
         await self._disconnect()
         self.refusal = reason
@@ -525,16 +560,17 @@ class PHTuiApp(App[str | None]):
         elif decision == "quit":
             await self.action_quit()
         elif self._prompt is not None:
-            # Staying means typing next, and a modal's close leaves nothing focused
-            # — the pickers refocus the prompt for the same reason (`_insert_command`).
+            # To stay means to type next, and the close of a modal leaves nothing
+            # focused. The pickers refocus the prompt for the same reason
+            # (`_insert_command`).
             self._prompt.area.focus()
 
     async def _disconnect(self) -> None:
-        """Close the connection this app opened: after an attach failed, so a retry
-        starts clean, and on the way out.
+        """Close the connection that this app opened. That happens after a failed
+        attach, so that a retry starts clean, and on the way out.
 
-        The watcher first: it reports a daemon that *went away*, and a socket this
-        terminal closes on purpose is not that.
+        The watcher is canceled first. It reports a daemon that *went away*, and
+        a socket that this terminal closes on purpose is not that.
         """
         client, self._client = self._client, None
         if client is None:
@@ -543,11 +579,11 @@ class PHTuiApp(App[str | None]):
         await client.aclose()
 
     async def on_unmount(self) -> None:
-        # **Before anything else unwinds.** Both timers call into widgets, and a
-        # frame that lands after the status bar has been taken apart queries a
-        # node that is no longer there. The old single interval was stopped for
-        # free when the app shut its own timers down; two timers this class owns
-        # are two this class stops.
+        # **The timers stop before anything else unwinds.** Both timers call
+        # into widgets. A frame that lands after the status bar has been taken
+        # apart queries a node that is no longer there. The old single interval
+        # needed no code here, because the app stopped it when it shut down its
+        # own timers. This class owns two timers, so this class stops two.
         self._spin(False)
         if self._draw_timer is not None:
             self._draw_timer.stop()
@@ -557,35 +593,38 @@ class PHTuiApp(App[str | None]):
         self._command_disposers.clear()
         if self.front is not None:
             await self.front.close()
-        # **This app opened the connection, so this app closes it.** The front end
-        # only detaches: a host that kept one connection across several sessions —
-        # a browser tab per session, say — must not have one closing the socket the
-        # others are on. Without this the daemon keeps the subscription, and a
-        # subscriber is its own claim on a root's life, so nothing the sweep does
-        # can ever release it.
+        # **This app opened the connection, so this app closes it.** The front
+        # end only detaches. A host that kept one connection across several
+        # sessions, for example a browser tab for each session, must not have
+        # one of them close the socket that the others are on. Without this
+        # close, the daemon keeps the subscription. A subscriber is its own
+        # claim on the life of a root, so nothing that the sweep does can ever
+        # release it.
         await self._disconnect()
         self.title_writer.clear()
 
     # ---------------------------------------------------------------- frames --
 
     def state_changed(self, surfaces: Surface = Surface.ALL) -> None:
-        """Something the view renders has changed. Draw soon, once, and narrowly.
+        """Something that the view renders has changed. Draw soon, one time, and
+        only what changed.
 
-        **The single entry point**, and every local mutation goes through it too
-        rather than setting the flag: the flag alone was enough while a poll was
-        watching it, and is a permanently stale pane now that nothing is. That is
-        the one thing this change makes worse if it is got wrong, so there is one
-        place to get right.
+        **This is the single entry point.** Every local mutation goes through it
+        too, and does not set the flag directly. The flag alone was enough while
+        a poll watched it. Now that nothing polls, a flag that is set with no
+        draw scheduled leaves a pane stale permanently. That is the one thing
+        that the change to coalesced draws makes worse if it goes wrong, so
+        there is one place to get right.
 
-        **The timer is a debounce, not a frame rate.** It is `set_timer` and it
-        is armed only when it is not already, so no event means no draw; what it
-        bounds is how often events *may* redraw. During a streaming turn they
-        arrive faster than that, which is what makes `surfaces` worth having:
-        the flag used to be one boolean, so a chunk that can only move the
-        transcript redrew the sidebar at the ceiling rate too.
+        **The timer is a debounce, and not a frame rate.** It is a `set_timer`,
+        and it is armed only when it is not already armed, so no event means no
+        draw. It limits how often events *may* redraw. During a streaming turn,
+        events arrive faster than that limit, and that is why `surfaces` is
+        worth having. The flag used to be one boolean, so a chunk that can only
+        change the transcript also redrew the sidebar at the maximum rate.
 
-        `ALL` by default, so a caller that has not thought about it is correct
-        rather than stale.
+        The default is `ALL`, so a caller that has not thought about it is
+        correct and not stale.
         """
         self._dirty |= surfaces
         if self._draw_timer is None:
@@ -598,17 +637,17 @@ class PHTuiApp(App[str | None]):
         if status is None or view is None:
             return
         if front is None:
-            # Nothing to fold: the footer says why, and the rest waits for a front
-            # end — `_dirty` is left as it is, so the first draw after the attach
-            # is a whole one.
+            # There is nothing to fold. The footer says why, and the other
+            # surfaces wait for a front end. `_dirty` is left as it is, so the
+            # first draw after the attach is a whole one.
             status.show_unattached(self.refusal)
             return
         dirty, self._dirty = self._dirty, Surface.NOTHING
         if Surface.FOOTER in dirty:
-            # The readings with the footer, because they *are* the footer's
-            # right-hand half — and each is a fold of the log, so re-reading
-            # them for a transcript-only frame is the expensive half of a draw
-            # nobody asked for.
+            # The readings are read with the footer, because they *are* the
+            # right-hand half of the footer. Each one is a fold of the log. To
+            # read them again for a frame that draws only the transcript would
+            # be the expensive half of a draw that nobody asked for.
             self._readings = front.status_readings()
             status.show(front.state, self._readings)
         if Surface.TRANSCRIPT in dirty:
@@ -634,17 +673,17 @@ class PHTuiApp(App[str | None]):
             self._spinner = None
 
     def _advance(self) -> None:
-        """One spinner frame: the glyph, and the title.
+        """One spinner frame: the glyph and the title, and nothing else.
 
-        Only those. The glyph has a cell of its own (`StatusBar`), so a frame
-        repaints one cell; the line beside it is rebuilt by `_draw` when a fact
-        on it changes, which every fact does through a `FOOTER`-dirty frame.
-        Thirty times a second this used to rebuild the line and re-run the
-        layout under it to move one glyph.
+        The glyph has a cell of its own (`StatusBar`), so a frame repaints one
+        cell. `_draw` rebuilds the line beside it when a fact on the line
+        changes, and every such change arrives as a `FOOTER`-dirty frame. This
+        method used to rebuild the line and run the layout under it again
+        thirty times a second, to move one glyph.
 
-        It also stops itself if the turn ended without a draw noticing. Belt and
-        braces: `_draw` is what normally stops it, and a spinner nobody can stop
-        is the failure mode of every animation loop ever written.
+        It also stops itself if the turn ended and no draw noticed. That is a
+        second safeguard. `_draw` normally stops the spinner, and a spinner
+        that nobody can stop is the usual failure of an animation loop.
         """
         front, status = self.front, self._status
         if front is None or status is None or not front.state.busy:
@@ -662,49 +701,54 @@ class PHTuiApp(App[str | None]):
 
     async def on_prompt_input_submitted(self, message: PromptInput.Submitted) -> None:
         if message.text.startswith("/"):
-            # A command is the human's verb. Sending it as a prompt would spend
-            # a turn and make the log say the model chose it. First, and before
-            # asking for a front end: the terminal's own verbs need none (H3).
+            # A command is the verb of the human. To send it as a prompt would
+            # spend a turn and make the log say that the model chose it. This
+            # check comes first, and before the check for a front end, because
+            # the verbs of the terminal need no front end (H3).
             #
-            # **On a worker, like the two shell branches below** (H7). This is a
-            # handler on Textual's message pump, and a daemon verb is a round trip:
-            # `/compact` spends a whole model call in there. Awaited here it froze
-            # the entire UI for the duration — no keystrokes, no repaint, not even
-            # the spinner — for the command whose whole job is to take a while.
-            # `_dispatch_command` already reports its own failures through
-            # `notify`, which is a worker's contract, so nothing else had to change.
+            # **It runs on a worker, like the two shell branches below** (H7).
+            # This is a handler on the message pump of Textual, and a daemon
+            # verb is a round trip: `/compact` spends a whole model call in it.
+            # When the command was awaited here, it froze the entire UI for
+            # that time, with no keystrokes, no repaint, and not even the
+            # spinner. That happened for exactly the command that is meant to
+            # take a while. `_dispatch_command` already reports its own
+            # failures through `notify`, which is the contract of a worker, so
+            # nothing else had to change.
             self.run_worker(self._dispatch_command(message.text), group="command")
             return
         front = self._attached("pH has no session")
         if front is None:
             return
         if message.text.startswith("!!"):
-            # The person's own shell, not a turn: `!!` spends no tokens and the
-            # model never sees it. Logged all the same — pressing enter is an act
-            # in the session, so every attached UI renders it from the event.
+            # This is the shell of the user, and not a turn. `!!` spends no
+            # tokens and the model never sees it. It is logged all the same. To
+            # press enter is an act in the session, so every attached UI renders
+            # it from the event.
             self.run_worker(self._shell(front, message.text[2:].strip()), group="shell")
             return
         if message.text.startswith("!"):
-            # Tested after `!!` so the longer prefix wins — `!!ls` must not read
-            # as `!` of `!ls`. What `surface` then means is `ph_app.shell`'s.
+            # `!` is tested after `!!` so that the longer prefix wins: `!!ls`
+            # must not read as `!` of `!ls`. `ph_app.shell` says what `surface`
+            # then means.
             self.run_worker(
                 self._shell(front, message.text[1:].strip(), surface=True), group="shell"
             )
             return
         if message.queue or front.state.busy:
-            # The driver refuses a second concurrent `run()`, and a person
-            # typing mid-turn means "also this", not "instead of that".
+            # The driver refuses a second concurrent `run()`. A user who types
+            # during a turn means "also this", and not "instead of that".
             front.queue(message.text)
             return
         self._run_turn(message.text)
 
     async def _shell(self, front: FrontSession, command: str, *, surface: bool = False) -> None:
-        """Run `!<command>` or `!!<command>` and let the log do the rendering.
+        """Run `!<command>` or `!!<command>`. The log does the rendering.
 
-        Nothing is drawn here: the command and its output arrive as `shell/*`
-        events like everything else, which is what keeps `TuiState` entirely
-        event-derived and lets the browser and the terminal share one fold. That
-        holds for `!` too — its splice is a further event, never a draw.
+        Nothing is drawn here. The command and its output arrive as `shell/*`
+        events like everything else. That keeps `TuiState` entirely derived
+        from events, and lets the browser and the terminal share one fold. It
+        holds for `!` too: its splice is a further event, never a draw.
         """
         if not command:
             self.notify(
@@ -721,31 +765,32 @@ class PHTuiApp(App[str | None]):
 
     @verb_work("attach")
     async def action_attach(self, argument: str = "") -> None:
-        """`/attach <path> …` — stage files for the next prompt.
+        """`/attach <path> …`: stage files for the next prompt.
 
-        **Client-side, and that is the whole point** (I-9): the front end reads
-        the bytes with the person's own permissions and hands the harness
-        content, never a path. In process that reads this machine; over a socket
-        it reads the *client's* machine, which is the only thing a browser tab
-        could do and the reason a remote terminal can attach a file the daemon
-        has never seen.
+        **This runs on the client, and that is the purpose** (I-9). The front
+        end reads the bytes with the permissions of the user and hands content
+        to the harness, never a path. In process, that reads this machine. Over
+        a socket, it reads the machine of the *client*. That is the only thing
+        that a browser tab could do, and it is the reason why a remote terminal
+        can attach a file that the daemon has never seen.
 
-        The one verb that takes an argument, so it is the one whose body reads
-        one — `_RunAction` forwards what followed the name. Chosen from the
-        palette there is nothing to attach, so it says how it is used rather
-        than doing nothing.
+        This verb takes an argument, so its body reads one: `_RunAction`
+        forwards what followed the name. `/view` is the only other verb in
+        `TUI_VERBS` that takes one. When the verb is chosen from the palette,
+        there is nothing to attach. It then says how it is used, because
+        otherwise it would do nothing.
         """
-        # `shlex.split`, not `str.split` (H7). A path with a space in it is the
-        # ordinary case on a Mac — `~/Library/Application Support/...` — and
-        # whitespace-splitting turned one `/attach "my notes.md"` into two
-        # filenames that do not exist, reported as two failures naming neither
-        # of the things the person typed. Quoting is what a person reaches for,
-        # and it is what the shell they typed it into would have honored.
+        # `shlex.split`, and not `str.split` (H7). A path with a space in it is
+        # the ordinary case on a Mac: `~/Library/Application Support/...`. A
+        # split on whitespace turned one `/attach "my notes.md"` into two
+        # filenames that do not exist. They were reported as two failures, and
+        # neither named what the user typed. A user reaches for quotes, and the
+        # shell that they typed the line into would have honored them.
         try:
             paths = shlex.split(argument)
         except ValueError:
-            # An unbalanced quote. Their text back, rather than a traceback or a
-            # silent mis-split of it.
+            # An unbalanced quote. The user gets their text back, and not a
+            # traceback or a silent wrong split of it.
             paths = [argument.strip()] if argument.strip() else []
         front = self._attached("attach")
         if front is None:
@@ -756,8 +801,8 @@ class PHTuiApp(App[str | None]):
         try:
             staged = await front.attach(paths)
         except Exception as error:
-            # Loud: a person who attached a diagram and got a plain text turn
-            # would have no way to tell it was never sent (P7-01).
+            # This is loud. A user who attached a diagram and got a plain text
+            # turn would have no way to tell that it was never sent (P7-01).
             log.exception("ph_app.tui: attaching failed")
             self.notify(str(error), title="attach", severity="error", markup=False)
             return
@@ -785,19 +830,21 @@ class PHTuiApp(App[str | None]):
         self.state_changed()
 
     def commands(self) -> list[CommandDefinition]:
-        """Every slash command that can run here now, for the palette, the completion
-        list and `_dispatch_command`: this terminal's own, then whatever its front end
-        offers — each screen's, and the daemon's."""
+        """Every slash command that can run here now. The palette, the completion
+        list and `_dispatch_command` read it. The commands of this terminal come
+        first. Then come the commands that its front end offers: one for each
+        screen, and those of the daemon."""
         front = self.front
         return [*self._verbs, *(front.commands() if front is not None else ())]
 
     def _attached(self, verb: str) -> FrontSession | None:
-        """The front end a verb needs, or the sentence saying why there is none.
+        """The front end that a verb needs, or a notification that says why there
+        is none.
 
-        A verb that does nothing and says nothing is one the person presses again;
-        silent returns here were part of how a failed start came to look like a
-        hang (H3). `verb` titles the toast, so it reads as the answer to the key
-        that was pressed.
+        A user presses a verb again when it does nothing and says nothing.
+        Silent returns here were part of how a failed start came to look like a
+        hang (H3). `verb` is the title of the toast, so the toast reads as the
+        answer to the key that was pressed.
         """
         front = self.front
         if front is None:
@@ -810,28 +857,29 @@ class PHTuiApp(App[str | None]):
         return front
 
     async def _watch_daemon(self, client: DaemonClient) -> None:
-        """Say so, once, when the daemon goes away (H3).
+        """Tell the user, one time, when the daemon goes away (H3).
 
-        Nothing did. The pump ended, `_until_idle` returned, and the terminal
-        went on showing a spinner for a turn that had stopped existing — the
-        failure state the whole UI could not name. A person's only evidence was
-        that nothing ever happened again.
+        Nothing used to. The pump ended, `_until_idle` returned, and the
+        terminal went on showing a spinner for a turn that no longer existed.
+        The UI had no way to name this failure state. The only evidence that a
+        user had was that nothing ever happened again.
 
-        The app is **not** ended here. The transcript up to the disconnection is
-        worth reading, `/sessions` still works once a daemon is back, and killing
-        a terminal over a socket is this row's own failure arriving from the
-        other side. What is owed is the truth on screen.
+        This does **not** end the app. The transcript up to the disconnection is
+        worth reading, `/sessions` still works once a daemon is back, and
+        killing a terminal over a socket is this row's own failure arriving from
+        the other side. What the user is owed is the truth on screen.
         """
         await client.closed.wait()
         front = self.front
         if front is not None:
             front.state.stand_down()
-        # **Every open ask, for the same reason one is withdrawn when somebody
-        # else answers it: a question nothing can receive is a control that looks
-        # live and is not.** The task awaiting the modal has been cancelled with
-        # the read loop, and Textual leaves a screen on the stack when its waiter
-        # goes — so without this the person is left holding a modal while the
-        # notification below tells them the daemon is gone.
+        # **Every open ask is withdrawn, for the same reason that one is
+        # withdrawn when somebody else answers it: a question that nothing can
+        # receive is a control that looks live and is not.** The task that
+        # awaited the modal was canceled with the read loop, and Textual leaves
+        # a screen on the stack when its waiter goes. Without this loop, the
+        # user is left holding a modal while the notification below says that
+        # the daemon is gone.
         for ask in list(self._open_asks):
             self.withdraw_ask(ask, reason="")
         self.notify(
@@ -844,7 +892,7 @@ class PHTuiApp(App[str | None]):
 
     @work(exclusive=True, group="turn")
     async def _run_turn(self, text: str) -> None:
-        """One turn, in a worker — which is what makes the modals legal."""
+        """One turn, in a worker. The worker is what makes the modals legal."""
         front = self.front
         if front is None:
             return
@@ -878,7 +926,8 @@ class PHTuiApp(App[str | None]):
         return decision_of(await self._ask(ask, profile_changed_modal(name, listing)))
 
     async def _ask[T](self, ask: AskKey | None, modal: PhModal[T]) -> T:
-        """Push one ask modal and wait, findable by `ask` while it is up."""
+        """Push one ask modal and wait. `withdraw_ask` can find the modal by `ask`
+        while it is up."""
         if ask is not None:
             self._open_asks[ask] = modal
         try:
@@ -890,14 +939,15 @@ class PHTuiApp(App[str | None]):
     def withdraw_ask(self, ask: AskKey, *, reason: str = ANSWERED_ELSEWHERE) -> None:
         """`ModalHost`: this ask can no longer be delivered (H1).
 
-        Dismissed with the modal's own cancel value — the same one Esc produces —
-        because the answer is discarded either way: whoever mooted the ask did so
-        before this got here. What matters is that the modal goes and that the
-        person is told *why*, rather than watching it vanish under their hands.
+        The modal is dismissed with its own cancel value, the same one that Esc
+        produces, because the answer is discarded either way: whatever made the
+        ask moot did so before this call arrived. What matters is that the modal
+        goes and that the user is told *why*, and does not only see it vanish.
 
-        `reason=""` withdraws silently, for the caller that is about to say
-        something better: the daemon going away takes every open ask with it, and
-        one notification per modal would bury the sentence that explains them.
+        `reason=""` withdraws silently, for a caller that is about to say
+        something better. When the daemon goes away, it takes every open ask
+        with it, and one notification for each modal would bury the sentence
+        that explains them.
         """
         modal = self._open_asks.pop(ask, None)
         if modal is None:
@@ -907,9 +957,10 @@ class PHTuiApp(App[str | None]):
         modal.withdraw()
 
     # -------------------------------------------------------------- actions --
-    # One per `TuiVerb`. Reached by key, by `/command`, and by `run_action`.
-    # Every picker opens with `push_screen(screen, callback)` and returns: an
-    # action runs on the message pump, where awaiting a dismissal deadlocks.
+    # There is one action for each `TuiVerb`. It is reached by key, by
+    # `/command`, and by `run_action`. Every picker opens with
+    # `push_screen(screen, callback)` and returns. An action runs on the message
+    # pump, where to await a dismissal deadlocks.
 
     def _pick(
         self,
@@ -921,11 +972,12 @@ class PHTuiApp(App[str | None]):
         self.push_screen(ChoicePicker(title=title, choices=choices, **options), then)
 
     def action_open_screen(self, screen_id: str) -> None:
-        """Open a screen a row contributed (P4-17).
+        """Open a screen that a row contributed (P4-17).
 
-        One action for every registered screen, reached by its key and by its
-        `/<id>` command alike. `build` runs here rather than at registration, so
-        what opens is a fold of the log as it stands.
+        This is one action for every registered screen. The key of the screen
+        and its `/<id>` command both reach it. `build` runs here and not at
+        registration, so the screen that opens is a fold of the log as it is
+        now.
         """
         front = self.front
         if front is None:
@@ -940,12 +992,14 @@ class PHTuiApp(App[str | None]):
             )
             return
         if front.diverged:
-            # A screen is built from this client's mirror of the log, and a mirror
-            # that refused a frame is a *prefix* with no way to tell how short. Said
-            # rather than drawn: the old code rebuilt the session here and a
-            # non-contiguous log refused loudly at exactly this point, which is how
-            # the last instance of this was found. Keeping the mirror incrementally
-            # moved the refusal earlier, so this is where it has to be asked about.
+            # A screen is built from the mirror of the log that this client
+            # keeps. A mirror that refused a frame is a *prefix*, and nothing
+            # says how short it is. So this says so and draws nothing. The old
+            # code rebuilt the session here, and a non-contiguous log refused
+            # loudly at exactly this point, which is how the last instance of
+            # this fault was found. Now that the mirror is kept incrementally,
+            # the refusal happens earlier, so this is the place that must ask
+            # about it.
             self.notify(
                 "this client missed part of the log, so a screen built from it would "
                 "be incomplete — reattach to rebuild it",
@@ -956,18 +1010,18 @@ class PHTuiApp(App[str | None]):
             return
         screen = definition.build(front.session)
         if isinstance(screen, Revealing) and self._view is not None:
-            # Opened where the reader is, when the screen can take a position.
+            # The screen opens where the reader is, when it can take a position.
             seq = self._view.seq_in_view()
-            if seq >= 0:
+            if seq is not None:
                 screen.reveal(seq)
         self.push_screen(screen)
 
     def on_reveal_seq(self, message: RevealSeq) -> None:
-        """A screen asking for the transcript row behind one of its own.
+        """A screen asks for the transcript row behind one of its own rows.
 
-        The other half of the join: the screen names a log seq, the transcript
-        owns which widget that is. Popping first, so what the reader lands on is
-        the row and not the screen they were leaving.
+        This is the other half of the join. The screen names a log seq, and the
+        transcript knows which widget that is. The screen is popped first, so
+        that the reader lands on the row and not on the screen that they left.
         """
         message.stop()
         if len(self.screen_stack) > 1:
@@ -1017,11 +1071,11 @@ class PHTuiApp(App[str | None]):
         self.run_worker(self._choose_model(choice), group="model", exclusive=True)
 
     async def _choose_model(self, choice: ModelChoice) -> None:
-        """Ask the daemon for `choice`, and say what it answered.
+        """Ask the daemon for `choice`, and report what it answered.
 
-        The route changes on the daemon, not here: a terminal that set its own
-        footer first would show a model nothing is running on whenever the
-        daemon refused — which is what `/model` did before it was real.
+        The route changes on the daemon and not here. A terminal that set its
+        own footer first would show a model that nothing runs on whenever the
+        daemon refused. `/model` did exactly that before it was real.
         """
         front = self.front
         if front is None:
@@ -1038,12 +1092,12 @@ class PHTuiApp(App[str | None]):
 
     @verb_work("sessions")
     async def action_open_sessions(self) -> None:
-        """Which sessions exist — one question, asked of the harness.
+        """Which sessions exist: one question, asked of the harness.
 
-        The stored logs and the live roots are folded where both are known, so
-        this terminal reads no session file and needs no directory: it used to be
-        handed a path and walk it, which worked only while it and the harness
-        shared a machine.
+        The harness folds the stored logs and the live roots, because it knows
+        both. This terminal therefore reads no session file and needs no
+        directory. It used to receive a path and walk it, which worked only
+        while the terminal and the harness shared a machine.
         """
         front = self._attached("sessions")
         if front is None:
@@ -1060,21 +1114,22 @@ class PHTuiApp(App[str | None]):
             self.exit(chosen)
 
     def action_open_history(self) -> None:
-        """`/history` — the prompts you have sent, and where each one sits.
+        """`/history`: the prompts that the user has sent, and where each one is.
 
-        The cursor reveals as it moves (`on_highlight`), which is the second half
-        of the ask: the transcript scrolls to the prompt under the cursor through
-        the same `RevealSeq` join a contributed screen uses, so the conversation
-        moves behind the picker while you look for one.
+        The cursor reveals as it moves (`on_highlight`), and that is the second
+        half of the request. The transcript scrolls to the prompt under the
+        cursor through `scroll_to_seq`, the same call that answers a
+        `RevealSeq` from a contributed screen. The conversation therefore moves
+        behind the picker while the user looks for a prompt.
         """
         front = self._attached("history")
         if front is None:
             return
         if front.diverged:
-            # The same condition `action_open_screen` refuses on, and the same
-            # reason: a mirror that missed a frame is a prefix with no way to
-            # tell how short, so a history folded from it would be quietly
-            # incomplete.
+            # This is the condition that `action_open_screen` refuses on, for
+            # the same reason. A mirror that missed a frame is a prefix, and
+            # nothing says how short it is. A history folded from it would be
+            # incomplete with no sign of it.
             self.notify(
                 "this client missed part of the log, so the history folded from it "
                 "would be incomplete — reattach to rebuild it",
@@ -1098,14 +1153,14 @@ class PHTuiApp(App[str | None]):
     def _reveal_history(self, value: str) -> None:
         """Scroll the transcript to the prompt under the cursor.
 
-        No guard on the seq: `scroll_to_seq` already answers `False` for one it
-        has no row for, which is the same rule written once.
+        There is no guard on the seq. `scroll_to_seq` already answers `False`
+        for a seq that it has no row for, so the rule is written one time.
         """
         if value in self._history_rows and self._view is not None:
             self._view.scroll_to_seq(int(value))
 
     def _insert_history(self, chosen: str | None) -> None:
-        """Put the chosen prompt in the box — to send, or to edit first."""
+        """Put the chosen prompt in the box, to send or to edit first."""
         text = self._history_rows.get(chosen or "")
         self._history_rows = {}  # the picker is gone; so is its data
         if text is None or self._prompt is None:
@@ -1122,17 +1177,19 @@ class PHTuiApp(App[str | None]):
         )
 
     def _preview_theme(self, name: str) -> None:
-        """Apply a theme as the cursor passes it — seeing it is how you pick."""
+        """Apply a theme as the cursor passes it. To see a theme is how a user
+        picks one."""
         if name in self.catalog.themes:
             self.theme = name
 
     def _set_theme(self, chosen: str | None) -> None:
         if chosen is not None and chosen in self.catalog.themes:
-            # Into `$PH_HOME/themes/theme-profile.yaml`, which this creates on the
-            # first pick — so a person who has never run `/theme` has no theme
-            # file and needs none.
+            # The choice goes into `$PH_HOME/themes/theme-profile.yaml`, which
+            # this call creates on the first pick. A user who has never run
+            # `/theme` therefore has no theme file and needs none.
             self.theme_profile = choose_theme(self.home, self.theme_profile, chosen)
-        # Chosen or canceled, the theme in force is the one the profile names.
+        # Chosen or canceled, the theme in force is the one that the theme
+        # profile names.
         self.theme = self.catalog.resolve(self.theme_profile.chosen).name
 
     @verb_work("permissions")
@@ -1144,9 +1201,9 @@ class PHTuiApp(App[str | None]):
 
     def _set_preset(self, chosen: str | None) -> None:
         front = self.front
-        # The lookup *is* the membership test, and it narrows: `chosen not in
-        # PRESETS` checked the same thing and left the value a `str`, which the
-        # typed send then refused.
+        # The lookup *is* the membership test, and it narrows the type.
+        # `chosen not in PRESETS` checked the same thing and left the value a
+        # `str`, which the typed send then refused.
         name = PRESET_NAMES.get(chosen or "")
         if name is None or front is None:
             return
@@ -1157,11 +1214,11 @@ class PHTuiApp(App[str | None]):
     async def action_open_login(self) -> None:
         """Ask the harness what it holds, then offer the list.
 
-        The asking has to happen before the picker is built — the answer is a
-        wire call when the harness is a daemon, and `credential_held` is
-        synchronous — so somebody has to await it. That is an argument about
-        *ordering*, and it used to settle *who owns the pump* as a side effect,
-        because `async def action_*` is the only shape Textual offers.
+        The question must be asked before the picker is built. The answer is a
+        wire call to the daemon, so somebody has to await it. That is an
+        argument about *ordering*. It used to settle *who owns the pump* as a
+        side effect, because `async def action_*` is the only shape that Textual
+        offers.
         """
         front = self._attached("login")
         if front is None:
@@ -1180,29 +1237,32 @@ class PHTuiApp(App[str | None]):
 
     def _store(self, name: str, value: str | None) -> None:
         front = self.front
-        # In-process only, and never written down: `notify` names the credential
-        # and never the secret.
-        if value is None or front is None or not front.store_credential(name, value):
+        # The value goes to the daemon, which holds it in the memory of its
+        # process and never writes it down. `notify` names the credential and
+        # never the secret.
+        if value is None or front is None:
             return
+        front.store_credential(name, value)
         self.notify(f"{name} set for this session", title="login", markup=False)
 
     async def action_view(self, what: str = "") -> None:
-        """`/view <what>` — the one verb for what is on screen.
+        """`/view <what>`: the one verb for what is on screen.
 
-        Six things behind one name, because the question a person is asking is
-        the same one every time. Three of them were verbs of their own with
-        names that shared no word (`/thinking`, `/tools`, `/sidebar`), and the
-        two the sidebar panels needed would have made five — at which point the
-        palette lists five ways to say "show me less" and none of them says so.
+        Six things are behind one name, because the user asks the same question
+        every time. Three of them were verbs of their own, with names that
+        shared no word (`/thinking`, `/tools`, `/sidebar`). The two that the
+        sidebar panels needed would have made five. The palette would then list
+        five ways to say "show me less", and none of them would say so.
 
-        Settled first, acted on second: `tools`, `skills` and `all` are panel
-        state and persist, while `sidebar` is this window's and does not — the
-        distinction `TuiSettings` already draws, kept rather than flattened.
+        The setting is decided first and acted on second. `tools`, `skills` and
+        `all` are panel state and persist. `sidebar` belongs to this window and
+        does not persist. `TuiSettings` already draws that distinction, and this
+        keeps it.
         """
         chosen = what.strip().lower()
         if chosen == "sidebar":
-            # The one that is this window's rather than this person's, so it
-            # persists nowhere and there is no settings field to flip.
+            # This one belongs to this window and not to this user. It persists
+            # nowhere, and there is no settings field to flip.
             if self._sidebar is not None:
                 self._sidebar.display = not self._sidebar.display
             self.state_changed(Surface.SIDEBAR)
@@ -1210,15 +1270,16 @@ class PHTuiApp(App[str | None]):
         settings, rebuild = self.settings, False
         if chosen == "all":
             # Mixed means show both. A toggle over two independent flags has no
-            # honest single answer when they disagree, and "make it all visible"
-            # is what somebody typing `all` at a half-hidden panel means — so
-            # when they already agree this flips, and otherwise it shows.
+            # single correct answer when they disagree. A user who types `all`
+            # at a half-hidden panel means "make it all visible". So this flips
+            # when the two flags already agree, and shows both when they do not.
             #
-            # Named rather than routed back through `VIEWS`: reading the flags
-            # generically needed a second lambda per row whose only job was to
-            # report the field the first one flipped, and nothing but a test
-            # could say the two named the same one. Two panels, two fields, one
-            # expression the checker reads.
+            # The two fields are named here and not routed back through `VIEWS`.
+            # To read the flags generically needed a second lambda for each row,
+            # whose only job was to report the field that the first one flipped.
+            # Only a test could say that the two named the same field. With two
+            # panels and two fields, this is one expression that the type
+            # checker reads.
             show = not (settings.show_tools and settings.show_skills)
             settings = replace(settings, show_tools=show, show_skills=show)
         elif chosen in VIEWS:
@@ -1229,52 +1290,56 @@ class PHTuiApp(App[str | None]):
             return
         self._save(settings)
         if rebuild:
-            # The transcript is *built* from these two, so it is rebuilt. The
-            # panels are read at draw time, so they are not — which is the whole
-            # of what `VIEWS`' second column records.
+            # The transcript is *built* from these two settings, so it is
+            # rebuilt. The panels are read at draw time, so they are not. That
+            # is all that the second column of `VIEWS` records.
             await self._rebuild()
-        # The panels either way; the transcript only when it was *not* just
-        # rebuilt above. Spelled positively, because the first form read
-        # `SIDEBAR if not rebuild else ALL` and asked a reader to invert a
-        # negation to see that the expensive branch was the one already done.
+        # The panels are redrawn either way. The transcript is redrawn only
+        # when it was *not* just rebuilt above. The condition is written
+        # positively. The first form read `SIDEBAR if not rebuild else ALL`, and
+        # a reader had to invert a negation to see that the expensive branch
+        # was the one already done.
         self.state_changed(Surface.SIDEBAR if rebuild else Surface.ALL)
 
     async def _rebuild(self) -> None:
-        """Redraw from scratch — what a display toggle needs."""
+        """Redraw from scratch, which is what a display toggle needs."""
         if self._view is not None and self.front is not None:
             await self._view.rebuild(self._rows(self.front))
 
     def action_list_tools(self) -> None:
-        """`/tools` — the catalog, with what each one is for.
+        """`/tools`: the catalog, with what each tool is for.
 
-        The sidebar carries the names because they are charged to every request;
-        this carries the descriptions, which are charged to every request *too*
-        and are far too long for 32 columns. Notified rather than appended to
-        the transcript: a front end may not write into a fold of the log (A11),
-        and this is the surface every other command's output already uses.
+        The sidebar carries the names because they are charged to every
+        request. This carries the descriptions, which are charged to every
+        request *too* and are far too long for 32 columns. The list is a
+        notification and is not appended to the transcript. A front end may not
+        write into a fold of the log (A11), and a notification is where the
+        output of every other command already goes.
         """
         front = self._attached("tools")
         if front is not None:
             self._show_catalog("tools", front.state.tools)
 
     def action_list_skills(self) -> None:
-        """`/skills` — what is installed, and what each one is for."""
+        """`/skills`: what is installed, and what each skill is for."""
         front = self._attached("skills")
         if front is not None:
             self._show_catalog("skills", front.state.skills)
 
     async def action_quit(self) -> None:
         """`/quit`, and its key. The exit code says whether there was ever a session
-        (M4): a terminal left from under a failed start did not succeed at anything
-        a script running `phern --mode tui` could rely on, so it does not answer `0`."""
+        (M4). A terminal that the user leaves after a failed start did not
+        succeed at anything that a script running `phern --mode tui` could rely
+        on, so it does not answer `0`."""
         self.exit(return_code=1 if self.refusal is not None else 0)
 
     def _show_catalog(self, what: str, entries: tuple[CatalogEntry, ...]) -> None:
         """Render one catalog as a toast.
 
-        Takes the entries rather than a field name to `getattr` off the state:
-        the two callers each know which tuple they mean, and a name looked up at
-        runtime is a rename that type-checks and then finds nothing.
+        It takes the entries, and not a field name to `getattr` from the state.
+        Each of the two callers knows which tuple it means. A name that is
+        looked up at run time is a rename that passes the type checker and then
+        finds nothing.
         """
         if not entries:
             self.notify(f"no {what} in this deployment", title=what, markup=False)
@@ -1285,7 +1350,8 @@ class PHTuiApp(App[str | None]):
         self.notify("\n".join(lines), title=f"{what} ({len(entries)})", markup=False)
 
     def _save(self, settings: TuiSettings) -> None:
-        """Adopt new settings and persist them. A write failure costs the memory, not the change."""
+        """Adopt new settings and persist them. If the write fails, the change
+        still applies, and only the next run does not remember it."""
         self.settings = settings
         try:
             save_tui_settings(self.home, settings)
@@ -1295,11 +1361,12 @@ class PHTuiApp(App[str | None]):
     # ---------------------------------------------------------- completions --
 
     def _history_source(self) -> list[PromptRecord]:
-        """Every prompt this person has sent, for the arrow keys and `/history`.
+        """Every prompt that this user has sent, for the arrow keys and `/history`.
 
-        Empty while the mirror has diverged, so the arrows simply edit rather
-        than offering a history that is a prefix of unknown length. `/history`
-        says so out loud; a key cannot, so it declines quietly.
+        It is empty while the mirror has diverged. The arrows then only edit,
+        and do not offer a history that is a prefix of unknown length.
+        `/history` says so in a notification. A key cannot, so it declines
+        silently.
         """
         front = self.front
         if front is None or front.diverged:
@@ -1320,24 +1387,30 @@ async def run_tui(
     model_choice: ModelChoice = ModelChoice(),
     profile: str = "",
 ) -> int:
-    """Entry point for `--mode tui`. Answers the exit code, `0` when clean (M4).
+    """Entry point for `--mode tui`. Returns the exit code, which is `0` when
+    clean (M4).
 
-    Takes no profile: the daemon mounts the one `daemon_argv` names. The route is
-    `model_choice`, carried by `session/new` for each session this terminal opens
-    — and empty is the profile's default, which the attach reports. Loops so that choosing
-    a session from the picker reopens it — the app exits with the id, everything
-    it attached has detached, and a fresh app attaches to the chosen session. The
-    *root* is untouched by that, which is the difference from before: switching
-    sessions in the picker no longer ends the turn you were watching.
+    It takes no composed profile: the daemon composes the one that
+    `daemon_argv` names. `profile` is only a name, for the profile on which a
+    session that this terminal creates runs (S5). The route is `model_choice`,
+    which `session/new` carries for each session that this terminal opens. An
+    empty route means the default of the profile, which the attach reports.
 
-    **Returned rather than raised.** This used to `raise SystemExit`, which made
-    it the CLI's first and only exit-code mechanism — nothing else in `cli.py`
-    calls `sys.exit` — so the next command needing one would have invented a
-    second. A library function that exits the process is also one a caller
-    cannot compose: a test, or a future `--mode` that runs the TUI and then does
-    something, would have had to catch `SystemExit` to find out what happened.
-    The entry point owns exiting, and `cli.py` translates this into the
-    `typer.Exit` it already uses everywhere else.
+    It loops so that a session chosen from the picker is reopened. The app
+    exits with the id, everything that it attached has detached, and a fresh
+    app attaches to the chosen session. The *root* is untouched by that, which
+    is the difference from before: to switch sessions in the picker no longer
+    ends the turn that the user was watching.
+
+    **The code is returned and not raised.** This function used to
+    `raise SystemExit`. That made it the first and only exit-code mechanism of
+    the CLI, because nothing else in `cli.py` calls `sys.exit`, and the next
+    command that needed one would have invented a second. A library function
+    that exits the process is also one that a caller cannot compose. A test, or
+    a future `--mode` that runs the TUI and then does something, would have had
+    to catch `SystemExit` to find out what happened. The entry point owns the
+    exit, and `cli.py` translates this code into the `typer.Exit` that it
+    already uses everywhere else.
     """
     while True:
         app = PHTuiApp(
@@ -1350,17 +1423,17 @@ async def run_tui(
         )
         chosen = await app.run_async()
         if app.return_code:
-            # **The exit code is the app's** (H3). Textual sets `return_code` to 1
-            # when the app ended on an unhandled error, and answering `0` here
-            # would report that as success: a terminal that crashed and a terminal
-            # the person quit are indistinguishable to anything scripting
-            # `phern --mode tui`, including a supervisor deciding whether to
-            # restart it.
+            # **The exit code belongs to the app** (H3). Textual sets
+            # `return_code` to 1 when the app ended on an unhandled error. To
+            # answer `0` here would report that as success. A terminal that
+            # crashed and a terminal that the user quit would then look the same
+            # to anything that scripts `phern --mode tui`, including a
+            # supervisor that decides whether to restart it.
             return app.return_code
         if chosen is None:
             return 0
         session_id = chosen
-        # The picker has done its job once; reopening through `/sessions` is an
-        # explicit choice already, and offering the list again on the way in
-        # would ask the same question twice.
+        # The picker has already done its job one time. To reopen through
+        # `/sessions` is already an explicit choice, and to offer the list
+        # again on the way in would ask the same question twice.
         offer_sessions = False

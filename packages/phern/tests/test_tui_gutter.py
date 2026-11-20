@@ -1,7 +1,8 @@
-"""The gutter: the transcript's first column is its scrollbar and its rows' bars.
+"""The gutter: the first column of the transcript is its scrollbar and the bars of its rows.
 
-Positions and colors read off the widgets rather than a picture, so a theme or a
-font cannot pass these by accident; the snapshot suite has the pictures.
+The tests read positions and colors from the widgets and not from a picture, so
+a theme or a font cannot pass them by accident. The snapshot suite has the
+pictures.
 """
 
 from __future__ import annotations
@@ -55,13 +56,13 @@ def _rows() -> list[ChatItem]:
 
 
 def _cells(view: TranscriptView) -> list[Segment]:
-    """The gutter as drawn: one one-cell segment per row of the scrollbar."""
+    """The gutter as drawn: one segment of one cell for each row of the scrollbar."""
     bar = view.vertical_scrollbar
     return [segment for y in range(bar.region.height) for segment in bar.render_line(y)]
 
 
 def _gutter(view: TranscriptView, widget: Widget) -> Iterable[tuple[str, RichColor | None]]:
-    """The gutter cells beside `widget`: each one's glyph and foreground."""
+    """The gutter cells beside `widget`: the glyph and the foreground of each."""
     top = view.vertical_scrollbar.region.y
     for cell in _cells(view)[widget.region.y - top : widget.region.bottom - top]:
         yield cell.text, cell.style.color if cell.style else None
@@ -77,8 +78,9 @@ def _bar_color(widget: Widget) -> RichColor:
 
 
 async def test_the_gutter_is_column_zero_and_every_row_starts_in_column_one() -> None:
-    """The scrollbar is the view's first column, always shown, and no row's text
-    is under it: the padding column holds the bar, the content box starts after.
+    """The scrollbar is the first column of the view and is always shown. The
+    text of no row is under it: the padding column holds the bar, and the
+    content box starts after it.
 
     Sabotage: return `region` unchanged from `GutterScroll._arrange_scrollbars`'s
     vertical branch, and the bar lands on the rows' first character.
@@ -98,9 +100,10 @@ async def test_the_gutter_is_column_zero_and_every_row_starts_in_column_one() ->
 
 
 async def test_each_rows_bar_is_drawn_in_the_gutter_in_its_own_color() -> None:
-    """Beside a card, the bar glyph in the card's `row--bar` color — pending,
-    done and failed are three colors — beside reasoning and a compaction marker
-    theirs, and beside a plain message nothing at all.
+    """Beside a card, the gutter draws the bar glyph in the `row--bar` color of
+    the card. Pending, done and failed are three colors. Beside reasoning and a
+    compaction marker it draws their colors, and beside a plain message it draws
+    nothing.
 
     Sabotage: drop the `-error` rule from `ToolCardWidget`'s CSS, and the failed
     card's bar is the done card's green.
@@ -123,11 +126,12 @@ async def test_each_rows_bar_is_drawn_in_the_gutter_in_its_own_color() -> None:
 
 
 async def test_a_card_that_settles_recolors_its_bar() -> None:
-    """The one change nothing else repaints the gutter for: a row's color moved
-    and its size did not. `TranscriptView.sync` refreshes the bar for it.
+    """Nothing else repaints the gutter for this one change: the color of a row
+    moved and its size did not. `TranscriptView.sync` refreshes the bar for it.
 
-    Sabotage: drop the `refresh()` at the end of `TranscriptView._sync`, and the
-    bar stays the pending color until something scrolls.
+    Sabotage: drop the `self.vertical_scrollbar.refresh()` in
+    `TranscriptView._sync`, and the bar stays the pending color until something
+    scrolls.
     """
     items = rows_of(ChatItem(key="u1", role="user", text="go", seq=1), _card("c"))
     app = TranscriptApp(items)
@@ -150,8 +154,8 @@ async def test_a_card_that_settles_recolors_its_bar() -> None:
 
 
 async def test_the_gutter_scrolls_by_mouse() -> None:
-    """The track and the thumb still answer the mouse: Textual's own metadata on
-    the cells is kept when a bar is drawn into them.
+    """The track and the thumb still answer the mouse. The metadata that Textual
+    puts on the cells is kept when a bar is drawn into them.
 
     Sabotage: build the bar cell's `Style` without `meta=`, and a click on a
     barred cell of the track does nothing.
@@ -177,7 +181,7 @@ async def test_the_gutter_scrolls_by_mouse() -> None:
 
 
 def _thumb(view: TranscriptView) -> list[int]:
-    """The gutter rows the thumb covers: the cells a press would grab."""
+    """The gutter rows that the thumb covers: the cells that a press would grab."""
     return [
         y
         for y, cell in enumerate(_cells(view))
@@ -186,13 +190,13 @@ def _thumb(view: TranscriptView) -> list[int]:
 
 
 async def test_the_thumb_keeps_its_size_while_it_scrolls() -> None:
-    """Whole cells, one length, from the top row at the top to the last at the end.
+    """The thumb is whole cells of one length, from the top row at the top to the last at the end.
 
     The stock thumb is measured in eighths of a cell and draws a partial block
-    at each end; a cell beside a bar can hold one glyph, so each partial end
-    became a whole thumb cell and the thumb was one row long when it sat on a
-    cell boundary and two when it straddled one — flickering a row on every
-    line scrolled.
+    at each end. A cell beside a bar can hold one glyph, so each partial end
+    became a whole thumb cell. The thumb was then one row long when it sat on a
+    cell boundary and two rows long when it straddled one, and it flickered by a
+    row on every line scrolled.
 
     Sabotage: compute the length in `GutterRender.thumb` from the position as
     well as the window (round the end, not the length), and the lengths differ.
@@ -216,8 +220,9 @@ async def test_the_thumb_keeps_its_size_while_it_scrolls() -> None:
 
 
 async def test_the_thumb_is_the_headings_color() -> None:
-    """The thumb draws in `$ph-accent`, the role the status line and the side
-    panel's headings use — a role, so it follows the theme with them."""
+    """The thumb draws in `$ph-accent`, the role that the status line and the
+    headings of the side panel use. It is a role, so the thumb follows the theme
+    with them."""
     app = _scrolling()
     async with app.run_test(size=(60, 12)) as pilot:
         await pilot.pause()
@@ -230,9 +235,9 @@ async def test_the_thumb_is_the_headings_color() -> None:
 
 
 def test_the_textual_members_the_gutter_relies_on_still_exist() -> None:
-    """The tripwire for a Textual that renames what `GutterScroll` overrides or
-    `GutterRender` is constructed with — a failure here names the member, where
-    the alternative is a bar drawn on the right with every other test green."""
+    """A tripwire for a Textual that renames what `GutterScroll` overrides or
+    what `GutterRender` is constructed with. A failure here names the member.
+    Without it, the bar would be drawn on the right with every other test green."""
     for name in ("scrollbar_gutter", "_get_scrollable_region", "_arrange_scrollbars"):
         assert name in vars(Widget), f"Widget.{name} is gone"
         assert name in vars(GutterScroll)

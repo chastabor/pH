@@ -1,10 +1,11 @@
-"""Project trust and plan review — two decisions, one shape.
+"""Project trust: one decision, as a `ConfirmModal`.
 
-Both are "read this, then choose", so both are `ConfirmModal`. What makes trust
-worth a modal at all: pH will run this project's `AGENTS.md`, its hooks and its
-configured plugins, and a directory the user has just cloned is a directory
-whose configuration they have not read. The prompt is once per project root,
-and the answer is remembered under `$PH_HOME`.
+The decision is "read this, then choose". It needs a modal for this reason: pH
+will run the `AGENTS.md` of this project, its hooks and its configured plugins,
+and the user has not read the configuration of a directory that they have just
+cloned. "Trust this project" is remembered under `$PH_HOME`, so the prompt then
+does not appear again for that project root. "This session only" is not
+remembered.
 
 @module ph_app.tui.modals.trust
 """
@@ -15,7 +16,7 @@ from pathlib import Path
 
 from .base import Action, ConfirmModal
 
-__all__ = ["plan_review_modal", "project_trust_modal"]
+__all__ = ["project_trust_modal"]
 
 
 def project_trust_modal(root: Path) -> ConfirmModal:
@@ -35,24 +36,8 @@ def project_trust_modal(root: Path) -> ConfirmModal:
             Action("no", "Don't load it", "error"),
         ],
         cancel_value="no",
-        # Enter on an unread prompt picks the answer that ends with the session:
-        # trusting a directory for good should be a choice somebody moved to.
+        # Enter on an unread prompt picks the answer that ends with the session.
+        # To trust a directory permanently should be a choice that the user
+        # moved to.
         initial="once",
-    )
-
-
-def plan_review_modal(plan: str) -> ConfirmModal:
-    """Show a proposed plan and ask what to do with it.
-
-    Opened by Phase 4's `plan/mode` exit; the dialog is Phase 2's (P2-04).
-    """
-    return ConfirmModal(
-        title="review the plan",
-        body=plan,
-        actions=[
-            Action("approve", "Go ahead", "success"),
-            Action("edit", "Let me revise it", "primary"),
-            Action("reject", "No, stop here", "error"),
-        ],
-        cancel_value="reject",
     )

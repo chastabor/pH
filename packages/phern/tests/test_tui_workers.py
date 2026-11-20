@@ -1,30 +1,33 @@
-"""H7 — no handler on Textual's message pump may quietly await the harness.
+"""H7: no handler on the message pump of Textual may quietly await the harness.
 
-`PHTuiApp`'s `action_*` and `on_*` methods run *on the pump*. Anything awaited
-inside one is time the UI is frozen for: no keystrokes, no repaint, not even the
-spinner. `/compact` spends a whole model call in `run_command`, and awaiting it
-inline froze the terminal for the one command whose job is to take a while.
+The `action_*` and `on_*` methods of `PHTuiApp` run *on the pump*. Whatever one
+of them awaits is time for which the UI is frozen: no keystrokes, no repaint,
+not even the spinner. `/compact` spends a whole model call in `run_line`. When
+that call was awaited inline, the terminal froze for the one command whose job
+is to take a while.
 
-The fix for that call site was a worker. The rule it implies is not enforced by
-the fix, and `app.py` itself names three entry points to the same verbs —
-"Reached by key, by `/command`, and by `run_action`" — of which only one was
-wrapped. Today's slow verbs happen to be keyless, so the rest is latent rather
-than broken; latent is exactly what a gate is for.
+The fix for that call site was a worker. The fix does not enforce the rule that
+it implies. `app.py` itself names three entry points to the same verbs: "It is
+reached by key, by `/command`, and by `run_action`". Only one of the three was
+wrapped. The slow verbs of that time had no key, so the rest was latent and not
+broken. A gate exists for exactly what is latent.
 
-**A table rather than an analysis.** Deciding "does this await the harness"
-from the syntax tree would mean following `front.*` through `FrontSession` into
-two transports, and would answer wrongly the first time somebody introduced an
-indirection. So each handler is classified here, once, by a person — and a new
-one fails this file until it is classified too. That is
-`test_registration_ownership`'s BOUND table, for the same reason: a rule
-everybody has to remember is a rule that gets forgotten.
+**A table and not an analysis.** To decide "does this await the harness" from
+the syntax tree would mean following `front.*` through `FrontSession` into the
+transport behind it. It would also answer wrongly the first time that somebody
+introduced an indirection. So a person classifies each handler here, one time,
+and a new handler fails this file until it is classified too. The BOUND table
+of `test_registration_ownership` exists for the same reason: a rule that
+everybody must remember is a rule that is forgotten.
 
-**Per verb, not at the funnel.** `run_action` is the one place every entry point
-goes through, and wrapping *it* was considered and rejected: it would change
-every action's timing at once, and an action that returns as soon as it is
-scheduled races every pilot test that presses a key and then asserts. Doing it
-in the four verbs that actually make a wire call touches only those four, and
-nothing presses a key for them.
+**For each verb, not at the funnel.** `run_action` is the one place that every
+entry point goes through. Wrapping *it* was considered and rejected. It would
+change the timing of every action at the same time, and an action that returns
+as soon as it is scheduled races every pilot test that presses a key and then
+asserts. The change is made in the four verbs that make a wire call, and it
+touches only those four. When this was decided, nothing pressed a key for them.
+Two of the four now have a key (`session_picker` and `permission_picker`), and
+`test_tui_pilot.py` presses both.
 """
 
 from __future__ import annotations
@@ -37,12 +40,12 @@ from ph_app.tui.app import VERB_GROUP
 from ph_app.tui.commands import TUI_VERBS
 
 APP = pathlib.Path(ph_app.tui.app.__file__)
-"""Asked of the module, not spelled from the checkout layout — the spelling
-`test_tui_frames` already uses for this same file, and the one that still
-resolves when the suite runs against an installed distribution."""
+"""The path is asked of the module, and not spelled from the layout of the
+checkout. `test_tui_frames` already uses this spelling for the same file, and
+it still resolves when the suite runs against an installed distribution."""
 
 TREE = ast.parse(APP.read_text(encoding="utf-8"), filename=str(APP))
-"""Parsed once. Three assertions walk it, and the module is 55 KB."""
+"""Parsed one time. Two tests walk it, and the module is about 67 KB."""
 
 UI_LOCAL: dict[str, str] = {
     "on_mount": "builds the screen and starts the pump's own tasks",
@@ -52,26 +55,28 @@ UI_LOCAL: dict[str, str] = {
     "action_view": "toggles panel state and redraws from rows it already holds",
     "action_quit": "exits with this app's own code; async only to match Textual's base",
 }
-"""Every handler that may stay `async` on the pump: each awaits only this
-process's own state.
+"""Every handler that may stay `async` on the pump. Each one awaits only the
+state of this process.
 
-The table is exhaustive by assertion below, so a new `async def action_*` or
-`on_*` fails until somebody decides which side it is on."""
+The assertion below makes the table exhaustive. A new `async def action_*` or
+`on_*` therefore fails until somebody decides which side it is on."""
 
 SCHEDULES_WORK = {f"action_{verb.action}" for verb in TUI_VERBS if verb.work is not None}
-"""Verbs that need the harness, derived from where a verb is already declared.
+"""The verbs that need the harness, derived from where a verb is already declared.
 
-Hand-listed here at first, which copied the verb→action mapping into a test file
-and asked a new slow verb to be remembered in two places. `TuiVerb.work` is the
-declaration; this is the gate reading it. `UI_LOCAL` stays a hand table
-because `on_mount` and its kind have no declaration site anywhere."""
+The set was listed by hand here at first. That copied the mapping from verb to
+action into a test file, and a new slow verb had to be remembered in two
+places. `TuiVerb.work` is the declaration, and this gate reads it. `UI_LOCAL`
+stays a hand-written table, because `on_mount` and the handlers like it are
+declared nowhere."""
 
 
 _SCHEDULING = {"work", "verb_work"}
-"""Decorators that turn an `async def` into a sync callable returning a `Worker`.
+"""Decorators that turn an `async def` into a sync callable that returns a `Worker`.
 
-Both spellings, because `verb_work` is `work` with this app's group and
-exclusivity already chosen — a handler carrying either never holds the pump."""
+Both spellings are here, because `verb_work` is `work` with the group and the
+exclusivity of this app already chosen. A handler that carries either one never
+holds the pump."""
 
 
 def _decorators(node: ast.AsyncFunctionDef) -> set[str]:
@@ -82,11 +87,11 @@ def _decorators(node: ast.AsyncFunctionDef) -> set[str]:
 
 
 def _pump_handlers() -> set[str]:
-    """Async handlers that run *on* the pump — so `@work` ones are not among them.
+    """Async handlers that run *on* the pump. The `@work` handlers are not among them.
 
-    A decorated verb is a sync callable returning a `Worker`, which
-    `_dispatch_action` does not await, so it never holds the pump however long
-    its body runs.
+    A decorated verb is a sync callable that returns a `Worker`.
+    `_dispatch_action` does not await it, so it never holds the pump, however
+    long its body runs.
     """
     return {
         node.name
@@ -98,11 +103,19 @@ def _pump_handlers() -> set[str]:
 
 
 def test_no_pump_handler_awaits_the_harness() -> None:
-    """The whole rule, in one assertion each way.
+    """The whole rule, in three assertions.
 
-    Sabotage: add an `async def action_anything` to `PHTuiApp` and the first
-    assertion names it; make one of the four `async def` again and the second
-    does.
+    1. Every async handler on the pump is classified in `UI_LOCAL`.
+    2. `UI_LOCAL` names no handler that is gone.
+    3. No verb that needs the harness is on the pump. The first assertion
+       already fails for such a verb, unless somebody also lists the verb in
+       `UI_LOCAL` to make the first assertion pass. The third assertion is for
+       that case.
+
+    Sabotage: add an `async def action_anything` to `PHTuiApp`, and the first
+    assertion names it. Remove `@verb_work` from one of the four verbs, and the
+    first assertion names that verb. Then list the verb in `UI_LOCAL` as well,
+    and the third assertion names it.
     """
     found = _pump_handlers()
 
@@ -113,22 +126,22 @@ def test_no_pump_handler_awaits_the_harness() -> None:
     assert set(UI_LOCAL) - found == set(), (
         f"these no longer exist and the table is stale: {sorted(set(UI_LOCAL) - found)}"
     )
-    assert set(SCHEDULES_WORK) & found == set(), (
+    assert SCHEDULES_WORK & found == set(), (
         "a verb that awaits the harness went back to awaiting it on the pump: "
-        f"{sorted(set(SCHEDULES_WORK) & found)}"
+        f"{sorted(SCHEDULES_WORK & found)}"
     )
 
 
 def test_every_harness_verb_hands_off_a_worker() -> None:
-    """And they schedule rather than merely being absent from the pump table.
+    """The verbs schedule work, and are not only absent from the pump table.
 
-    A verb that dropped its wire call entirely would satisfy the test above;
-    this is what says the work still happens.
+    A verb that dropped its wire call completely would satisfy the test above.
+    This test says that the work still happens.
 
-    The *policy* needs no assertion any more: `verb_work` reads `TuiVerb.work`
-    for both the group and the exclusivity, so there is no second copy to
-    disagree with the row. It used to be spelled at the decorator, and this file
-    hand-listed the mapping to check the two matched.
+    The *policy* needs no assertion any more. `verb_work` reads `TuiVerb.work`
+    for both the group and the exclusivity, so there is no second copy that
+    could disagree with the row. The policy used to be written at the decorator,
+    and this file listed the mapping by hand to check that the two matched.
 
     Sabotage: remove `@verb_work` from any verb declaring `work`.
     """
@@ -148,16 +161,16 @@ def test_every_harness_verb_hands_off_a_worker() -> None:
 
 
 def test_only_the_side_effecting_verb_declines_to_be_replaced() -> None:
-    """`work` is a decision per verb, and the wrong value loses a file.
+    """`work` is a decision for each verb, and the wrong value loses a file.
 
-    A second press of a *picker* means "I meant this one", so cancelling the
-    first round trip is right. A second `/attach` is a second file, and
-    cancelling the first to honour it drops an attachment the person asked for —
-    silently, because the worker simply stops.
+    A second press of a *picker* means "I meant this one", so it is right to
+    cancel the first round trip. A second `/attach` is a second file. To cancel
+    the first in order to honor the second drops an attachment that the user
+    asked for. It is dropped silently, because the worker simply stops.
 
-    Read off the rows rather than a literal, so the four names are not spelled a
-    third time: `TUI_VERBS` has them, `SCHEDULES_WORK` derives from it, and this
-    asks the same table which of them queues.
+    The names are read from the rows and not from a literal, so the four names
+    are not spelled a third time. `TUI_VERBS` has them, `SCHEDULES_WORK` derives
+    from it, and this test asks the same table which of them queues.
     """
     queues = {verb.name for verb in TUI_VERBS if verb.work == "queue"}
 

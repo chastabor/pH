@@ -28,7 +28,6 @@ topics:
           rows:
             - ["`initialize`, `daemon/hello`", "`capabilities?`: what this client can do", "`CapabilityBlock`: `protocolVersion`, `capabilities`"]
             - ["`daemon/status`", "none", "`DaemonStatusReply`: pid, socket, uptime, roots, `startsOn`, `passivateAfter`, `socketWatch`, `unwritten`, `probe`, doctor sections"]
-            - ["`daemon/config`", "none", "`DaemonConfigReply`"]
             - ["`daemon/lifetime`", "none", "`DaemonLifetime`: `mode`, `holds`, `clients`, `keepAliveMs`"]
             - ["`daemon/probe`", "`name`: `startup`, `ready` or `live`", "`ProbeReply`"]
             - ["`shutdown`", "none", "no reply; sent as a notification"]
@@ -84,7 +83,7 @@ topics:
           columns: [method, sent when, params]
           rows:
             - ["`session.event`", "an attached root appends a log record", "`sessionId`, `event`, `presentation?`"]
-            - ["`session.status`", "an attached root's status or footer moves", "`sessionId`, `status?`, `lastTurn?`, `readings?`, `provider?`, `model?`, `modelKey?`"]
+            - ["`session.status`", "an attached root's status or footer moves", "`sessionId`, `status?`, `lastTurn?`, `readings?`, `provider?`, `model?`, `modelKey?`, `compaction?`"]
             - ["`session.children`", "a sub-agent's row moves", "`sessionId`, `children`"]
             - ["`session.commands`", "the root's command list changes", "`sessionId`, `commands`"]
             - ["`session.screens`", "the root's screen list changes", "`sessionId`, `screens`"]
@@ -1072,7 +1071,7 @@ edges:
           served is absent.
         code: |
           -> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":["asks"]}}
-          <- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":10,"capabilities":{"sessions":true,"streaming":true,"roots":true,"attach":true,"cursors":true,"snapshots":true,"asks":true,"browse":true,"browse-cwd":true,"projections":true,"attachments":true,"staging":true,"shell":true}}}
+          <- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":11,"capabilities":{"sessions":true,"streaming":true,"roots":true,"attach":true,"cursors":true,"snapshots":true,"asks":true,"browse":true,"browse-cwd":true,"projections":true,"attachments":true,"staging":true,"shell":true}}}
       - struct: ph_app.params:InitializeParams
       - struct: ph_app.protocol:CapabilityBlock
       - title: session/new
@@ -1082,7 +1081,7 @@ edges:
           -> {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/work/app","trust":"","choice":{"key":"","provider":"","model":""},"profile":""}}
           <- {"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"/work/app has not been trusted; ask, then send trust","data":{"reason":"untrusted_project"}}}
           -> {"jsonrpc":"2.0","id":22,"method":"session/new","params":{"cwd":"/work/app","trust":"once","choice":{"key":"","provider":"","model":""},"profile":""}}
-          <- {"jsonrpc":"2.0","id":22,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","watchers":0,"cursor":{"generation":"1794882334990","sequence":1},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","header":{"version":4,"id":"20261117T022534-fa5c9a","createdAt":1794882334990,"cwd":"/work/app","family":"c04137-20261117T022534-fa5c9a"}}}
+          <- {"jsonrpc":"2.0","id":22,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","watchers":0,"cursor":{"generation":"1794882334990","sequence":1},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","compaction":{"triggerFraction":0.85},"header":{"version":4,"id":"20261117T022534-fa5c9a","createdAt":1794882334990,"cwd":"/work/app","family":"c04137-20261117T022534-fa5c9a"}}}
       - struct: ph_app.params:NewSessionParams
       - struct: ph_app.payloads:NewSessionReply
       - title: session/attach
@@ -1090,7 +1089,7 @@ edges:
         note: Attach subscribes to what happens next and does not replay. `cursor` says where the live stream begins.
         code: |
           -> {"jsonrpc":"2.0","id":4,"method":"session/attach","params":{"sessionId":"20261117T022534-fa5c9a"}}
-          <- {"jsonrpc":"2.0","id":4,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","watchers":1,"cursor":{"generation":"1794882334990","sequence":1},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","readings":[{"id":"posture","slot":"line","text":"read-only accepted","level":"normal"},{"id":"sandbox-mode","slot":"session","text":"sandbox read-only","level":"normal"}]}}
+          <- {"jsonrpc":"2.0","id":4,"result":{"sessionId":"20261117T022534-fa5c9a","status":"idle","watchers":1,"cursor":{"generation":"1794882334990","sequence":1},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","compaction":{"triggerFraction":0.85},"readings":[{"id":"posture","slot":"line","text":"read-only accepted","level":"normal"},{"id":"sandbox-mode","slot":"session","text":"sandbox read-only","level":"normal"}]}}
       - struct: ph_app.protocol:SessionParams
       - struct: ph_app.payloads:AttachReply
       - title: A cursor
@@ -1107,7 +1106,7 @@ edges:
           <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"client/command","seq":1,"time":1794882335010,"data":{"command":"tui-1:c1"},"ignorable":true}}}
           <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"agent/inbox/spliced","seq":2,"time":1794882335011,"data":{"target":"next-turn","start":0,"inserted":[{"id":"4fb47fb5-...","role":"user","content":[{"type":"text","text":"hello"}],"source":{"kind":"user"}}]}}}}
           <- {"jsonrpc":"2.0","method":"session.status","params":{"status":"running","readings":[...],"sessionId":"20261117T022534-fa5c9a"}}
-          <- {"jsonrpc":"2.0","id":5,"result":{"sessionId":"20261117T022534-fa5c9a","status":"running","watchers":1,"cursor":{"generation":"1794882334990","sequence":3},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":""}}
+          <- {"jsonrpc":"2.0","id":5,"result":{"sessionId":"20261117T022534-fa5c9a","status":"running","watchers":1,"cursor":{"generation":"1794882334990","sequence":3},"provider":"fake","model":"fake-1","modelKey":"main","profile":"headless","profileChanges":0,"profileNote":"","compaction":{"triggerFraction":0.85}}}
           <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"assistant/chunk","seq":12,"time":1794882335018,"data":{"turn":1,"step":1,"attempt":0,"chunk":{"type":"text-delta","index":0,"text":"ok"}}}}}
           <- {"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"20261117T022534-fa5c9a","event":{"type":"turn/end","seq":18,"time":1794882335019,"data":{"turn":1,"reason":{"kind":"completed"}}}}}
           <- {"jsonrpc":"2.0","method":"session.status","params":{"status":"idle","lastTurn":"completed","readings":[...],"sessionId":"20261117T022534-fa5c9a"}}

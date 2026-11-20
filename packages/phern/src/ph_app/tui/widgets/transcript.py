@@ -1,24 +1,26 @@
 """The transcript: rows that render from `TuiState` and nothing else.
 
-Two disciplines are enforced here rather than remembered (P2-06).
+This module enforces two rules, so that nobody has to remember them (P2-06).
 
 **Never build markup with an f-string.** User text, tool output and provider
-errors all contain `[` — a path like `foo[0]`, a Python list, a Rich tag someone
-typed on purpose. `Content(text)` renders it literally; an f-string into a
-markup parser makes the model's output a formatting language, and at worst
-swallows it. Where styling *is* wanted, `Content.from_markup` takes `$variables`
-so the substituted value can never be parsed as markup.
+errors all contain `[`: a path like `foo[0]`, a Python list, a Rich tag that
+somebody typed on purpose. `Content(text)` renders the text literally. An
+f-string passed to a markup parser makes the output of the model a formatting
+language, and at worst the parser swallows the output. Where styling *is*
+wanted, `Content.from_markup` takes `$variables`, so the substituted value can
+never be parsed as markup.
 
-**Stream by appending, not by reparsing.** `MarkdownStream.write(fragment)`
-appends to a live Markdown widget; re-`update()`ing the accumulated text on every
-delta re-parses the whole message per token, which is quadratic and visibly
-janky by the second paragraph. The view tracks how much of each row it has
-already written and sends only the tail.
+**Stream by appending, not by parsing again.** `MarkdownStream.write(fragment)`
+appends to a live Markdown widget. A call to `update()` with the accumulated
+text on every delta parses the whole message again for each token. That is
+quadratic, and the display visibly stutters by the second paragraph. The view
+tracks what it has already written to each row and sends only the tail.
 
-The same discipline, one layer up: a settled row **remembers what it last drew**
-and skips `update()` when nothing changed. `sync` visits every visible row on
-every dirty frame, and `Static.update` always re-lays-out — so without the memo
-a 200-row transcript re-rendered 200 widgets per frame while streaming.
+The same rule applies one layer up. A settled row **remembers what it last
+drew** and skips `update()` when nothing changed. `sync` visits every visible
+row on every dirty frame, and `Static.update` always runs the layout again.
+Without the memo, a 200-row transcript rendered 200 widgets again for each
+frame while it streamed.
 
 @module ph_app.tui.widgets.transcript
 """
@@ -65,14 +67,14 @@ _ROLE_LABEL = {
 MARKDOWN_ROLES: frozenset[str] = frozenset({"assistant", "thinking"})
 """Roles rendered as Markdown.
 
-Not a display preference — a consistency requirement. The model writes Markdown,
-so its rows render it; a *streamed* row that rendered Markdown while a
-*replayed* one showed raw asterisks would make a resumed session look different
-from the session the person left, which is the same failure the P2-01 gate
-guards against, one layer up.
+This is a consistency requirement, not a display preference. The model writes
+Markdown, so its rows render it. If a *streamed* row rendered Markdown while a
+*replayed* row showed raw asterisks, a resumed session would look different from
+the session that the user left. That is the failure that the P2-01 gate guards
+against, one layer up.
 
-The user's own text is deliberately absent: what someone typed is shown as they
-typed it.
+The text of the user is deliberately absent: what somebody typed is shown as
+they typed it.
 """
 
 _ROLE_STYLE = {
@@ -87,7 +89,8 @@ _ROLE_STYLE = {
 
 
 def _status_markup(card: ToolCard) -> tuple[str, str]:
-    """The glyph and its style for a call's state — one rule for cards and dispatches."""
+    """Return the glyph and its style for the state of a call. Cards and dispatches
+    share this one rule."""
     glyph = "…" if not card.settled else ("✗" if card.is_error else "✓")
     return glyph, ("$ph-tool-error" if card.is_error else "$ph-tool-success")
 
@@ -95,9 +98,9 @@ def _status_markup(card: ToolCard) -> tuple[str, str]:
 class TranscriptRow(Barred, Vertical):
     """A settled row: a styled label over its body.
 
-    Its bar — drawn by the gutter, see `widgets.gutter` — is absent for every
-    role but a compaction marker, which is the one settled row that marks
-    itself: the place the conversation was folded.
+    The gutter draws the bar of a row (see `widgets.gutter`). No role has a bar
+    except a compaction marker. That is the one settled row that marks itself:
+    it is the place where the conversation was folded.
     """
 
     COMPONENT_CLASSES: ClassVar[set[str]] = {ROW_BAR}
@@ -122,14 +125,14 @@ class TranscriptRow(Barred, Vertical):
     def compose(self) -> ComposeResult:
         label = _ROLE_LABEL.get(self.item.role, self.item.role)
         style = _ROLE_STYLE.get(self.item.role, "$ph-foreground")
-        # `$label` is substituted, never parsed: a role name could not introduce
-        # markup here, but the same rule everywhere is what makes it reliable.
+        # `$label` is substituted, never parsed. A role name could not introduce
+        # markup here, but the rule is reliable because it is the same everywhere.
         yield Static(Content.from_markup(f"[{style}]$label[/]", label=label), classes="row-label")
         yield Static(Content(self.item.text), classes="row-body")
 
     def on_mount(self) -> None:
         self._shown = (self.item.text, self.item.shadowed)
-        # Dimmed, not removed: the person read it, the model no longer has it.
+        # Dimmed, not removed: the user read it, and the model no longer has it.
         self.set_class(self.item.shadowed, "-shadowed")
 
     def refresh_text(self) -> None:
@@ -138,11 +141,12 @@ class TranscriptRow(Barred, Vertical):
             return
         self._shown = current
         self.set_class(self.item.shadowed, "-shadowed")
-        # Mounted, not yet composed — a row that was added and changed inside one
-        # frame, which a `/command` that logs `run` and `done` around an await
-        # does deterministically. `compose` reads `self.item` when it runs, so
-        # the latest text is what it will draw; there is nothing to update yet.
-        # The widget owns its children's lifetime, so the widget is what says so.
+        # The row can be mounted and not yet composed: it was added and changed
+        # inside one frame. A `/command` that logs `run` and `done` around an
+        # await does that deterministically. `compose` reads `self.item` when it
+        # runs, so it will draw the latest text, and there is nothing to update
+        # yet. The widget owns the lifetime of its children, so the widget is
+        # what handles this case.
         with suppress(NoMatches):
             self.query_one(".row-body", Static).update(Content(self.item.text))
 
@@ -150,11 +154,11 @@ class TranscriptRow(Barred, Vertical):
 class StreamingMessage(Barred, Markdown):
     """An assistant or thinking row that grows a fragment at a time.
 
-    **Copies as Markdown, not as what was drawn.** `SOURCE_BLOCKS` is the whole
-    of it from this side: every block answers a selection with its own span of
-    `item.text` rather than with its rendering, which is what `ph_app.tui.widgets.
-    selection` exists to explain. The other transcript rows need nothing — they
-    are `Static`s holding the text already.
+    **A copy gives Markdown, not what was drawn.** `SOURCE_BLOCKS` is all that
+    this side needs for that. Every block answers a selection with its own span
+    of `item.text` and not with its rendering. `ph_app.tui.widgets.selection`
+    explains this. The other transcript rows need nothing, because they are
+    `Static`s that already hold the text.
     """
 
     COMPONENT_CLASSES: ClassVar[set[str]] = {ROW_BAR}
@@ -182,34 +186,35 @@ class StreamingMessage(Barred, Markdown):
         self.item = item
         self._stream: MarkdownStream | None = None
         self._written = ""
-        """What has been handed to the stream — the string, not its length.
+        """What has been handed to the stream: the string, not its length.
 
-        A count is only a safe cursor while every update *extends* the last one,
-        and the transcript's text is a derivation that can be replaced: attaching
-        mid-answer builds the row from a snapshot, and the settled
-        `assistant/message` is assembled from blocks rather than from the
+        A count is a safe cursor only while every update *extends* the last one.
+        The text of the transcript is a derivation that can be replaced.
+        Attaching in the middle of an answer builds the row from a snapshot, and
+        the settled `assistant/message` is assembled from blocks and not from the
         concatenated chunks. When the new text was not an extension, slicing it
-        at the old length appended the middle of the answer to the end of it, and
-        the row showed that until something forced a rebuild."""
+        at the old length appended the middle of the answer to the end of it. The
+        row showed that until something forced a rebuild."""
         self.add_class(f"-{item.role}")
         self.add_class("-streaming")
 
     async def write_tail(self, text: str) -> None:
-        """Append whatever part of `text` has not been written yet.
+        """Append the part of `text` that has not been written yet.
 
-        **Decided by comparing the strings**, so "this is more of what we have"
-        and "this is something else" are told apart rather than assumed. Only the
-        first is an append; the second is a rewrite, which costs one re-render of
-        a row that was wrong anyway.
+        **The decision compares the strings.** "This is more of what we have"
+        and "this is something else" are then told apart and not assumed. Only
+        the first is an append. The second is a rewrite, which costs one more
+        render of a row that was wrong anyway.
         """
         if text == self._written:
             return
         if not text.startswith(self._written):
-            # The row's text changed under the stream: render it whole. Stopping
-            # first is what flushes whatever the stream still had pending — an
-            # `update` before that would be overwritten by the fragments landing
-            # after it. A later extension re-opens a stream and appends to
-            # `Markdown.source`, which `update` has just set, so the two compose.
+            # The text of the row changed under the stream, so render it whole.
+            # The stream is stopped first, which flushes whatever the stream
+            # still had pending. An `update` before that would be overwritten by
+            # the fragments that arrive after it. A later extension opens a
+            # stream again and appends to `Markdown.source`, which `update` has
+            # just set, so the two compose.
             await self._stop_stream()
             self._written = text
             await self.update(text)
@@ -239,11 +244,12 @@ class StreamingMessage(Barred, Markdown):
 class ToolCardWidget(Barred, Vertical):
     """One tool call: a header line, its body, and any Code Mode sub-dispatches.
 
-    Dispatch rows are mounted as they arrive, keyed by call id, rather than
-    composed once. Live, the card mounts on the tick after `tool/call` — before
-    any `tool/code-dispatch-start` exists — so compose-time content would show
-    the "governed calls" section on replay and never live. Same fold, same
-    picture, is the P2-01 promise at the widget level.
+    Dispatch rows are mounted as they arrive, keyed by call id. They are not
+    composed one time with the card. Live, the card mounts on the tick after
+    `tool/call`, before any `tool/code-dispatch-start` exists. Content built at
+    compose time would therefore show the "governed calls" section on replay and
+    never live. The same fold must give the same picture: that is the promise of
+    P2-01 at the level of the widget.
     """
 
     COMPONENT_CLASSES: ClassVar[set[str]] = {ROW_BAR}
@@ -320,12 +326,12 @@ class ToolCardWidget(Barred, Vertical):
         return self.item.text if card is None else card.body
 
     async def refresh_card(self) -> bool:
-        """Redraw if anything changed; answer whether it did.
+        """Redraw if anything changed, and return whether it did.
 
-        The answer is what lets a subclass extend the card without defeating the
-        memo: `Static.update` always re-lays-out, so a row that redrew
-        unconditionally would force a full arrange on every dirty frame — which
-        is the cost this memo exists to remove, and `sync` visits every row.
+        The return value lets a subclass extend the card and keep the memo.
+        `Static.update` always runs the layout again, so a row that redrew
+        unconditionally would force a full arrange on every dirty frame. This
+        memo exists to remove that cost, and `sync` visits every row.
         """
         current = self._snapshot()
         changed = current != self._shown
@@ -338,8 +344,8 @@ class ToolCardWidget(Barred, Vertical):
                 self.query_one(".tool-header", Static).update(self._header())
                 self.query_one(".tool-body", Static).update(Content(self._body()))
             except NoMatches:
-                # Same gap as `TranscriptRow.refresh_text`; compose draws from
-                # `self.item` when it runs.
+                # The same gap as in `TranscriptRow.refresh_text`. `compose`
+                # draws from `self.item` when it runs.
                 return changed
         await self._sync_dispatches()
         return changed
@@ -377,24 +383,24 @@ class ToolCardWidget(Barred, Vertical):
 
 
 def _cell_facts(details: dict[str, JsonValue]) -> str:
-    """The `CellDetails` line — only the facts that are true.
+    """Return the `CellDetails` line, with only the facts that are true.
 
-    Read as a plain mapping rather than by importing the model: the payload is
-    ph-rlm's, and ph-app does not depend on the bundle. A field this build does not
-    know is ignored, which is what lets a tool enrich its own card without the
-    transcript learning its schema.
+    The details are read as a plain mapping, and the model is not imported. The
+    payload belongs to ph-rlm, and `ph_app` does not import the bundle. A field
+    that this build does not know is ignored. That lets a tool enrich its own
+    card without the transcript learning its schema.
 
-    The dispatch *count* is deliberately absent: the collapsible below already reports
-    it, from the `tool/code-dispatch-start` fold that owns those rows. Two projections
-    of one number in one widget can disagree, which is what A11 forbids.
+    The dispatch *count* is deliberately absent. The collapsible below already
+    reports it, from the `tool/code-dispatch-start` fold that owns those rows.
+    Two projections of one number in one widget can disagree, which A11 forbids.
     """
     facts: list[str] = []
     attachments = as_int(details.get("attachments"))
     if attachments:
         facts.append(count_of(attachments, "attachment"))
     if details.get("truncated"):
-        # The count is the body's, which ends with the run's total: one number,
-        # one place (A11).
+        # The count belongs to the body, which ends with the total of the run:
+        # one number, one place (A11).
         facts.append("output truncated")
     if details.get("reset"):
         facts.append("kernel restarted — namespace empty")
@@ -404,15 +410,15 @@ def _cell_facts(details: dict[str, JsonValue]) -> str:
 class CodeCellWidget(ToolCardWidget):
     """A Code Mode cell: the program, what it printed, and every call it made.
 
-    The card kind `terminal` earns its own widget for one reason: the *program*
-    is the interesting half. Every other tool's card is a header and a body,
-    because its input is a path or a query that fits on the header line; a cell's
-    input is the code the model wrote, and a transcript that showed only its
-    first line would hide the thing a reader is trying to follow.
+    The card kind `terminal` has its own widget for one reason: the *program*
+    is the interesting half. The card of every other tool is a header and a
+    body, because its input is a path or a query that fits on the header line.
+    The input of a cell is the code that the model wrote. A transcript that
+    showed only its first line would hide what a reader is trying to follow.
 
-    Everything drawn here comes from the settled record — `ToolCallView.body` for
-    the program, `tool/result.meta` for the facts line — so a replayed cell is
-    the cell that ran (P2-01).
+    Everything drawn here comes from the settled record: `ToolCallView.body` for
+    the program and `tool/result.meta` for the facts line. A replayed cell is
+    therefore the cell that ran (P2-01).
     """
 
     DEFAULT_CSS = """
@@ -442,8 +448,8 @@ class CodeCellWidget(ToolCardWidget):
     async def refresh_card(self) -> bool:
         changed = await super().refresh_card()
         if changed:
-            # `self._shown` is the tuple `super()` just stored, so the program
-            # and the facts are read back rather than recomputed.
+            # `self._shown` is the tuple that `super()` just stored, so the
+            # program and the facts are read back and not computed again.
             program, facts = self._shown[-2:] if self._shown else ("", "")
             self.query_one(".cell-program", Static).update(Content(str(program)))
             widget = self.query_one(".cell-facts", Static)
@@ -453,26 +459,29 @@ class CodeCellWidget(ToolCardWidget):
 
 
 RowWidget: TypeAlias = ToolCardWidget | StreamingMessage | TranscriptRow
-"""One transcript row, whatever shape the item asked for.
+"""One transcript row, in whatever shape the item asked for.
 
-Not Textual's `Widget`: the three carry different bases (`Vertical`, `Markdown`)
-and share exactly one thing this view needs — `item`, the `ChatItem` they were
-built from. `_row_for_seq` reads `row.item.seq` and `seq_in_view` reads it again,
-so a base that only promises "mountable" would not typecheck the navigation this
-widget exists to provide. `CodeCellWidget` rides in under `ToolCardWidget`.
+This is not Textual's `Widget`. The three classes have different bases
+(`Vertical`, `Markdown`) and share exactly one thing that this view needs:
+`item`, the `ChatItem` that they were built from. `_row_for_seq` reads
+`row.item.seq` and `seq_in_view` reads it again. A base that only promises
+"mountable" would not typecheck the navigation that this widget exists to
+provide. `CodeCellWidget` is covered as a subclass of `ToolCardWidget`.
 """
 
 
 class TranscriptView(GutterScroll, VerticalScroll):
-    """Renders a list of rows, mounting new ones and updating changed ones.
+    """Renders a list of rows: it mounts new rows and updates changed ones.
 
-    Receives rows already filtered — `TuiState.visible_items` owns which toggles
-    hide what — so the view has no opinion about the transcript's meaning.
+    The view receives rows that are already filtered. `TuiState.visible_items`
+    owns which toggles hide what, so the view has no opinion about the meaning
+    of the transcript.
 
-    Column 0 is the gutter (`widgets.gutter`): the scrollbar, always shown
-    because the rows' bars are drawn in it, over a track the color of the
-    background and a thumb in the headings' color — the status line's and the
-    side panel's, so it follows the theme with them. Rows start in column 1.
+    Column 0 is the gutter (`widgets.gutter`). It holds the scrollbar, which is
+    always shown because the bars of the rows are drawn in it. The track has
+    the color of the background, and the thumb has the color of the headings.
+    That is the color of the status line and of the side panel, so the thumb
+    follows the theme with them. Rows start in column 1.
     """
 
     DEFAULT_CSS = """
@@ -492,25 +501,25 @@ class TranscriptView(GutterScroll, VerticalScroll):
         self._mounting = anyio.Lock()
         """Serializes `sync`, because Textual refuses a mount while one is pending.
 
-        Two draws can overlap: `_draw` clears its coalescing timer before it
-        awaits, so a change arriving mid-draw schedules the next one — and the
-        second `sync` then calls `mount()` on a node whose previous child is
+        Two draws can overlap. `_draw` clears its coalescing timer before it
+        awaits, so a change that arrives during a draw schedules the next one.
+        The second `sync` then calls `mount()` on a node whose previous child is
         still mounting, which raises `MountError: Can't mount widget(s) before
-        … is mounted`. It surfaced as an unrelated test failing under coverage,
-        where everything is slow enough for the windows to overlap.
+        … is mounted`. It appeared as an unrelated test that failed under
+        coverage, where everything is slow enough for the windows to overlap.
 
-        The lock belongs here rather than at the caller: the ordering constraint
-        is this widget's, and a caller that had to know about it is one that will
+        The lock belongs here and not at the caller. The ordering constraint
+        belongs to this widget, and a caller that had to know about it would
         eventually forget."""
 
     async def sync(self, items: list[ChatItem]) -> None:
         """Bring the view in line with `items`. Idempotent and cheap when nothing changed."""
         async with self._mounting:
-            # **A queued draw may land after this view is gone.** Serializing
-            # `sync` means a second one can begin later than it used to — after
-            # the app started unmounting, which is the same hazard `on_unmount`
-            # stops the timers for. Mounting into a detached node raises, so a
-            # draw that arrives too late renders nothing instead.
+            # **A queued draw may arrive after this view is gone.** Because
+            # `sync` is serialized, a second one can begin later than it used
+            # to: after the app started unmounting. That is the same hazard that
+            # `on_unmount` stops the timers for. Mounting into a detached node
+            # raises, so a draw that arrives too late renders nothing.
             if self.is_mounted:
                 await self._sync(items)
 
@@ -522,24 +531,27 @@ class TranscriptView(GutterScroll, VerticalScroll):
                 self._rows[item.key] = widget
                 await self.mount(widget)
             if not widget.is_mounted:
-                # Mounted a moment ago and detached since — the view is coming
-                # apart around this loop. Its content would go into a node
-                # nothing is rendering, and `Markdown.append` refuses it.
+                # The widget was mounted a moment ago and has been detached
+                # since, so the view is coming apart around this loop. Its
+                # content would go into a node that nothing renders, and
+                # `Markdown.append` refuses it.
                 continue
             await self._update(widget, item)
-        # The gutter draws the rows' bars, and a row that settled or failed in
-        # this pass changed its bar's color without changing its size — which is
-        # the one change nothing else would repaint the gutter for. One column.
+        # The gutter draws the bars of the rows. A row that settled or failed in
+        # this pass changed the color of its bar and not its size. Nothing else
+        # would repaint the gutter for that change. The refresh covers one
+        # column.
         self.vertical_scrollbar.refresh()
-        # Stick to the bottom while rows arrive; release when the reader scrolls
-        # up. Textual's `anchor()` does that from one call — but engaged only
-        # once there is something to scroll: anchoring an underfull pane scrolls
-        # it to a *negative* offset and every row renders pushed to the bottom.
+        # Stick to the bottom while rows arrive, and release when the reader
+        # scrolls up. Textual's `anchor()` does that from one call. It is
+        # engaged only when there is something to scroll: anchoring an underfull
+        # pane scrolls it to a *negative* offset, and every row renders pushed
+        # to the bottom.
         #
-        # Re-armed only from the bottom. Textual releases the anchor when the
-        # reader scrolls away, and an unconditional re-arm here undid that on
-        # the very next dirty frame — which also meant a jump to a record
-        # (`scroll_to_seq`) survived exactly until the next event.
+        # The anchor is armed again only from the bottom. Textual releases the
+        # anchor when the reader scrolls away. An unconditional re-arm here
+        # undid that on the next dirty frame. It also meant that a jump to a
+        # record (`scroll_to_seq`) lasted only until the next event.
         if (
             self.max_scroll_y > 0
             and not self.is_anchored
@@ -560,8 +572,8 @@ class TranscriptView(GutterScroll, VerticalScroll):
         if isinstance(widget, ToolCardWidget):
             await widget.refresh_card()
         elif isinstance(widget, StreamingMessage):
-            # A settled row is finalized on its first sync, which is what makes
-            # a replayed message look identical to one that streamed in.
+            # A settled row is finalized on its first sync. That makes a
+            # replayed message look identical to one that streamed in.
             if item.streaming:
                 await widget.write_tail(item.text)
             else:
@@ -570,7 +582,7 @@ class TranscriptView(GutterScroll, VerticalScroll):
             widget.refresh_text()
 
     async def rebuild(self, items: list[ChatItem]) -> None:
-        """Drop every row and render from scratch — what a toggle needs."""
+        """Drop every row and render from scratch. A toggle needs this."""
         await self.remove_children()
         self._rows.clear()
         await self.sync(items)
@@ -578,13 +590,13 @@ class TranscriptView(GutterScroll, VerticalScroll):
     # ------------------------------------------------------ cross-navigation --
     # The join with the auditor's view (P4-17): `ChatItem.seq` and
     # `TrajectoryRecord.source_seq` are the same log position, stored on both
-    # sides since P3-24. These two methods are all it took to read it.
+    # sides since P3-24. These two methods are all that was needed to read it.
 
     def scroll_to_seq(self, seq: int) -> bool:
-        """Bring the row for a log seq into view. `False` if none is shown.
+        """Bring the row for a log seq into view. Return `False` if none is shown.
 
-        The anchor is released first: a view stuck to the bottom would scroll
-        straight back, which is the whole of "the jump did nothing".
+        The anchor is released first. A view that is stuck to the bottom would
+        scroll straight back, and the jump would appear to do nothing.
         """
         widget = self._row_for_seq(seq)
         if widget is None:
@@ -593,25 +605,30 @@ class TranscriptView(GutterScroll, VerticalScroll):
         self.scroll_to_widget(widget, top=True, animate=False, immediate=True)
         return True
 
-    def seq_in_view(self) -> int:
-        """The seq of the topmost row on screen, or `-1` when nothing is.
+    def seq_in_view(self) -> int | None:
+        """Return the seq of the topmost row on screen. Return `None` when no row
+        is on screen, or when that row has no position in the log.
 
-        "Where the reader is" without inventing per-row focus: rows are widgets
-        in a scroll, not a table with a cursor, so the honest answer to "which
-        row am I looking at" is the first one still visible.
+        This gives "where the reader is" without inventing a focus for each row.
+        Rows are widgets in a scroll, not a table with a cursor. So the correct
+        answer to "which row am I looking at" is the first row that is still
+        visible.
         """
         top = self.content_region.y
         for widget in self._rows.values():
             region = widget.region
             if region.height and region.bottom > top:
-                return int(widget.item.seq)
-        return -1
+                # `ChatItem.seq` is `-1` for a row that the log has no position
+                # for. That is not a position that a screen can open at.
+                seq = int(widget.item.seq)
+                return seq if seq >= 0 else None
+        return None
 
     def _row_for_seq(self, seq: int) -> RowWidget | None:
-        """The row for `seq`, or the nearest one before it.
+        """Return the row for `seq`, or the nearest row before it.
 
-        `index_at_or_before` owns the "nearest" rule and why it is nearest, so
-        this side and the trajectory's cannot drift apart. `_rows` is in
+        `index_at_or_before` owns the "nearest" rule and the reason for it, so
+        this side and the trajectory side cannot drift apart. `_rows` is in
         transcript order, which is log order.
         """
         rows = list(self._rows.values())

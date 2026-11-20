@@ -1,14 +1,15 @@
-"""The modal shapes everything else in pH is built from.
+"""The modal shapes that everything else in pH is built from.
 
-`PhModal` carries the one thing every dialog shares — a cancel key — as a
-Textual binding with the id `cancel`, so `App.set_keymap` rebinds it from
-`tui.json` along with everything else. No modal compares a key literal.
+`PhModal` carries the one thing that every dialog shares, which is a cancel
+key. The key is a Textual binding with the id `cancel`, so `App.set_keymap`
+rebinds it from `tui.json` together with every other binding. No modal compares
+a key literal.
 
-`ChoicePicker` (pick one of a list, filtered as you type) and `ConfirmModal`
-(read this, then decide) cover every dialog Phase 2 needs — model, session,
-theme, preset, project trust, plan review. Writing five bespoke screens instead
-would mean five places to get the escape key, the focus order and the filter
-semantics subtly different.
+`ChoicePicker` picks one item of a list, and the list is filtered as the user
+types. `ConfirmModal` shows a text and then asks for a decision. The two cover
+every dialog that Phase 2 needs: model, session, theme, preset and project
+trust. Five separate screens would be five places where the escape key, the
+focus order and the filter rules could differ slightly.
 
 @module ph_app.tui.modals.base
 """
@@ -34,7 +35,7 @@ ResultT = TypeVar("ResultT")
 
 
 class PhModal(ModalScreen[ResultT]):
-    """A modal with pH's cancel binding. `cancel_value` is what dismissal returns."""
+    """A modal with the cancel binding of pH. A dismissal returns `cancel_value`."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", "Cancel", id="cancel", show=False)
@@ -49,10 +50,11 @@ class PhModal(ModalScreen[ResultT]):
     def withdraw(self) -> None:
         """Take this modal down with `cancel_value`, wherever it is in the stack.
 
-        `dismiss` hands its result to this screen's waiter but pops whichever
-        screen is on top. With two asks up at once, withdrawing the lower one took
-        the upper one down instead, and the upper ask's waiter never heard back. A
-        modal that is not on top is taken down when it gets there.
+        `dismiss` gives its result to the waiter of this screen, but it pops
+        whichever screen is on top. With two asks open at the same time, a
+        withdrawal of the lower one took the upper one down instead, and the
+        waiter of the upper ask never got an answer. A modal that is not on top
+        is taken down when it reaches the top.
         """
         if self.is_active:
             self.dismiss(self.cancel_value)
@@ -72,11 +74,12 @@ class Choice:
     label: str
     detail: str = ""
     marked: bool = False
-    """Rendered as the current selection — the active model, the live theme."""
+    """Rendered as the current selection: the active model, the live theme."""
     unavailable: str = ""
-    """Why this row cannot be chosen, for one that is worth seeing but not taking —
-    a sub-agent's log among the sessions. Choosing it shows this and leaves the
-    picker open, so no caller is handed a value it would have to refuse."""
+    """Why this row cannot be chosen. It is for a row that is worth showing but
+    cannot be taken, such as the log of a sub-agent among the sessions. Choosing
+    the row shows this text and leaves the picker open, so no caller receives a
+    value that it would have to refuse."""
 
     def matches(self, needle: str) -> bool:
         return matches_terms(f"{self.label} {self.detail} {self.value}", needle)
@@ -114,12 +117,14 @@ class ChoicePicker(PhModal[str | None]):
         self.title_text = title
         self.choices = choices
         self.free_text = free_text
-        """When set, an unmatched filter is offered as a literal value labeled
-        `<free_text>, as typed` — a model id or session id pH has no catalog
-        for is still something the user can name."""
+        """When set, a filter that is not the value of any matching row is
+        offered as a literal value, with the detail `<free_text>, as typed`. The
+        user can still name a model id or a session id that pH has no catalog
+        for."""
         self.on_highlight = on_highlight
-        """Called with the value under the cursor as it moves, so a theme can be
-        applied before it is chosen — seeing it is the only way to pick."""
+        """Called with the value under the cursor as the cursor moves, so that a
+        theme can be applied before it is chosen. The user can only pick a theme
+        by seeing it."""
         self._visible: list[Choice] = list(choices)
 
     def compose(self) -> ComposeResult:
@@ -198,20 +203,23 @@ class ChoicePicker(PhModal[str | None]):
 
 
 class Answers(Vertical):
-    """A dialog's answers: a column of buttons, each centered, walked by the arrows.
+    """The answers of a dialog: a column of buttons. Each button is centered, and
+    the arrow keys move between the buttons.
 
-    **Each button in a `Center`.** `align-horizontal` on the column would center
-    the answers as one block the width of the widest, leaving a shorter label's
-    button flush with the block's left edge.
+    **Each button is in a `Center`.** `align-horizontal` on the column would
+    center the answers as one block that is as wide as the widest button. A
+    button with a shorter label would then sit against the left edge of the
+    block.
 
-    **The arrows are bound here, on the column, not on the dialog.** So they act
-    only while an answer has focus, and move only among the answers. A text box
-    handles Left and Right itself, but not Up and Down; bound on the dialog,
-    those would throw focus out of approval's reason box mid-sentence. Tab still
-    reaches the box. Down and Up carry the picker's ids
-    (`completion_next`, `completion_previous`), so a rebinding in `tui.json`
-    moves both kinds of dialog; Right and Left are a courtesy for whoever reads
-    the answers as a row, and are fixed.
+    **The arrows are bound here, on the column, and not on the dialog.** They
+    therefore act only while an answer has focus, and they move only among the
+    answers. A text box handles Left and Right itself, but not Up and Down. If
+    Up and Down were bound on the dialog, they would move focus out of the
+    reason box of the approval dialog in the middle of a sentence. Tab still
+    reaches the box. Down and Up have the ids of the picker (`completion_next`,
+    `completion_previous`), so a rebinding in `tui.json` moves both kinds of
+    dialog. Right and Left are fixed. They are a courtesy for a user who reads
+    the answers as a row.
     """
 
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -244,13 +252,13 @@ class Action(NamedTuple):
 
 
 class ConfirmModal(PhModal[str | None]):
-    """Show a body, offer named actions, return the chosen one.
+    """Show a body, offer named actions, and return the chosen one.
 
-    The body is rendered as plain `Content`: a plan, a diff, a path, a command
-    line — every one of them contains brackets, and none of them is markup.
+    The body is rendered as plain `Content`. A plan, a diff, a path and a
+    command line all contain brackets, and none of them is markup.
 
-    The answers are an `Answers` column: centered, and walked by the arrows as
-    well as Tab.
+    The answers are an `Answers` column. They are centered, and the arrow keys
+    move between them as well as Tab.
     """
 
     DEFAULT_CSS = """
@@ -278,8 +286,9 @@ class ConfirmModal(PhModal[str | None]):
         self.actions = actions
         self.cancel_value = cancel_value
         self.initial = initial if initial is not None else (actions[0].value if actions else None)
-        """The answer focused when the dialog opens — what a bare Enter chooses.
-        The first action unless the caller names a safer one."""
+        """The answer that has focus when the dialog opens, which is what a bare
+        Enter chooses. It is the first action unless the caller names a safer
+        one."""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm"):

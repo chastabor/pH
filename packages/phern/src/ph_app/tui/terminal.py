@@ -1,12 +1,12 @@
-"""The terminal's window title.
+"""The window title of the terminal.
 
-The bell is `App.bell()` — Textual writes it through its own driver, which is
-also headless-safe. The title has no such helper, so it lives here, with the
-one subtlety that matters: Textual redirects `sys.stdout` while it drives the
-screen, so a control sequence written there lands in the app's log (and, under a
-test harness, in the captured output as literal `]2;pH` noise). These bytes are
-instructions, not output; they go to `sys.__stdout__`, and only when that is a
-terminal that will interpret them.
+The bell is `App.bell()`. Textual writes it through its own driver, which is
+also safe when headless. The title has no such helper, so it is set here. One
+detail matters. Textual redirects `sys.stdout` while it drives the screen, so a
+control sequence written there lands in the log of the app. Under a test
+harness, it also lands in the captured output as literal `]2;pH` noise. These
+bytes are instructions and not output. They go to `sys.__stdout__`, and only
+when that is a terminal that will interpret them.
 
 @module ph_app.tui.terminal
 """

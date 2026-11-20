@@ -1,23 +1,23 @@
-"""The approval modal, and the answerer that puts it on screen.
+"""The approval modal, and the decision that it returns.
 
-This is the seam's front-end half. `ApprovalService.request` records
-`approval/asked`, waterfalls to whoever registered an answerer, and records
-`approval/decided` — so the modal's only job is to return an outcome. It does
-not append anything itself; a front-end writing its own approval events would
-give the log two authors for one decision.
+This is the front-end half of the seam. `ApprovalService.request` records
+`approval/asked`, runs the waterfall to whoever registered an answerer, and
+records `approval/decided`. The only task of the modal is therefore to return an
+outcome. It appends nothing itself. If a front end wrote its own approval
+events, the log would have two authors for one decision.
 
-Four decisions reach the model (P4-05), and each is a different sentence a
-person wants to say. *Allow* and *Reject* stop or start the call; a rejection may
-carry a reason, because "no, use the existing helper" redirects a turn where a
-bare denial only stops it. *Edit* corrects the call rather than refusing it, and
-*Respond* answers in the tool's own voice without running it — both exist
-because stopping a turn to say "wrong path" or "you don't need that" costs a
-round trip that saying it in place does not.
+Four decisions reach the model (P4-05), and each one is a different sentence
+that a person wants to say. *Allow* starts the call and *Reject* stops it. A
+rejection may carry a reason, because "no, use the existing helper" redirects a
+turn, and a bare denial only stops it. *Edit* corrects the call and does not
+refuse it. *Respond* answers in place of the tool and does not run it. Both
+exist because stopping a turn to say "wrong path" or "you don't need that" costs
+a round trip, and saying it in place does not.
 
-Which of the four are offered is the *asking row's* call, carried on the request
-as `allowed_decisions`: a deployment may withhold `edit` for a tool whose
-arguments must not be hand-written. Dismissing the modal is a rejection:
-absence is not consent.
+The *asking row* decides which of the four are offered, and the request carries
+that as `allowed_decisions`. A deployment may withhold `edit` for a tool whose
+arguments must not be written by hand. Dismissing the modal is a rejection,
+because absence is not consent.
 
 @module ph_app.tui.modals.approval
 """
@@ -49,12 +49,12 @@ __all__ = ["ApprovalDecision", "ApprovalModal"]
 
 @dataclass(frozen=True, slots=True)
 class _Offer:
-    """One button, and what pressing it opens.
+    """One button, and what a press on it opens.
 
-    The four decisions were spelled in three parallel tables — button id to
-    decision, decision to placeholder, decision to prefill — which is three
-    places that have to agree every time a fifth is added. One row per decision
-    instead.
+    The four decisions were written in three parallel tables: button id to
+    decision, decision to placeholder, and decision to prefill. Those are three
+    places that must agree every time a fifth decision is added. There is now
+    one row for each decision.
     """
 
     decision: ApprovalDecisionName
@@ -77,11 +77,12 @@ _REJECT = _BY_DECISION["reject"]
 
 @dataclass(frozen=True, slots=True)
 class ApprovalDecision:
-    """What the human chose.
+    """What the user chose.
 
-    `answer` is what the seam is handed; `reason` is the aside a rejection may
-    carry, which the front end steers in as user input rather than putting on
-    the decision — it is a message to the model, not part of the verdict.
+    `answer` is what the seam receives. `reason` is the remark that a rejection
+    may carry. The front end steers it in as user input and does not put it on
+    the decision, because it is a message to the model and not part of the
+    verdict.
     """
 
     answer: ApprovalAnswer
@@ -91,9 +92,10 @@ class ApprovalDecision:
 class ApprovalModal(PhModal[ApprovalDecision]):
     """Ask whether one tool call may run.
 
-    The decisions are an `Answers` column — centered, and walked by the arrows
-    as well as Tab, the same as every other dialog's answers. The arrows move
-    among the decisions only, so once the reason box is open they stay with it.
+    The decisions are an `Answers` column, the same as the answers of every
+    other dialog. They are centered, and the arrow keys move between them as
+    well as Tab. The arrows move among the decisions only, so after the reason
+    box opens, they stay in the box.
     """
 
     DEFAULT_CSS = """
@@ -132,7 +134,7 @@ class ApprovalModal(PhModal[ApprovalDecision]):
             )
 
     def _offers(self, decision: ApprovalDecisionName) -> bool:
-        """Whether the asking row will accept this one. Empty means all four."""
+        """Whether the asking row accepts this decision. An empty list means all four."""
         allowed = self.request.allowed_decisions
         return not allowed or decision in allowed
 
@@ -146,10 +148,10 @@ class ApprovalModal(PhModal[ApprovalDecision]):
         if event.button.id == "approval-approve":
             self.dismiss(ApprovalDecision(answer="allowed-once"))
             return
-        # The three that collect text share one box, revealed on the first press
-        # and submitted on the second — the same button has to mean "do it now"
-        # once the box is open, because every one of these inputs is optional or
-        # prefilled.
+        # The three decisions that collect text share one box. The first press
+        # shows the box and the second press submits it. The same button must
+        # mean "do it now" after the box is open, because every one of these
+        # inputs is optional or prefilled.
         if self.has_class("-explaining"):
             self._submit(self.query_one("#approval-why", Input).value)
             return
@@ -166,7 +168,7 @@ class ApprovalModal(PhModal[ApprovalDecision]):
         self._submit(event.value)
 
     def _submit(self, text: str) -> None:
-        """Turn what was typed into the answer the seam expects."""
+        """Turn the typed text into the answer that the seam expects."""
         typed = text.strip()
         if self._pending.decision == "respond" and typed:
             self.dismiss(ApprovalDecision(answer=Responded(message=typed)))
@@ -175,9 +177,9 @@ class ApprovalModal(PhModal[ApprovalDecision]):
             try:
                 arguments = json.loads(typed)
             except ValueError:
-                # Not a refusal — the person meant to edit and mistyped, so the
-                # box stays open with what they wrote rather than the call being
-                # silently rejected on a stray comma.
+                # This is not a refusal. The user meant to edit and mistyped, so
+                # the box stays open with the typed text. A stray comma must not
+                # reject the call silently.
                 self.query_one("#approval-why", Input).placeholder = "not valid JSON — try again"
                 return
             self.dismiss(ApprovalDecision(answer=Edited(arguments=arguments)))
@@ -186,7 +188,7 @@ class ApprovalModal(PhModal[ApprovalDecision]):
 
 
 def _as_json(arguments: JsonValue) -> str:
-    """The edit box opens on the call as it stands, when it can be rendered."""
+    """The edit box opens with the call as it stands, when the call can be rendered."""
     try:
         return json.dumps(arguments)
     except (TypeError, ValueError):

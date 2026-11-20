@@ -1,13 +1,13 @@
 """What the prompt can complete, decided without a running app.
 
-Parsing is separated from candidate lookup for a reason that shows up under
-load: the parse is pure and runs on every keystroke, while listing a directory
-is I/O and must only happen when the token being typed is actually a path. So
+Parsing is separate from candidate lookup, and the reason shows under load. The
+parse is pure and runs on every keystroke. To list a directory is I/O, and it
+must happen only when the token being typed is a path. So
 `parse_completion_token` answers *what is being completed*, and
 `build_completion_state` consults the candidate sources only for that kind.
 
-The command source is pH's own `ctx.commands.list()`. Nothing here maintains a
-second list of what exists (I7).
+The command source is `PHTuiApp.commands`, the same list that the palette and
+the dispatch read. Nothing here keeps a second list of what exists (I7).
 
 @module ph_app.tui.autocomplete
 """
@@ -79,10 +79,10 @@ class CompletionState:
 
 
 def parse_completion_token(text: str) -> CompletionRequest | None:
-    """The token at the end of `text`, if it is one pH completes.
+    """The token at the end of `text`, if it is one that pH completes.
 
-    A command completes only as the first thing in the prompt — `/` inside a
-    sentence is a path separator or a date, and offering commands there would
+    A command completes only as the first thing in the prompt. A `/` inside a
+    sentence is a path separator or a date, and to offer commands there would
     fire constantly while someone types prose.
     """
     if not text or text[-1].isspace():
@@ -131,11 +131,12 @@ def build_completion_state(
 class PathCompleter:
     """Directory listing for `@path` completion, one level at a time.
 
-    Walking a whole repository per keystroke is the obvious way to write this
-    and the wrong one — a large checkout makes the prompt stutter. Listing only
-    the directory named by the prefix is bounded by that directory's size, and
-    `os.scandir` answers `is_dir()` from the directory entry itself, so a large
-    directory costs one syscall rather than one per entry.
+    To walk a whole repository on each keystroke is the obvious way to write
+    this, and it is the wrong one: a large checkout makes the prompt stutter.
+    A listing of only the directory that the prefix names is bounded by the
+    size of that directory. `os.scandir` answers `is_dir()` from the directory
+    entry itself, so a large directory costs one syscall and not one for each
+    entry.
     """
 
     root: str

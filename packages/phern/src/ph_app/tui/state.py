@@ -1,12 +1,12 @@
 """What the transcript *is*, independent of how Textual draws it.
 
-A plain data model, for two reasons. It can be built and asserted without a
-running app — which is what makes the resume gate testable — and it keeps the
-"what happened" question separate from the "how does it look" one, so a widget
-change cannot alter the transcript's meaning.
+This is a plain data model, for two reasons. It can be built and checked without
+a running app, which is what makes the resume gate testable. It also keeps the
+question "what happened" separate from the question "how does it look", so a
+widget change cannot alter the meaning of the transcript.
 
-`ChatItem.key` is the identity a widget mounts against, so a `tool/call` row
-becomes its own `tool/result` row rather than a second row beside it.
+`ChatItem.key` is the identity that a widget mounts against. A `tool/call` row
+therefore becomes its own `tool/result` row, and not a second row beside it.
 
 @module ph_app.tui.state
 """
@@ -38,22 +38,22 @@ __all__ = [
 class Surface(IntFlag):
     """Which part of the screen a change reaches.
 
-    The redraw was one boolean, so every event redrew everything: an
-    `assistant/chunk` — which arrives faster than the coalescing window during a
-    streaming turn, and cannot change a sidebar — re-ran the session panel, the
-    todo list and the subagent fold thirty times a second. A flag lets the draw
-    ask what actually moved.
+    The redraw used to be one boolean, so every event redrew everything. An
+    `assistant/chunk` arrives faster than the coalescing window during a
+    streaming turn, and it cannot change a sidebar. It still ran the session
+    panel, the todo list and the subagent fold again, thirty times a second.
+    With a flag, the draw can ask what moved.
 
-    `ALL` is the default everywhere, and deliberately: a surface that should
-    have been redrawn and was not is a pane showing yesterday's answer, which is
-    far worse than a redraw nobody needed. An event type earns a narrower
-    entry on its own `ph_app.tui.adapter.EventRule`, beside the handler that
-    does the folding.
+    `ALL` is the default everywhere, and that is deliberate. A surface that
+    should have been redrawn and was not is a pane that shows an old answer.
+    That is much worse than a redraw that nobody needed. An event type gets a
+    narrower entry on its own `ph_app.tui.adapter.EventRule`, beside the handler
+    that does the fold.
     """
 
     NOTHING = 0
-    """Named rather than `Surface(0)`, because a dataclass default may not be a
-    call and a zero flag is worth being able to say out loud."""
+    """Named, and not written as `Surface(0)`, because a dataclass default may not
+    be a call, and because a zero flag is worth a name."""
 
     TRANSCRIPT = 1
     FOOTER = 2
@@ -68,13 +68,14 @@ ItemRole: TypeAlias = Literal[
 
 @dataclass(frozen=True, slots=True)
 class CatalogEntry:
-    """One entry of what this deployment offers the model: a tool, or a skill.
+    """One entry of what this deployment offers the model: a tool or a skill.
 
-    One type for both because the two panels ask the same two questions of
-    them — what is it called, and what is it for — and a `ToolSchema` beside a
-    `Skill` would make every renderer here branch on which it had for a field
-    both carry. The parts that differ (a tool's parameters, a skill's path and
-    version) are not what a catalog panel shows, so they are not carried.
+    One type serves both, because the two panels ask the same two questions of
+    them: what is it called, and what is it for. With a `ToolSchema` beside a
+    `Skill`, every renderer here would branch on which one it had, for a field
+    that both carry. The parts that differ (the parameters of a tool, the path
+    and version of a skill) are not what a catalog panel shows, so they are not
+    carried.
     """
 
     name: str
@@ -83,11 +84,11 @@ class CatalogEntry:
 
 @dataclass(slots=True)
 class ToolCard:
-    """The durable facts a tool row renders from.
+    """The durable facts that a tool row renders from.
 
-    Every field comes from the log — never from a live execution — so a replayed
-    session draws the identical card (the reason `present_call`/`present_result`
-    are pure).
+    Every field comes from the log and never from a live execution, so a
+    replayed session draws the identical card. That is the reason why
+    `present_call` and `present_result` are pure.
     """
 
     call_id: str
@@ -96,23 +97,24 @@ class ToolCard:
     title: str = ""
     subtitle: str = ""
     card: str = "generic"
-    """The tool's declared `CardKind`. The `terminal` kind is the code cell
-    (P3-19); every other kind draws the same way."""
+    """The declared `CardKind` of the tool. The `terminal` kind is the code cell
+    (P3-19). Every other kind draws the same way."""
     input_text: str = ""
-    """The call's full input, when the tool offered one (`ToolCallView.body`) —
-    a cell's program. Kept apart from `arguments`, which is the raw JSON the
-    model emitted and may not even parse."""
+    """The full input of the call, when the tool offered one
+    (`ToolCallView.body`): the program of a cell. It is kept apart from
+    `arguments`, which is the raw JSON that the model emitted and may not even
+    parse."""
     details: dict[str, JsonValue] = field(default_factory=dict)
-    """The tool's own durable presentation payload, threaded verbatim from
-    `tool/result.meta` — for a cell, `CellDetails`. The card shows what it
-    understands and ignores the rest, so a tool can enrich its own card without
-    the transcript learning its schema."""
+    """The durable presentation payload of the tool, passed through verbatim from
+    `tool/result.meta`. For a cell it is `CellDetails`. The card shows what it
+    understands and ignores the rest, so a tool can enrich its own card and the
+    transcript does not learn its schema."""
     settled: bool = False
     is_error: bool = False
     failure_kind: str = ""
     body: str = ""
     dispatches: list[ToolCard] = field(default_factory=list)
-    """Code Mode sub-dispatches, one row each (C2) — forty writes are forty rows."""
+    """Code Mode sub-dispatches, one row each (C2). Forty writes are forty rows."""
 
 
 STATUS_GLYPHS: dict[str, str] = {
@@ -126,14 +128,15 @@ STATUS_GLYPHS: dict[str, str] = {
 
 @dataclass(frozen=True, slots=True)
 class SubagentRow:
-    """One sub-agent, as the panel draws it: the daemon's row, and how deep it sits.
+    """One sub-agent as the panel draws it: the row from the daemon, and its depth.
 
-    **The wire row itself rather than a copy of its fields** (P11-09), for the reason
-    `TuiState.lifetime` holds its model whole: the daemon folds each child's own log
-    (`ChildRow`), and a second shape here would be a second declaration of fourteen
-    fields with nothing checking that they agree. What the panel adds is only what
-    drawing needs — the glyph, and `depth`, which is the family's tree read off
-    `parent_id` so a grandchild is indented under the child that spawned it.
+    **This holds the wire row itself and not a copy of its fields** (P11-09),
+    for the reason that `TuiState.lifetime` holds its model whole. The daemon
+    folds the log of each child (`ChildRow`). A second shape here would be a
+    second declaration of fourteen fields, with nothing to check that the two
+    agree. The panel adds only what drawing needs: the glyph, and `depth`. The
+    depth is the tree of the family read from `parent_id`, so a grandchild is
+    indented under the child that spawned it.
     """
 
     child: ChildRow
@@ -142,13 +145,15 @@ class SubagentRow:
 
     @property
     def session_id(self) -> str:
-        """The child's own log — what the panel keys it by, unique at every depth."""
+        """The log of the child. The panel keys the row by it. It is unique at every
+        depth."""
         return self.child.session_id
 
     @property
     def live(self) -> bool:
-        """Still working: not revoked, and not settled — `child_is_live`, over the row,
-        so the panel and the seam cannot come to disagree."""
+        """Whether the child is still working: not revoked, and not settled. This is
+        `child_is_live` applied to the row, so the panel and the seam cannot
+        disagree."""
         return child_is_live(self.child)
 
     @property
@@ -168,29 +173,30 @@ class ChatItem:
     turn: int = 0
     seq: int = -1
     shadowed: bool = False
-    """Replaced by a compaction summary. Distinct from `role == "compaction"`,
-    which is the summary itself: the summary is what the model sees *now*, and
-    the shadowed rows are what it no longer sees. Conflating them would make a
-    compaction indistinguishable from the history it stands in for."""
+    """Whether a compaction summary replaced this row. This is distinct from
+    `role == "compaction"`, which is the summary itself. The summary is what the
+    model sees *now*, and the shadowed rows are what it no longer sees. If the
+    two were merged, a compaction could not be told apart from the history that
+    it stands in for."""
 
     @property
     def is_visible_to_model(self) -> bool:
         """Whether this row is part of what the model currently sees.
 
-        A shadowed row stays in the transcript — a person already read it — but
-        answers `False`, because the model no longer has it.
+        A shadowed row stays in the transcript, because a person already read
+        it. It answers `False`, because the model no longer has it.
         """
         return not self.shadowed
 
 
 @dataclass(frozen=True, slots=True)
 class PromptRecord:
-    """One prompt a person sent, as the history walk and the picker show it.
+    """One prompt that a person sent, as the history walk and the picker show it.
 
-    A projection of the `user` rows of `TuiState.items` rather than a second
-    store — see `TuiState.prompt_history`. `seq` is what lets a chosen row be
-    *revealed* in the transcript, which is the half of this that a history file
-    could not do; it is `-1` for a row the log has no position for.
+    This is a projection of the `user` rows of `TuiState.items` and not a second
+    store: see `TuiState.prompt_history`. With `seq`, a chosen row can be
+    *revealed* in the transcript, which a history file could not do. `seq` is
+    `-1` for a row that the log has no position for.
     """
 
     text: str
@@ -202,88 +208,101 @@ class PromptRecord:
 class TuiState:
     """The whole front-end model: rows and live status.
 
-    The posture is no longer here — it is a `StatusReading` the seams that own
-    it contribute, which the footer and the session panel place by slot."""
+    The posture is no longer here. It is a `StatusReading` that the seams which
+    own it contribute, and the footer and the session panel place it by slot."""
 
     items: list[ChatItem] = field(default_factory=list)
     status: str = "idle"
-    """The root's own word: `idle`, `running`, `waiting`, `retrying`,
-    `passivated`. A `str` rather than a two-valued literal because a daemon's
-    session has more states than a spinner does, and the alternative — a second
-    status field on the remote front end, kept in step by hand — was three
-    writers of one fact. Widgets read `busy`, which is the bool they wanted."""
+    """The status word of the root, for example `idle`, `running`, `waiting`,
+    `retrying`, `failed` or `passivated`. It is a `str` and not a two-valued
+    literal, because the session of a daemon has more states than a spinner
+    does. The alternative was a second status field on the remote front end,
+    kept in step by hand, which made three writers of one fact. Widgets read
+    `busy`, which is the bool that they wanted."""
     turn: int = 0
     queued: int = 0
     tools: tuple[CatalogEntry, ...] = ()
     """What the model may call here, as `tools/list` projected it.
 
-    Read at draw time rather than folded from events, because it is not in the
-    log: a row registers its tools at mount, so this is a fact about the
-    deployment the session is running under and not about the session. The
-    panel draws the names and `/tools` draws the descriptions — one read, two
-    renderings, which is why the description is carried rather than dropped at
-    the wire edge."""
+    It is read from the daemon at attach and not folded from events, because it
+    is not in the log. A row registers its tools at mount, so this is a fact
+    about the deployment that the session runs under, and not about the session.
+    The panel draws the names and `/tools` draws the descriptions: one read, two
+    renderings. That is why the description is carried and not dropped at the
+    wire edge."""
     skills: tuple[CatalogEntry, ...] = ()
-    """What is installed here, from `skills/list`. `tools`' reasoning, and the
-    same catalog the model's own prompt is built from."""
+    """What is installed here, from `skills/list`. The reasoning of `tools`
+    applies. It is the same catalog that the prompt of the model is built from."""
     tokens: int = 0
-    """What the last request cost, from the provider's own usage report — the
-    same count `ctx.token_meter` calls its `usage` baseline."""
+    """What the last request cost, from the usage report of the provider. It is the
+    same count that `ctx.token_meter` calls its `usage` baseline."""
     context_window: int | None = None
+    compacts_at: float | None = None
+    """The share of the context window at which the root compacts on its own, or
+    `None` when nothing compacts on pressure. The daemon states it in the status
+    of the root (`CompactionFacts`), from the compaction seam of the root. It is
+    not in the log, so `reset` leaves it as it is."""
     model: str = ""
     provider: str = ""
     model_key: str = ""
-    """The profile's name for the route in force, `""` when it lists none that matches."""
+    """The name that the profile gives the route in force, or `""` when it lists no
+    match."""
 
     @property
     def route(self) -> str:
-        """`provider/model` in force, the spelling `/model` takes back — `""` before attach."""
+        """The `provider/model` in force, in the spelling that `/model` accepts. It
+        is `""` before attach."""
         return f"{self.provider}/{self.model}" if self.provider else ""
 
     lifetime: DaemonLifetime | None = None
     """Why the daemon behind this session is still running, or `None`.
 
-    `None` for a front end that is not on a daemon at all, and the sidebar draws
-    no line then: "this process will exit when you close it" is not news about a
-    process the person is looking at.
+    It is `None` for a front end that is not on a daemon at all, and the sidebar
+    then draws no line. "This process will exit when you close it" is not news
+    about a process that the user is looking at.
 
-    The wire model itself rather than a copy of its fields: it is read once at
-    attach and replaced whole whenever `daemon.lifetime` says the answer moved,
-    so a second shape here would be a second declaration of three fields with
-    nothing checking they agree."""
+    This holds the wire model itself and not a copy of its fields. It is read
+    one time at attach and replaced whole whenever `daemon.lifetime` says that
+    the answer changed. A second shape here would be a second declaration of
+    four fields, with nothing to check that the two agree."""
     todos: list[dict[str, Any]] = field(default_factory=list)
     subagents: dict[str, SubagentRow] = field(default_factory=dict)
-    """Every sub-agent beneath this session by session id, a parent before its own
-    children — the daemon's `session.children`, drawn (P11-09).
+    """Every sub-agent beneath this session, by session id, with a parent before
+    its own children. It is the `session.children` of the daemon, drawn
+    (P11-09).
 
-    **Not folded from the log**, and it cannot be: a root's log holds no record of
-    its children (Phase 11), so the daemon reads each child's own log and sends the
-    family whole (`take_children`). Which is also why `reset` leaves it alone —
-    replaying the log does not determine it. A panel beside the transcript rather
-    than rows inside it: eight children ticking through `queued → running → done`
-    would push the conversation off screen."""
+    **It is not folded from the log**, and it cannot be. The log of a root holds
+    no record of its children (Phase 11), so the daemon reads the log of each
+    child and sends the family whole (`take_children`). For the same reason
+    `reset` leaves it alone: a replay of the log does not determine it. It is a
+    panel beside the transcript and not rows inside it, because eight children
+    that move through `queued → running → done` would push the conversation off
+    the screen."""
     _cards: dict[str, ToolCard] = field(default_factory=dict, repr=False)
-    """Every tool card by call id — top-level calls and Code Mode sub-dispatches
-    alike, so a `tool/code-dispatch` finds its row the way a `tool/result` does."""
+    """Every tool card by call id: top-level calls and Code Mode sub-dispatches
+    alike. A `tool/code-dispatch` therefore finds its row in the way that a
+    `tool/result` does."""
     _streaming: dict[tuple[int, int, ItemRole], ChatItem] = field(default_factory=dict, repr=False)
-    """The open streaming row per `(turn, step, role)` — **role included** (H5).
+    """The open streaming row for each `(turn, step, role)`. **The role is part of
+    the key** (H5).
 
-    One step can stream reasoning and then text, and keyed by the step alone the
-    second role evicted the first from this map. Nothing then settled the
-    evicted row: it stayed `streaming=True` forever, which in the transcript is a
-    `StreamingMessage` holding a live `MarkdownStream` task — one per reasoning
-    block, for the life of the app — and a thinking row that never stopped
-    animating on a turn that had long since finished."""
+    One step can stream reasoning and then text. When the key was the step
+    alone, the second role evicted the first from this map. Nothing then settled
+    the evicted row, and it stayed `streaming=True` forever. In the transcript
+    that is a `StreamingMessage` that holds a live `MarkdownStream` task: one
+    for each reasoning block, for the life of the app. It is also a thinking row
+    that never stopped animating, on a turn that had finished long before."""
 
     def take_children(self, rows: Sequence[ChildRow]) -> None:
-        """The daemon's children list, drawn whole (P11-09).
+        """The children list from the daemon, drawn whole (P11-09).
 
-        **Replaced, never merged**: each `session.children` frame is the whole
-        family, so a row missing from it is a row the daemon no longer lists, and a
-        merge would keep it. In place, for `reset`'s reason — the app holds this
-        dict. Depth is read off `parent_id` in one pass, which the daemon's order
-        (a parent before its own children) is what makes possible; a row whose
-        parent is not listed is the root's own child.
+        **It is replaced and never merged.** Each `session.children` frame is
+        the whole family, so a row that is missing from it is a row that the
+        daemon no longer lists, and a merge would keep it. The replacement is in
+        place, for the reason that `reset` gives: the app holds this dict. Depth
+        is read from `parent_id` in one pass. The order of the daemon (a parent
+        before its own children) makes that possible. A row whose parent is not
+        listed is a child of the root.
         """
         depth: dict[str, int] = {}
         self.subagents.clear()
@@ -295,39 +314,41 @@ class TuiState:
     # ------------------------------------------------------------------ rows --
 
     def stand_down(self) -> None:
-        """Stop claiming work that is not happening — the daemon has gone.
+        """Stop claiming work that is not happening, because the daemon has gone.
 
-        One member because two callers reach it from two layers: the front end's
-        own `submit`, whose optimistic `running` is what put the spinner up, and
-        the app's watcher, which is the only thing that hears about a turn
-        somebody *else* started. Written inline in both, the two guards had
-        already drifted — one preserved `failed` and the other did not — and the
-        surviving value depended on which ran last.
+        This is one member because two callers reach it from two layers. One is
+        the `submit` of the front end, whose optimistic `running` started the
+        spinner. The other is the watcher of the app, which is the only thing
+        that hears about a turn that somebody *else* started. When the rule was
+        written inline in both, the two guards had already drifted: one
+        preserved `failed` and the other did not. The value that survived
+        depended on which guard ran last.
 
-        `failed` is kept because it is a fact the daemon reported and nothing
-        here has learned otherwise; every other status is a claim about work in
-        flight, and there is none.
+        `failed` is kept because it is a fact that the daemon reported, and
+        nothing here has learned otherwise. Every other status is a claim about
+        work in flight, and there is none.
         """
         if self.status != "failed":
             self.status = "idle"
 
     @property
     def busy(self) -> bool:
-        """Whether the spinner should turn: work is in flight, or about to be.
+        """Whether the spinner should turn: work is in flight, or is about to be.
 
-        `retrying` counts: a root in P5-04's backoff is between attempts, not
-        done. `waiting` does not: a root parked on a person is waiting for the
-        screen, and a spinner over a modal says the wrong thing.
+        `retrying` counts. A root in the backoff of P5-04 is between attempts,
+        and it is not done. `waiting` does not count. A root that is parked on a
+        person waits for the screen, and a spinner over a modal says the wrong
+        thing.
         """
         return self.status in ("running", "retrying")
 
     def reset(self) -> None:
-        """Clear everything the log determines, in place.
+        """Clear everything that the log determines, in place.
 
-        In place, and that is the whole point: the app, the frontend and the
-        adapter all hold *this* object. A replay that assigned a fresh
-        `TuiState` would leave every other holder looking at the empty one —
-        which is exactly how the first `--resume` came up blank.
+        It is in place on purpose: the app, the front end and the adapter all
+        hold *this* object. A replay that assigned a new `TuiState` would leave
+        every other holder with the empty one. That is exactly how the first
+        `--resume` came up blank.
         """
         self.items.clear()
         self._cards.clear()
@@ -358,17 +379,19 @@ class TuiState:
         return self.add(item)
 
     def end_streaming(self, turn: int, step: int | None = None) -> list[ChatItem]:
-        """Settle open rows — one step's, or every step's of this turn.
+        """Settle open rows: the rows of one step, or of every step of this turn.
 
-        All of a step's roles together, because its voices finish together: the
-        `assistant/message` that ends a step is the whole of what it produced,
-        reasoning and text alike, and a row left open is a row still animating.
+        All the roles of a step are settled together, because they finish
+        together. The `assistant/message` that ends a step is everything that
+        the step produced, reasoning and text alike. A row that is left open is
+        a row that still animates.
 
-        **`step=None` is the turn's own end, and it is the backstop.** A step
-        that raised — a request error with no retry — never appends an
-        `assistant/message`, so nothing settles what it had already streamed and
-        the row animates for the life of the app. That is the same leak the role
-        key closes on the ordinary path, arriving through the other door.
+        **`step=None` is the end of the turn itself, and it is the backstop.** A
+        step that raised (a request error with no retry) never appends an
+        `assistant/message`. Nothing then settles what it had already streamed,
+        and the row animates for the life of the app. That is the same leak
+        that the role key closes on the ordinary path, and it arrives here by
+        another path.
         """
         keys = [
             key for key in self._streaming if key[0] == turn and (step is None or key[1] == step)
@@ -388,29 +411,29 @@ class TuiState:
         return self.tokens / self.context_window
 
     def prompt_history(self) -> list[PromptRecord]:
-        """Every prompt this person sent, newest first.
+        """Every prompt that this person sent, newest first.
 
-        **The mirror is the history**, which is why nothing is stored: these rows
-        are already here because the transcript is built from them, so the list
-        is correct across a resume and costs nothing to keep. A shell-style
-        history file would be a second copy of the log, and one that could not
-        say *where* in the conversation a prompt sits.
+        **The mirror is the history**, so nothing is stored. These rows are
+        already here, because the transcript is built from them. The list is
+        therefore correct across a resume, and it costs nothing to keep. A
+        shell-style history file would be a second copy of the log, and it could
+        not say *where* in the conversation a prompt sits.
 
-        Consecutive duplicates collapse. Sending the same thing twice in a row is
-        a person retrying, and two identical rows in a walk read as the arrow key
-        having missed.
+        Consecutive duplicates collapse. A person who sends the same thing twice
+        in a row is retrying, and two identical rows in a walk look as if the
+        arrow key had missed.
 
-        `shadowed` rows are kept: compaction hides a prompt from the *model*, and
-        this list is for the person, who still typed it.
+        `shadowed` rows are kept. Compaction hides a prompt from the *model*,
+        and this list is for the person, who still typed it.
 
-        **Not enforced (§5 rule 6): this is *this session's* history, not this
-        person's.** It is a fold over the mirror, so it holds exactly what the
-        mirror holds — a resume gets that session's prompts back, and a
-        reference-forked child gets only its own, because such a child holds only
-        its own events. That is the same fact `ph_app.sessions` works around when
-        a forked row would otherwise render with no title. A history spanning
-        every session would be the second copy of the log this docstring opens by
-        refusing.
+        **Not enforced (§5 rule 6): this is the history of *this session*, and
+        not of this person.** It is a fold over the mirror, so it holds exactly
+        what the mirror holds. A resume gets the prompts of that session back. A
+        reference-forked child gets only its own, because such a child holds
+        only its own events. `ph_app.sessions` works around the same fact where
+        a forked row would otherwise render with no title. A history that
+        spanned every session would be the second copy of the log that the start
+        of this docstring refuses.
         """
         history: list[PromptRecord] = []
         for item in reversed(self.items):

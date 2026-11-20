@@ -246,17 +246,6 @@ async def test_the_skill_list_matches_the_catalog_the_model_is_given(tmp_path: P
         ], "the description travels, because that is what /skills prints"
 
 
-async def test_the_config_rows_are_the_composed_profile(tmp_path: Path) -> None:
-    """A property of the daemon, not of any root: every root mounts this."""
-    async with running(tmp_path) as daemon:
-        client = await daemon.client()
-
-        reply = await client.call("daemon/config")
-
-        assert reply["rows"] == list(daemon.running.supervisor.profile.dump())
-        assert reply["rows"], "an empty profile would make this vacuous"
-
-
 def test_the_credential_names_come_from_the_composed_rows() -> None:
     """Read from the configuration, not from a list kept in a front end (I7).
 

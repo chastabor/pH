@@ -1,20 +1,22 @@
-"""Themes and the theme profile — the two files a person may hand-write.
+"""Themes and the theme profile: the two files that a user may write by hand.
 
-Neither needs a running app, and that is the point of testing them here: a theme
-that will not parse must fail at *load*, with a message naming the file and every
-fault in it, rather than on the frame that first draws the role it broke.
+Neither needs a running app, and that is the reason to test them here. A theme
+that does not parse must fail at *load*, with a message that names the file and
+every fault in it. It must not fail on the frame that first draws the role that
+it broke.
 
 Two rules carry most of this suite.
 
-**The built-ins take no private path.** They load through the same parser as a
-user's own, so the shipped set is deliberately mixed — three JSON, four YAML — and
-`test_every_shipped_theme_parses` is what holds that honest. A notation only
-somebody else's file takes is a notation nobody here tests.
+**The built-in themes take no private path.** They load through the same parser
+as a theme of the user. So the shipped set is deliberately mixed: three JSON,
+four YAML. `test_every_shipped_theme_parses_and_carries_every_role` holds the
+set to that. A notation that only the file of somebody else takes is a notation
+that nobody here tests.
 
-**A preference file must not be able to stop the TUI.** A broken theme is skipped,
-a broken profile costs the ordering, and in both cases pH opens in the default. The
-opposite trade from a *profile document*, which is refused loudly — a deployment's
-composition is not something to guess at, and a preference is.
+**A preference file must not be able to stop the TUI.** A broken theme is
+skipped, and a broken profile costs the ordering. In both cases pH opens in the
+default. A *profile document* gets the opposite trade and is refused loudly. The
+composition of a deployment is not something to guess at, and a preference is.
 """
 
 from __future__ import annotations
@@ -60,11 +62,12 @@ def test_every_builtin_theme_converts_to_textual() -> None:
 
 
 def test_every_shipped_theme_parses_and_carries_every_role() -> None:
-    """The gate the mixed shipped set exists for.
+    """The gate that the mixed shipped set exists for.
 
-    Four of the seven are YAML with a `vars` palette, so this walks the notation
-    *and* the substitution that a user's own file will take. A color Textual
-    cannot read is a `ThemeError` from `load_catalog`, which is what makes this one
+    Four of the seven are YAML with a `vars` palette. So this walks the notation
+    *and* the substitution that the file of a user will take. A color that
+    Textual cannot read is a `ThemeError` when the shipped themes are parsed
+    (`_builtins`, which `load_catalog` reads). That is what makes this one
     assertion cover every hex digit in all seven files.
 
     Sabotage: change one palette entry to `#ff00gg` and the catalog refuses to
@@ -82,7 +85,8 @@ def test_every_shipped_theme_parses_and_carries_every_role() -> None:
 def test_a_yaml_theme_and_its_json_twin_parse_identically(tmp_path: Path) -> None:
     """One parser under two notations.
 
-    Sabotage: drop the suffix dispatch in `_decode` and the YAML file never loads.
+    Sabotage: drop the suffix dispatch in `decode_document` (`ph.documents`) and
+    the YAML file never loads.
     """
     source = _roles()
     _write_theme(tmp_path, "twin-json.json", source)
@@ -114,17 +118,17 @@ def test_a_var_that_is_not_a_color_is_refused() -> None:
 
 
 def test_a_theme_with_three_faults_names_all_three() -> None:
-    """Every problem in one message.
+    """Every problem is in one message.
 
     Seventeen roles over a fourteen-color palette is seventeen edit-and-retry
     cycles when the parser stops at the first fault.
 
-    This also carries the **at load, not at paint** claim: `#ff00gg` is refused
-    here, by `parse_theme`, rather than on the frame that first draws the role —
-    at which point the traceback would name a widget. It had its own test, which
-    was deleted as redundant: measured, removing it changed neither the covered
-    lines nor the partial branches of `ph_app.tui.themes`, because this assertion
-    exercises the same path with the same input.
+    This test also carries the claim **at load, not at paint**. `parse_theme`
+    refuses `#ff00gg` here, and not on the frame that first draws the role,
+    where the traceback would name a widget. The claim had a test of its own,
+    which was deleted as redundant. Measured: removing it changed neither the
+    covered lines nor the partial branches of `ph_app.tui.themes`, because this
+    assertion exercises the same path with the same input.
 
     Sabotage: restore the first-fault `raise` and two of these three assertions
     fail.
@@ -143,7 +147,7 @@ def test_a_theme_with_three_faults_names_all_three() -> None:
 
 
 def test_yaml_wins_over_a_json_of_the_same_name(tmp_path: Path) -> None:
-    """A person's own ambiguity, resolved the same way every run.
+    """The ambiguity is the user's own, and it resolves the same way on every run.
 
     Sabotage: iterate the directory once instead of once per suffix, and which
     file wins depends on the order the filesystem hands them back.
@@ -157,20 +161,21 @@ def test_a_user_theme_shadows_a_builtin(tmp_path: Path) -> None:
     _write_theme(tmp_path, "ph-dark.json", {**_roles(), "accent": "#ff00ff"})
     catalog = load_catalog(tmp_path)
     assert catalog.themes["ph-dark"].accent == "#ff00ff"
-    # Listed once, as the user's — that is the one that loads.
+    # Listed one time, as the user's, because that is the file that loads.
     assert catalog.names.count("ph-dark") == 1
     assert "ph-dark" in catalog.user
 
 
 def test_a_theme_missing_a_role_is_refused(tmp_path: Path) -> None:
     _write_theme(tmp_path, "broken.json", {"dark": True, "background": "#000"})
-    # Skipped rather than fatal: one bad file must not cost the user the others.
+    # The file is skipped, and the load does not fail. One bad file must not
+    # cost the user the other files.
     assert "broken" not in load_user_themes(tmp_path)
 
 
 def test_a_theme_with_an_unknown_role_is_refused() -> None:
-    # A typo'd role would otherwise leave the real one at its default, which
-    # reads as a rendering bug rather than a bad theme file.
+    # A role with a typo would otherwise leave the real role at its default.
+    # That reads as a rendering bug and not as a bad theme file.
     with pytest.raises(ThemeError):
         parse_theme("typo", {**_roles(), "acccent": "#fff"})
 
@@ -187,11 +192,11 @@ def _roles() -> dict[str, object]:
 
 
 def _write_theme(tmp_path: Path, filename: str, document: dict[str, object]) -> None:
-    """One theme into `$PH_HOME/themes`, in whichever notation the name asks for.
+    """Write one theme into `$PH_HOME/themes`, in the notation that the name asks for.
 
-    Four tests were writing this out by hand and had drifted on the `encoding=`
-    kwarg between copies — which is exactly the kind of difference that makes two
-    otherwise-identical setups read as if they meant something different.
+    Four tests wrote this out by hand, and the copies had drifted on the
+    `encoding=` kwarg. That is exactly the kind of difference that makes two
+    otherwise identical setups read as if they meant different things.
     """
     directory = tmp_path / "themes"
     directory.mkdir(exist_ok=True)
@@ -203,7 +208,7 @@ def _write_theme(tmp_path: Path, filename: str, document: dict[str, object]) -> 
 
 
 def test_a_first_run_with_no_profile_uses_the_default_theme(tmp_path: Path) -> None:
-    """Nothing to set up before pH will start, which is the whole of P9-02's ask.
+    """Nothing has to be set up before pH starts, which is all that P9-02 asks.
 
     Sabotage: make `load_theme_profile` raise on a missing file.
     """
@@ -212,7 +217,7 @@ def test_a_first_run_with_no_profile_uses_the_default_theme(tmp_path: Path) -> N
 
 
 def test_the_first_pick_writes_the_profile(tmp_path: Path) -> None:
-    """The file the docs name is the file that holds the answer.
+    """The file that the docs name is the file that holds the answer.
 
     Sabotage: write `tui.json` instead, and the YAML never appears.
     """
@@ -221,16 +226,16 @@ def test_the_first_pick_writes_the_profile(tmp_path: Path) -> None:
     path = theme_profile_path(tmp_path)
     assert path.name == PROFILE_FILENAME
     assert "catppuccin-mocha" in path.read_text(encoding="utf-8")
-    # Read back by the next launch, which is the claim that matters.
+    # The next launch reads it back, which is the claim that matters.
     assert load_theme_profile(tmp_path).chosen == "catppuccin-mocha"
 
 
 def test_an_unrelated_preference_change_does_not_write_a_theme(tmp_path: Path) -> None:
-    """The reason the field had to leave `TuiSettings` at all.
+    """The reason why the field had to leave `TuiSettings`.
 
-    `save_tui_settings` persists the whole document, so a theme left on it would
-    be rewritten by a `/view` toggle — two files claiming one fact, the losing one
-    still being maintained.
+    `save_tui_settings` persists the whole document. A theme left on it would
+    therefore be rewritten by a `/view` toggle. Two files would claim one fact,
+    and the file that loses would still be maintained.
 
     Sabotage: put `theme` back on `TuiSettings`, and this fails on the next
     unrelated toggle.
@@ -250,25 +255,25 @@ def test_an_unreadable_profile_costs_the_ordering_and_not_the_session(tmp_path: 
 
 
 def test_a_profile_naming_a_theme_that_is_gone_still_opens(tmp_path: Path) -> None:
-    """A deleted theme is cosmetic; the catalog falls back and the session runs."""
+    """A deleted theme is a cosmetic problem. The catalog falls back and the session runs."""
     save_theme_profile(tmp_path, ThemeProfile(default="deleted-theme"))
     catalog = load_catalog(tmp_path)
     assert catalog.resolve(load_theme_profile(tmp_path).chosen).name == DEFAULT_THEME
 
 
 def test_the_profile_is_not_read_as_a_theme(tmp_path: Path) -> None:
-    """It lives among the themes and is not one.
+    """The profile is stored among the themes and is not a theme.
 
-    Sabotage: drop the filename guard in `load_user_themes` — the parser refuses
-    it anyway, so the test that catches this is the *log line* accusing a
-    perfectly good file, which is why the guard is by name.
+    Sabotage: drop the filename guard in `_documents`. The parser refuses the
+    file anyway, so the only thing that shows this sabotage is the *log line*
+    that accuses a perfectly good file. That is why the guard is by name.
     """
     save_theme_profile(tmp_path, ThemeProfile(default="ph-light"))
     assert PROFILE_FILENAME.removesuffix(".yaml") not in load_user_themes(tmp_path)
 
 
 def test_the_profile_order_leads_the_picker(tmp_path: Path) -> None:
-    """Position is the only thing ordering says, so this asserts order.
+    """Position is the only thing that an ordering says, so this asserts order.
 
     Sabotage: drop `profile.ordered` from `theme_choices` and the list is
     alphabetical again.
@@ -277,21 +282,21 @@ def test_the_profile_order_leads_the_picker(tmp_path: Path) -> None:
     profile = ThemeProfile(default="ph-dark", order=("ph-light", "catppuccin-mocha", "gone"))
     rows = theme_choices("ph-dark", catalog, profile)
     assert [row.value for row in rows][:2] == ["ph-light", "catppuccin-mocha"]
-    # Every theme is still listed, and exactly once — an ordering is not a filter.
+    # Every theme is still listed, and exactly one time. An ordering is not a filter.
     assert sorted(row.value for row in rows) == catalog.names
     assert next(row for row in rows if row.value == "ph-dark").marked
 
 
 def test_exactly_one_row_is_the_default(tmp_path: Path) -> None:
-    """`default` names what opens next launch; the dot names what you are seeing.
+    """`default` names what opens at the next launch. The dot names what is on screen now.
 
-    The two differ while the picker previews, which is the reason they are two
-    things. Sabotage: label the `order` rows instead, and three rows claim a word
-    the profile records once.
+    The two differ while the picker previews, which is the reason why they are
+    two things. Sabotage: label the `order` rows instead, and three rows claim a
+    word the profile records once.
     """
     catalog = load_catalog(tmp_path)
     profile = ThemeProfile(default="ph-light", order=("catppuccin-mocha", "ph-light"))
-    # `active` is mid-preview, two rows away from the stored default.
+    # `active` is mid-preview, one row away from the stored default.
     rows = theme_choices("catppuccin-mocha", catalog, profile)
     defaults = [row.value for row in rows if "default" in row.detail]
     assert defaults == ["ph-light"]

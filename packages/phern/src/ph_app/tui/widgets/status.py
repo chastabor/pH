@@ -1,8 +1,10 @@
 """Footer and sidebar: what is happening, and under what posture.
 
-The context reading turns amber at the compaction threshold rather than at some
-round number, because the number a user needs to see coming is the one where
-the harness will act (G4's 0.85 fraction, Phase 4).
+The context reading turns amber at the compaction threshold and not at a round
+number. The number that a user needs to see coming is the one where the harness
+will act. That number is the share that the profile of the root configures
+(`TuiState.compacts_at`, 0.85 by default). When nothing compacts on pressure,
+the reading does not turn amber.
 
 @module ph_app.tui.widgets.status
 """
@@ -28,7 +30,6 @@ from ...payloads import DaemonLifetime
 from ..state import CatalogEntry, TuiState
 
 __all__ = [
-    "COMPACTION_THRESHOLD",
     "Sidebar",
     "StatusBar",
     "children_heading",
@@ -37,57 +38,54 @@ __all__ = [
     "shorten_path",
 ]
 
-COMPACTION_THRESHOLD = 0.85
-"""Where Phase 4's `compaction-summarize` triggers. The gauge warns here."""
-
 SPINNER = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 IDLE = "●"
-"""The glyph between turns, where the spinner runs during one."""
+"""The glyph that is shown between turns. During a turn the spinner runs in its place."""
 
 SEPARATOR = " · "
-"""Between the footer's categories: `flash/high · turn 3 · context 12%`.
+"""The separator between the categories of the footer: `flash/high · turn 3 · context 12%`.
 
-One space each side. The two it had made each `·` read as a column gap, and a
-footer is one line with no columns — the ask said "tighten", and this is the
-whole of what was loose."""
+One space on each side. With two spaces, each `·` read as a column gap, and a
+footer is one line with no columns. The request was to "tighten" the line, and
+these spaces were the only loose part."""
 
 QUALIFIER = "/"
-"""Within a category: the model and its effort, the gauge and its cache rate.
+"""The separator within a category: the model and its effort, the gauge and its cache rate.
 
-A reading in the `model` or `context` slot is half of a figure this footer
-already draws, and `·` would make it one more category — which is where the
-effort sat before, three entries from the model it qualifies."""
+A reading in the `model` or `context` slot is half of a figure that this footer
+already draws. A `·` would make the reading one more category. The effort used
+to be drawn that way, three entries from the model that it qualifies."""
 
 
 def in_slot(readings: Sequence[StatusReading], slot: ReadingSlot) -> list[StatusReading]:
-    """The readings a region draws, by the slot their own field declared.
+    """Return the readings that a region draws, selected by the slot that their field declared.
 
-    This is what `StatusReading.id` and `slot` bought together. The footer used
+    `StatusReading.id` and `slot` together make this possible. The footer used
     to render every reading in order, so a fact that belonged beside the
-    session's directory could only get there as a bespoke wire field; the first
-    fix for that was a hardcoded set of ids *here*, which put a placement
-    decision about a ph-core row in ph-app — where renaming the id silently
+    directory of the session could only get there as a special wire field. The
+    first fix for that was a hardcoded set of ids *here*. That put a placement
+    decision about a ph-core row in `ph_app`, where a rename of the id silently
     moved the reading back onto the line.
 
-    **No fallback for a slot this module does not know**, because there is no
-    such reading: `ReadingSlot` is closed and `StatusReading` validates it, so a
-    client refuses an unknown slot at the wire and an in-process reading carries
-    one of the values this build was typed against. That every value is drawn
-    *somewhere* is a test's to say (`test_every_reading_slot_is_drawn`), not a
-    runtime check's.
+    **There is no fallback for a slot that this module does not know**, because
+    there is no such reading. `ReadingSlot` is closed and `StatusReading`
+    validates it. A client therefore refuses an unknown slot at the wire, and an
+    in-process reading carries one of the values that this build was typed
+    against. A test (`test_every_reading_slot_is_drawn`) checks that every value
+    is drawn *somewhere*. No runtime check does.
     """
     return [one for one in readings if one.slot == slot]
 
 
 def _piece(reading: StatusReading) -> Content:
-    """One reading as the status line draws it: its own text, amber when warning.
+    """Return one reading as the footer draws it: its own text, amber when it warns.
 
-    Contributed by a row through `ctx.tui_status` — the line knows what a
-    reading *is* and nothing about what any of them mean, which is what lets
-    `limits` show a budget here without ph-app importing the package that owns
-    one. `Content`, never markup: the text is a row's string, so it is never
-    parsed, and a `[` in it is a `[`.
+    A row contributes a reading through `ctx.tui_status`. The footer knows what
+    a reading *is* and nothing about what any reading means. That lets `limits`
+    show a budget here without `ph_app` importing the package that owns one. The
+    piece is `Content`, never markup. The text is a string from a row, so it is
+    never parsed, and a `[` in it stays a `[`.
     """
     text = reading.text
     return Content.styled(text, "$ph-warning") if reading.level == "warning" else Content(text)
@@ -97,30 +95,32 @@ _HOME = str(Path.home())
 
 
 def children_heading(state: TuiState) -> str:
-    """`children · 3 running, 5 pending` — the shape of the fan-out at a glance.
+    """Return `children · 3 running, 5 pending`: the shape of the fan-out at a glance.
 
-    A count, because the panel is one line per child and eight of them is a list
-    somebody has to tally by eye; the question a person actually has mid-fan-out
-    is how much is moving and how much is waiting.
+    The heading is a count because the panel has one line for each child, and a
+    reader would have to tally eight lines by eye. During a fan-out the user
+    wants to know how much is moving and how much is waiting.
 
-    **"pending", never "queued"**, and that is the whole reason this reads oddly
-    next to the rows it counts. The status bar already says "queued" for the
-    person's *own* prompts waiting on a busy agent, and two counts on one screen
-    using one word for two different things is worse than a synonym. The children's
-    own vocabulary is untouched — `queued` is what their logs say and what every
-    other reader folds; this is a heading, and headings are for the reader.
+    **The word is "pending", never "queued".** That is why the heading reads
+    differently from the rows that it counts. The footer already says "queued"
+    for the user's *own* prompts that wait on a busy agent. Two counts on one
+    screen that use one word for two different things are worse than a synonym.
+    The vocabulary of the children does not change: `queued` is what their logs
+    say and what every other reader folds. This is a heading, and a heading is
+    written for the reader.
 
-    Settled children are not counted at all. They stay listed, because a parent
-    asking what happened to one deserves an answer, but "how busy is this
-    fan-out" is a question about the ones still going — at every depth, since a
-    grandchild working is the fan-out working.
+    Settled children are not counted. They stay listed, because a parent that
+    asks what happened to a child needs an answer. But "how busy is this
+    fan-out" is a question about the children that are still going. That holds
+    at every depth, because a grandchild that works is the fan-out working.
 
-    **`child_is_live`'s rule decides which those are, rather than a literal
-    here** (`SubagentRow.live`): not revoked, and not in the seam's settled set,
-    so `queued` and anything else unsettled land in `pending` — where a
-    hand-written `status in {running, queued}` would count a status added to the
-    seam as neither and quietly under-report a fan-out that is still working.
-    Counted off the rows the panel draws, which are the daemon's (A11).
+    **The rule of `child_is_live` decides which children those are, and no
+    literal here does** (`SubagentRow.live`). A live child is not revoked and
+    is not in the settled set of the seam, so `queued` and any other unsettled
+    status are counted as `pending`. A hand-written `status in {running, queued}`
+    would count a status added to the seam as neither. It would then under-report
+    a fan-out that is still working, with no warning. The count is taken from
+    the rows that the panel draws, which are the rows of the daemon (A11).
     """
     live = [row for row in state.subagents.values() if row.live]
     running = sum(1 for row in live if row.child.status == "running")
@@ -133,19 +133,21 @@ def children_heading(state: TuiState) -> str:
 
 
 def render_subagents(state: TuiState) -> str:
-    """The delegation panel: one line per sub-agent, a grandchild indented under the
-    child that spawned it (P3-19, P11-09).
+    """Render the delegation panel: one line for each sub-agent, with a grandchild
+    indented under the child that spawned it (P3-19, P11-09).
 
-    A *panel*, not transcript rows, because a fan-out of eight ticking through
-    `queued → running → done` would push the conversation off screen — and
-    because the interesting thing about a family is its current shape, which is
-    a projection rather than a history. Drawn from the daemon's `session.children`,
-    which it reads from each child's own log — the states the resume sweep and the
-    budgets read too; a tombstoned child stays listed, since a parent asking what
-    happened to the one it revoked deserves an answer.
+    This is a *panel*, not transcript rows, for two reasons. A fan-out of eight
+    that ticks through `queued → running → done` would push the conversation off
+    screen. And the interesting thing about a family is its current shape, which
+    is a projection and not a history. The panel is drawn from the
+    `session.children` of the daemon, which the daemon reads from the log of
+    each child. The resume sweep and the budgets read the same states. A
+    tombstoned child stays listed, because a parent that asks what happened to
+    the child that it revoked needs an answer.
 
-    A child held for a credential says which (T5): `queued` alone reads exactly
-    like a child waiting for a slot, and only one of the two needs a person.
+    A child that is held for a credential says which credential (T5). `queued`
+    alone reads exactly like a child that waits for a slot, and only one of the
+    two needs a person.
     """
     lines: list[str] = []
     for row in state.subagents.values():
@@ -162,42 +164,46 @@ def render_subagents(state: TuiState) -> str:
 
 
 class StatusBar(Horizontal):
-    """One line: spinner, model and its effort, turn, queue depth, context and
-    its cache rate, then every reading the rows put on the line.
+    """The footer, in one line: spinner, model and its effort, turn, queue depth,
+    context and its cache rate, then every reading that the rows put on the line.
 
-    **Drawn as the prompt's top edge**, between the transcript and the box:
-    `● ──────── flash/high · turn 3 · read-only accepted`. The glyph at the far
-    left, in the column the transcript's gutter uses; the text right-aligned; a
-    rule filling the row between them. The prompt has no border of its own any
-    more — two rows and two columns of a terminal spent on a frame — so this row
-    is what separates the conversation from the draft. One column of padding at
-    the right end keeps the text off the side panel's border, which is drawn in
-    the very next cell.
+    **The footer is drawn as the top edge of the prompt**, between the
+    transcript and the box: `● ──────── flash/high · turn 3 · read-only accepted`.
+    The glyph is at the far left, in the column that the gutter of the
+    transcript uses. The text is right-aligned. A rule fills the row between
+    them. The prompt no longer has a border of its own, because a frame spent
+    two rows and two columns of a terminal. This row is therefore what separates
+    the conversation from the draft. One column of padding at the right end
+    keeps the text off the border of the sidebar, which is drawn in the next
+    cell.
 
     **The glyph is its own cell**, so a spinner frame repaints one cell and
-    nothing else: the line is rebuilt only when a fact on it changes, and the
-    layout — which an auto-width line re-runs on every `update` — not at all.
+    nothing else. The line is rebuilt only when a fact on it changes. The
+    layout, which an auto-width line runs again on every `update`, does not run
+    at all for a spinner frame.
 
-    **Drawn in the headings' color**, rule and text alike: `$ph-accent`, the role
-    the side panel's section titles use and the one the transcript's top three
-    Markdown heading levels resolve to (the theme maps it onto Textual's
-    `primary`). A role, not a color, so the bar follows the theme the way the
-    headings do. Set once on the bar and inherited; the only spans that name a
-    color are the ones that must differ from it — a warning reading, and the
-    gauge from the compaction threshold on.
+    **The footer is drawn in the color of the headings**, rule and text alike:
+    `$ph-accent`. The section titles of the sidebar use this role, and the top
+    three Markdown heading levels of the transcript resolve to it (the theme
+    maps it onto Textual's `primary`). It is a role, not a color, so the footer
+    follows the theme as the headings do. The color is set one time on the
+    footer and inherited. The only spans that name a color are the spans that
+    must differ from it: a warning reading, and the gauge from the compaction
+    threshold on.
 
-    **The rule is a widget beside the text, not padding inside it.** Textual's
-    horizontal layout gives the text its own width and the rule what is left, so
-    nothing here measures a string against the terminal, and `#status-line`
-    still renders exactly the line it was given — which is what a test reads and
-    what a narrow terminal crops. Too narrow for the whole line, the rule keeps
-    its last cell — a fraction never sizes below one — and the text runs past
-    the row, which clips its right end: the posture before the model, the order
-    the line was written in. One row whatever the width, so the prompt never
-    moves down for a long reading.
+    **The rule is a widget beside the text, not padding inside it.** The
+    horizontal layout of Textual gives the text its own width and gives the rule
+    what is left. So nothing here measures a string against the terminal, and
+    `#status-line` still renders exactly the line that it was given. A test
+    reads that line, and a narrow terminal crops it. When the terminal is too
+    narrow for the whole line, the rule keeps its last cell, because a fraction
+    never sizes below one. The text then runs past the row, which clips its
+    right end. The posture is therefore clipped before the model, which is the
+    order in which the line was written. The footer is one row at any width, so
+    the prompt never moves down for a long reading.
 
-    Owns the spinner frame, so the footer and the terminal title read the same
-    glyph from one counter.
+    The footer owns the spinner frame, so the footer and the terminal title
+    read the same glyph from one counter.
     """
 
     DEFAULT_CSS = """
@@ -226,14 +232,15 @@ class StatusBar(Horizontal):
         self._draw_glyph(Content(self.glyph))
 
     def _part(self, part: Literal["glyph", "line"]) -> Static | None:
-        """The cell or line to draw into, or `None` while there is none.
+        """Return the cell or the line to draw into, or `None` while there is none.
 
-        A frame may land while this widget is mounted and its child is not —
-        compose is asynchronous, and so is teardown. A widget owns its children's
-        lifetime, so it is the widget that says "nothing to draw into yet" rather
-        than every caller guessing at the moment. Asked first, so the string work
-        is not done for a line that is gone; `query_one` by id is the cheap path,
-        ~45x a generic `query`.
+        A frame may arrive while this widget is mounted and its child is not,
+        because compose is asynchronous and so is teardown. A widget owns the
+        lifetime of its children. So the widget reports "nothing to draw into
+        yet", and the callers do not have to guess at the moment. The callers
+        ask first, so that no string work is done for a line that is gone.
+        `query_one` by id is the cheap path: a generic `query` costs about 45
+        times as much.
         """
         try:
             return self.query_one(f"#status-{part}", Static)
@@ -241,20 +248,21 @@ class StatusBar(Horizontal):
             return None
 
     def _draw_glyph(self, glyph: Content) -> None:
-        """One cell, one column wide by CSS, so no layout runs for it."""
+        """Draw the glyph cell. CSS fixes it at one column wide, so no layout runs for it."""
         cell = self._part("glyph")
         if cell is not None:
             cell.update(glyph, layout=False)
 
     def show(self, state: TuiState, readings: Sequence[StatusReading] = ()) -> None:
-        """`flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`,
-        with the glyph in its own cell at the bar's far left.
+        """Draw `flash/high · turn 3 · context 12%/cache 28.8k(98%) · read-only accepted`,
+        with the glyph in its own cell at the far left of the footer.
 
-        One *segment* per category, `SEPARATOR` between them and `QUALIFIER`
-        within: the model with what qualifies it, the turn, the queue, the gauge
-        with what qualifies it, then the line's readings in their own order.
-        Built from `Content` pieces rather than markup, so a row's string is
-        never parsed at all — and a frame costs no markup parse either.
+        There is one *segment* for each category, with `SEPARATOR` between
+        segments and `QUALIFIER` within one. The segments are the model with
+        what qualifies it, the turn, the queue, the gauge with what qualifies it,
+        and then the readings of the line in their own order. The line is built
+        from `Content` pieces and not from markup, so a string from a row is
+        never parsed. A frame also costs no markup parse.
         """
         self._draw_glyph(Content(self.glyph if state.busy else IDLE))
         line = self._part("line")
@@ -270,11 +278,14 @@ class StatusBar(Horizontal):
         pressure = state.pressure
         if pressure is not None:
             gauge = f"context {min(pressure, 1.0) * 100:.0f}%"
-            # Amber from the threshold on: the point is to see it coming.
-            warn = pressure >= COMPACTION_THRESHOLD
+            # Amber from the threshold on, so that the user sees compaction
+            # coming. The threshold is the share that the root compacts at, and
+            # a root that does not compact on pressure has none.
+            warn = state.compacts_at is not None and pressure >= state.compacts_at
             context.append(Content.styled(gauge, "$ph-warning") if warn else Content(gauge))
-        # With no gauge — the window unknown — the readings stand alone rather
-        # than vanish: a cache rate is still a fact, if a less placed one.
+        # With no gauge, because the window is unknown, the readings stand alone
+        # and do not vanish. A cache rate is still a fact, although it then has
+        # no gauge to stand beside.
         context.extend(map(_piece, in_slot(readings, "context")))
         if context:
             segments.append(Content(QUALIFIER).join(context))
@@ -282,12 +293,14 @@ class StatusBar(Horizontal):
         line.update(Content(SEPARATOR).join(segments))
 
     def show_unattached(self, refusal: str | None) -> None:
-        """No session yet: why, when a start failed, else that one is on its way.
+        """Draw the footer with no session yet: the reason when a start failed, and
+        otherwise that a session is on its way.
 
-        The refusal is the line that stays once the modal saying it is gone. Its
-        first line only: the whole of it was in the modal, and a footer is one row.
-        A `Content` piece rather than markup, for the reason `ConfirmModal` gives
-        — a refusal quotes paths and options, and `[…]` is markup.
+        The refusal is the line that stays after the modal that reported it is
+        gone. Only its first line is drawn: the modal showed all of it, and a
+        footer is one row. It is a `Content` piece and not markup, for the reason
+        that `ConfirmModal` gives: a refusal quotes paths and options, and `[…]`
+        is markup.
         """
         self._draw_glyph(Content(IDLE) if refusal is None else Content.styled(IDLE, "$ph-warning"))
         line = self._part("line")
@@ -301,11 +314,13 @@ class StatusBar(Horizontal):
 
 
 class Sidebar(Vertical):
-    """Session facts, and (from Phase 4) the todo list."""
+    """The sidebar: session facts, the todo list (from Phase 4), the children, and
+    the tool and skill catalogs."""
 
     WIDTH = 32
-    """Fixed, so a long path is shortened here rather than wrapping into the
-    next row's label. Set on the widget, not repeated in CSS, so there is one."""
+    """The fixed width. A long path is shortened here, so that it does not wrap
+    into the label of the next row. The width is set on the widget and not
+    repeated in CSS, so there is one copy of it."""
 
     DEFAULT_CSS = """
     Sidebar { background: $ph-panel; border-left: vkey $ph-border; padding: 1; }
@@ -318,9 +333,10 @@ class Sidebar(Vertical):
         super().__init__(**kwargs)
         self.styles.width = self.WIDTH
         self._shown: tuple[object, ...] | None = None
-        # Each catalog with the strings it renders to, keyed on the tuple it was
-        # rendered from — see `show`. Empty rather than `None` so the identity
-        # check there needs no first-frame special case.
+        # Each catalog with the strings that it renders to, keyed on the tuple
+        # that it was rendered from (see `show`). The tuple is empty and not
+        # `None`, so that the identity check there needs no special case for the
+        # first frame.
         self._tools: tuple[tuple[CatalogEntry, ...], str, str] = ((), "", "")
         self._skills: tuple[tuple[CatalogEntry, ...], str, str] = ((), "", "")
 
@@ -329,17 +345,17 @@ class Sidebar(Vertical):
         yield Static(Content(""), id="session-facts", classes="section-body")
         yield Static(Content.from_markup("[b]todo[/b]"), classes="section-title")
         yield Static(Content(""), id="todo-list", classes="section-body")
-        # Hidden until a child exists: an empty heading costs a line of a
-        # 32-column panel to say nothing.
+        # Hidden until a child exists. An empty heading would cost a line of a
+        # 32-column sidebar and say nothing.
         yield Static(
             Content.from_markup("[b]children[/b]"), id="children-title", classes="section-title"
         )
         yield Static(Content(""), id="children", classes="section-body")
-        # What fills the context window, and the reason these are panels rather
-        # than a command alone: the catalog is charged to every request, so its
-        # size is a thing to be looked at rather than asked after. Each pair
-        # hides together — a heading over a hidden body is a wasted line of 32
-        # columns, and `/view` is what hides them.
+        # These show what fills the context window. They are panels, and not
+        # only a command, because the catalog is charged to every request. Its
+        # size should therefore be visible without a question. Each pair hides
+        # together, because a heading over a hidden body wastes a line of 32
+        # columns. `/view` hides them.
         yield Static(Content.from_markup("[b]tools[/b]"), id="tools-title", classes="section-title")
         yield Static(Content(""), id="tools-list", classes="section-body")
         yield Static(
@@ -357,13 +373,14 @@ class Sidebar(Vertical):
         show_tools: bool = True,
         show_skills: bool = True,
     ) -> None:
-        # What the rows themselves said belongs here — see `in_slot`. Positional
-        # like `StatusBar.show`'s, because it is the same list from one read.
+        # The readings that the rows contributed for this slot belong here. See
+        # `in_slot`. The argument is positional like that of `StatusBar.show`,
+        # because it is the same list from one read.
         placed = " · ".join(one.text for one in in_slot(readings, "session"))
-        # Model, reasoning effort, turn and posture live on the footer now —
-        # they change while a turn runs and the eye is already there. What is
-        # left is what does not move: where this session is, and what the
-        # kernel will let a command touch.
+        # Model, reasoning effort, turn and posture are on the footer now. They
+        # change while a turn runs, and the eye is already there. What is left
+        # here does not move: where this session is, and what the kernel lets a
+        # command touch.
         facts = "\n".join(
             [
                 f"id      {session_id}",
@@ -376,20 +393,21 @@ class Sidebar(Vertical):
         children = render_subagents(state)
         heading = children_heading(state)
         # **Rendered on identity, not on every frame.** The two catalogs are set
-        # once at attach and never move — a row registers its tools at mount —
-        # so joining them here would rebuild two byte-identical strings thirty
-        # times a second for the life of the session, ahead of the very check
-        # that would have thrown them away. `is` rather than `==` because the
-        # question is "is this the same tuple", which is what makes it O(1).
+        # one time at attach and never change, because a row registers its tools
+        # at mount. Joining them here would rebuild two byte-identical strings
+        # thirty times a second for the life of the session, before the check
+        # that would discard them. The test is `is` and not `==` because the
+        # question is "is this the same tuple", which makes the test O(1).
         if state.tools is not self._tools[0] or state.skills is not self._skills[0]:
             self._tools = (state.tools, _heading("tools", state.tools), _names(state.tools))
             self._skills = (state.skills, _heading("skills", state.skills), _names(state.skills))
         was = self._shown
-        # `_CATALOGS` is where the two rendered catalogs start in this tuple, so
-        # the loop below can find last frame's by position rather than by an
-        # arithmetic that reads the same forwards and backwards — the first
-        # spelling was `7 - index`, which is correct for two entries counted
-        # from the wrong end and silently swaps them.
+        # `_CATALOGS` is the position where the two rendered catalogs start in
+        # this tuple. The loop below can then find the catalogs of the last
+        # frame by position. The first version computed `7 - index`, an
+        # arithmetic that reads the same forwards and backwards. It is correct
+        # for two entries counted from the wrong end, so it silently swapped
+        # them.
         now = (facts, todos, children, heading, show_tools, show_skills, self._tools, self._skills)
         if now == was:
             return
@@ -404,17 +422,19 @@ class Sidebar(Vertical):
             skills_title = self.query_one("#skills-title", Static)
             skills_panel = self.query_one("#skills-list", Static)
         except NoMatches:
-            # Same reason as `StatusBar.show`: composed asynchronously, torn
-            # down asynchronously, and a frame in either gap has nowhere to go.
+            # The same reason as in `StatusBar._part`: the widget is composed
+            # asynchronously and torn down asynchronously, and a frame in
+            # either gap has nowhere to go.
             return
         facts_panel.update(Content(facts))
         todo_panel.update(Content(todos))
         children_title.display = bool(children)
         if was is None or heading != was[3]:
-            # Guarded because `from_markup` is the most expensive thing here —
-            # 28 µs against `children_heading`'s 1 — and the heading is the one
-            # part of this panel that barely changes: a child's token counter
-            # ticking redraws the body every frame and leaves this string alone.
+            # Guarded because `from_markup` is the most expensive call here: 28 µs
+            # against 1 µs for `children_heading`. The heading is also the one
+            # part of this panel that hardly ever changes. The ticking token
+            # counter of a child redraws the body every frame and leaves this
+            # string alone.
             children_title.update(Content.from_markup(f"[b]{heading}[/b]"))
         panel.display = bool(children)
         panel.update(Content(children))
@@ -424,40 +444,42 @@ class Sidebar(Vertical):
                 (skills_title, skills_panel, show_skills, self._skills),
             )
         ):
-            # A hidden panel hides its heading with it: 32 columns cannot afford
-            # a line that names a body nobody can see.
+            # A hidden panel hides its heading with it. 32 columns cannot afford
+            # a line that names a body that nobody can see.
             title.display = visible
             body.display = visible
-            # Guarded for `children_title`'s reason, and it bites harder here:
-            # `from_markup` is 28 µs against the 1 µs beside it, and these two
-            # headings are the parts of this panel that *never* change while a
-            # turn's token counter redraws the body on every frame.
+            # Guarded for the same reason as `children_title`, and the saving is
+            # larger here. `from_markup` costs 28 µs against the 1 µs beside it.
+            # These two headings *never* change, while the token counter of a
+            # turn redraws the body on every frame.
             if was is None or rendered is not was[_CATALOGS + index]:
                 title.update(Content.from_markup(rendered[1]))
                 body.update(Content(rendered[2]))
 
 
 _CATALOGS = 6
-"""Where `Sidebar.show`'s rendered catalogs begin in its change-detection tuple."""
+"""The position where the rendered catalogs begin in the change-detection tuple
+of `Sidebar.show`."""
 
 
 def _heading(what: str, names: tuple[CatalogEntry, ...]) -> str:
-    """`tools 5` — the panel's name and how many, which is the glance-value.
+    """Return `tools 5`: the name of the panel and the number of entries.
 
-    A catalog is charged to every request, so *how many* is the number worth
-    seeing without reading the list under it. Bare when empty, because `tools 0`
-    reads as a measurement where the `—` below already says it plainly.
+    A catalog is charged to every request, so the number of entries is worth
+    seeing without reading the list under it. The heading is bare when the
+    catalog is empty, because `tools 0` reads as a measurement and the `—` below
+    already says it plainly.
     """
     return f"[b]{what}[/b] {len(names)}" if names else f"[b]{what}[/b]"
 
 
 def _names(names: tuple[CatalogEntry, ...]) -> str:
-    """A catalog as its names, wrapped by the panel.
+    """Return a catalog as its names, which the panel wraps.
 
-    `—` rather than an empty body, so a panel that is *drawn* always says
-    something: no tools is a real answer — a deployment that mounted no tool
-    rows — and must not read as a panel that failed to load. The count goes on
-    the heading, where it is legible without reading the list.
+    An empty catalog gives `—` and not an empty body, so that a panel that is
+    *drawn* always says something. No tools is a real answer: it is a deployment
+    that mounted no tool rows. It must not read as a panel that failed to load.
+    The count goes on the heading, where it is readable without the list.
     """
     return ", ".join(one.name for one in names) if names else "—"
 
@@ -467,46 +489,52 @@ TODO_GLYPHS = {"pending": "○", "in_progress": "◐", "completed": "●"}
 NO_WORK_SEEN = " (no work seen)"
 """What a completed entry says when the harness counted no tools in its window.
 
-**A field, not a rule re-derived here.** `worked` is attached by `tool-todo` when
-it writes the list (P7-16), so this reads a number rather than restating what
-counts as work — which it could not do anyway: `ph-app` depends on `ph-core` and
-not on the bundle that owns the tool, and a copy of the rule on this side is the
-drift that boundary exists to prevent.
+**This reads a field and does not derive a rule again.** `tool-todo` attaches
+`worked` when it writes the list (P7-16), so this module reads a number and does
+not restate what counts as work. It could not restate it anyway: `ph_app`
+imports ph-core and may not import the bundle that owns the tool. A copy of the
+rule on this side is the drift that the boundary exists to prevent.
 
-The sidebar and not only the tool card because the card is one call's and this
-panel is the plan a person watches all session. It is a *signal*, not a verdict:
-"decide the approach" is a real step with no tool calls, and the point is that a
-tick with work behind it and a tick without now look different.
+The note is in the sidebar, and not only on the tool card, because the card
+belongs to one call and this panel is the plan that a user watches for the
+whole session. It is a *signal*, not a verdict. "decide the approach" is a real
+step with no tool calls. The purpose is that a tick with work behind it and a
+tick without now look different.
 """
 
 
 def daemon_line(lifetime: DaemonLifetime | None) -> list[str]:
-    """The `daemon` fact, or no line at all — P9-04's question, answered here.
+    """Return the `daemon` fact, or no line at all. This answers the question of P9-04.
 
-    **The question is "if I close this window, what happens".** A person running
-    a front end a daemon was spawned for has no other way to know whether the
-    supervisor behind it stays, and the answer is not one a client can derive:
-    the lifetime was decided by whoever started the process.
+    **The question is "if I close this window, what happens".** A user who runs
+    a front end that a daemon was spawned for has no other way to know whether
+    the supervisor behind it stays. A client cannot derive the answer, because
+    whoever started the process decided the lifetime.
 
-    So three sentences, in the order the answer narrows:
+    So the line is one of three sentences, in the order in which the answer
+    narrows:
 
-    * `service` — somebody ran `phern daemon`; closing this changes nothing.
-    * `held · task` — it is ephemeral, but a turn is in flight or a schedule is
-      on the books, so it outlives this window and keeps going.
-    * `held · client` — somebody else's terminal is on it too.
-    * `exits on detach`, or `exits 5m after detach` — nothing but this client
-      wants it.
+    * `service`: somebody ran `phern daemon`, and closing this window changes
+      nothing.
+    * `held ·` and the reasons. With `task` or `schedule`, the daemon is
+      ephemeral but a turn is in flight or a schedule is recorded, so the daemon
+      outlives this window and keeps going. With `client`, the terminal of
+      somebody else is on it too.
+    * `exits on detach`, or `exits 5m after detach`: nothing but this client
+      wants the daemon.
 
     **`client` is filtered by the count, not by assumption.** It is in `holds`
-    whenever *anybody* is connected, and this window is one of them, so printing
-    it unconditionally would spend a row of a 32-column panel telling a person
+    whenever *anybody* is connected, and this window is one of them. Printing it
+    unconditionally would spend a row of a 32-column sidebar to tell a user that
     they have a window open. Dropping it unconditionally would be worse: with
     two terminals open, both would read `exits on detach` and both would be
-    wrong. `clients` is on the frame so the reader can tell those apart.
+    wrong. `clients` is on the frame so that the reader can tell those cases
+    apart.
 
-    An empty list rather than an empty string, so a front end with no daemon
-    draws no row instead of a blank one: `"this process exits when you close it"`
-    is not news about a process the person is looking at.
+    The result is an empty list and not an empty string, so that a front end
+    with no daemon draws no row instead of a blank one.
+    `"this process exits when you close it"` is not news about a process that
+    the user is looking at.
     """
     if lifetime is None:
         return []
@@ -520,19 +548,20 @@ def daemon_line(lifetime: DaemonLifetime | None) -> list[str]:
 
 
 def _todo_line(todo: dict[str, Any]) -> str:
-    """One entry, with the receipt when it is empty."""
+    """Return one entry, with the `NO_WORK_SEEN` note when it is completed and no
+    work was counted."""
     glyph = TODO_GLYPHS.get(as_str(todo.get("status")), "○")
     bare = todo.get("status") == "completed" and not todo.get("worked")
     return f"{glyph} {todo.get('content', '')}{NO_WORK_SEEN if bare else ''}"
 
 
 def shorten_path(path: str, width: int = Sidebar.WIDTH - 10) -> str:
-    """A path that fits, keeping the end — the part that identifies it.
+    """Return a path that fits. It keeps the end, which is the part that identifies it.
 
-    Public because the startup picker's title wants the same rule at a different
-    width: two `~`-substitutions in one package is two answers to "how does pH
-    write a path", and the second one had no width cap at all — so a deep
-    directory overflowed a modal that is 72 columns wide.
+    The function is public because the title of the startup picker needs the
+    same rule at a different width. Two `~`-substitutions in one package are two
+    answers to "how does pH write a path". The second one had no width cap at
+    all, so a deep directory overflowed a modal that is 72 columns wide.
     """
     if path.startswith(_HOME):
         path = f"~{path[len(_HOME) :]}"

@@ -1,14 +1,15 @@
-"""The transcript is a fold over the log — the P2-01 gate.
+"""The transcript is a fold over the log: the gate of P2-01.
 
-The load-bearing claim: a resumed session and a live one show the same
-conversation, because both are built from `session.events` and nothing else. If
-the adapter ever grew a live-only shortcut — a chunk it kept that the replay
-could not reconstruct — these two sequences would drift, and the person who
-resumed would silently see a different transcript from the one they left.
+The main claim: a resumed session and a live session show the same conversation,
+because both are built from `session.events` and from nothing else. Suppose that
+the adapter gained a live-only shortcut, such as a chunk that it kept and that
+the replay could not reconstruct. The two sequences would then drift, and a user
+who resumed would silently see a different transcript from the one that they
+left.
 
-The second claim is narrower and just as easy to lose: the adapter reads the
-log's plain JSON, not models, so every field is optional and a malformed one is
-a missing row rather than a crash.
+The second claim is narrower and as easy to lose. The adapter reads the plain
+JSON of the log and not models. So every field is optional, and a malformed
+field costs a row and does not cause a crash.
 """
 
 from __future__ import annotations
@@ -63,9 +64,9 @@ class _CallsThenAnswers:
     """Calls `ping` on the first request, then answers.
 
     The gate needs a tool call in it. A transcript that only ever holds text
-    would pass while the card projection — built from `tool/call` and
-    `tool/result` — diverged between live and replay, which is exactly where a
-    live-only shortcut would be tempting to write.
+    would pass while the card projection, which is built from `tool/call` and
+    `tool/result`, diverged between live and replay. That projection is exactly
+    where a live-only shortcut would be tempting to write.
     """
 
     def __init__(self) -> None:
@@ -97,10 +98,10 @@ def _replay(session: Session) -> TuiState:
 
 
 def _live(session: Session) -> TuiState:
-    """The same fold, event by event, as a client watching it happen.
+    """The same fold, event by event, as a client that watches it happen.
 
-    `_replay`'s pair. The two must agree (P2-01), and a test that asserts they do
-    should not have to spell one of them out by hand.
+    This is the pair of `_replay`. The two must agree (P2-01), and a test that
+    asserts that they agree should not have to write one of them out by hand.
     """
     adapter = TuiEventAdapter()
     for event in session.events:
@@ -149,7 +150,7 @@ async def test_the_user_prompt_reaches_the_transcript(mount: MountProfile) -> No
 
 
 async def test_bracketed_text_is_carried_verbatim(mount: MountProfile) -> None:
-    """Markup is never parsed on the way in — the widgets do that check too."""
+    """Markup is never parsed on the way in. The widgets check that too."""
     typed = "run foo[0] and [bold]not bold[/bold]"
     live_state, session = await _drive(mount, prompt=typed)
     assert ("user", typed) in _shape(live_state)
@@ -169,12 +170,12 @@ async def test_a_malformed_event_costs_one_row_not_the_transcript(mount: MountPr
 
 
 async def test_a_chunk_moves_the_transcript_and_nothing_else(mount: MountProfile) -> None:
-    """The entry the surface table exists for.
+    """The entry that the surface table exists for.
 
-    An `assistant/chunk` arrives faster than the draw's coalescing window for
-    the whole of a streaming turn, so before the table every one of them redrew
-    the session panel, the todo list and the subagent fold — none of which a
-    chunk can move. The draw asks `take_touched` what actually changed.
+    During the whole of a streaming turn, `assistant/chunk` events arrive faster
+    than the coalescing window of the draw. Before the table, each one redrew
+    the session panel, the todo list and the subagent fold, and a chunk can move
+    none of them. The draw asks `take_touched` what changed.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-surfaces")
@@ -188,10 +189,10 @@ async def test_a_chunk_moves_the_transcript_and_nothing_else(mount: MountProfile
 
 
 async def test_a_panel_event_does_not_redraw_the_transcript(mount: MountProfile) -> None:
-    """The other direction, so the table is not just "chunks are cheap".
+    """The other direction, so the table does not only say "chunks are cheap".
 
-    A todo write and a child's token counter move the sidebar and nothing else;
-    re-syncing a long transcript for either is the cost this avoids.
+    A todo write moves the sidebar and nothing else. The table avoids the cost
+    of syncing a long transcript again for it.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-panels")
@@ -206,9 +207,10 @@ async def test_a_panel_event_does_not_redraw_the_transcript(mount: MountProfile)
 async def test_a_rule_written_without_surfaces_redraws_everything(mount: MountProfile) -> None:
     """`ALL` is the default, and that is the safety property.
 
-    A surface left stale shows yesterday's answer; a redraw nobody needed costs
-    a frame. So an event type earns a narrow entry rather than losing one, and
-    a rule written without surfaces is correct by default.
+    A surface that is left stale shows an old answer, and a redraw that nobody
+    needed costs one frame. So an event type earns a narrow entry and does not
+    lose a surface by default, and a rule that is written without surfaces is
+    correct.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-default")
@@ -222,25 +224,24 @@ async def test_a_rule_written_without_surfaces_redraws_everything(mount: MountPr
 
 
 def test_a_handler_that_draws_a_row_declares_the_transcript() -> None:
-    """The half of a rule that can be derived, held against what it says.
+    """The half of a rule that can be derived is checked against what the rule says.
 
-    The handler and its surfaces are one `EventRule` now, so they cannot be
-    edited apart — but a rule can still *say* the wrong thing, and one did:
-    `subagent/admitted` draws "Delegated to X" and was declared `SIDEBAR`
-    alone, so the row would have waited in the fold until something unrelated
-    marked the transcript — a stale pane, which is the exact failure the
+    The handler and its surfaces are now one `EventRule`, so they cannot be
+    edited separately. But a rule can still *say* the wrong thing, and one did.
+    `subagent/admitted` drew "Delegated to X" and was declared `SIDEBAR` alone.
+    The row would have waited in the fold until something unrelated marked the
+    transcript. That is a stale pane, which is the exact failure that the
     per-surface draw was introduced to avoid.
 
     **One direction only.** A handler that draws a row must declare the
-    transcript; the converse is false and must stay false —
-    `assistant/chunk` streams *into* a row that already exists rather than
-    adding one, so it declares `TRANSCRIPT` and calls neither `_row` nor
-    `_card_row`. `FOOTER` and `SIDEBAR` cannot be derived at all: a handler
-    assigning `self.state.todos` is not distinguishable by shape from one
-    assigning `queued`.
+    transcript. The converse is false and must stay false. `assistant/chunk`
+    streams *into* a row that already exists and does not add one, so it
+    declares `TRANSCRIPT` and calls neither `_row` nor `_card_row`. `FOOTER` and
+    `SIDEBAR` cannot be derived at all: a handler that assigns
+    `self.state.todos` cannot be told by shape from one that assigns `queued`.
 
-    Reading the handler's source rather than running it, because the question
-    is what it *would* draw.
+    The test reads the source of the handler and does not run it, because the
+    question is what the handler *would* draw.
     """
     import ast
     import inspect
@@ -260,7 +261,6 @@ def test_a_handler_that_draws_a_row_declares_the_transcript() -> None:
         assert not draws or Surface.TRANSCRIPT in surfaces, (
             f"{event_type} draws a row and does not declare TRANSCRIPT"
         )
-    assert TuiEventAdapter is not None
 
 
 async def test_an_unknown_event_type_is_ignored(mount: MountProfile) -> None:
@@ -274,10 +274,10 @@ async def test_an_unknown_event_type_is_ignored(mount: MountProfile) -> None:
 
 
 async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: MountProfile) -> None:
-    """The gate's other half: a compacted range is dimmed, never dropped.
+    """The other half of the gate: a compacted range is dimmed and never dropped.
 
-    Rebuilding from `derive_messages()` would delete these rows, because that is
-    the model's view and the summary shadows them there.
+    A rebuild from `derive_messages()` would delete these rows. That derivation
+    is the view of the model, and the summary shadows the rows there.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-compaction")
@@ -290,10 +290,11 @@ async def test_compaction_marks_what_it_replaced_and_keeps_it(mount: MountProfil
     log_event(
         session,
         "user/message",
-        # Attributed the way `compaction-summarize` attributes it (P4-03): a
-        # plugin's text, declaring `form: compaction`. Built with
-        # `user_payload` this test passed while asserting against a message no
-        # producer writes — a person's own words never shadow anything.
+        # This is attributed in the way that `compaction-summarize` attributes it
+        # (P4-03): the text of a plugin, which declares `form: compaction`. When
+        # it was built with `user_payload`, this test passed while it asserted
+        # against a message that no producer writes. The own words of a user
+        # never shadow anything.
         plugin_payload(
             "(summary of earlier conversation)",
             "m2",
@@ -320,11 +321,11 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
 ) -> None:
     """Argument truncation (P4-03) rewrites an old assistant message in place.
 
-    Two things must not happen. Its text is the model's own and is already on
-    screen, so rendering the replacement would show the assistant saying the
-    same thing twice; and the rows it stands for must *not* be dimmed, because
-    the message is still exactly what the model sees — only a tool-call argument
-    was elided.
+    Two things must not happen. First, the replacement must not be rendered. Its
+    text is the text of the model and is already on screen, so the assistant
+    would appear to say the same thing twice. Second, the rows that it stands
+    for must *not* be dimmed. The message is still exactly what the model sees,
+    and only a tool-call argument was elided.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-truncated")
@@ -354,12 +355,13 @@ async def test_an_argument_truncation_does_not_add_a_second_assistant_row(
 async def test_a_truncation_replacement_does_not_reset_the_token_footer(
     mount: MountProfile,
 ) -> None:
-    """The other half of the same hazard, and the one a reader would not guess.
+    """The other half of the same hazard, and the half that a reader would not guess.
 
-    The footer shows the last reported usage it saw. A replacement is appended
-    at the end of the log, so falling through would set the footer from whatever
-    turn the *rewritten* message belonged to — the same stale-baseline bug the
-    engine avoids by dropping `usage` from the replacement.
+    The footer shows the last reported usage that it saw. A replacement is
+    appended at the end of the log. If the replacement were handled like any
+    other message, the footer would be set from the turn that the *rewritten*
+    message belonged to. That is the same stale-baseline bug that the engine
+    avoids by dropping `usage` from the replacement.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-truncated-usage")
@@ -389,8 +391,9 @@ async def test_a_truncation_replacement_does_not_reset_the_token_footer(
 
 
 async def test_truncated_arguments_are_announced(mount: MountProfile) -> None:
-    """The tool cards above still show the arguments as sent, so this notice is
-    the only place the transcript can say the model is no longer shown them."""
+    """The tool cards above still show the arguments as they were sent. So this
+    notice is the only place where the transcript can say that the model is no
+    longer shown them."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-truncation-notice")
     log_event(
@@ -410,10 +413,11 @@ async def test_truncated_arguments_are_announced(mount: MountProfile) -> None:
 async def test_a_declined_compaction_is_a_notice(mount: MountProfile) -> None:
     """A compaction that did not happen leaves no row of its own.
 
-    Its successful sibling does — the summary the replacement carries — which is
-    why `compaction/summarized` is record-less here and this one is not. The
-    reader is at the limit the compaction would have relieved, and the next
-    thing they may see is a turn ending in a provider refusal.
+    A compaction that succeeded does leave one: the summary that the replacement
+    carries. That is why `compaction/summarized` draws no row here and this type
+    does. The reader is at the limit that the compaction would have relieved,
+    and the next thing that they see may be a turn that ends in a provider
+    refusal.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-declined")
@@ -435,14 +439,15 @@ async def test_a_surfaced_shell_command_is_marked_apart_from_a_quiet_one(
 ) -> None:
     """`!` and `!!` must not draw the same card.
 
-    The two differ in exactly one consequence — whether the agent reads the
-    output — and in none of the three things a shell card otherwise shows: the
-    command, what it printed, the exit code. A person who cannot tell them apart
-    on screen cannot tell whether they just handed the model 4 KiB of build log.
+    The two differ in exactly one consequence: whether the agent reads the
+    output. They differ in none of the three things that a shell card otherwise
+    shows: the command, what it printed, and the exit code. A person who cannot
+    tell them apart on screen cannot tell whether they just gave the model 4 KiB
+    of build log.
 
-    Read off the event, so a resumed session marks it the same way it was drawn
-    live — the P2-01 claim this file exists for, applied to the one field that
-    says where a command's output went.
+    The mark is read from the event, so a resumed session marks the card in the
+    same way as it was drawn live. That is the P2-01 claim that this file exists
+    for, applied to the one field that says where the output of a command went.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-shell-mark")
@@ -454,12 +459,13 @@ async def test_a_surfaced_shell_command_is_marked_apart_from_a_quiet_one(
 
 
 async def test_an_interrupted_command_is_drawn_as_interrupted(mount: MountProfile) -> None:
-    """P10-08. A command the daemon died during is settled on resume by repair,
+    """P10-08. Repair settles on resume a command that the daemon died during,
     and the card says what that settle means.
 
-    Without the line a settled card with no output and no exit code reads as a
-    command that printed nothing and succeeded — the opposite of what is known.
-    Fed the closer repair actually writes, so the card and repair cannot drift.
+    Without the line, a settled card with no output and no exit code reads as a
+    command that printed nothing and succeeded. That is the opposite of what is
+    known. The test feeds the closer that repair really writes, so the card and
+    repair cannot drift.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-shell-interrupted")
@@ -473,9 +479,10 @@ async def test_an_interrupted_command_is_drawn_as_interrupted(mount: MountProfil
 
 
 def test_a_question_the_harness_stopped_during_is_not_drawn_as_an_answer() -> None:
-    """Repair settles a question it finds open on resume, and that settle carries no
-    `answer`. Read as one, it drew an empty row in the person's name — a reply
-    nobody gave. The log a 0.3.x repair left (`interrupted`) reads the same way.
+    """Repair settles a question that it finds open on resume, and that settle
+    carries no `answer`. When the settle was read as an answer, it drew an empty
+    row in the name of the user, which is a reply that nobody gave. The log that
+    a 0.3.x repair left (`interrupted`) reads the same way.
 
     Sabotage: drop the stopped branch from `_on_question_answered`, and the empty
     user row comes back for both logs.
@@ -496,8 +503,8 @@ def test_a_question_the_harness_stopped_during_is_not_drawn_as_an_answer() -> No
 
 
 def test_a_question_nobody_could_be_asked_still_says_so() -> None:
-    """The other settle not written by an answer: the question could not be
-    written, so it was not delivered — `declined` and `failed`, as before."""
+    """The other settle that an answer did not write: the question could not be
+    written, so it was not delivered. `declined` and `failed` are read as before."""
     session = Session("undelivered")
     log_event(session, "question/asked", {"askId": "q1", "question": "Which color?"})
     log_event(
@@ -516,10 +523,11 @@ def test_a_question_nobody_could_be_asked_still_says_so() -> None:
 
 
 async def test_an_orphaned_dispatch_is_drawn_settled(mount: MountProfile) -> None:
-    """P10-11. A Code Mode cell the daemon died inside left a dispatch card that
-    ran forever: nothing settled `tool/code-dispatch-start`. Repair now does, by
-    the kind's closer, and the card draws that settle as an error saying why —
-    fed the closer repair actually writes, so the two cannot drift."""
+    """P10-11. A Code Mode cell that the daemon died inside left a dispatch card
+    that ran forever, because nothing settled `tool/code-dispatch-start`. Repair
+    now settles it, with the closer of the kind. The card draws that settle as
+    an error that says why. The test feeds the closer that repair really writes,
+    so the two cannot drift."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-dispatch-orphaned")
     log_event(session, "turn/start", {"turn": 1})
@@ -565,8 +573,9 @@ async def test_a_restore_says_what_the_tree_is(
     mount: MountProfile, settle: tuple[bool, str | None] | None, said: str
 ) -> None:
     """S12. A restore is its own pair, whoever asked for it, and its settle is the
-    row: put back, left as it was, or — a process that died restoring — unknown. The
-    last is fed the closer repair actually writes, so the two cannot drift."""
+    row: put back, left as it was, or unknown when a process died during the
+    restore. The last case is fed the closer that repair really writes, so the
+    two cannot drift."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-restore")
     log_event(session, "supervisor/retry", {"attempt": 1, "of": 3, "delayMs": 0, "reason": "x"})
@@ -584,18 +593,19 @@ async def test_a_restore_says_what_the_tree_is(
 async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(
     mount: MountProfile,
 ) -> None:
-    """Esc throws the inbox away, and the transcript has to say so.
+    """Esc discards the inbox, and the transcript has to say so.
 
     `AgentDriver.cancel` clears every pending message unless the caller asks it
-    not to — the intended behavior, and until now an entirely silent one: the
-    footer's "1 queued" fell to nothing and a queued prompt, or the output of a
-    `!` waiting for the next step, was gone with no account of it anywhere on
-    screen. The account is the point, not a veto on the clearing.
+    not to. That is the intended behavior, and until now it was completely
+    silent. The "1 queued" of the footer fell to nothing. A queued prompt, or
+    the output of a `!` that waited for the next step, was gone with no account
+    of it anywhere on screen. The purpose is the account, and not a veto on the
+    clearing.
 
-    Driven through the real `Inbox` rather than a hand-written payload, because
-    what is being pinned is that the adapter reads the `outcome` key `_mutate`
-    actually writes — the one thing that still tells a dropped message from a
-    claimed one once both are only a `removedCount` on the log.
+    The test drives the real `Inbox` and not a hand-written payload. It checks
+    that the adapter reads the `outcome` key that `Inbox.splice` really writes.
+    That key is the one thing that still tells a dropped message from a claimed
+    one after both are only a `removedCount` on the log.
 
     Sabotage: drop the `outcome` test in the handler and a *claimed* batch —
     which removes messages too — starts reporting itself as a cancellation.
@@ -608,8 +618,9 @@ async def test_canceled_pending_input_leaves_a_row_and_not_a_falling_count(
         claimed=lambda _message, _turn: None,
     )
     inbox = Inbox(session, quiet)
-    # The shape a `!` actually splices, so the row under test is the row a
-    # person would lose: a relayed plugin message, not something they typed.
+    # This is the shape that a `!` really splices, so the row under test is the
+    # row that a person would lose: a relayed plugin message, and not something
+    # that they typed.
     relay = PluginSource(plugin="ph-app.shell", form="relay")
     inbox.append("next-step", create_user_message(content=[TextBlock(text="$ make")], source=relay))
 
@@ -637,15 +648,16 @@ async def test_reasoning_then_text_in_one_step_settles_both_rows(
 ) -> None:
     """A step has two voices, and both of them finish (H5).
 
-    The open streaming row was keyed by `(turn, step)` alone, so the text row
-    *replaced* the thinking row in the map the moment the model stopped
-    reasoning. Nothing then settled the thinking row: it stayed `streaming`, and
-    in the transcript a streaming row is a `StreamingMessage` holding a live
-    `MarkdownStream` task — one per reasoning block, never stopped, and a
-    thinking row still animating on a turn that ended minutes ago.
+    The open streaming row was keyed by `(turn, step)` alone. So the text row
+    *replaced* the thinking row in the map at the moment when the model stopped
+    reasoning. Nothing then settled the thinking row, and it stayed `streaming`.
+    In the transcript a streaming row is a `StreamingMessage` that holds a live
+    `MarkdownStream` task. There was one for each reasoning block, it was never
+    stopped, and a thinking row was still animating on a turn that had ended
+    minutes before.
 
-    Replayed as well as streamed, because the two must agree: the same log has to
-    produce the same rows either way (P2-01).
+    The log is replayed as well as streamed, because the two must agree: the
+    same log has to produce the same rows either way (P2-01).
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-two-voices")
@@ -681,10 +693,10 @@ async def test_reasoning_then_text_in_one_step_settles_both_rows(
 async def test_a_step_that_only_reasoned_still_shows_its_answer(mount: MountProfile) -> None:
     """The half that did not stream is still in the message (H5).
 
-    `assistant/message` carries both voices whatever arrived as deltas, and the
-    finalizer used to name one direction only — a thinking row plus text. The
-    reverse, a step whose text streamed and whose reasoning came only in the
-    message, dropped the reasoning silently.
+    `assistant/message` carries both voices, whatever arrived as deltas. The
+    finalizer used to handle one direction only: a thinking row plus text. In
+    the reverse case, the text of a step streamed and its reasoning came only in
+    the message, and the reasoning was dropped silently.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-one-voice")
@@ -713,27 +725,27 @@ async def test_a_step_that_only_reasoned_still_shows_its_answer(mount: MountProf
         "the reasoning that never streamed was dropped"
     )
     assert not any(item.streaming for item in live.items)
-    # The *reading* order differs from replay's here, and honestly so: live, the
-    # answer was on screen before the reasoning existed as anything but blocks in
-    # a message that had not arrived. Replay knows both at once and puts the
-    # thinking first. What must not differ is the content, which is what was
-    # being lost.
+    # The *reading* order here differs from the order of replay, and that is
+    # correct. Live, the answer was on screen before the reasoning existed as
+    # anything but blocks in a message that had not arrived. Replay knows both
+    # at the same time and puts the thinking first. The content must not differ,
+    # and the content is what was being lost.
     assert sorted(_shape(live)) == sorted(_shape(_replay(session)))
 
 
 async def test_a_violated_invariant_is_a_notice_in_the_conversation(mount: MountProfile) -> None:
-    """The person reading the transcript is this record's reader (I6).
+    """The person who reads the transcript is the reader of this record (I6).
 
-    `supervisor/unreachable` draws a row because its reader arrives *afterwards*,
-    when nothing could connect. This one is the inversion: what drifted is a
-    projection of the log, so the reader who needs telling is the one looking at
-    the transcript right now — the thing they are reading may no longer be what
-    the model was sent.
+    `supervisor/unreachable` draws a row because its reader arrives
+    *afterwards*, when nothing could connect. This record is the inverse. What
+    drifted is a projection of the log, so the reader who must be told is the
+    one who is looking at the transcript now. What they are reading may no
+    longer be what the model was sent.
 
-    The invariant ids and not the details: an id names which promise broke and
-    fits on a row, while "derive_messages holds 0 message(s) where a fresh
-    derivation gives 1" is a sentence about node counts that belongs in the log
-    the row points at.
+    The row shows the invariant ids and not the details. An id names which
+    promise broke, and it fits on a row. "derive_messages holds 0 message(s)
+    where a fresh derivation gives 1" is a sentence about node counts, and it
+    belongs in the log that the row points at.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-violated")
@@ -757,15 +769,16 @@ async def test_a_violated_invariant_is_a_notice_in_the_conversation(mount: Mount
 
 
 async def test_a_cleared_invariant_is_good_news_and_reads_like_it(mount: MountProfile) -> None:
-    """The same event type carries both transitions, and they are opposite facts.
+    """One event type carries both transitions, and they are opposite facts.
 
-    `verify_root` records the clearing too — a transcript that says
-    "violated" and then goes quiet leaves a reader unable to tell a repaired
-    cache from a daemon that stopped looking. But it writes it as the *same*
-    type with an empty list, so a renderer that reads only the type says the
-    alarming thing about the reassuring event. This one did: "stopped holding 1
-    invariant (an unnamed invariant)", from two `or` fallbacks that looked like
-    defensive dead code and were the only branch firing on half the traffic.
+    `verify_root` records the clearing too. A transcript that says "violated"
+    and then goes quiet leaves a reader unable to tell a repaired cache from a
+    daemon that stopped looking. But `verify_root` writes the clearing as the
+    *same* type with an empty list. So a renderer that reads only the type says
+    the alarming thing about the reassuring event. This renderer did: "stopped
+    holding 1 invariant (an unnamed invariant)". That came from two `or`
+    fallbacks that looked like defensive dead code and were the only branch that
+    ran on half the traffic.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-cleared")
@@ -777,14 +790,15 @@ async def test_a_cleared_invariant_is_good_news_and_reads_like_it(mount: MountPr
 
 
 async def test_a_plugins_replacement_is_not_called_a_compaction(mount: MountProfile) -> None:
-    """A surface `replace` is a mechanism, not a cause (P4-02).
+    """A surface `replace` is a mechanism and not a cause (P4-02).
 
-    `input-offload` is the first row to substitute on the surface for a reason
-    other than compaction, and until this test the adapter keyed on the
-    replacement alone: an offloaded paste rendered as "(history compacted)",
-    telling the reader their conversation had been summarized when a blob had
-    been relocated. The attribution the log already carries is the discriminator
-    — and the shadowing, which *is* the mechanism, applies either way.
+    `input-offload` is the first row that substitutes on the surface for a
+    reason other than compaction. Until this test, the adapter keyed on the
+    replacement alone. An offloaded paste rendered as "(history compacted)",
+    which told the reader that their conversation had been summarized when a
+    blob had been relocated. The attribution that the log already carries is
+    what tells the two apart. The shadowing *is* the mechanism, and it applies
+    in both cases.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-offload")
@@ -823,11 +837,12 @@ async def test_usage_feeds_the_context_gauge(mount: MountProfile) -> None:
 
 
 async def test_a_refinement_says_what_changed(mount: MountProfile) -> None:
-    """A refinement changes the model's own prompt, so it is a row, not a record.
+    """A refinement changes the prompt of the model itself, so it is a row and not
+    a record.
 
-    `/refine` is only one way here — the planner refines at turn end with no
-    command to show for it — so a user who could not see this would have no way
-    to know why the next turn behaves differently.
+    `/refine` is only one way to reach this. The planner refines at the end of a
+    turn with no command to show for it. A user who could not see this row would
+    have no way to know why the next turn behaves differently.
     """
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-harness")
@@ -860,8 +875,8 @@ async def test_a_refinement_says_what_changed(mount: MountProfile) -> None:
 
 
 async def test_a_corpus_is_a_row_only_when_it_changed(mount: MountProfile) -> None:
-    """The ordinary load is already described in the system prompt; what is news
-    is the corpus having changed under a conversation that was told about it."""
+    """The system prompt already describes the ordinary load. The news is that the
+    corpus changed under a conversation that was told about it."""
     ctx: Context = await mount()
     session = ctx.require(SESSIONS).create("tui-context")
     log_event(session, "context/loaded", {"corpus": "notes", "digest": "a", "note": ""})
@@ -876,17 +891,23 @@ async def test_a_corpus_is_a_row_only_when_it_changed(mount: MountProfile) -> No
 
 
 def test_every_known_event_type_is_rendered_or_classified() -> None:
-    """The adapter's vocabulary equals the log's — no silent omissions.
+    """The adapter has the same vocabulary as the log, with no silent omissions.
 
-    A new event type has to land in `HANDLERS`, be declared an auditor's record
-    (`is_audit_only`), or be named in `RECORDLESS`. Strict equality: `todo/write`
-    was carried as a declared forward reference from Phase 2 until its producer
-    landed (P4-01), and the subtraction that allowed it went with it — the next
-    type rendered ahead of the vocabulary should fail here loudly and be argued
-    for, not slip through a standing exemption.
+    A new event type has to be one of these:
 
-    The vocabulary includes the types packages declare: ph-clm's, which this suite
-    imports (the app may not), are checked here without this front end listing them.
+    - in `HANDLERS`
+    - declared a record for an auditor (`is_audit_only`)
+    - named in `RECORDLESS`
+
+    The equality is strict. `todo/write` was carried as a declared forward
+    reference from Phase 2 until its producer landed (P4-01), and the
+    subtraction that allowed it was removed with it. The next type that is
+    rendered ahead of the vocabulary should fail here loudly and be argued for.
+    It should not pass through a standing exemption.
+
+    The vocabulary includes the types that packages declare. The types of
+    ph-clm, which this suite imports and the app may not, are checked here
+    without a list of them in this front end.
     """
     vocabulary = known_log_types()
     assert {REVISED, DECLINED} <= vocabulary, "ph-clm's declarations did not run"
@@ -898,13 +919,13 @@ def test_every_known_event_type_is_rendered_or_classified() -> None:
 
 
 def test_every_declared_child_status_has_a_glyph() -> None:
-    """The TUI's status table is complete against the seam's vocabulary.
+    """The status table of the TUI is complete against the vocabulary of the seam.
 
-    A second consumer-side enumeration of `SubagentStatus`, correct today and
-    checked by nothing — so a status added to the seam would render as a blank
-    cell in the subagent panel and nobody would find out from a test. This is
-    the same gate `KNOWN_SESSION_EVENT_TYPES` gets from both front ends, applied
-    to the other vocabulary that crosses the log as `Any`.
+    The table is a second enumeration of `SubagentStatus`, on the consumer side.
+    It was correct, and nothing checked it. A status that was added to the seam
+    would render as a blank cell in the subagent panel, and no test would report
+    it. This is the same gate that `KNOWN_SESSION_EVENT_TYPES` gets from both
+    front ends, applied to the other vocabulary that crosses the log as `Any`.
     """
     from typing import get_args
 
@@ -918,8 +939,8 @@ def test_every_declared_child_status_has_a_glyph() -> None:
 
 
 def test_a_sandbox_refusal_is_a_notice_with_the_way_out() -> None:
-    """P6-38: the record carries the seam's sentence, and the transcript shows it
-    as a notice — the command's own result already said it failed."""
+    """P6-38: the record carries the sentence of the seam, and the transcript shows
+    it as a notice. The result of the command itself already said that it failed."""
     from ph.seams.sandbox import Denial
 
     session = Session("s")

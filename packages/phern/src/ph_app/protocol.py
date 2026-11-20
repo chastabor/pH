@@ -81,8 +81,6 @@ __all__ = [
     "served",
 ]
 
-PROTOCOL_VERSION = 10
-
 ProbeName: TypeAlias = Literal["startup", "ready", "live"]
 """The three questions an orchestrator asks of a daemon (P13-12), in the order it
 asks them: has it come up, may it be sent work, is it still alive. Closed, so a
@@ -90,6 +88,8 @@ probe a client spells that the daemon does not answer is `invalid_params` and no
 404 somebody reads as "not ready"."""
 
 PROBES: tuple[ProbeName, ...] = get_args(ProbeName)
+
+PROTOCOL_VERSION = 11
 """One number, in one place.
 
 It was declared twice — once per transport — which is how two servers come to
@@ -229,6 +229,18 @@ model name and its `cache` reading beside the context gauge, and spells the latt
 `cache 28.8k(98%)`. `slot` is a closed literal, so a client built before this
 refuses the readings a newer daemon stamps with either; restarting the daemon on
 the same release fixes that.
+
+**11 (after 0.12.0): the status of a root says when the root compacts, and
+`daemon/config` is gone.** `RootDescription` and `StatusFacts` gain `compaction`
+(`CompactionFacts`). Its `triggerFraction` is the share of the context window at
+which the root compacts on its own, and it is absent when nothing compacts on
+pressure. A front end draws its context gauge in the warning color from that
+share, and no longer from a copy of the default. A client that was built before
+this refuses the `compaction` that it does not know, because every model is
+`extra="forbid"`. Restarting the daemon on the same release fixes that.
+`daemon/config` sent the whole composed profile to a front end. Nothing asked for
+it after `credentials/held` answered the one question that it was read for, so
+the verb is removed, and an 11 daemon answers it with `unknown_method`.
 
 **Nothing refuses on this number, and that is worth saying where it is
 declared.** It is reported in `daemon/hello`'s capability block and printed by

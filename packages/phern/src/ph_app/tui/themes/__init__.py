@@ -1,27 +1,30 @@
 """Themes are data, not code.
 
-Built-in themes ship beside this module and load through the **same parser** as a
-user's own, from `$PH_HOME/themes/`. That matters: if the built-ins took a private
-path, a user theme could hit a validation rule the shipped ones never exercise, and
-the bug would only appear on someone else's machine. The shipped set is
-deliberately **mixed** — three JSON, four YAML — so neither notation is a branch
-only somebody else's file takes.
+Built-in themes ship beside this module and load through the **same parser** as
+a theme of the user, which is read from `$PH_HOME/themes/`. That matters. If
+the built-in themes took a private path, a user theme could hit a validation
+rule that the shipped themes never exercise, and the bug would appear only on
+the machine of somebody else. The shipped set is deliberately **mixed**: three
+JSON, four YAML. So neither notation is a branch that only the file of somebody
+else takes.
 
-A `TuiTheme` resolves to a Textual `Theme` plus `$ph-*` CSS variables, so a widget
-names a role (`$ph-tool-error`) rather than a color. Re-theming is then a data
-change, and a widget cannot quietly hard-code a hex value that survives it.
+A `TuiTheme` resolves to a Textual `Theme` plus `$ph-*` CSS variables, so a
+widget names a role (`$ph-tool-error`) and not a color. A change of theme is
+then a data change, and a widget cannot hard-code a hex value that would
+survive it unnoticed.
 
-**Which theme is in force is this module's other job.**
-`$PH_HOME/themes/theme-profile.yaml` is the one reader and the one writer of that
-preference: `/theme` creates it on the first pick, and until something does,
-`DEFAULT_THEME` applies and there is nothing for a person to set up. It is
-deliberately *not* a key in `tui.json` — `save_tui_settings` persists that whole
-document, so a theme left there would be rewritten by every unrelated preference
-change and two files would claim one fact.
+**This module also decides which theme is in force.**
+`$PH_HOME/themes/theme-profile.yaml` is the one file that the preference is
+read from and written to. `/theme` creates the file on the first pick. Until
+something does, `DEFAULT_THEME` applies and the user has nothing to set up. The
+preference is deliberately *not* a key in `tui.json`. `save_tui_settings`
+persists that whole document, so a theme left there would be rewritten by every
+unrelated preference change, and two files would claim one fact.
 
-Design ported from tau's `tau_coding.tui.themes` (see `docs/dev-notes/phase-2.md`
-for why pH re-implements rather than imports). The `vars` palette and the
-report-every-fault parser are P9-01's half of that port; the profile is P9-02.
+The design is ported from tau's `tau_coding.tui.themes` (see
+`docs/dev-notes/phase-2.md` for why pH implements it again and does not import
+it). The `vars` palette and the parser that reports every fault are the half of
+that port that P9-01 did. The profile is P9-02.
 
 @module ph_app.tui.themes
 """
@@ -71,25 +74,25 @@ log = logging.getLogger("ph_app.tui.themes")
 DEFAULT_THEME = "ph-dark"
 
 THEME_SUFFIXES: tuple[str, ...] = (".yaml", ".yml", ".json")
-"""The notations a theme may be written in, **in precedence order**.
+"""The notations that a theme may be written in, **in precedence order**.
 
-A person with `mocha.yaml` beside a `mocha.json` has made their own ambiguity;
-what this tuple buys is that it resolves the same way every run, rather than on
-whatever order the directory happened to hand back.
+A user with `mocha.yaml` beside a `mocha.json` has made their own ambiguity.
+The benefit of this tuple is that the ambiguity resolves the same way on every
+run, and not by the order in which the directory happened to list the files.
 """
 
 PROFILE_FILENAME = "theme-profile.yaml"
-"""The preference file, which lives among the themes and is not one.
+"""The preference file. It is stored among the themes and is not a theme.
 
-Beside `THEME_SUFFIXES` because the two together are what a filename in that
-directory *means*, and because `_documents` — which runs at import, through
-`BUILTIN_THEME_NAMES` — has to know the exclusion before the profile section
-below is reached.
+It is defined beside `THEME_SUFFIXES` for two reasons. The two together are
+what a filename in that directory *means*. And `_documents`, which runs at
+import through `BUILTIN_THEME_NAMES`, has to know the exclusion before the
+profile section below is reached.
 
-In `$PH_HOME/themes/` rather than `$PH_HOME/profiles/`: that directory is what
-the profile loader lists for `--profile` names, so a theme document there would
-offer itself as a plugin profile and be refused at compose time — a confusing
-failure for a file that is not one.
+The file is in `$PH_HOME/themes/` and not in `$PH_HOME/profiles/`. The profile
+loader lists that second directory for `--profile` names. A theme document
+there would offer itself as a plugin profile and be refused at compose time,
+which is a confusing failure for a file that is not a plugin profile.
 """
 
 
@@ -99,11 +102,11 @@ class ThemeError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class TuiTheme:
-    """Every color role the pH TUI draws with.
+    """Every color role that the pH TUI draws with.
 
-    Deliberately a closed set. A widget that needs a color the theme does not
-    name should be asking for a *role* — one a designer can re-point — not
-    reaching for a literal.
+    The set is deliberately closed. A widget that needs a color that the theme
+    does not name should ask for a *role*, which a designer can point at another
+    color. It should not use a literal.
     """
 
     name: str
@@ -152,10 +155,10 @@ class TuiTheme:
 COLOR_ROLES: tuple[str, ...] = tuple(
     field.name for field in fields(TuiTheme) if field.name not in ("name", "dark")
 )
-"""The roles that carry a color — everything but the theme's name and `dark`.
+"""The roles that carry a color: everything but the name of the theme and `dark`.
 
-Derived rather than listed, so a role added to `TuiTheme` is parsed, validated and
-exposed as a `$ph-*` variable with nothing else edited.
+The tuple is derived and not listed, so a role added to `TuiTheme` is parsed,
+validated and exposed as a `$ph-*` variable with no other edit.
 """
 
 _REQUIRED = frozenset(COLOR_ROLES) | {"dark"}
@@ -165,16 +168,17 @@ _REQUIRED = frozenset(COLOR_ROLES) | {"dark"}
 
 
 def parse_theme(name: str, data: object, origin: str = "theme") -> TuiTheme:
-    """Build a theme from a decoded document, refusing anything it cannot render.
+    """Build a theme from a decoded document, and refuse anything that it cannot render.
 
-    `origin` names the file in the error, because the message a user sees when a
-    theme will not load should say which theme.
+    `origin` names the file in the error. The message that a user sees when a
+    theme does not load should say which theme.
 
-    **Every fault at once.** This used to raise on the first one, which against a
-    hand-written theme of seventeen roles over a fourteen-color palette is
-    seventeen edit-and-retry cycles. The refusals themselves are unchanged: an
-    unknown role is still refused rather than ignored, because a typo'd role name
-    would otherwise leave the real one at its default and read as a rendering bug.
+    **Every fault is reported at once.** This used to raise on the first fault.
+    For a hand-written theme of seventeen roles over a fourteen-color palette,
+    that is seventeen cycles of edit and retry. The refusals themselves are
+    unchanged. An unknown role is still refused and not ignored, because a
+    mistyped role name would otherwise leave the real role at its default and
+    look like a rendering bug.
     """
     if not isinstance(data, dict):
         raise ThemeError(f"{origin}: a theme must be a mapping")
@@ -182,8 +186,8 @@ def parse_theme(name: str, data: object, origin: str = "theme") -> TuiTheme:
     keys = set(data)
     problems.extend(f"unknown role {key!r}" for key in sorted(keys - _REQUIRED - {"name", "vars"}))
     problems.extend(f"missing {key}" for key in sorted(_REQUIRED - keys))
-    # Defaulted rather than guarded on presence: an absent `dark` is already
-    # reported as missing above, and `False` keeps it from being reported twice.
+    # Defaulted, not guarded on presence. An absent `dark` is already reported
+    # as missing above, and `False` keeps it from being reported twice.
     dark = data.get("dark", False)
     if not isinstance(dark, bool):
         problems.append("'dark' must be a boolean")
@@ -195,12 +199,13 @@ def parse_theme(name: str, data: object, origin: str = "theme") -> TuiTheme:
         if not raw:
             problems.append(f"{role} must be a non-empty string")
             continue
-        # **Whole-value substitution, not tau's token-wise pass.** Every role here
-        # is a single color, where tau's may be a Rich style string
-        # (`bold #061a1a on #a7f3f0`) — which is why tau has to substitute per
-        # token, and why it must then refuse a var named after a Rich keyword
-        # (`on`, `bold`, …) that would corrupt one. pH has neither the style
-        # strings nor, therefore, that hazard, so it does not carry the rule.
+        # **Whole-value substitution, not the token-wise pass of tau.** Every
+        # role here is a single color. A role of tau may be a Rich style string
+        # (`bold #061a1a on #a7f3f0`). That is why tau has to substitute for
+        # each token, and why it must then refuse a var named after a Rich
+        # keyword (`on`, `bold`, …) that would corrupt a style string. pH has no
+        # style strings and therefore no such hazard, so it does not carry the
+        # rule.
         value = palette.get(raw, raw)
         fault = _color_problem(value)
         if fault is not None:
@@ -213,15 +218,17 @@ def parse_theme(name: str, data: object, origin: str = "theme") -> TuiTheme:
 
 
 def _palette(raw: object) -> tuple[dict[str, str], list[str]]:
-    """The optional `vars` block: a name per color, used by the roles below it.
+    """Return the optional `vars` block: a name for each color, used by the roles below it.
 
-    One level deep on purpose — a var may not refer to another var. A palette is
-    a list of the colors a theme is built from, and resolution order is a
-    feature nobody asked for and every reader would then have to hold in mind.
+    The block is one level deep on purpose: a var may not refer to another var.
+    A palette is a list of the colors that a theme is built from. Resolution
+    order is a feature that nobody asked for, and every reader would then have
+    to keep it in mind.
 
-    Answers with its faults rather than appending to a list it was handed, which
-    is the shape `_color_problem` beside it already has: two helpers in one pass
-    reporting the same kind of thing two different ways is one way too many.
+    The function returns its faults and does not append to a list that it was
+    handed. `_color_problem` beside it already has that shape. Two helpers in
+    one pass that report the same kind of thing in two different ways are one
+    way too many.
     """
     problems: list[str] = []
     if raw is None:
@@ -242,11 +249,13 @@ def _palette(raw: object) -> tuple[dict[str, str], list[str]]:
 
 
 def _color_problem(value: str) -> str | None:
-    """`None` when Textual can read this color, else how it reads to a person.
+    """Return `None` when Textual can read this color, and otherwise a description
+    of the fault for the user.
 
-    Checked **at load**, not at paint. A theme carrying `#ff00gg` otherwise
-    installs cleanly and takes the screen down on the frame that first draws the
-    role — at which point the traceback names a widget rather than the file.
+    The color is checked **at load**, not at paint. Otherwise a theme that
+    carries `#ff00gg` installs cleanly and takes the screen down on the frame
+    that first draws the role. At that point the traceback names a widget and
+    not the file.
     """
     try:
         Color.parse(value)
@@ -256,29 +265,32 @@ def _color_problem(value: str) -> str | None:
 
 
 SHIPPED_DIR = Path(__file__).parent
-"""Where the built-in documents live.
+"""Where the built-in documents are.
 
-A plain `Path`, which is this repo's idiom for packaged data — `ph_app.profiles`
-does it for the profile YAML one directory up, and each bundle does it for its
-`bundle.yaml`. It is also what lets the shipped set and the user's share
-`_documents` below: an `importlib.resources` `Traversable` has a `name` and no
-`suffix`/`stem`/`glob`, so reading it cost a private re-implementation of all
-three.
+This is a plain `Path`, which is the idiom of this repo for packaged data.
+`ph_app.profiles` uses it for the profile YAML one directory up, and each
+bundle uses it for its `bundle.yaml`. It also lets the shipped set and the set
+of the user share `_documents` below. An `importlib.resources` `Traversable`
+has a `name` and no `suffix`/`stem`/`glob`, so reading it cost a private
+implementation of all three.
 """
 
 
 def _documents(directory: Path) -> dict[str, Path]:
-    """Every theme document in `directory`, one per name, newest notation winning.
+    """Return every theme document in `directory`, one for each name. The notation
+    with the highest precedence wins.
 
-    The precedence pass, written once for both the shipped set and the user's.
-    Iterated in reverse so a later (higher-precedence) suffix overwrites: a person
-    with `mine.yaml` beside `mine.json` has made their own ambiguity, and what
-    this buys is that it resolves the same way every run rather than on the order
-    the filesystem hands them back.
+    This is the precedence pass, written one time for both the shipped set and
+    the set of the user. The suffixes are iterated in reverse, so that a later
+    suffix, which has higher precedence, overwrites. A user with `mine.yaml`
+    beside `mine.json` has made their own ambiguity. The benefit is that it
+    resolves the same way on every run, and not by the order in which the
+    filesystem returns the files.
 
-    The theme **profile** lives in this directory too and is not a theme, so it is
-    passed over by name. Left to the parser it would be refused and skipped — the
-    same outcome by accident, and a log line accusing a perfectly good file.
+    The theme **profile** is in this directory too and is not a theme, so it is
+    skipped by name. If it were left to the parser, it would be refused and
+    skipped. That is the same outcome by accident, with a log line that accuses
+    a perfectly good file.
     """
     found: dict[str, Path] = {}
     for suffix in reversed(THEME_SUFFIXES):
@@ -309,17 +321,17 @@ BUILTIN_THEME_NAMES: tuple[str, ...] = tuple(sorted(_builtins()))
 
 
 _UNREADABLE: tuple[type[Exception], ...] = (ThemeError, *DOCUMENT_FAULTS)
-"""Everything a theme file can fail with: ph-core's set for reading one, plus
-this module's own for parsing it. The answer to all of them is the same — skip
-this file, keep the others, say which and why."""
+"""Everything that a theme file can fail with: the set of ph-core for reading
+one, plus the error of this module for parsing it. The answer to all of them is
+the same: skip this file, keep the others, and say which file and why."""
 
 
 def load_user_themes(home: Path) -> dict[str, TuiTheme]:
-    """Themes from `$PH_HOME/themes/*.{yaml,yml,json}`.
+    """Load the themes from `$PH_HOME/themes/*.{yaml,yml,json}`.
 
-    One bad file does not stop the TUI starting: it is skipped with its reason,
-    because a theme is a preference and refusing to launch over one is worse than
-    launching in the default.
+    One bad file does not stop the TUI from starting. The file is skipped and
+    its reason is logged. A theme is a preference, and refusing to launch over
+    one is worse than launching in the default.
     """
     directory = themes_dir(home)
     if not directory.is_dir():
@@ -338,33 +350,35 @@ def load_user_themes(home: Path) -> dict[str, TuiTheme]:
 
 @dataclass(frozen=True, slots=True)
 class ThemeCatalog:
-    """Every theme one run can offer, read once.
+    """Every theme that one run can offer, read one time.
 
     The app builds a catalog at start and hands it to whatever lists, resolves
-    or describes a theme. Before this existed each of those re-read
-    `$PH_HOME/themes`, so startup scanned the directory once per theme name.
+    or describes a theme. Before the catalog existed, each of those read
+    `$PH_HOME/themes` again, so startup scanned the directory one time for each
+    theme name.
 
     **Not enforced (§5 rule 6): a theme file is read at start and never again.**
     Editing one while pH is running changes nothing until the next launch, and
-    there is no watcher — which is the cost of the sentence above rather than an
-    oversight. `/theme` re-reads nothing either; it picks from this catalog. A
-    person iterating on a palette restarts, and that is the whole of it.
+    there is no watcher. That is the cost of the paragraph above and not an
+    oversight. `/theme` reads nothing again either: it picks from this catalog.
+    A user who iterates on a palette restarts, and nothing more is needed.
     """
 
     themes: Mapping[str, TuiTheme]
     user: frozenset[str]
-    """Names that came from `$PH_HOME/themes`. A user file shadowing a built-in
-    is listed once, as the user's, because that is the one that loads."""
+    """Names that came from `$PH_HOME/themes`. A user file that shadows a
+    built-in theme is listed one time, as the user's, because that is the file
+    that loads."""
 
     @property
     def names(self) -> list[str]:
         return sorted(self.themes)
 
     def resolve(self, name: str) -> TuiTheme:
-        """The theme by name, falling back to the default when it is unknown.
+        """Return the theme by name, or the default when the name is unknown.
 
         A theme that vanished (a deleted user file, a renamed built-in) is a
-        cosmetic problem; falling back keeps the session usable.
+        cosmetic problem. Falling back keeps the session usable.
         """
         theme = self.themes.get(name)
         if theme is None:
@@ -379,19 +393,20 @@ class ThemeCatalog:
 
 
 def load_catalog(home: Path | None = None) -> ThemeCatalog:
-    """Built-ins plus the user's, one directory scan."""
+    """Load the built-in themes plus those of the user, in one directory scan."""
     user = load_user_themes(home) if home is not None else {}
     return ThemeCatalog(themes={**_builtins(), **user}, user=frozenset(user))
 
 
 def fallback_variables() -> dict[str, str]:
-    """The `$ph-*` variables every stylesheet can rely on: the default theme's.
+    """Return the `$ph-*` variables that every stylesheet can rely on: those of
+    the default theme.
 
     Textual parses CSS before a theme is chosen, and a `$ph-*` that resolves
-    nowhere is a hard parse failure rather than a default color. An app that
-    returns this from `get_theme_variable_defaults` makes every role resolvable
-    always — which also means switching to one of Textual's own themes degrades
-    the colors instead of crashing.
+    nowhere is a hard parse failure and not a default color. An app that returns
+    this from `get_theme_variable_defaults` makes every role always resolvable.
+    A switch to one of Textual's own themes then degrades the colors and does
+    not crash.
     """
     return dict(_builtins()[DEFAULT_THEME].to_textual().variables or {})
 
@@ -409,19 +424,19 @@ _PROFILE_HEADER = """\
 
 @dataclass(frozen=True, slots=True)
 class ThemeProfile:
-    """The person's theme preference: which one, and how `/theme` lists them.
+    """The theme preference of the user: which theme, and how `/theme` lists them.
 
-    Every field is optional and an absent file is an empty one, which is the whole
-    of the first-run story — `chosen` answers `DEFAULT_THEME` and nothing has to be
-    configured before pH will start.
+    Every field is optional, and an absent file is an empty one. That is all
+    that a first run needs: `chosen` answers `DEFAULT_THEME`, and nothing has to
+    be configured before pH starts.
     """
 
     default: str = ""
     """The theme to open in. `/theme` writes this, and nothing else does."""
     order: tuple[str, ...] = ()
     """Names to list first in `/theme`, in this order. A name that no longer
-    resolves is simply not listed — an ordering is a convenience, and refusing
-    the file over a theme somebody deleted would cost them the rest of it."""
+    resolves is not listed. An ordering is a convenience, and refusing the file
+    over a theme that somebody deleted would cost them the rest of it."""
 
     @property
     def chosen(self) -> str:
@@ -436,7 +451,7 @@ class ThemeProfile:
 
 
 def themes_dir(home: Path) -> Path:
-    """`$PH_HOME/themes` — the themes and the profile that names one, together."""
+    """Return `$PH_HOME/themes`, which holds the themes and the profile that names one."""
     return home / "themes"
 
 
@@ -445,24 +460,25 @@ def theme_profile_path(home: Path) -> Path:
 
 
 def load_theme_profile(home: Path) -> ThemeProfile:
-    """Read the profile, or answer an empty one.
+    """Read the profile, or return an empty one.
 
-    A missing file is the ordinary first run. An unreadable one costs the
-    customization and not the session — the rule `tui.json` already lives by, and
-    for the same reason: defaults are always a valid answer for a preference.
+    A missing file is the ordinary first run. An unreadable file costs the
+    customization and not the session. `tui.json` already follows that rule, for
+    the same reason: defaults are always a valid answer for a preference.
 
-    **A key this build has no field for is read past**, which is
-    `tui_settings_from_json`'s tolerance rule applied to the other preference
-    file. That is what makes a future field a pure addition — the light/dark pair
-    a terminal-appearance switch would want was carried here and removed again
-    precisely because it can be: a profile written by a newer pH still loads here,
-    and one written here still loads there.
+    **A key that this build has no field for is skipped.** That is the tolerance
+    rule of `tui_settings_from_json`, applied to the other preference file. It
+    makes a future field a pure addition: a profile written by a newer pH still
+    loads here, and one written here still loads there. The light/dark pair
+    that a terminal-appearance switch would want was carried here and removed
+    again, precisely because it can be added later in that way.
     """
     path = theme_profile_path(home)
     data = read_document(path)
     if data is None:
-        # Absent on a first run, unreadable after a bad hand-edit —
-        # `read_document` has said which, and the answer to both is the default.
+        # The file is absent on a first run, or unreadable after a bad edit by
+        # hand. `read_document` has already logged an unreadable file, and the
+        # answer to both is the default.
         return ThemeProfile()
     if not isinstance(data, dict):
         log.warning("ph_app.tui: %s is not a mapping; using the default theme", path)
@@ -474,40 +490,41 @@ def load_theme_profile(home: Path) -> ThemeProfile:
 
 
 def _name(value: object) -> str:
-    """A theme name, or `""` for anything that is not one.
+    """Return a theme name, or `""` for anything that is not one.
 
-    `as_str` is ph-core's narrowing and the house spelling — the same one
-    `tui/state.py` folds the log with — and it answers `""` for a mis-shaped
-    field rather than `str(value)`'s plausible-looking `"None"`.
+    `as_str` is the narrowing function of ph-core and the spelling that this
+    codebase uses. `tui/state.py` folds the log with the same function. It
+    answers `""` for a field of the wrong shape, where `str(value)` would give
+    a plausible-looking `"None"`.
     """
     return as_str(value).strip()
 
 
 def save_theme_profile(home: Path, profile: ThemeProfile) -> None:
-    """Write `$PH_HOME/themes/theme-profile.yaml`. A `/theme` pick lands here.
+    """Write `$PH_HOME/themes/theme-profile.yaml`. A `/theme` pick is written here.
 
-    Dumped rather than formatted by hand: a theme name is a file stem and may
-    carry anything a filesystem allows, and `safe_dump` is what knows when that
-    needs quoting.
+    The document is dumped and not formatted by hand. A theme name is a file
+    stem and may carry anything that a filesystem allows, and `safe_dump` knows
+    when that needs quoting.
     """
-    # One rule for both keys: drop what is unset, so a field nobody touched
-    # leaves no trace in a file a person reads.
+    # One rule for both keys: drop what is unset, so that a field that nobody
+    # touched leaves no trace in a file that a person reads.
     written: dict[str, object] = {"default": profile.default, "order": list(profile.order)}
     document = {key: value for key, value in written.items() if value}
     body = yaml.safe_dump(document, sort_keys=False, allow_unicode=True) if document else ""
-    # Atomically (O2), for `save_tui_settings`' reason: the profile is a whole
-    # document, and a reader that meets half of it falls back to the default
-    # theme rather than the one somebody chose.
+    # Written atomically (O2), for the same reason as in `save_tui_settings`.
+    # The profile is a whole document, and a reader that meets half of it falls
+    # back to the default theme and not the one that somebody chose.
     write_atomic(theme_profile_path(home), _PROFILE_HEADER + body)
 
 
 def choose_theme(home: Path, profile: ThemeProfile, name: str) -> ThemeProfile:
-    """Record `name` as the theme to open in, and hand back the new profile.
+    """Record `name` as the theme to open in, and return the new profile.
 
-    The one place a pick is written, so the caller does not have to know that a
-    pick is a `replace` plus a dump. A write failure costs the memory, not the
-    change: the returned profile is adopted either way, which is the same trade
-    `PHTuiApp._save` makes for `tui.json`.
+    This is the one place where a pick is written, so the caller does not have
+    to know that a pick is a `replace` plus a dump. A write failure costs the
+    memory, not the change: the returned profile is adopted either way.
+    `PHTuiApp._save` makes the same trade for `tui.json`.
     """
     updated = replace(profile, default=name)
     try:

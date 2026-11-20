@@ -1,9 +1,10 @@
-# catppuccin-mocha — the Catppuccin Mocha palette, mapped onto pH's roles.
+# catppuccin-mocha: the Catppuccin Mocha palette, mapped onto the roles of pH.
 #
-# `vars` is the palette as its authors publish it, whole: a role is re-pointed by
-# naming a different color below, and the four flavors differ only in this
-# block. Roles are pH's closed set (`TuiTheme`), so a role missing here is a
-# refusal at load rather than a color that silently defaults.
+# `vars` is the whole palette as its authors publish it. To point a role at a
+# different color, name that color below. The four flavors differ only in the
+# `vars` block and in `dark`, which is `false` for Latte alone. The roles are
+# the closed set of pH (`TuiTheme`), so a role that is missing here is refused
+# at load and does not silently take a default color.
 #
 # Palette: https://github.com/catppuccin/catppuccin
 

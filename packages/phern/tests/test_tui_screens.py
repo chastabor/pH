@@ -1,16 +1,20 @@
-"""`ctx.tui_screens` from the front end's side (P4-17), driven as a person does.
+"""`ctx.tui_screens` from the side of the front end (P4-17), driven as a user drives it.
 
-The row's gates, one test each: *a plugin row registers a screen and gets a
-verb, a key and a palette entry; unloading the row removes all three; the
-trajectory opens over the chat and returns to it; a record jumps to its
-transcript row and back.* The diff screen gets the first two as a shipped screen
-and its own over a log the daemon revised.
+The gates of the row, with one test for each:
 
-The lifetime tests are the ones to read. A screen is easy; a screen whose slash
-command and whose key disappear with the row that contributed it is the property
-dsh's slot service has and the reason this is a seam rather than a list in the
-app. The seam's own half is in `ph-core`'s `test_seams.py`; this is the half
-that needs a terminal.
+- A plugin row registers a screen and gets a verb, a key and a palette entry.
+- Unloading the row removes all three.
+- The trajectory opens over the chat and returns to it.
+- A record jumps to its transcript row and back.
+
+The diff screen is held to the first two as a shipped screen. It also has tests
+of its own, over a log that the daemon revised.
+
+Read the lifetime tests first. A screen is easy to make. The slash command and
+the key of a screen must disappear with the row that contributed it. The slot
+service of dsh has that property, and it is the reason why this is a seam and
+not a list in the app. The half that belongs to the seam is in `test_seams.py`
+of `ph-core`. This file is the half that needs a terminal.
 """
 
 from __future__ import annotations
@@ -47,21 +51,21 @@ pytestmark = pytest.mark.anyio
 
 @pytest.fixture
 def tui_profile() -> str:
-    """`tui`, the interactive posture a person drives these screens in.
+    """`tui`, the interactive posture in which a user drives these screens.
 
-    Not because it is the profile that has them: every named profile mounts the
-    trajectory (`presentation.yaml`). The daemon mounts the profile, so the
-    choice is made before any app exists — see the fixture this overrides in
-    `conftest.py`.
+    The reason is not that `tui` is the profile that has the screens. Every
+    named profile mounts the trajectory (`presentation.yaml`). The daemon mounts
+    the profile, so the choice is made before any app exists. See the fixture
+    that this one overrides, in `app_fixtures.py`.
     """
     return "tui"
 
 
 def _binding(app: PHTuiApp, binding_id: str) -> Any:  # noqa: ANN401
-    """The live binding carrying `binding_id`, or `None`.
+    """The live binding that carries `binding_id`, or `None`.
 
-    Looked up by id rather than by key, because the id is what a keymap remaps
-    and therefore the only stable name a test can hold.
+    The lookup is by id and not by key. A keymap remaps the id, so the id is the
+    only stable name that a test can hold.
     """
     for bindings in app.chat._bindings.key_to_bindings.values():
         for binding in bindings:
@@ -71,11 +75,12 @@ def _binding(app: PHTuiApp, binding_id: str) -> Any:  # noqa: ANN401
 
 
 def _routes(app: PHTuiApp, screen_id: str) -> set[str]:
-    """Every route this front end has actually opened to one screen.
+    """Every route that this front end has opened to one screen.
 
-    Built by *looking*, so a test comparing two registrations compares findings
-    rather than two hand-written checklists — a pair of those cannot disagree,
-    which is the shape of gate this project has been bitten by twice.
+    The set is built by *looking* at the app. A test that compares two
+    registrations therefore compares findings, and not two hand-written
+    checklists. Two such checklists cannot disagree, and a gate of that shape
+    has failed this project two times.
     """
     assert app.front is not None
     definitions = app.front.commands()
@@ -90,23 +95,23 @@ def _routes(app: PHTuiApp, screen_id: str) -> set[str]:
 
 
 ROUTES = {"command", "palette", "key"}
-"""What one `ScreenDefinition` is supposed to buy — the row's first gate."""
+"""What one `ScreenDefinition` must yield. This is the first gate of the row."""
 
 
 # ------------------------------------------------- a verb, a key, an entry --
 
 
 SHIPPED = pytest.mark.parametrize("shipped", LOCAL_SCREENS, ids=lambda one: one.id)
-"""Every screen pH ships, so a screen added to `LOCAL_SCREENS` is held to the same
-gates as the trajectory without a test of its own for each."""
+"""Every screen that pH ships. A screen that is added to `LOCAL_SCREENS` is
+therefore held to the same gates as the trajectory, with no test of its own."""
 
 
 @SHIPPED
 async def test_a_contributed_screen_becomes_a_verb_a_key_and_a_palette_entry(
     make_tui_app: MakeApp, shipped: ScreenDefinition
 ) -> None:
-    """The gate. One `ScreenDefinition`, three routes to it — and the row that
-    contributed each screen is an ordinary row, not a special case."""
+    """The gate. One `ScreenDefinition` yields three routes. The row that
+    contributed each screen is an ordinary row and not a special case."""
     async with running(make_tui_app()) as (app, _pilot):
         assert _routes(app, shipped.id) == ROUTES
 
@@ -117,11 +122,11 @@ async def test_a_contributed_screen_becomes_a_verb_a_key_and_a_palette_entry(
 async def test_a_plugin_screens_key_is_rebindable_like_every_other(
     make_tui_app: MakeApp, tmp_path: Path
 ) -> None:
-    """The reason the binding carries the screen's id.
+    """The binding carries the id of the screen for this reason.
 
-    Driven through `tui.json`, because that is the claim: a key that could not
-    be remapped there would be the one key in the app a person could not change,
-    which is precisely what `config.py` exists to prevent.
+    The test goes through `tui.json`, because that is the claim. A key that
+    could not be remapped there would be the one key in the app that a user
+    could not change. `config.py` exists to prevent exactly that.
     """
     (tmp_path / "tui.json").write_text(
         json.dumps({"keybindings": {SCREEN_ID: "ctrl+j"}}), encoding="utf-8"
@@ -135,11 +140,12 @@ async def test_a_plugin_screens_key_is_rebindable_like_every_other(
 async def test_a_screen_hidden_in_tui_json_is_not_offered(
     make_tui_app: MakeApp, tmp_path: Path, shipped: ScreenDefinition
 ) -> None:
-    """Hiding a screen is the terminal's, not the profile's (decision 23).
+    """The terminal hides a screen, and the profile does not (decision 23).
 
-    The row still mounts on the daemon — a session profile that removed it would
-    be refused — and this terminal opens none of the three routes to it. Sabotage:
-    drop the `hidden` check in `_screens_of` and every route comes back.
+    The row still mounts on the daemon. A session profile that removed it would
+    be refused. This terminal opens none of the three routes to the screen.
+    Sabotage: drop the `hidden` check in `_screens_of` and every route comes
+    back.
     """
     (tmp_path / "tui.json").write_text(
         json.dumps({"hidden_screens": [shipped.id]}), encoding="utf-8"
@@ -154,18 +160,19 @@ async def test_a_screen_hidden_in_tui_json_is_not_offered(
 async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
     make_tui_app: MakeApp, tui_daemon: Daemon, shipped: ScreenDefinition
 ) -> None:
-    """I2 across a socket: a screen's routes do not outlive its row.
+    """I2 across a socket: the routes of a screen do not outlive its row.
 
-    The daemon attaches to `ctx.tui_screens` as the front end it stands in for —
-    `present_with` gives it every screen now, every later one, and a disposer per
-    registration — and publishes `session.screens` on both edges. So a row
+    The daemon listens to `screens/change` on the context of the root. The seam
+    emits it when a screen is registered and when one is removed. The daemon
+    then publishes the whole list as `session.screens`. So a row that is
     unloaded on the daemon takes the verb, the palette entry and the key away
-    from a terminal one socket removed, which is the whole claim the seam makes
-    in process.
+    from a terminal that is one socket away. That is the whole claim that the
+    seam makes in process.
 
-    Driven with each *drawable* screen: the ids `LOCAL_SCREENS` has a builder
-    for are the ones whose routes a client actually opens. Sabotage: drop the
-    `present_with` subscription and the terminal keeps a verb whose row is gone.
+    The test runs with each *drawable* screen. The ids that `LOCAL_SCREENS` has
+    a builder for are the ids whose routes a client opens. Sabotage: drop the
+    `screens/change` listener of the daemon (`drew` in `supervisor.py`) and the
+    terminal keeps a verb whose row is gone.
     """
     async with running(make_tui_app()) as (app, pilot):
         assert _routes(app, shipped.id) == ROUTES
@@ -176,7 +183,7 @@ async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
         assert entry is not None
         await until(pilot, lambda: _routes(app, shipped.id) == ROUTES)
 
-        # Unload it the way removing the row does: dispose the scope that owns
+        # Unload it as the removal of the row does: dispose the scope that owns
         # the registration.
         await _unload(root_of(tui_daemon), shipped.id)
 
@@ -188,25 +195,27 @@ async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
 async def test_a_screen_this_build_cannot_draw_is_not_offered(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """The limit P5-14 leaves behind, as a gate rather than a paragraph.
+    """The limit that P5-14 leaves behind, as a gate and not as a paragraph.
 
-    `ScreenDefinition.build` is the one field that cannot travel, so a socket
-    client is told which screens the deployment mounted (`screens/list`) and
-    draws the ones it has a builder for — `LOCAL_SCREENS`, which is every screen
-    pH ships. A screen some *other* row contributes reaches a remote front end as
-    a name it cannot open, so it is dropped rather than offered and then failing:
-    a verb that opens nothing is worse than a verb that is not there.
+    `ScreenDefinition.build` is the one field that cannot travel. So a socket
+    client is told which screens the deployment mounted (`screens/list`), and it
+    draws the ones that it has a builder for. Those are `LOCAL_SCREENS`, which
+    is every screen that pH ships. A screen that some *other* row contributes
+    reaches a remote front end as a name that it cannot open. The client drops
+    it, and does not offer it and then fail. A verb that opens nothing is worse
+    than a verb that is not there.
 
-    Two halves, because dropping everything would satisfy the first: the pretend
-    screen gets no routes, and the trajectory — same list, same reply — gets all
-    three.
+    The test has two halves, because a client that dropped everything would
+    satisfy the first. The pretend screen gets no routes. The trajectory, which
+    is in the same list, gets all three.
 
-    Not enforced (§5 rule 6): closing this needs P7-07's declarative screen
-    bodies, after which a row's screen can be *described* to a client rather than
-    built in it. The seam's own claims — that unloading a row takes its screen
-    with it (I2), and that registration order does not decide reachability — are
-    where the seam is, in `ph-core`'s `test_seams.py`; what is asserted here is
-    what this transport can and cannot carry.
+    Not enforced (§5 rule 6): closing this gap needs the declarative screen
+    bodies of P7-07. After that, the screen of a row can be *described* to a
+    client and need not be built in it. The seam has claims of its own: that
+    unloading a row takes its screen with it (I2), and that registration order
+    does not decide reachability. Those are tested where the seam is, in
+    `test_seams.py` of `ph-core`. This test asserts what this transport can and
+    cannot carry.
     """
     async with running(make_tui_app()) as (app, pilot):
         root = root_of(tui_daemon)
@@ -227,19 +236,19 @@ async def test_a_screen_this_build_cannot_draw_is_not_offered(
 
 
 VIEW_ROWS = 7
-"""How tall the transcript is in these tests: short enough that three short turns
-scroll, with room to spare. Jumping to the last prompt must be able to put it at
-the *top* of the view, so what follows it — the prompt's own rows and the
-answer's — has to be taller than the view."""
+"""The height of the transcript in these tests. It is short enough that three
+short turns scroll, with room to spare. A jump to the last prompt must be able
+to put that prompt at the *top* of the view. So what follows the prompt, which
+is its own rows and the rows of the answer, must be taller than the view."""
 
 
 async def _short_view(app: PHTuiApp, pilot: Any) -> None:  # noqa: ANN401
-    """Resize the terminal so the transcript is `VIEW_ROWS` tall.
+    """Resize the terminal so that the transcript is `VIEW_ROWS` tall.
 
-    **The view, not the terminal**, because the chrome around it is the layout's
-    business and moves: these tests asked for a 12-row terminal when the chrome
-    was five rows, it became two, the view grew to ten, and a jump stopped short
-    with a failure that named the jump.
+    **The view is sized, not the terminal.** The chrome around the view belongs
+    to the layout, and it moves. These tests asked for a 12-row terminal when
+    the chrome was five rows. The chrome became two rows, the view grew to ten,
+    and a jump stopped short with a failure that named the jump.
     """
     view = app._view
     assert view is not None
@@ -265,8 +274,8 @@ async def _three_turns(app: PHTuiApp, pilot: Any) -> None:  # noqa: ANN401
 async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
     make_tui_app: MakeApp,
 ) -> None:
-    """The gate. A pushed screen, not a second app — so leaving it is `escape`
-    and what it returns to is the conversation exactly as it was."""
+    """The gate. The trajectory is a pushed screen and not a second app. So
+    `escape` leaves it, and it returns to the conversation exactly as it was."""
     async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app._view is not None
@@ -276,8 +285,8 @@ async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
 
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
-        # Bound after the wait: the `isinstance` inside the lambda narrows
-        # nothing out here, and `App.screen` is a `Screen[object]`.
+        # `screen` is bound after the wait. The `isinstance` inside the lambda
+        # narrows nothing out here, and `App.screen` is a `Screen[object]`.
         screen = app.screen
         assert isinstance(screen, TrajectoryScreen)
         assert screen.records, "the screen was built from the live session's log"
@@ -290,8 +299,8 @@ async def test_the_trajectory_opens_over_the_chat_and_escape_returns_to_it(
 
 
 async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeApp) -> None:
-    """`build` runs at open time, not at registration: a screen that had been
-    built once would show the session as it was when the row mounted."""
+    """`build` runs when the screen opens, not at registration. A screen that
+    was built one time would show the session as it was when the row mounted."""
     async with running(make_tui_app()) as (app, pilot):
         await pilot.press(TRAJECTORY_KEY)
         await until(pilot, lambda: isinstance(app.screen, TrajectoryScreen))
@@ -316,8 +325,9 @@ async def test_the_screen_is_a_fold_of_the_log_as_it_stands(make_tui_app: MakeAp
 
 
 async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> None:
-    """The gate, over the join P3-24 stored and nobody read: a record's
-    `source_seq` and a transcript row's `seq` are the same number."""
+    """The gate, over the join that P3-24 stored and nothing read: the
+    `source_seq` of a record and the `seq` of a transcript row are the same
+    number."""
     async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
@@ -338,8 +348,8 @@ async def test_a_record_jumps_to_its_transcript_row(make_tui_app: MakeApp) -> No
 
 
 async def test_a_transcript_row_opens_the_record_beside_it(make_tui_app: MakeApp) -> None:
-    """The other direction. Rows are widgets in a scroll rather than a table
-    with a cursor, so "where the reader is" is the topmost visible row."""
+    """The other direction. Rows are widgets in a scroll and not a table with a
+    cursor, so "where the reader is" is the topmost visible row."""
     async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
@@ -359,8 +369,9 @@ async def test_a_transcript_row_opens_the_record_beside_it(make_tui_app: MakeApp
 async def test_a_seq_with_no_row_lands_on_the_nearest_one_before_it(
     make_tui_app: MakeApp,
 ) -> None:
-    """A `request/header` is an auditor's record with no transcript row by
-    design. Landing a reader next to it beats landing them nowhere."""
+    """A `request/header` is a record for an auditor, and by design it has no
+    transcript row. To land a reader next to it is better than to land them
+    nowhere."""
     async with running(make_tui_app()) as (app, pilot):
         await _three_turns(app, pilot)
         assert app.front is not None and app._view is not None
@@ -374,23 +385,26 @@ async def test_a_seq_with_no_row_lands_on_the_nearest_one_before_it(
 
 
 def test_the_terminal_never_reaches_past_the_front_session() -> None:
-    """`app.py` and the widgets may only touch what `FrontSession` declares.
+    """`app.py` and the widgets may touch only what `FrontSession` declares.
 
-    Every member the terminal reads off its harness has to be one a *remote*
-    harness can answer. `front.ctx` was the obvious offender — nine service
-    lookups that only exist while the harness is in this process — but it is the
-    class of thing that matters, not the name: `front.agent`, `front.ctx`,
-    `front._stack` all fail the same way, and only over a socket, which is why no
-    amount of running the terminal today would catch one.
+    Every member that the terminal reads from its harness must be one that a
+    *remote* harness can answer. `front.ctx` was the obvious offender: nine
+    service lookups that exist only while the harness is in this process. But
+    the class of thing matters, and not the name. `front.agent`, `front.ctx`
+    and `front._stack` all fail in the same way, and only over a socket. The
+    terminal ran its harness in process when this gate was written, so running
+    the terminal then could not catch one.
 
-    So the check is **membership**, not a banned word: whatever is read off
-    `front` must be in the Protocol. That makes the test self-updating — adding a
-    member to `FrontSession` licenses it here — and strictly stronger than
-    forbidding `.ctx`, which both missed every other reach-through and would have
-    flagged an unrelated `event.ctx`.
+    So the check is **membership**, and not a banned word: whatever is read
+    from `front` must be in the Protocol. That makes the test update itself,
+    because a member that is added to `FrontSession` is allowed here. It is
+    also strictly stronger than forbidding `.ctx`. That ban missed every other
+    reach-through, and it would have flagged an unrelated `event.ctx`.
 
-    `frontend.py` is deliberately out of scope: it *is* the in-process
-    implementation, and resolving seams is its whole job.
+    The check reads `app.py` and the widgets. `frontend.py` is deliberately out
+    of scope: it declares the two protocols (`FrontSession` and `ModalHost`) and
+    holds no implementation. The implementation that ships is `DaemonSession`
+    in `remote.py`, a client of the daemon.
     """
     allowed = set(dir(FrontSession)) | set(getattr(FrontSession, "__annotations__", {}))
     root = Path(ph_app.tui.__path__[0])
@@ -401,8 +415,8 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Attribute) or node.attr in allowed:
                 continue
-            # `front.x` and `self.front.x` — the two spellings the terminal uses
-            # to reach its harness.
+            # `front.x` and `self.front.x` are the two spellings that the
+            # terminal uses to reach its harness.
             base = node.value
             named = isinstance(base, ast.Name) and base.id == "front"
             through_self = isinstance(base, ast.Attribute) and base.attr == "front"
@@ -417,8 +431,9 @@ def test_the_terminal_never_reaches_past_the_front_session() -> None:
 async def _turns_with_revisions(
     app: PHTuiApp, pilot: Pilot[str | None], root: Root
 ) -> list[SessionEvent]:
-    """Three turns, the first two user messages each replaced in the daemon's log
-    after its own turn, so each revision has transcript rows on both sides."""
+    """Three turns. The first two user messages are each replaced in the log of
+    the daemon after their own turn, so each revision has transcript rows on
+    both sides."""
     assert app.front is not None
     front = app.front
     await _short_view(app, pilot)
@@ -448,9 +463,10 @@ async def _open_diff(app: PHTuiApp, pilot: Pilot[str | None]) -> DiffScreen:
 async def test_the_diff_lists_the_daemons_revisions_and_escape_returns_to_the_chat(
     make_tui_app: MakeApp, tui_daemon: Daemon, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Built from this client's mirror of the log, which holds every replacement
-    the daemon wrote, so no request beyond the ones the transcript already made; and
-    only the row on screen is rendered."""
+    """The screen is built from the mirror that this client keeps of the log.
+    The mirror holds every replacement that the daemon wrote, so the screen
+    makes no request beyond the ones that the transcript already made. Only the
+    row on screen is rendered."""
     rendered: list[int] = []
     render = Revision.texts
 
@@ -478,8 +494,8 @@ async def test_the_diff_lists_the_daemons_revisions_and_escape_returns_to_the_ch
 async def test_enter_on_a_change_goes_to_its_transcript_row(
     make_tui_app: MakeApp, tui_daemon: Daemon
 ) -> None:
-    """The join the trajectory uses, from the other screen: a substitution's entry
-    lands on the row the replacement drew."""
+    """The join that the trajectory uses, from the other screen: the entry of a
+    substitution lands on the row that the replacement drew."""
     async with running(make_tui_app()) as (app, pilot):
         first, _ = await _turns_with_revisions(app, pilot, root_of(tui_daemon))
         assert app._view is not None
@@ -509,7 +525,7 @@ async def test_opened_from_the_chat_it_starts_at_the_nearest_change_before_the_r
             app._view.scroll_to_seq(reading)
             await pilot.pause()
             screen = await _open_diff(app, pilot)
-            # The cursor moves after the table's first refresh (`DiffScreen.on_mount`).
+            # `DiffScreen.on_mount` moves the cursor, so wait for the mount to run.
             await pilot.pause()
             await pilot.pause()
             selected = screen.selected()
@@ -519,10 +535,10 @@ async def test_opened_from_the_chat_it_starts_at_the_nearest_change_before_the_r
 
 
 async def _unload(root: Root, screen_id: str) -> None:
-    """Dispose whatever scope owns this screen's registration.
+    """Dispose the scope that owns the registration of this screen.
 
-    A row's removal is the disposal of the scope its `apply` was handed, so this
-    is that unwinding rather than a second way to take a screen away.
+    The removal of a row is the disposal of the scope that its `apply` received.
+    So this is that unwinding, and not a second way to take a screen away.
     """
     registry = root.ctx.get("tui_screens")
     entry = registry._entries[screen_id]
@@ -530,9 +546,10 @@ async def _unload(root: Root, screen_id: str) -> None:
 
 
 def test_edits_past_the_drawn_budget_are_counted_not_rendered() -> None:
-    """A summary's group holds every older summary, and each one's before can be most of
-    a conversation, so once the drawn lines are spent the rest are counted rather than
-    rendered and diffed on every cursor move. Sabotage: render every edit."""
+    """The group of a summary holds every older summary, and the before of each
+    one can be most of a conversation. So when the drawn lines are spent, the
+    remaining edits are counted. They are not rendered and diffed on every
+    cursor move. Sabotage: render every edit."""
     rendered: list[int] = []
 
     def entry(seq: int) -> DiffEntry:

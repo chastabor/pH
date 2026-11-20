@@ -1,39 +1,42 @@
-"""Settings, completion, and session listing — the parts with no app.
+"""Settings, completion and session listing: the parts with no app.
 
-Themes moved to `test_tui_themes.py` when they grew a second notation and a
-profile file of their own (P9-01, P9-02); what is left here is everything else
-that can be asserted without a terminal.
+Themes moved to `test_tui_themes.py` when they gained a second notation and a
+profile file of their own (P9-01, P9-02). This file holds everything else that
+can be asserted without a terminal.
 
-Kept separate from the pilot tests because these are the pieces a broken
-terminal must not be able to hide: a settings file that stops the TUI starting
-is worse than a settings file pH ignores, and the only way to know which one
-happens is to test it without a running app.
+These tests are kept separate from the pilot tests because these are the pieces
+that a broken terminal must not be able to hide. A settings file that stops the
+TUI from starting is worse than a settings file that pH ignores. The only way to
+know which one happens is to test it without a running app.
 
-## Two measurements behind the session picker and the trajectory filter
+## Four measurements behind the session picker and the trajectory filter
 
-**`_inherited_title` opens the ancestor rather than searching for it.** An ancestor
-is a sibling inside the session's own family directory, so the path is a join.
-Resolving each one by id instead scanned every family in the store: at **200
-families whose newest rows were segment tips, 111.8 ms and 200 store scans against
-18.6 ms — 6x**, running synchronously on the UI thread.
+**`_inherited_title` opens the ancestor and does not search for it.** An
+ancestor is a sibling inside the family directory of the session itself, so the
+path is a join. To resolve each one by id scanned every family in the store. At
+**200 families whose newest rows were segment tips, that was 111.8 ms and 200
+store scans against 18.6 ms, which is 6x**, and it ran synchronously on the UI
+thread.
 
-**`Query` is compiled once per rebuild, not per record.** `refresh_rows` calls the
-predicate once per record, so parsing inside it re-lexed the query and re-parsed
-every selector for every row on every keystroke — making the *plain free-text*
-path, the common one, **2.5x** more expensive than before `type:` existed, because
-the tag scan ran whether or not anyone had typed a tag. A malformed term also
-constructed and raised a `SelectorError` per record: thousands of exceptions caught
-and dropped.
+**`Query` is compiled one time for each rebuild, and not for each record.**
+`refresh_rows` calls the predicate one time for each record. Parsing inside the
+predicate therefore lexed the query again and parsed every selector again, for
+every row, on every keystroke. That made the *plain free-text* path, which is
+the common one, **2.5x** more expensive than before `type:` existed, because the
+tag scan ran whether or not anyone had typed a tag. A malformed term also
+constructed and raised a `SelectorError` for each record: thousands of
+exceptions that were caught and dropped.
 
-**The segment-chain title cache.** A segmented run is one chain, so every row below
-walks the same ancestors. Measured on a **60-segment chain: 550 opens and 39.9 ms
-against 60 and 4.6 ms** — synchronously, on the UI thread.
+**The segment-chain title cache.** A segmented run is one chain, so every row
+below walks the same ancestors. Measured on a **60-segment chain: 550 opens and
+39.9 ms against 60 and 4.6 ms**, synchronously, on the UI thread.
 
-**The trajectory filter coalesces keystrokes.** `DataTable` virtualizes *rendering*,
-not row construction: a refill measures every cell of every row, so a
-thousand-record log costs **~150 ms per keystroke and typing four characters cost
-625 ms**. Row surgery is worse, because removing the rows that drop out reindexes
-the table each time — so the fix is the frequency, not the primitive.
+**The trajectory filter coalesces keystrokes.** `DataTable` virtualizes
+*rendering* and not row construction. A refill measures every cell of every row,
+so a thousand-record log costs **~150 ms for each keystroke, and typing four
+characters cost 625 ms**. Row surgery is worse, because removing the rows that
+drop out reindexes the table each time. So the fix is the frequency and not the
+primitive.
 """
 
 from __future__ import annotations
@@ -73,24 +76,25 @@ def test_settings_survive_an_unreadable_file(tmp_path: Path) -> None:
 def test_an_unknown_key_in_settings_is_ignored() -> None:
     """Including `theme`, which this file wrote until P9-02 moved it.
 
-    The tolerance rule *is* the upgrade path: a key left over from a build that
-    had the field is read past, and gone the next time anything writes the file.
+    The tolerance rule *is* the upgrade path. A key that is left over from a
+    build that had the field is read past, and it is gone the next time anything
+    writes the file.
     """
     settings = tui_settings_from_json(
         {"theme": "ph-light", "somethingFromANewerPH": 3, "keybindings": {"quit": "ctrl+d"}}
     )
     assert settings == TuiSettings(keybindings=settings.keybindings)
     assert settings.keybindings.quit == "ctrl+d"
-    # Unnamed bindings keep their defaults rather than becoming unset.
+    # A binding that is not named keeps its default and does not become unset.
     assert settings.keybindings.cancel
 
 
 def test_a_binding_this_build_has_no_field_for_is_kept(tmp_path: Path) -> None:
-    """A screen contributed by a row is rebound in `tui.json` like a built-in.
+    """A screen that a row contributes is rebound in `tui.json` like a built-in one.
 
-    Its binding id is the screen's, and this build has no field for it — so
-    dropping the unrecognized key would make exactly one class of key
-    unrebindable, which is the rule the settings file exists to prevent.
+    The id of its binding is the id of the screen, and this build has no field
+    for it. To drop the unrecognized key would therefore make exactly one class
+    of key impossible to rebind, and the settings file exists to prevent that.
     """
     settings = tui_settings_from_json(
         {"keybindings": {"quit": "ctrl+q", "trajectory": "ctrl+j", "malformed": 7}}
@@ -101,8 +105,8 @@ def test_a_binding_this_build_has_no_field_for_is_kept(tmp_path: Path) -> None:
     assert keymap["trajectory"] == "ctrl+j"
     assert "malformed" not in keymap, "only strings are keys"
 
-    # And it survives a save, so a rebound plugin key is not lost on the next
-    # toggle the app writes.
+    # The binding also survives a save, so a rebound plugin key is not lost the
+    # next time the app writes a toggle.
     save_tui_settings(tmp_path, settings)
     assert load_tui_settings(tmp_path).keybindings.as_map()["trajectory"] == "ctrl+j"
 
@@ -149,9 +153,9 @@ def test_path_completion_survives_a_missing_directory(tmp_path: Path) -> None:
 
 
 def _write_session(directory: Path, session_id: str, title: str, **header: object) -> None:
-    # The family comes from the model, which since format 1 tags it with the
-    # cwd — so a fixture that spelled `family = session_id` would write into a
-    # directory no filtered listing looks in.
+    # The family comes from the model, which tags it with the cwd since format 1.
+    # A fixture that wrote `family = session_id` would therefore write into a
+    # directory that no filtered listing looks in.
     record = {"id": session_id, "createdAt": 0, "cwd": "/work", **header}
     if record.get("cwd") is None:
         record.pop("cwd", None)
@@ -179,11 +183,12 @@ def _write_session(directory: Path, session_id: str, title: str, **header: objec
 
 
 def test_browse_filtered_by_cwd_finds_a_session_older_than_the_limit(tmp_path: Path) -> None:
-    """The reason the filter is a parameter of the fold and not a comprehension.
+    """This is why the filter is a parameter of the fold and not a comprehension.
 
-    `limit` takes the newest rows. Filtering what comes *back* would let this
-    directory's own session fall off that window behind newer work elsewhere, so
-    a repo somebody last touched a month ago lists as empty on a busy machine.
+    `limit` takes the newest rows. A filter on what comes *back* would let the
+    session of this directory fall out of that window behind newer work
+    elsewhere. A repo that somebody last touched a month ago would then list as
+    empty on a busy machine.
 
     Sabotage: filter the result instead of the scan — `[s for s in
     session_summaries(d) if s.cwd == "/work"]` — and this finds nothing.
@@ -191,24 +196,26 @@ def test_browse_filtered_by_cwd_finds_a_session_older_than_the_limit(tmp_path: P
     _write_session(tmp_path, "wanted", "the one worked on long ago", cwd="/work")
     for index in range(60):
         _write_session(tmp_path, f"other{index}", "newer work elsewhere", cwd="/elsewhere")
-    # Explicit mtimes: the writes above are fast enough to land in the same tick,
-    # and this fold sorts on mtime. "wanted" is the oldest by a clear margin.
+    # The mtimes are explicit. The writes above are fast enough to land in the
+    # same tick, and this fold sorts on mtime. "wanted" is the oldest by a clear
+    # margin.
     for path in tmp_path.rglob("*.jsonl"):
         os.utime(path, (0, 1_000) if path.stem == "wanted" else (0, 2_000_000))
 
     found = session_summaries(tmp_path, cwd="/work")
     assert [summary.session_id for summary in found] == ["wanted"]
-    # And it is genuinely past the window an unfiltered listing would show.
+    # It is also past the window that an unfiltered listing shows.
     assert "wanted" not in {summary.session_id for summary in session_summaries(tmp_path)}
 
 
 def test_a_filtered_listing_opens_no_other_directorys_logs(tmp_path: Path) -> None:
-    """The point of tagging the lineage directory (format 1).
+    """The purpose of the tag on the lineage directory (format 1).
 
-    Before it, answering "which sessions are this repo's" meant opening the
-    header of every log in the store. Now the tag on the *directory name* settles
-    it, so the files of another repo are never read — asserted by counting, since
-    the whole value of the change is the reads that do not happen.
+    Before the tag, the answer to "which sessions belong to this repo" needed
+    the header of every log in the store to be opened. Now the tag on the
+    *directory name* gives the answer, so the files of another repo are never
+    read. The test counts the opens, because the whole value of the change is
+    the reads that do not happen.
 
     Sabotage: drop the `tag=` argument in `session_summaries` and every log is
     opened again.
@@ -235,10 +242,10 @@ def test_a_filtered_listing_opens_no_other_directorys_logs(tmp_path: Path) -> No
 
 
 def test_a_session_with_no_cwd_belongs_to_no_directory(tmp_path: Path) -> None:
-    """A tagless lineage is found by an unfiltered listing and by no filter.
+    """An unfiltered listing finds a lineage with no tag, and no filter finds it.
 
-    The honest answer rather than a placeholder tag: a session that never had a
-    working directory should not turn up in a search for one.
+    This is the correct answer, and a placeholder tag is not. A session that
+    never had a working directory should not appear in a search for one.
     """
     _write_session(tmp_path, "rootless", "no cwd", cwd=None)
     assert [s.session_id for s in session_summaries(tmp_path)] == ["rootless"]
@@ -280,12 +287,12 @@ def test_session_summaries_skip_a_missing_directory(tmp_path: Path) -> None:
 
 
 def test_a_reference_forked_child_takes_its_title_from_the_lineage(tmp_path: Path) -> None:
-    """A child whose log begins mid-conversation still names itself.
+    """A child whose log begins in the middle of a conversation still has a title.
 
-    Its own file holds no `user/message` — that is what storing a reference
-    means — so without the walk this row renders blank and a person picking a
-    session is choosing between ids. `StoredSession`'s own comment refuses
-    exactly that outcome, in the same words, for the listing one layer down.
+    Its own file holds no `user/message`, which is what storing a reference
+    means. Without the walk, this row renders blank, and a person who picks a
+    session chooses between ids. The comment of `StoredSession` refuses exactly
+    that outcome, in the same words, for the listing one layer down.
     """
     _write_session(tmp_path, "root", "the original")
     write_reference_fork(tmp_path, "branch", "root", boundary=4)
@@ -295,11 +302,11 @@ def test_a_reference_forked_child_takes_its_title_from_the_lineage(tmp_path: Pat
 
 
 def test_a_child_whose_ancestor_is_gone_still_gets_a_row(tmp_path: Path) -> None:
-    """The reader refuses a broken chain; the picker must not.
+    """The reader refuses a broken chain, and the picker must not.
 
-    A person whose parent log was deleted needs to *see* the orphan in order to
-    do anything about it, so a missing ancestor costs a title here rather than
-    the row — and never an exception out of a directory scan.
+    A person whose parent log was deleted needs to *see* the orphan before they
+    can do anything about it. So a missing ancestor costs a title here and not
+    the row, and it never raises an exception out of a directory scan.
     """
     write_reference_fork(tmp_path, "orphan", "deleted", boundary=4)
 
@@ -312,11 +319,12 @@ def test_a_child_whose_ancestor_is_gone_still_gets_a_row(tmp_path: Path) -> None
 def test_a_segment_cycle_still_lists_every_session(tmp_path: Path) -> None:
     """A corrupt header must not empty the picker.
 
-    Two segments naming each other have no chain head, so nothing represents
-    them; hanging each under the other then puts both inside the children graph
-    with no root above them, and the render walk — which starts from roots —
-    emits nothing at all. Every row vanishes because two are broken, against
-    this view's own rule that losing a session is worse than misplacing one.
+    Two segments that name each other have no chain head, so nothing represents
+    them. Hanging each under the other then puts both inside the children graph
+    with no root above them. The render walk starts from roots, so it emits
+    nothing at all. Every row vanishes because two are broken. That is against
+    the rule of this view itself, that losing a session is worse than
+    misplacing one.
     """
     write_reference_fork(tmp_path, "s0", "s1", boundary=4, kind="segment", family="s0")
     write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment", family="s0")
@@ -328,7 +336,7 @@ def test_a_segment_cycle_still_lists_every_session(tmp_path: Path) -> None:
 
 
 def test_forked_sessions_are_listed_under_their_parent(tmp_path: Path) -> None:
-    """The header records the fork; the picker shows it as one."""
+    """The header records the fork, and the picker shows it as one."""
     _write_session(tmp_path, "root", "the original")
     _write_session(tmp_path, "branch", "a fork", parentSession="root")
     labels = [choice.label for choice in session_choices(session_summaries(tmp_path))]
@@ -338,10 +346,11 @@ def test_forked_sessions_are_listed_under_their_parent(tmp_path: Path) -> None:
 def test_a_rolled_session_is_one_row_with_no_indent(tmp_path: Path) -> None:
     """**A segment is the same conversation in a new file, so it is one row.**
 
-    Structurally a roll is a fork at the tip, so before `kind` existed nothing on
-    disk told them apart and this rendered as a staircase — three nested rows
-    carrying one inherited title between them, for one conversation. The row that
-    survives is the **tip**: the newest file, and the one a resume should open.
+    Structurally a roll is a fork at the tip. Before `kind` existed, nothing on
+    disk told them apart, and this rendered as a staircase: three nested rows
+    with one inherited title between them, for one conversation. The row that
+    remains is the **tip**: the newest file, and the one that a resume should
+    open.
     """
     _write_session(tmp_path, "s0", "the conversation")
     write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment")
@@ -366,10 +375,10 @@ def test_a_fork_still_indents_under_its_parent(tmp_path: Path) -> None:
 def test_a_branch_of_a_rolled_session_lands_under_the_surviving_row(tmp_path: Path) -> None:
     """The case that makes contraction more than cosmetic.
 
-    Forking an early segment leaves a child whose parent is a file the list no
-    longer shows. Mapping it through the contraction puts it under the row that
-    stands for that conversation; without that it would be orphaned to the root
-    and read as an unrelated session.
+    A fork of an early segment leaves a child whose parent is a file that the
+    list no longer shows. Mapping the child through the contraction puts it
+    under the row that stands for that conversation. Without the mapping it
+    would be orphaned to the root and read as an unrelated session.
     """
     _write_session(tmp_path, "s0", "the conversation")
     write_reference_fork(tmp_path, "s1", "s0", boundary=4, kind="segment")
@@ -383,14 +392,16 @@ def test_a_branch_of_a_rolled_session_lands_under_the_surviving_row(tmp_path: Pa
 
 
 def test_the_picker_shows_a_child_as_a_child(tmp_path: Path) -> None:
-    """**P11-08: a sub-agent's log is listed under its parent, and is not a way in.**
+    """**P11-08: the log of a sub-agent is listed under its parent, and is not a
+    way in.**
 
-    Its header names the agent that spawned it in `parentSession`, the same link a
-    fork's does, so the picker drew it as a fork: a second conversation a person
-    could carry on. Choosing it attached it as a root, which put a second writer on
-    a log its root's mount writes. The header's `origin` is what tells the two
-    apart, so it rides the summary, and the row says which one it is: nested under
-    its parent, marked as a sub-agent, and refused with the way to read it instead.
+    Its header names the agent that spawned it in `parentSession`, which is the
+    same link that the header of a fork has. So the picker drew it as a fork: a
+    second conversation that a person could carry on. Choosing it attached it as
+    a root, which put a second writer on a log that the mount of its root
+    writes. The `origin` of the header is what tells the two apart, so it is
+    carried on the summary. The row says which one it is: nested under its
+    parent, marked as a sub-agent, and refused with the way to read it instead.
 
     Sabotage: draw a sub-agent's row as a fork's, and it takes the fork's arrow and
     answers with its id.
@@ -428,12 +439,13 @@ def test_the_picker_shows_a_child_as_a_child(tmp_path: Path) -> None:
 
 
 def test_credential_choices_mark_what_is_already_set() -> None:
-    """Rows straight off the daemon's answer, in the order it gave them.
+    """The rows come directly from the answer of the daemon, in the order that it
+    gave them.
 
-    The walk that used to produce these names is the daemon's now
-    (`credentials_of`), so what is left here is the rendering — and the order,
-    which is the profile's row order and the reason the answer is a mapping
-    rather than a set.
+    The daemon now does the walk that used to produce these names
+    (`credentials_of`). What is left here is the rendering and the order. The
+    order is the row order of the profile that the root is mounted on, and it is
+    the reason why the answer is a mapping and not a set.
     """
     choices = credential_choices({"PH_PRESENT_KEY": True, "PH_ABSENT_KEY": False})
 

@@ -1,35 +1,38 @@
 """What a registered screen *becomes* in this front end, and how it talks back.
 
-`ctx.tui_screens` (P4-17) is the seam; this is pH's presenter for it. One
-`ScreenDefinition` yields, with no further wiring:
+`ctx.tui_screens` (P4-17) is the seam, and this front end presents it. One
+`ScreenDefinition` yields these, with no further wiring:
 
-* a slash command, so `/<id>` is in the palette, completes at the prompt, and
-  records `command/run` like every other verb — built by `commands.py`'s
-  `action_command`, the one spelling of "a command whose body is an action";
-* a key, when the screen asked for one — carrying the screen's id as its
-  binding id, which is what `App.set_keymap` remaps, so a plugin's key obeys
-  `tui.json` exactly as a built-in's does;
-* `escape` back to the chat, because it is a pushed screen rather than a second
+* A slash command, so `/<id>` is in the palette and completes at the prompt.
+  `action_command` in `commands.py` builds it. That function is the one place
+  that builds "a command whose body is an action".
+* A key, when the screen asked for one. The key carries the id of the screen as
+  its binding id, which is what `App.set_keymap` remaps. The key of a plugin
+  therefore obeys `tui.json` exactly as a built-in key does.
+* `escape` back to the chat, because it is a pushed screen and not a second
   app.
 
-All of it unwinds with the *registration*: the presenter hands its teardown to
-the seam, which owns it on the registering row's scope (I2). Unloading the row
-takes the verb and the key with it, and there is no second list to keep in step.
+All of it unwinds with the *registration*. The seam owns the registration on
+the scope of the registering row (I2). When the row unloads, the daemon
+publishes the new list as `session.screens`, and `ph_app.tui.remote` releases
+the old key bindings and builds the verbs and the keys again. There is no
+second list to keep in step.
 
-**The verb and the key are built by the front end, not by this module's
-presenter.** There used to be one: `present_screens` attached an in-process app
+**The front end builds the verb and the key, and this module has no
+presenter.** There used to be one. `present_screens` attached an in-process app
 to `ctx.tui_screens` and turned each registration into a command and a binding.
 The harness moved into the daemon (P5-14), so there is no in-process front end
-left to attach — a client is *told* which screens exist over the wire — and the
-presenter, its `_Presenter` and `register_tui_commands` went with it.
-`ph_app.tui.remote` builds the two routes from the wire's list.
+left to attach: a client is *told* over the wire which screens exist. The
+presenter, its `_Presenter` and `register_tui_commands` went with the move.
+`ph_app.tui.remote` builds the two routes from the list on the wire.
 
-**Cross-navigation is two halves and one join.** `RevealSeq` is a screen asking
-its host to show the transcript row for a log seq; `Revealing` is a screen
-accepting the same number on the way in. `RevealHost` is the mirror a screen
-checks before it offers the action at all — structurally, so any shell that can
-answer gets the behavior and a screen never counts the screen stack to guess
-where it is. All three read `source_seq`/`seq`, which the log already carries.
+**Cross-navigation is two halves and one join.** `RevealSeq` is a screen that
+asks its host to show the transcript row for a log seq. `Revealing` is a screen
+that accepts the same number on the way in. `RevealHost` is the mirror: a screen
+checks for it before it offers the action at all. The check is structural, so
+any shell that can answer gets the behavior, and a screen never counts the
+screen stack to guess where it is. All three read `source_seq`/`seq`, which the
+log already carries.
 
 @module ph_app.tui.screens
 """
@@ -46,12 +49,13 @@ __all__ = ["AppSurface", "RevealHost", "RevealSeq", "Revealing", "open_screen_ac
 
 
 class RevealSeq(Message):
-    """A screen asking its host to show the transcript row for a log seq.
+    """A screen asks its host to show the transcript row for a log seq.
 
-    A message rather than a dismissal value: the shell pushes screens it knows
-    nothing about, and a return type it had to interpret would make every
-    screen's meaning the app's business. `screen_id` travels with it so the host
-    can name whoever asked without knowing any of them by name.
+    This is a message and not a dismissal value. The shell pushes screens that
+    it knows nothing about. A return type that it had to interpret would make
+    the meaning of every screen the business of the app. `screen_id` travels
+    with the message so that the host can name the screen that asked, without
+    knowing any screen by name.
     """
 
     def __init__(self, seq: int, *, screen_id: str = "") -> None:
@@ -61,48 +65,52 @@ class RevealSeq(Message):
 
 
 class AppSurface(Protocol):
-    """The three things a front end asks of the app it is attached to.
+    """The three things that a front end asks of the app that it is attached to.
 
-    **A Protocol, not `PHTuiApp`.** Naming the class would close a cycle —
-    `app` imports `remote.attach_session` — though `from __future__ import
-    annotations` plus `TYPE_CHECKING` defuses exactly that, and
-    `daemon/projections.py` does it for `Root`. What actually rules the class out
-    is that it would be *wrong*: these three are the app's *surface*, not pH's
-    session machinery, and demanding the concrete class would make the headless
-    doubles illegal for no gain — a front end driven with no terminal is a shape
-    this layer supports on purpose.
+    **A Protocol, and not `PHTuiApp`.** To name the class would close an import
+    cycle, because `app` imports `remote.attach_session`. That alone does not
+    rule the class out: `from __future__ import annotations` plus
+    `TYPE_CHECKING` removes exactly that problem, and `daemon/projections.py`
+    does so for `Root`. What rules the class out is that it would be *wrong*.
+    These three are the *surface* of the app, and not the session machinery of
+    pH. To demand the concrete class would make the headless doubles illegal
+    for no gain. A front end driven with no terminal is a shape that this layer
+    supports on purpose.
 
-    **Here and not in `frontend.py`**, where it started, for the reason that file
-    opens with: P7-07's HTML renderer consumes `FrontSession`, so a Textual
-    `Binding` in its imports is exactly the coupling it is written to avoid.
-    This module is already the Textual-shaped half of the front end and already
-    holds `RevealHost`, the sibling protocol for the same object.
+    **It is here and not in `frontend.py`**, where it started, for the reason
+    that the docstring of that file gives. The HTML renderer of P7-07 consumes
+    `FrontSession`, so a Textual `Binding` in the imports of `frontend.py` is
+    exactly the coupling that the file is written to avoid. This module is
+    already the Textual-shaped half of the front end. It already holds
+    `RevealHost`, the sibling protocol for the same object.
 
     It replaced `app: Any`, which had spread to `attach_surfaces`,
-    `_wire_screens`, `local_commands`, `action_command` and `_RunAction.app`:
-    six annotations saying nothing, and a double that satisfied all of them by
-    implementing one member and never reaching the other two.
+    `_wire_screens`, `local_commands`, `action_command` and `_RunAction.app`.
+    Those were six annotations that said nothing, and a double satisfied all of
+    them by implementing one member and never reaching the other two.
     """
 
     def run_worker(self, work: Coroutine[Any, Any, Any]) -> object:
-        """Own a coroutine started from a sync caller, so it dies with the app.
+        """Own a coroutine that a sync caller started, so that it dies with the app.
 
-        Textual's own parameters are not restated: a structural match needs only
-        what is called, and `exclusive=False` — the one this used to carry — is
-        the default it was passing anyway, in three places that had to agree.
+        The parameters of Textual are not restated. A structural match needs
+        only what is called. `exclusive=False`, the one parameter that this
+        used to carry, is the default that it was passing anyway, in three
+        places that had to agree.
 
-        `object`, not Textual's `Worker`: no caller reads what comes back, here
-        or in `run_action` below, so naming the class would import it for a value
-        nobody holds — and a return type this surface does not promise is one an
-        implementation is free to widen."""
+        The return type is `object`, and not the `Worker` of Textual. No caller
+        reads what comes back, here or in `run_action` below, so to name the
+        class would import it for a value that nobody holds. A return type that
+        this surface does not promise is also one that an implementation is
+        free to widen."""
         ...
 
     def add_binding(self, binding: Binding) -> Callable[[], None]:
-        """Bind a key on the live app; the return removes it again."""
+        """Bind a key on the live app. The returned function removes it again."""
         ...
 
     async def run_action(self, action: str) -> object:
-        """Dispatch a Textual action — how every local slash command has a body."""
+        """Dispatch a Textual action. This is the body of every local slash command."""
         ...
 
 
@@ -110,8 +118,8 @@ class AppSurface(Protocol):
 class Revealing(Protocol):
     """A screen that can open positioned at a log seq.
 
-    Optional, and checked structurally: a screen that has nothing to position
-    simply does not have the method, and the shell opens it as it is.
+    This is optional, and checked structurally. A screen that has nothing to
+    position does not have the method, and the shell opens it as it is.
     """
 
     def reveal(self, seq: int) -> None:
@@ -121,12 +129,12 @@ class Revealing(Protocol):
 
 @runtime_checkable
 class RevealHost(Protocol):
-    """An app that answers `RevealSeq` — the mirror of `Revealing`.
+    """An app that answers `RevealSeq`. It is the mirror of `Revealing`.
 
-    A screen asks its host structurally rather than counting the screen stack,
-    because stack depth answers "how did I get here", which is not the question:
-    `--mode trajectory` has no transcript to reveal into however it was mounted,
-    and a shell that can reveal can do so from any depth.
+    A screen asks its host structurally and does not count the screen stack.
+    Stack depth answers "how did I get here", which is not the question.
+    `--mode trajectory` has no transcript to reveal into, however it was
+    mounted, and a shell that can reveal can do so from any depth.
     """
 
     def on_reveal_seq(self, message: RevealSeq) -> None: ...
@@ -135,9 +143,9 @@ class RevealHost(Protocol):
 def open_screen_action(screen_id: str) -> str:
     """The Textual action string that opens one screen.
 
-    One spelling, used by the binding and by the slash command, so a key and a
-    verb cannot come to mean different things. `app.`-namespaced because the key
-    is bound on the chat's base screen (`commands.screen_bindings` says why) and
-    the action lives on the app.
+    The binding and the slash command both use this one string, so a key and a
+    verb cannot come to mean different things. It carries the `app.` namespace
+    because the key is bound on the base screen of the chat
+    (`commands.screen_bindings` says why) and the action is on the app.
     """
     return f"app.open_screen({screen_id!r})"

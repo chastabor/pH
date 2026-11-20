@@ -1,33 +1,33 @@
-"""The gutter: one column that is the scrollbar and the rows' highlight bars.
+"""The gutter: one column that is the scrollbar and the highlight bars of the rows.
 
-A transcript row that wants marking — a tool card, the model's reasoning, a
-compaction marker — used to draw its own left border, which put the bar in
-column 1 and the row's text in column 3, two columns right of every other row.
-The scrollbar, meanwhile, sat on the right in two columns of its own. Here both
-are one column, at the left: the scrollbar's track and thumb are the cell
-backgrounds, and each row's bar is the glyph drawn over them in the row's color.
-Every row's text starts in column 1.
+A transcript row that needs a mark is a tool card, the reasoning of the model,
+or a compaction marker. Such a row used to draw its own left border. That put
+the bar in column 1 and the text of the row in column 3, two columns right of
+every other row. The scrollbar was on the right, in two columns of its own.
+Here both are one column, at the left. The track and the thumb of the scrollbar
+are the cell backgrounds, and the bar of each row is the glyph drawn over them
+in the color that the row gives. The text of every row starts in column 1.
 
-**A row says what color its bar is; the gutter draws it.** The color is the
-row's `row--bar` component style, so it is CSS — themed, and switched by the
-same `-settled`/`-error`/`-thinking` classes that style the rest of the row. A
-row whose CSS names no color has no bar, which is what a plain message says,
-and `transparent` turns off a bar a broader rule gave. `Barred` is the row's
-side of that; `GutterScroll` is the view's.
+**A row says what color its bar is, and the gutter draws it.** The color is the
+`row--bar` component style of the row, so it is CSS. It is themed, and the same
+`-settled`/`-error`/`-thinking` classes that style the rest of the row switch
+it. A row whose CSS names no color has no bar, which is the case for a plain
+message. `transparent` turns off a bar that a broader rule gave. `Barred` is
+the row side of that, and `GutterScroll` is the view side.
 
-**Why the column is padding.** Textual places a scroll view's children at the
-left edge of its content box (`_compositor.add_widget`: `placement_offset =
-container_region.offset`) and takes the scrollbar's strip out of that box
-*afterwards* (`_get_scrollable_region`). On the right those are the same point;
-on the left they are a column the rows and the bar both claim, and the rows'
-first character disappears under the bar. So the column is `padding-left`,
-which moves the content box, and the bar is arranged into it.
+**Why the column is padding.** Textual places the children of a scroll view at
+the left edge of its content box (`_compositor.add_widget`: `placement_offset =
+container_region.offset`) and takes the strip of the scrollbar out of that box
+*afterwards* (`_get_scrollable_region`). On the right those are the same point.
+On the left they are a column that the rows and the bar both claim, and the
+first character of each row disappears under the bar. So the column is
+`padding-left`, which moves the content box, and the bar is arranged into it.
 
-**Three overridden members, two of them private**, because Textual has no style
-for which side a scrollbar is on: `scrollbar_gutter` reserves nothing for the
-vertical bar, `_get_scrollable_region` carves nothing vertical, and
-`_arrange_scrollbars` places the bar one scrollbar-width left of the content
-box. `test_tui_gutter` is the tripwire for a Textual that renames one, and
+**Three members are overridden, and two of them are private**, because Textual
+has no style for the side that a scrollbar is on. `scrollbar_gutter` reserves
+nothing for the vertical bar, `_get_scrollable_region` carves nothing vertical,
+and `_arrange_scrollbars` places the bar one scrollbar-width left of the
+content box. `test_tui_gutter` fails when a Textual release renames one, and
 Textual is pinned below 9.
 
 @module ph_app.tui.widgets.gutter
@@ -51,7 +51,7 @@ from textual.widget import Widget
 __all__ = ["BAR", "ROW_BAR", "Barred", "GutterRender", "GutterScroll"]
 
 BAR = "▌"
-"""The left half of a cell — Textual's `outer` left border, which is what the rows
+"""The left half of a cell. It is Textual's `outer` left border, which the rows
 drew for themselves before the gutter drew it for them."""
 
 ROW_BAR = "row--bar"
@@ -59,22 +59,23 @@ ROW_BAR = "row--bar"
 
 
 class Barred:
-    """A row the gutter draws a bar beside, in its `row--bar` color.
+    """A row that the gutter draws a bar beside, in its `row--bar` color.
 
-    A bare mixin, not a `DOMNode`, for `_SourceSelection`'s reason: Textual builds
-    a widget's default CSS from a single `__bases__` chain and steps over a mixin
-    that is not a `DOMNode`, where one that is would truncate the chain. The row
-    class itself declares `COMPONENT_CLASSES = {ROW_BAR}`, because Textual
-    gathers those from the `DOMNode` bases only.
+    This is a bare mixin, not a `DOMNode`, for the same reason as
+    `_SourceSelection`. Textual builds the default CSS of a widget from a single
+    `__bases__` chain and steps over a mixin that is not a `DOMNode`. A mixin
+    that is a `DOMNode` would truncate the chain. The row class itself declares
+    `COMPONENT_CLASSES = {ROW_BAR}`, because Textual gathers those from the
+    `DOMNode` bases only.
     """
 
     def gutter_bar(self) -> Color | None:
-        """The bar's color, or `None` when the row's CSS gives it none.
+        """Return the color of the bar, or `None` when the CSS of the row gives it none.
 
-        **No rule is no bar**, rather than a default: an unset component color is
-        opaque white, so a row that never mentioned its bar would otherwise draw
-        a white one beside every line — and needed a `transparent` rule to say
-        what not saying anything already meant."""
+        **No rule means no bar**, not a default. An unset component color is
+        opaque white. A row that never mentioned its bar would otherwise draw a
+        white one beside every line, and would need a `transparent` rule to say
+        what saying nothing already meant."""
         styles = cast(Widget, self).get_component_styles(ROW_BAR)
         if not styles.has_rule("color"):
             return None
@@ -85,22 +86,24 @@ class Barred:
 _UP = {"@mouse.down": "scroll_up"}
 _GRAB = {"@mouse.down": "grab"}
 _DOWN = {"@mouse.down": "scroll_down"}
-"""What a press on a cell above the thumb, on it, and below it does — the
-`ScrollBar` actions Textual's own renderer names, attached the same way."""
+"""What a press does on a cell above the thumb, on the thumb, and below it. These
+are the `ScrollBar` actions that Textual's own renderer names, attached in the
+same way."""
 
 
 class GutterRender(ScrollBarRender):
-    """The scrollbar's track and thumb as cell backgrounds, each row's bar drawn
-    over them in the row's color.
+    """The track and the thumb of the scrollbar as cell backgrounds, with the bar
+    of each row drawn over them in the color that the row gives.
 
-    **The thumb is whole cells, one length.** Textual's stock thumb is measured in
-    eighths of a cell and draws a partial block at each end, so its edges move
-    smoothly; a cell beside a bar can hold one glyph, the bar, so each partial
-    end had to become a whole thumb cell or none — and counted as whole, a thumb
-    sitting on a cell boundary was one row shorter than the same thumb straddling
-    one, flickering a row on every line scrolled. Here the length is fixed by the
-    window (the stock arithmetic, rounded once) and only the start moves, a whole
-    cell at a time, from the top row at the top to the last at the end.
+    **The thumb is whole cells, and has one length.** Textual's stock thumb is
+    measured in eighths of a cell and draws a partial block at each end, so its
+    edges move smoothly. A cell beside a bar can hold one glyph, the bar. So
+    each partial end had to become a whole thumb cell or none. Counted as whole
+    cells, a thumb that sat on a cell boundary was one row shorter than the same
+    thumb straddling a boundary, so it flickered by a row on every line
+    scrolled. Here the window fixes the length (the stock arithmetic, rounded
+    one time), and only the start moves, a whole cell at a time, from the top
+    row at the top to the last row at the end.
     """
 
     def __init__(
@@ -114,15 +117,16 @@ class GutterRender(ScrollBarRender):
         vertical: bool = True,
         style: StyleType = "bright_magenta on #555555",
     ) -> None:
-        # The stock parameters, spelled: `ScrollBar.render` passes them by name.
+        # The stock parameters are spelled out, because `ScrollBar.render` passes them by name.
         super().__init__(virtual_size, window_size, position, thickness, vertical, style)
         self.bars = bars
-        """Per gutter row, the color of the bar beside it. Asked at render time,
-        which is when the rows' regions are the frame's."""
+        """For each gutter row, the color of the bar beside it. It is asked at
+        render time, when the regions of the rows are those of the frame."""
 
     def thumb(self, size: int) -> range | None:
-        """The rows the thumb covers in a bar `size` rows tall, or `None` when
-        there is nothing to scroll — the stock renderer's condition, unchanged."""
+        """Return the rows that the thumb covers in a bar `size` rows tall, or `None`
+        when there is nothing to scroll. The condition is that of the stock
+        renderer, unchanged."""
         virtual, window = self.virtual_size, self.window_size
         if not (window and size and virtual and size != virtual):
             return None
@@ -161,40 +165,43 @@ class GutterRender(ScrollBarRender):
 class GutterScroll:
     """Mixin for a scroll view whose vertical scrollbar is its left padding column.
 
-    The view's own CSS says `padding-left: 1; scrollbar-size-vertical: 1` (the
-    two must agree; `test_tui_gutter` checks the arithmetic rather than trusting
-    it) and, for a view with `Barred` rows, `overflow-y: scroll`, so the column
-    is drawn whether or not there is anything to scroll — the bars live in it.
+    The CSS of the view itself says `padding-left: 1; scrollbar-size-vertical: 1`.
+    The two must agree, and `test_tui_gutter` checks the arithmetic and does not
+    trust it. For a view with `Barred` rows, the CSS also says
+    `overflow-y: scroll`, so the column is drawn whether or not there is
+    anything to scroll. The bars are drawn in it.
 
     **Vertical only.** Both views that use it hide horizontal overflow
-    (`VerticalScroll`, and `ListView` with it); a horizontal bar here would also
-    need the corner cell Textual's own arrangement draws, so a view that scrolls
-    sideways is not one this mixin serves.
+    (`VerticalScroll`, and `ListView` with it). A horizontal bar here would also
+    need the corner cell that Textual's own arrangement draws. So this mixin
+    does not serve a view that scrolls sideways.
 
-    A bare mixin, for `Barred`'s reason.
+    A bare mixin, for the same reason as `Barred`.
     """
 
     def on_mount(self) -> None:
-        """Hand the scrollbar a renderer that knows this view's rows.
+        """Give the scrollbar a renderer that knows the rows of this view.
 
-        An instance attribute over a class-level `renderer`, which is Textual's
-        own extension point for the scrollbar's looks, declared as a class
-        variable; the bars are this view's, so the binding is per instance.
+        This sets an instance attribute over the class-level `renderer`.
+        `renderer` is Textual's own extension point for the looks of the
+        scrollbar, and it is declared as a class variable. The bars belong to
+        this view, so the binding is per instance.
         """
         widget = cast(Widget, self)
         widget.vertical_scrollbar.renderer = partial(GutterRender, bars=self.gutter_bars)  # type: ignore[assignment, misc]
 
     def gutter_bars(self) -> list[Color | None]:
-        """Per row of the gutter, the bar color of the row beside it, or `None`.
+        """Return, for each row of the gutter, the bar color of the row beside it, or `None`.
 
-        **Asked of what is on screen, one point per line**: the widget under the
-        content box's first column, walked up to this view's child. Never a
-        child's `region` — on a frame that only scrolled, Textual has rebuilt
-        the visible map and not the full one, and the region of a row off
-        screen is looked up in the full one, which rebuilds it: a whole-screen
-        arrange per line scrolled, measured at 24 ms a step at 300 rows. The
-        point lookup reads the visible map only, and a row spanning many lines
-        is asked its color once.
+        **The answer comes from what is on screen, one point for each line.**
+        The point is the widget under the first column of the content box,
+        walked up to the child of this view. It is never the `region` of a
+        child. On a frame that only scrolled, Textual has rebuilt the visible
+        map and not the full one. The region of a row that is off screen is
+        looked up in the full map, which rebuilds it. That is a whole-screen
+        arrange for each line scrolled, measured at 24 ms a step at 300 rows.
+        The point lookup reads the visible map only, and a row that spans many
+        lines is asked for its color one time.
         """
         widget = cast(Widget, self)
         box = widget.content_region
@@ -226,11 +233,11 @@ class GutterScroll:
         return Spacing()
 
     def _get_scrollable_region(self, region: Region) -> Region:
-        """The content box whole — the bar takes nothing from it."""
+        """Return the content box whole. The bar takes nothing from it."""
         return region
 
     def _arrange_scrollbars(self, region: Region) -> Iterable[tuple[Widget, Region]]:
-        """The vertical bar, in the column left of the content box `region`."""
+        """Place the vertical bar in the column left of the content box `region`."""
         widget = cast(Widget, self)
         size = widget.scrollbar_size_vertical
         if widget.show_vertical_scrollbar and size:

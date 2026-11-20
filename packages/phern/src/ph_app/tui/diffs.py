@@ -1,68 +1,76 @@
 """What changed, grouped as git groups commits by file: the projection behind `/diff`.
 
-Each group is one thing as it is now, and every change that led to it, oldest first:
-what `git log -p -- file` shows for a file. Each entry is one change: a `before` and an
-`after`, the seq that shows it in the transcript, and the records its producer wrote
-for it. A group also holds its whole history in one diff, the thing as first written
-against the thing now, as `git diff A..B -- file` does. The screen
-(`ph_app.tui.diff_screen`) draws whatever this list holds, so it knows nothing about
-where a group came from.
+Each group is one thing as it is now, with every change that led to it, oldest
+first. That is what `git log -p -- file` shows for a file. Each entry is one
+change: a `before` and an `after`, the seq that shows it in the transcript, and
+the records that its producer wrote for it. A group also holds its whole history
+in one diff: the thing as first written against the thing now, as
+`git diff A..B -- file` does. The screen (`ph_app.tui.diff_screen`) draws
+whatever this list holds, so it knows nothing about where a group came from.
 
-**Meant to grow more kinds.** Context revisions are the one source today. A workspace
-file change or a profile diff would be one more `DiffKind` member and one more source
-function in `SOURCES`, beside `revisions`. Neither the screen nor the groups the other
-sources produce would change. A tuple, not a registry: the sources are this package's
-own, and a seam with a single member is one nobody can check (`ph.seams.tui_screens`
-says the same about its one slot).
+**Meant to grow more kinds.** Context revisions are the one source today. A
+workspace file change or a profile diff would be one more `DiffKind` member and
+one more source function in `SOURCES`, beside `revisions`. Neither the screen
+nor the groups that the other sources produce would change. `SOURCES` is a tuple
+and not a registry. The sources belong to this package, and a seam with a single
+member is one that nobody can check. `ph.seams.tui_screens` says the same about
+its one slot.
 
-**A revision is any surface replacement, whoever wrote it.** That covers compaction's
-summary, its argument elision and overflow clip, input-offload's paste preview, and a
-model's own edit through ph-clm. All of them go through `ph.session.revise`, so one
-reading of the log covers every one, and the app may not import a bundle to learn its
-types (`test_app_layering.py`). Each one is classified from the event alone, as a
-substitution, a stand-in or a rewrite (`ph_app.revisions.shape_of`, which the
-training export shares).
+**A revision is any surface replacement, whoever wrote it.** That covers the
+summary of compaction, its argument elision and its overflow clip, the paste
+preview of input-offload, and the edit that a model makes through ph-clm. All of
+them go through `ph.session.revise`, so one reading of the log covers every one.
+The app may not import a bundle to learn its types (`test_app_layering.py`).
+Each revision is classified from the event alone, as a substitution, a stand-in
+or a rewrite. `ph.session.shape_of` does that, through
+`ph_app.revisions.read_revision`, which the training export shares.
 
-**A revision's group is the surface node it led to** (`Session.history`). Every
-revision ends up in exactly one: a node is shadowed once, so the revisions behind
-today's surface form a tree per node. The history merges, unlike git's one line per
-file: a summary over two sections a model had edited holds both edits and itself.
-Grouping by ph-clm's sections instead would need the app to read a bundle's map, which
-it may not (`test_app_layering.py`), and a section is a run of these nodes anyway.
+**The group of a revision is the surface node that it led to**
+(`Session.history`). Every revision ends up in exactly one group. A node is
+shadowed one time, so the revisions behind the current surface form a tree for
+each node. The history merges, unlike the one line per file of git: a summary
+over two sections that a model had edited holds both edits and itself. Grouping
+by the sections of ph-clm would need the app to read the map of a bundle, which
+it may not do (`test_app_layering.py`). A section is a run of these nodes in any
+case.
 
-**An entry's before is what the change replaced, not what was first written.** A
-revision of a revision is diffed against the revision it replaced, so stepping through
-a group shows each edit once. The group's whole history is the conversation as first
-written (`originals`) against the node now, which is what ph-clm's `context_diff`
-compares too. Both sides render through `render_messages`, and both diffs are
-`unified_diff`, so a revision reads the same here as in that tool.
+**The before of an entry is what the change replaced, not what was first
+written.** A revision of a revision is diffed against the revision that it
+replaced, so stepping through a group shows each edit one time. The whole
+history of the group is the conversation as first written (`originals`) against
+the node now, which is also what the `context_diff` of ph-clm compares. Both
+sides render through `render_messages`, and both diffs are `unified_diff`, so a
+revision reads the same here as in that tool.
 
-**Producer records are shown, not interpreted.** The records its producer wrote
-through the revision door, which stamps each with the replacements it explains
-(`Session.records_of`): `clm/revised`, `compaction/summarized`, `offload/input-spilled`,
-or a type this process has never heard of. Each is listed field by field, the way the
-trajectory describes a type it has no phrase for (`wire.fields_of`), apart from what the
-door wrote on it: what it revises, and its `size`, which becomes the entry's recorded
-size when the record explains this change alone. A replacement written before the door
-stamped its records has none.
+**Producer records are shown, not interpreted.** These are the records that the
+producer of a change wrote through the revision door, which stamps each record
+with the replacements that it explains (`Session.records_of`). A record can be
+`clm/revised`, `compaction/summarized`, `offload/input-spilled`, or a type that
+this process has never heard of. Each record is listed field by field, the way
+the trajectory describes a type that it has no phrase for (`wire.fields_of`).
+What the door wrote on the record is kept apart from those fields: what the
+record revises, and its `size`. The `size` becomes the recorded size of the
+entry when the record explains this change alone. A replacement that was written
+before the door stamped its records has none.
 
-**Nothing is rendered until a row is shown, and nothing rendered is kept.** A summary's
-before is every node it shadowed, which can be most of the conversation, so building the
-list renders no text: an entry holds how to render its two sides (`texts`), a group its
-whole history (`whole`), and the screen renders the row it shows and lets the strings go
-when the row changes. An entry
-with no recorded size has its characters counted then. No tokenizer runs: the client
-has no meter for the session, and a count that disagreed with the producer's own would
-be worse than characters labeled as characters.
+**Nothing is rendered until a row is shown, and nothing rendered is kept.** The
+before of a summary is every node that it shadowed, which can be most of the
+conversation. So building the list renders no text. An entry holds how to render
+its two sides (`texts`), and a group holds how to render its whole history
+(`whole`). The screen renders the row that it shows, and releases the strings
+when the row changes. An entry with no recorded size has its characters counted
+at that time. No tokenizer runs. The client has no meter for the session, and a
+count that disagreed with the count of the producer would be worse than
+characters that are labeled as characters.
 
-**A limit, recorded rather than fixed.** The transcript draws nothing for an in-place
-rewrite of an assistant message, because the text is already on screen
-(`TuiEventAdapter._on_assistant_message`). So this list is the only place a person sees
-one.
+**A limit, recorded and not fixed.** The transcript draws nothing for an
+in-place rewrite of an assistant message, because the text is already on screen
+(`TuiEventAdapter._on_assistant_message`). So this list is the only place where
+a person sees one.
 
-**Textual-free**, like `trajectory`. It takes a `Session`, which a stored log becomes
-through `ph.persistence.read_session` with nothing mounted, so a viewer over a file can
-reuse it.
+**Textual-free**, like `trajectory`. It takes a `Session`. A stored log becomes
+one through `ph.persistence.read_session` with nothing mounted, so a viewer over
+a file can reuse this module.
 
 @module ph_app.tui.diffs
 """
@@ -105,22 +113,23 @@ __all__ = [
 ]
 
 DiffKind: TypeAlias = Literal["revision"]
-"""Where an entry came from. The screen shows it as a column, so a person reading a
-mixed list can tell the kinds apart."""
+"""Where an entry came from. The screen shows it as a column, so that a person
+who reads a mixed list can tell the kinds apart."""
 
 
 @dataclass(frozen=True, slots=True)
 class ProducerRecord:
-    """A record that landed beside a change, field by field and uninterpreted."""
+    """A record that was written beside a change, field by field and not interpreted."""
 
     type: str
     seq: int
     fields: tuple[tuple[str, str], ...]
-    """`wire.fields_of`, in the payload's own order."""
+    """The result of `wire.fields_of`, in the order of the payload."""
     revises: tuple[int, ...] = ()
-    """The replacements the record explains. More than this one when it is one record
-    for several, as compaction writes one for every argument it elided: its numbers
-    describe all of them, so none of them is this entry's size."""
+    """The replacements that the record explains. It names more than this one when
+    it is one record for several changes, as compaction writes one for every
+    argument it elided. The numbers of such a record describe all of those
+    changes, so none of them is the size of this entry."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,16 +137,18 @@ class DiffEntry:
     """One change: what it was, and what it is."""
 
     seq: int
-    """The log seq the change landed at; a group's entries are ordered by it."""
+    """The log seq at which the change was written. The entries of a group are
+    ordered by it."""
     title: str
     summary: str
     producer: str
-    """Who made the change, as the log says: a plugin's name, or the types of the
-    records beside it. Empty when the log does not say."""
+    """Who made the change, as the log reports it: the name of a plugin, or the
+    types of the records beside the change. It is empty when the log does not
+    say."""
     texts: Callable[[], tuple[str, str]] = field(compare=False, repr=False)
     """`(before, after)`, rendered on each call and kept by nobody here."""
     facts: tuple[str, ...] = ()
-    """Lines of the source's own about this change, shown above the diff."""
+    """Lines that the source wrote about this change, shown above the diff."""
     records: tuple[ProducerRecord, ...] = ()
     recorded: RevisionSize | None = None
     """The size a producer record gave, when one did."""
@@ -154,7 +165,8 @@ class DiffGroup:
     reveal: int
     """The seq of the transcript row that shows the thing now."""
     entries: tuple[DiffEntry, ...]
-    """Oldest first; the last is the change that made it what it is now."""
+    """Oldest first. The last entry is the change that made the thing what it is
+    now."""
     whole: Callable[[], tuple[str, str]] = field(compare=False, repr=False)
     """`(as first written, now)`, rendered on each call and kept by nobody here."""
 
@@ -164,7 +176,7 @@ class DiffGroup:
 
     @property
     def producers(self) -> str:
-        """Who made its changes, each once, oldest first."""
+        """Who made its changes, each producer one time, oldest first."""
         return ", ".join(dict.fromkeys(entry.producer for entry in self.entries if entry.producer))
 
 
@@ -223,8 +235,8 @@ SOURCES: tuple[DiffSource, ...] = (revisions,)
 
 
 def _whole(session: Session, node: int) -> tuple[str, str]:
-    """A node's whole history: the conversation it stands for as first written, and
-    the node now."""
+    """The whole history of a node: the conversation that it stands for as first
+    written, and the node now."""
     return (
         render_messages(originals(session, node)),
         render_messages(messages_of(session, (node,))),
@@ -252,8 +264,8 @@ def _facts(
 
 
 def _described(record: SessionEvent) -> ProducerRecord:
-    """A record as the screen lists it: its producer's fields, and apart from them the
-    door's stamp of what it revises."""
+    """A record as the screen lists it: the fields of its producer and, apart from
+    them, the stamp of the revision door that says what the record revises."""
     return ProducerRecord(
         record.type, record.seq, tuple(fields_of(producer_data(record))), revises_of(record)
     )

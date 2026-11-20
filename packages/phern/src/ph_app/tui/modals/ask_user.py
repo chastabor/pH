@@ -1,9 +1,9 @@
 """The ask-user modal: a question from the model, answered by a person.
 
-Two shapes, because the seam has two. With `options`, this is a picker and the
-answer is one of them. Without, it is free text. Nothing here invents a third
-mode — `multi_select` joins the chosen options with a comma, which is what the
-seam's `str` return can carry.
+The modal has two shapes, because the seam has two. With `options`, it is a
+picker and the answer is one of the options. Without `options`, it is free
+text. Nothing here adds a third mode. `multi_select` joins the chosen options
+with a comma, which the `str` return of the seam can carry.
 
 @module ph_app.tui.modals.ask_user
 """
@@ -23,7 +23,7 @@ __all__ = ["AskUserModal"]
 
 
 class AskUserModal(PhModal[str | None]):
-    """Put one question to the human and return their answer."""
+    """Put one question to the user and return the answer."""
 
     DEFAULT_CSS = """
     AskUserModal { align: center middle; background: $background 60%; }
@@ -54,8 +54,9 @@ class AskUserModal(PhModal[str | None]):
             if not self.options:
                 yield Input(placeholder="your answer…", id="ask-text")
             elif self.question.multi_select:
-                # A checkbox spends `enter` on toggling, so the answer needs a
-                # button of its own rather than a key the boxes already claim.
+                # A checkbox uses `enter` to toggle. The answer therefore needs a
+                # button of its own, and not a key that the checkboxes already
+                # claim.
                 with Vertical(id="ask-options"):
                     for index, option in enumerate(self.options):
                         yield Checkbox(option, id=f"ask-opt-{index}")

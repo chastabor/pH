@@ -1,25 +1,26 @@
-"""`$PH_HOME/tui.json` — keybindings and front-end preferences.
+"""`$PH_HOME/tui.json`: keybindings and front-end preferences.
 
-Two rules, both borrowed deliberately.
+There are two rules, and both are borrowed deliberately.
 
-**Never hard-code a key check** (prime-agent's rule, adopted). Every binding is
-a named field with a default, and the field names double as Textual binding ids,
-so one `App.set_keymap(keybindings.as_map())` rebinds the whole app — screens
-and modals included. A widget that compared `event.key == "escape"` directly
-would silently ignore the user's setting.
+**Never hard-code a key check** (the rule of prime-agent, adopted). Every
+binding is a named field with a default, and the field names are also the
+Textual binding ids. One `App.set_keymap(keybindings.as_map())` therefore
+rebinds the whole app, with its screens and modals. A widget that compared
+`event.key == "escape"` directly would silently ignore the setting of the user.
 
-**A broken settings file must not stop the TUI starting.** A preference file is
-not a source of truth for anything the harness needs; if it fails to parse, the
-TUI launches on defaults and says so. Refusing to launch over a typo'd sidebar
-position would be a worse failure than the typo.
+**A broken settings file must not stop the TUI from starting.** A preference
+file is not a source of truth for anything that the harness needs. If it fails
+to parse, the TUI starts on defaults and says so. A refusal to start because of
+a typo in a sidebar position would be a worse failure than the typo.
 
-**The theme is not here** (P9-02). It lives in `$PH_HOME/themes/theme-profile.yaml`,
-which `/theme` writes and nothing else does. It used to be a field on
-`TuiSettings`, and the reason it could not stay is `save_tui_settings`: it
-persists the *whole* document, so a `/view thinking` toggle would rewrite a theme
-it had no opinion about, and two files would claim one fact. A `theme` key left
-over from before this change is ignored on read by the rule below and gone on the
-next write — which is the whole of the upgrade.
+**The theme is not here** (P9-02). It is in
+`$PH_HOME/themes/theme-profile.yaml`, which `/theme` writes and nothing else
+does. It used to be a field on `TuiSettings`, and `save_tui_settings` is the
+reason why it could not stay. That function persists the *whole* document, so a
+`/view thinking` toggle would rewrite a theme that it had no opinion about, and
+two files would claim one fact. A `theme` key that is left over from before
+this change is ignored on read by the rule below, and it is gone on the next
+write. That is the whole upgrade.
 
 @module ph_app.tui.config
 """
@@ -56,7 +57,8 @@ SidebarPosition: TypeAlias = Literal["left", "right", "off"]
 
 @dataclass(frozen=True, slots=True)
 class TuiKeybindings:
-    """Configurable keys. Each field name is also the Textual binding id it maps."""
+    """The configurable keys. Each field name is also the Textual binding id that
+    it maps."""
 
     cancel: str = "escape"
     submit: str = "enter"
@@ -71,35 +73,39 @@ class TuiKeybindings:
     completion_previous: str = "up"
     history_previous: str = "up"
     history_next: str = "down"
-    """The same two keys the completion list uses, and deliberately so.
+    """The keys that walk the prompt history. They are the same two keys that the
+    completion list uses, and that is deliberate.
 
-    They never contend, and `PromptInput._decide` is where that is arranged —
-    stated there rather than restated here, since a claim about another module's
-    branch order goes stale silently. Split fields even so, because they are two
-    *bindings*: somebody who moves history onto `alt+up` to free the arrows for
-    editing must be able to say that, and a single field would move both."""
+    The two never contend, and `PromptInput._decide` is where that is arranged.
+    It is stated there and not repeated here, because a claim about the branch
+    order of another module goes stale silently. The fields are split even so,
+    because they are two *bindings*. Somebody who moves history onto `alt+up`,
+    to free the arrows for editing, must be able to say that, and a single field
+    would move both."""
     history_search: str = "alt+r"
-    """`ctrl+r` is the session picker, which is older; the shell reflex has to
-    give way to the binding that was already there."""
+    """The key that searches the prompt history. `ctrl+r` is the session picker,
+    which is older. The shell reflex has to give way to the binding that was
+    already there."""
     toggle_thinking: str = "ctrl+t"
     toggle_tool_results: str = "ctrl+o"
     toggle_sidebar: str = "ctrl+b"
     quit: str = "ctrl+d"
     trajectory_quit: str = "q"
-    """The trajectory viewer's own way out (H7).
+    """The key that leaves the trajectory viewer (H7).
 
-    A field because it is a binding, and this class's rule is that every binding
-    id is one: bound under an id of its own so `quit`'s keymap could not move it,
-    it would otherwise have been the single key in the app nobody could remap —
-    the same rule broken in the other direction."""
+    It is a field because it is a binding, and the rule of this class is that
+    every binding id is a field. It is bound under an id of its own, so that the
+    keymap of `quit` could not move it. Without a field it would have been the
+    single key in the app that nobody could remap, which is the same rule broken
+    in the other direction."""
     extra: Mapping[str, str] = field(default_factory=dict)
-    """Binding ids this build has no field for — a plugin screen's key, under
-    its screen id (P4-17).
+    """Keys for binding ids that this build has no field for: the key of a plugin
+    screen, under its screen id (P4-17).
 
-    Kept rather than dropped, and that is the whole point: a screen contributed
-    by a row is remapped in `tui.json` exactly like a built-in, because
-    `set_keymap` rebinds by binding id and does not care where the id came
-    from. An id nothing binds costs nothing."""
+    They are kept and not dropped, on purpose. A screen that a row contributes
+    is remapped in `tui.json` exactly like a built-in screen, because
+    `set_keymap` rebinds by binding id and does not care where the id came from.
+    An id that nothing binds costs nothing."""
 
     def as_map(self) -> dict[str, str]:
         """Binding id → key: the shape `App.set_keymap` takes."""
@@ -109,7 +115,7 @@ class TuiKeybindings:
 
 @dataclass(frozen=True, slots=True)
 class TuiSettings:
-    """Everything the front-end remembers between runs."""
+    """Everything that the front end remembers between runs."""
 
     keybindings: TuiKeybindings = field(default_factory=TuiKeybindings)
     sidebar: SidebarPosition = "right"
@@ -118,27 +124,30 @@ class TuiSettings:
     show_tool_results: bool = True
     show_tools: bool = True
     daemon_keep_alive: str = "0"
-    """How long a daemon this UI starts should stay after the terminal closes.
+    """How long a daemon that this UI starts stays after the terminal closes.
 
-    A duration as `--keep-alive` spells it (`"30s"`, `"5m"`), and `"0"` — leave at
-    once — is the default. Here rather than on the daemon because it is a
-    *preference*: the person flipping between two terminals is the one who knows
-    whether a re-mount between them is worth avoiding. It reaches the daemon
-    through `spawn_command`'s argv, which is the only route a client-side
-    preference has (`cli._spawned_keep_alive`)."""
+    It is a duration in the spelling of `--keep-alive` (`"30s"`, `"5m"`). The
+    default is `"0"`, which means leave at once. The setting is here and not on
+    the daemon because it is a *preference*. The person who switches between two
+    terminals is the one who knows whether it is worth avoiding a re-mount
+    between them. It reaches the daemon through the argv of `spawn_command`,
+    which is the only route that a client-side preference has
+    (`cli._spawned_keep_alive`)."""
     show_skills: bool = True
-    """Whether the sidebar's tools and skills panels are drawn.
+    """Whether the tools panel and the skills panel of the sidebar are drawn.
 
-    Visible by default, because what fills the context window is the thing a
-    person should not have to go looking for. Hiding one hides its header too —
-    a 32-column panel cannot afford a heading over nothing."""
+    They are visible by default, because a person should not have to go looking
+    for what fills the context window. Hiding a panel hides its header too,
+    because a 32-column panel has no room for a heading over nothing."""
     hidden_screens: tuple[str, ...] = ()
-    """Screen ids this terminal does not offer: no verb, no palette entry, no key.
+    """Screen ids that this terminal does not offer: no verb, no palette entry and
+    no key.
 
-    Here, and not as a row removed from a profile, because a screen is
-    presentation (decision 23): every named profile mounts the screens pH ships,
-    and a session profile that removed one would be refused. Hidden per terminal,
-    so a second front end on the same daemon still offers what this one hides."""
+    The setting is here, and a screen is not hidden by removing a row from a
+    profile, because a screen is presentation (decision 23). Every named profile
+    mounts the screens that pH ships, and a session profile that removed one
+    would be refused. Screens are hidden for each terminal, so a second front
+    end on the same daemon still offers what this one hides."""
 
     def to_json(self) -> dict[str, Any]:
         data = asdict(self)
@@ -155,10 +164,10 @@ def _coerce(value: object, allowed: tuple[str, ...], fallback: str) -> str:
 
 
 def tui_settings_from_json(data: object) -> TuiSettings:
-    """Build settings from parsed JSON, ignoring anything unrecognized.
+    """Build settings from parsed JSON, and ignore anything unrecognized.
 
-    Tolerant on purpose: an older pH wrote fewer keys, a newer one writes more,
-    and neither should make the other refuse to start.
+    This is tolerant on purpose. An older pH wrote fewer keys and a newer pH
+    writes more, and neither should make the other refuse to start.
     """
     if not isinstance(data, dict):
         return TuiSettings()
@@ -172,9 +181,9 @@ def tui_settings_from_json(data: object) -> TuiSettings:
             for name, value in raw_keys.items()
             if isinstance(name, str) and isinstance(value, str) and value
         }
-        # What is left over is a binding id this build has no field for — a
-        # contributed screen's. Dropping it would make exactly one class of key
-        # unrebindable, which is the rule this file exists to prevent.
+        # What is left over is a binding id that this build has no field for:
+        # the id of a contributed screen. If it were dropped, exactly one class
+        # of key could not be rebound, and this file exists to prevent that.
         keys = replace(
             defaults,
             **{name: value for name, value in usable.items() if name in named},
@@ -189,8 +198,8 @@ def tui_settings_from_json(data: object) -> TuiSettings:
         show_skills=as_bool(data.get("show_skills"), True),
         daemon_keep_alive=as_str(data.get("daemon_keep_alive"), "0"),
         show_tool_results=as_bool(data.get("show_tool_results"), True),
-        # The strings of an array, and nothing from anything else — this reader's
-        # tolerance, applied per entry.
+        # The strings of an array, and nothing from any other value. This is the
+        # tolerance of this reader, applied to each entry.
         hidden_screens=tuple(
             one for one in as_seq(data.get("hidden_screens")) if isinstance(one, str) and one
         ),
@@ -200,15 +209,16 @@ def tui_settings_from_json(data: object) -> TuiSettings:
 def load_tui_settings(home: Path) -> TuiSettings:
     """Read `$PH_HOME/tui.json`, or return defaults.
 
-    `read_document` carries the whole ladder — absent is quiet, unreadable is
-    logged, both answer `None` — and `tui_settings_from_json` already reads a
-    non-mapping as "no settings", so the two compose into one line.
+    `read_document` covers every case: an absent file is quiet, an unreadable
+    file is logged, and both answer `None`. `tui_settings_from_json` already
+    reads a value that is not a mapping as "no settings", so the two compose
+    into one line.
     """
     return tui_settings_from_json(read_document(tui_settings_path(home)))
 
 
 def save_tui_settings(home: Path, settings: TuiSettings) -> None:
-    """Write `$PH_HOME/tui.json`. A `/view` toggle or a sidebar move lands here."""
-    # Atomically (O2): a second front end reads this while this one writes it,
-    # and half a settings document parses as none.
+    """Write `$PH_HOME/tui.json`. A `/view` toggle or a sidebar move is saved here."""
+    # The write is atomic (O2). A second front end reads this file while this
+    # one writes it, and half a settings document parses as no document.
     write_atomic(tui_settings_path(home), json.dumps(settings.to_json(), indent=2) + "\n")

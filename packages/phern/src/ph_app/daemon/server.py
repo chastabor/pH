@@ -99,7 +99,6 @@ from ..payloads import (
     CommandShown,
     CredentialsHeldReply,
     CredentialStored,
-    DaemonConfigReply,
     DaemonLifetime,
     DaemonMode,
     DaemonStatusReply,
@@ -678,12 +677,6 @@ class _Connection:
         # about one root. The supervisor names the directory of the store
         # (`sessions_directory`), and it knows which roots are held.
         return SessionBrowse(sessions=browse_of(self.server.supervisor, cwd=params.cwd))
-
-    async def _daemon_config(self, _params: NoParams) -> DaemonConfigReply:
-        # The composed profile of the *daemon*: what a new root starts on when
-        # `session/new` names no profile. A root can be on another profile
-        # (S5), so these rows are the default and not the rows of every root.
-        return DaemonConfigReply(rows=list(self.server.supervisor.profile.dump()))
 
     async def _credentials_held(self, params: SessionParams) -> CredentialsHeldReply:
         # The names are `credentials/held` and `credentials/store`, and not
@@ -1334,7 +1327,6 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.SCHEDULE_CREATE, _Connection._schedule_create),
         _unkeyed(verbs.SCHEDULE_CANCEL, _Connection._schedule_cancel),
         _unkeyed(verbs.SCHEDULE_LIST, _Connection._schedule_list),
-        _unkeyed(verbs.DAEMON_CONFIG, _Connection._daemon_config),
         _unkeyed(verbs.DAEMON_STATUS, _Connection._daemon_status),
         _unkeyed(verbs.DAEMON_LIFETIME, _Connection._daemon_lifetime),
         _unkeyed(verbs.DAEMON_PROBE, _Connection._daemon_probe),

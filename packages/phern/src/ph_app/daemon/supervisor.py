@@ -57,6 +57,7 @@ from ph.json import as_obj, as_seq, as_str
 from ph.keys import (
     AGENTS,
     COMMANDS,
+    COMPACTION,
     GOALS,
     INVARIANTS,
     MOUNT,
@@ -136,6 +137,7 @@ from ph.tools.errors import error_message
 from ..attach import Tray, prompt_message
 from ..payloads import (
     ChildRow,
+    CompactionFacts,
     OwedListing,
     OwedRoot,
     ProfileAsk,
@@ -939,6 +941,7 @@ class Root:
         authoritative.
         """
         options = self.agent.options
+        compaction = self.ctx.get(COMPACTION)
         return RootDescription(
             session_id=self.session.id,
             status=self.status,
@@ -964,6 +967,13 @@ class Root:
                 kept_note(self.change, self.id, door="session")
                 if self.change is not None and not self.held_on_profile
                 else ""
+            ),
+            # The share at which this root compacts on its own, as its seam
+            # answers it. A front end draws its context gauge in the warning
+            # color from this share. `ph_app` may not import the bundle that
+            # owns the engine, so it asks the seam and copies no default.
+            compaction=CompactionFacts(
+                trigger_fraction=compaction.trigger_fraction() if compaction is not None else None
             ),
         )
 

@@ -62,7 +62,6 @@ from .payloads import (
     CommandShown,
     CredentialsHeldReply,
     CredentialStored,
-    DaemonConfigReply,
     DaemonLifetime,
     DaemonStatusReply,
     NewSessionReply,
@@ -96,7 +95,6 @@ __all__ = [
     "COMMANDS_LIST",
     "CREDENTIALS_HELD",
     "CREDENTIALS_STORE",
-    "DAEMON_CONFIG",
     "DAEMON_HELLO",
     "DAEMON_LIFETIME",
     "DAEMON_PROBE",
@@ -147,7 +145,6 @@ DAEMON_HELLO = Verb("daemon/hello", InitializeParams, CapabilityBlock)
 Two verbs rather than one with two names: a verb *is* a name, and a client that
 says either gets the same reply model — which is the fact worth declaring."""
 
-DAEMON_CONFIG = Verb("daemon/config", NoParams, DaemonConfigReply)
 DAEMON_STATUS = Verb("daemon/status", NoParams, DaemonStatusReply)
 DAEMON_LIFETIME = Verb("daemon/lifetime", NoParams, DaemonLifetime)
 DAEMON_PROBE = Verb("daemon/probe", ProbeParams, ProbeReply)
