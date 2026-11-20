@@ -45,6 +45,7 @@ from code_graph_helpers import (
     grammar_cache,  # noqa: F401 - autouse, by being here
     new_agent,
 )
+from tree_sitter import Query, QueryCursor
 
 from ph.cordis import Context
 from ph.json import as_str
@@ -57,6 +58,7 @@ from ph.workspace_caches import WORKSPACE_FILE
 from ph_code_graph._extract import (
     INHERITS,
     Definition,
+    _pack,
     detect_language,
     extract,
     indexable,
@@ -200,6 +202,42 @@ def test_the_owner_table_is_built_once_for_the_whole_file() -> None:
     assert table[1].name == "f0"
     assert table[1991].name == "f199"
     assert 10 not in table, "the gap between two definitions belongs to neither"
+
+
+def test_a_module_level_constant_is_a_definition() -> None:
+    """The python query of the pack nests a constant under `expression_statement`,
+    and its grammar puts an assignment directly under `module`. No module-level
+    constant reached the index. `SUPPLEMENTS` adds the pattern that fits the tree.
+    An assignment inside a function or a class is not a module constant."""
+    code = (
+        "PRICES = {'tea': 3}\n"
+        "ENTRIES: list[object] = []\n"
+        "A = B = 2\n"
+        "box.lid = 1\n"
+        "class Shop:\n"
+        "    OPEN = True\n"
+        "def total():\n"
+        "    tax = 1\n"
+        "    return tax\n"
+    )
+
+    found = extract("shop.py", code, "python")
+
+    constants = {(one.name, one.start_line) for one in found.definitions if one.kind == "constant"}
+    assert constants == {("PRICES", 1), ("ENTRIES", 2), ("A", 3), ("B", 3)}, constants
+
+    # The canary. When the query of the pack finds a module constant by itself,
+    # the supplement is not needed any more, and this fails so that it is removed.
+    pack = _pack()
+    own = Query(pack.get_language("python"), pack.get_tags_query("python"))
+    tree = pack.get_parser("python").parse(code.encode("utf-8"))
+    named = {
+        node.text
+        for _pattern, capture in QueryCursor(own).matches(tree.root_node)
+        if "definition.constant" in capture
+        for node in capture["name"]
+    }
+    assert b"PRICES" not in named, "the pack finds module constants now: remove the supplement"
 
 
 def test_the_typescript_query_inherits_javascript() -> None:

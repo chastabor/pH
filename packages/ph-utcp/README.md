@@ -194,9 +194,12 @@ The environment of a command starts as the scrubbed environment of the
 deployment. The scrub removes every variable whose name looks like a credential.
 A template cannot get such a variable by naming it. The `pass_env` setting of a
 manual is how a deployment lets one pass. `pass_env` lists variable names. Each
-time the row starts a command of the manual (a tool call or a background run),
-it reads those variables from the environment of the harness and sets them on
-that command only. The `bash` tool of an agent does not get them.
+time the row starts a command of the manual, it reads those variables from the
+environment of the harness and sets them on that command only. Every command of
+the manual gets them: its discovery, each tool call and background run, and the
+`install` and `status` that a person runs. Discovery and a command of a person
+run unconfined, so a passed credential also reaches a command that no sandbox
+holds. The `bash` tool of an agent does not get them.
 
 **`phern doctor` reports a passed variable that the scrub does not remove.**
 `pass_env` keeps a credential away from other commands only if the scrub removes

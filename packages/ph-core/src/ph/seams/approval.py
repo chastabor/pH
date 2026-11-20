@@ -1,10 +1,12 @@
 """`ctx.approval` — asking a human, and failing closed when you cannot.
 
-The pipeline turns an `ask` decision into exactly one of four outcomes, and only
-`allowed-once` proceeds (B3). The other three are distinct on purpose: a model
-that is told "the user rejected this" can re-plan, while one told "there is no
-approval channel" knows the deployment is misconfigured rather than that a human
-said no. Collapsing them would make a missing UI look like a decision.
+The pipeline turns an `ask` decision into one answer. Only `allowed-once` and
+`Edited` (the call with the arguments that the person edited) proceed (B3).
+`Responded` runs nothing: the model gets the person's text instead. The three
+refusals are distinct on purpose: a model that is told "the user rejected this"
+can re-plan, while one told "there is no approval channel" knows the deployment
+is misconfigured rather than that a human said no. Collapsing them would make a
+missing UI look like a decision.
 
 **Fail closed** is the whole design. No answerer, an unmounted seam, a canceled
 prompt, an exception inside an answerer — every one of them denies. A permission
@@ -69,7 +71,8 @@ log = logging.getLogger("ph.seams.approval")
 ApprovalOutcome: TypeAlias = Literal[
     "allowed-once", "rejected", "canceled", "unavailable", "interrupted"
 ]
-"""The four answers that carry no data. Only `allowed-once` proceeds (B3)."""
+"""The answers that carry no data. Of these, only `allowed-once` proceeds (B3), and
+only repair writes `interrupted`."""
 
 # `INTERRUPTED` — the answer only repair writes — is declared with the kind in
 # `ph.session.kinds` (T4), and re-exported here with the seam's vocabulary.

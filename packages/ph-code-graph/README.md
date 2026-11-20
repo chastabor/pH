@@ -485,6 +485,10 @@ each has a test:
   way. `class`, `function`, and `call` are in the *javascript* query. A `.ts`
   file that is matched against the typescript query alone yields two tags and no
   calls. `INHERITS` fixes that.
+- **The python query of the pack missed module-level constants.** It looks for
+  an assignment inside an `expression_statement`, and the grammar of the pack
+  puts an assignment directly under `module`. `SUPPLEMENTS` adds a pattern that
+  fits the tree.
 
 ## Limits for each language
 

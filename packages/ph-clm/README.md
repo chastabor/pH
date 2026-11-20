@@ -37,7 +37,8 @@ again, one time.
 
 ## Readouts
 
-A readout is one line at the end of a tool result. It appears when that result
+A readout is one line at the end of a tool result. When the same call edited the
+context file, the receipt of that edit follows it. A readout appears when a result
 takes the context past a threshold, which is a share of the context window. The
 line gives the size of the context and says how to free space.
 

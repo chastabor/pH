@@ -163,7 +163,9 @@ without end."""
 
 GLYPHS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
 """How the list is rendered back to the model. The three states are on purpose
-the same three that the sidebar draws, so a person and the model read one list."""
+the same three that the sidebar draws, so a person and the model read one list.
+Only the marks differ: the sidebar draws `○`, `◐` and `●`
+(`ph_app.tui.widgets.status.TODO_GLYPHS`)."""
 
 # --------------------------------------------------------------------------
 # Verbatim from `langchain.agents.middleware.todo`, with one addition: the

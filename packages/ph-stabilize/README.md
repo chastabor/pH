@@ -224,9 +224,10 @@ hatch of the deployment, but it is matched against the decoded strings.
   hatch for a third-party tool whose author has not declared.
 - **Compaction can decline.** The cut is moved back to the nearest balanced
   boundary, so a call is never split from its result. If the only balanced cut
-  is the start of the conversation, nothing is compacted and the attempt
-  **reports that**. To send an orphaned `tool-result` to a provider that rejects
-  it is not a repair. Two cheaper remedies run first: the row elides over-long
+  is the start of the conversation, nothing is compacted. The automatic path
+  records nothing, and `/compact` **says that** there is no compactable history
+  yet. To send an orphaned `tool-result` to a provider that rejects it is not a
+  repair. Two cheaper remedies run first: the row elides over-long
   call arguments in retained history, and then spills the trailing tool-result
   batch.
 - **Limits are a fold over the log, not a counter in memory.** A limit that is

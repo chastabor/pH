@@ -79,7 +79,7 @@ Every front-end action is a `TuiVerb`, and it is reachable in three ways:
 | Slash | Key | |
 |---|---|---|
 | `/commands` | `ctrl+k` | Browse every command, those of the daemon and those of the client. |
-| `/model` | `ctrl+p` | Choose the provider and model. |
+| `/model [<key> \| <provider>/<model>]` | `ctrl+p` | Choose the provider and model. With a key or a route, move to it without the picker. |
 | `/theme` | `ctrl+y` | Choose a theme: `ph-dark`, `ph-light`, `high-contrast`, four catppuccin flavors, or one of your own in `$PH_HOME/themes`. |
 | `/sessions` | `ctrl+r` | Reopen a stored session. |
 | `/history` | `alt+r` | Search the prompts that you have sent. |
@@ -91,6 +91,9 @@ Every front-end action is a `TuiVerb`, and it is reachable in three ways:
 | `/profile …` | | The profile of the session: `show`, `diff`, `save <name>`, `use <name>`, `clear [row]`. This command belongs to the daemon, which registers it on every root. |
 | `/attach <path> …` | | Attach files to the next prompt. |
 | `/quit` | `ctrl+d` | |
+
+A verb with no argument in this table refuses one. `/theme dark` opens nothing
+and says `/theme takes no argument`.
 
 `/view` takes one word. Three of the words have keys of their own:
 

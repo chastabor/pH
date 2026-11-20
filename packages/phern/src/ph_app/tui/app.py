@@ -778,8 +778,8 @@ class PHTuiApp(App[str | None]):
         can attach a file that the daemon has never seen.
 
         This verb takes an argument, so its body reads one: `_RunAction`
-        forwards what followed the name. `/view` is the only other verb in
-        `TUI_VERBS` that takes one. When the verb is chosen from the palette,
+        forwards what followed the name. `/view` and `/model` are the other verbs
+        in `TUI_VERBS` that take one. When the verb is chosen from the palette,
         there is nothing to attach. It then says how it is used, because
         otherwise it would do nothing.
         """
@@ -1051,9 +1051,14 @@ class PHTuiApp(App[str | None]):
             self._prompt.area.insert(f"{chosen} ")
             self._prompt.area.focus()
 
-    def action_open_models(self) -> None:
+    def action_open_models(self, argument: str = "") -> None:
+        """`/model`: open the picker. `/model <key>` and `/model <provider>/<model>`
+        move the root without it, as the picker's value would."""
         front = self._attached("model")
         if front is None:
+            return
+        if chosen := argument.strip():
+            self._set_model(chosen)
             return
         state = front.state
         self._pick(

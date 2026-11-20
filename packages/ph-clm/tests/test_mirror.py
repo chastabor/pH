@@ -40,6 +40,7 @@ from clm_helpers import (
     model_text,
     mounted,
     sections_of,
+    without_section,
 )
 
 from ph.agent_loop.driver import ReactLoopAgent
@@ -93,11 +94,6 @@ async def _write(ctx: Context, agent: ReactLoopAgent, text: str) -> str:
     result = await edit(ctx, agent, "scribble", {"text": text})
     assert not result.is_error, result.content
     return text_of(result.content).lower()
-
-
-def _without(text: str, name: str) -> str:
-    """The file with the block of one section cut out."""
-    return re.sub(rf"\n\[\[SECTION {name} .*?(?=\n\[\[SECTION |\Z)", "", text, flags=re.S)
 
 
 # ---------------------------------------------------------------- the file --
@@ -228,7 +224,7 @@ async def test_a_deleted_section_becomes_a_tombstone(mount: MountProfile) -> Non
     ctx, agent, path = await _ready(mount)
     step = sections_of(ctx, agent.session)[1]
 
-    said = await _write(ctx, agent, _without(path.read_text(encoding="utf-8"), step.name))
+    said = await _write(ctx, agent, without_section(path.read_text(encoding="utf-8"), step.name))
 
     assert f"removed {step.name}".lower() in said
     assert "noise from a long listing" not in model_text(agent.session)
@@ -290,7 +286,7 @@ async def test_one_write_lands_all_its_edits_together(mount: MountProfile) -> No
     ctx, agent, path = await _ready(mount)
     sections = sections_of(ctx, agent.session)
     reply, grep_step = sections[2], sections[4]
-    text = _without(path.read_text(encoding="utf-8"), reply.name)
+    text = without_section(path.read_text(encoding="utf-8"), reply.name)
 
     said = await _write(ctx, agent, text.replace("3 matches", "3 matches, all in parser.py"))
 
@@ -313,9 +309,8 @@ async def test_deletions_either_side_of_a_marker_become_one_marker(mount: MountP
     step, marker, user = sections_of(ctx, agent.session)[1:4]
     assert marker.kind == "revised"
 
-    said = await _write(
-        ctx, agent, _without(_without(path.read_text(encoding="utf-8"), step.name), user.name)
-    )
+    text = without_section(path.read_text(encoding="utf-8"), step.name)
+    said = await _write(ctx, agent, without_section(text, user.name))
 
     assert "removed" in said
     kinds = [one.kind for one in sections_of(ctx, agent.session)]
@@ -350,7 +345,7 @@ async def test_sections_appended_since_the_file_was_written_are_left_alone(
         SurfaceIntent("append"),
     )
 
-    said = await _write(ctx, agent, _without(written, step.name))
+    said = await _write(ctx, agent, without_section(written, step.name))
 
     assert f"removed {step.name}".lower() in said
     assert "one more" in model_text(agent.session) and "done" in model_text(agent.session)
@@ -406,7 +401,7 @@ async def test_a_file_written_before_a_revision_is_refused(mount: MountProfile) 
     step, reply = sections_of(ctx, agent.session)[1:3]
     await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "stale"})
 
-    said = await _write(ctx, agent, _without(written, reply.name))
+    said = await _write(ctx, agent, without_section(written, reply.name))
 
     assert "not applied" in said and "revised after this file was written" in said
     assert len(agent.session.select(REVISED)) == 1, "only the tool's own edit landed"
@@ -420,7 +415,7 @@ async def test_a_dispatch_inside_a_cell_does_not_read_back(mount: MountProfile) 
     cell made."""
     ctx, agent, path = await _ready(mount)
     step = sections_of(ctx, agent.session)[1]
-    path.write_text(_without(path.read_text(encoding="utf-8"), step.name), encoding="utf-8")
+    path.write_text(without_section(path.read_text(encoding="utf-8"), step.name), encoding="utf-8")
     ctx.require(TOOLS).register(simple_tool("noop"))
 
     nested = await run_tool(
@@ -448,7 +443,7 @@ async def test_a_file_this_process_did_not_write_is_rewritten_not_applied(
     ctx, agent, path = await _ready(mount)
     written = path.read_text(encoding="utf-8")
     step = sections_of(ctx, agent.session)[1]
-    path.write_text(_without(written, step.name), encoding="utf-8")
+    path.write_text(without_section(written, step.name), encoding="utf-8")
     restarted = MirrorService(ctx=ctx, editor=ctx.require(CLM))
 
     said = await restarted.read_back(agent.session, agent, call_id=CALL_ID)
@@ -547,7 +542,7 @@ async def test_an_edit_no_call_made_is_declined_and_overwritten(mount: MountProf
     ctx, agent, path = await _ready(mount)
     written = path.read_text(encoding="utf-8")
     step = sections_of(ctx, agent.session)[1]
-    path.write_text(_without(written, step.name), encoding="utf-8")
+    path.write_text(without_section(written, step.name), encoding="utf-8")
 
     await ctx.require(CLM_MIRROR).refresh(agent.session, agent)
 
@@ -576,7 +571,7 @@ async def test_the_edit_lands_before_the_result_that_reports_it(mount: MountProf
     answer_first_request(
         ctx,
         "scribble",
-        lambda: {"text": _without(path.read_text(encoding="utf-8"), step.name)},
+        lambda: {"text": without_section(path.read_text(encoding="utf-8"), step.name)},
     )
     await agent.prompt("tidy your context")
 

@@ -37,9 +37,9 @@ deployment. It is matched against the decoded strings and not against the
 envelope.
 
 The findings go into the `reason` of the ask, in the words of the parser, for
-example *`rm -rf build` (removes files)*. The user is then told what the harness
-saw, and an auditor can tune it. Nobody can tune a gate whose reasoning is
-invisible.
+example *`rm -rf build` (removes a directory tree)*. The user is then told what
+the harness saw, and an auditor can tune it. Nobody can tune a gate whose
+reasoning is invisible.
 
 **`run_code` is the case that motivates the shape.** A cell is not a tool name:
 one `python` call may delete a tree, force-push, or open a socket. The

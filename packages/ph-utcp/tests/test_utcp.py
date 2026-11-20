@@ -141,6 +141,11 @@ MANUAL = {
 
 verb = sys.argv[1]
 if verb == "manual":
+    # A test that names a record file learns what each run of `manual` was given.
+    record = os.environ.get("FX_RECORD")
+    if record:
+        with open(record, "a") as handle:
+            handle.write(os.environ.get("FX_API_KEY", "-") + "\n")
     print(json.dumps(MANUAL))
 elif sys.argv[2] == "echo":
     times = int(arg("times") or 1)
@@ -274,6 +279,33 @@ async def test_the_command_sees_the_scrubbed_environment_narrowed_by_its_templat
         "FX_FROM_ROW": "row",
     }
     assert result.value["home"] is None, "`HOME` is not in this template's list"
+
+
+async def test_a_passed_credential_reaches_every_command_of_its_manual(
+    mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`pass_env` hands a variable that the scrub drops to the commands of one
+    manual: its discovery, each tool call, and a command that a person runs. The
+    first and the last run unconfined, and the docs of `pass_env` say so."""
+    monkeypatch.setenv("FX_API_KEY", "a credential")
+    record = tmp_path.parent / f"{tmp_path.name}-record.txt"
+    manual = _manual(tmp_path, env={"FX_RECORD": str(record)}, pass_env=["FX_API_KEY"])
+    ctx = await mount(_row(manual))
+    agent = new_agent(ctx)
+
+    called = await run_tool(ctx, "fx_echo", {"text": "x"}, agent=agent)
+    ran = await ctx.require(UTCP).run_command(
+        Manual.model_validate(manual),
+        [sys.executable, str(_provider(tmp_path)), "manual"],
+        agent,
+        timeout_ms=20_000,
+    )
+
+    assert called.value["env"]["FX_API_KEY"] == "a credential", "the tool call"
+    assert ran.exit_code == 0, ran
+    assert record.read_text(encoding="utf-8").splitlines() == ["a credential"] * 2, (
+        "discovery, then the command of a person"
+    )
 
 
 async def test_an_answer_outside_the_declared_shape_is_the_error_it_usually_is(

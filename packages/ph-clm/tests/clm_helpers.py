@@ -44,6 +44,7 @@ __all__ = [
     "mounted",
     "readout_share",
     "sections_of",
+    "without_section",
 ]
 
 ROW: dict[str, Any] = {"id": "clm-context", "name": "clm-context"}
@@ -112,6 +113,11 @@ def converse(session: Session) -> None:
     log_event(
         session, "assistant/message", assistant_payload("all green", "m8"), SurfaceIntent("append")
     )
+
+
+def without_section(text: str, name: str) -> str:
+    """A context file with the block of one section cut out: an edit that removes it."""
+    return re.sub(rf"\n\[\[SECTION {name} .*?(?=\n\[\[SECTION |\Z)", "", text, flags=re.S)
 
 
 def sections_of(ctx: Context, session: Session) -> tuple[Section, ...]:

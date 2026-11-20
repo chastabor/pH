@@ -68,7 +68,7 @@ from ph.agent.types import (
 )
 from ph.cordis import Context, Next, plugin
 from ph.json import as_str
-from ph.keys import SESSIONS, SUBAGENTS, TUI_STATUS
+from ph.keys import COMPACTION, SESSIONS, SUBAGENTS, TUI_STATUS
 from ph.seams._registry import contribute_via
 from ph.seams.invariants import contribute_fold_cache
 from ph.seams.subagents import SubagentRequest, SubagentService
@@ -88,7 +88,6 @@ __all__ = [
     "MODEL_LIMIT_MESSAGE",
     "SIBLING_STOPPED",
     "TOOL_DENIAL",
-    "WARN_FRACTION",
     "CallBudget",
     "Config",
     "Counts",
@@ -141,13 +140,22 @@ to look, and what to do instead. A denial that only refuses teaches a model to
 retry."""
 
 
-WARN_FRACTION = TRIGGER_FRACTION
-"""The fraction at which the footer reading turns amber.
+def _warns_at(ctx: Context) -> float:
+    """The share of a budget at which the footer reading turns amber.
 
-This is the compaction threshold itself, imported and not restated. Two readings
-on one line that changed color at different fractions would be two things to
-learn and not one. Three copies of `0.85`, with three comments that say the
-copies must stay equal, are how the copies stop being equal."""
+    It is the share at which the root compacts on its own, as the compaction
+    seam answers it (`CompactionSeam.trigger_fraction`). The context gauge of
+    the TUI turns amber at that share too. Two readings on one line that changed
+    color at different shares would be two things to learn and not one.
+
+    When nothing compacts on pressure, the gauge never turns amber. A budget
+    still runs out, so the reading then uses the default share of the
+    compaction row (`TRIGGER_FRACTION`). The seam is read with `get`, as the
+    daemon reads it for the gauge, so a profile that disables it loses the color
+    and not the reading."""
+    seam = ctx.get(COMPACTION)
+    share = seam.trigger_fraction() if seam is not None else None
+    return TRIGGER_FRACTION if share is None else share
 
 
 class ModelCallLimitExceeded(RuntimeError):
@@ -765,11 +773,13 @@ async def apply(ctx: Context, config: Config) -> None:
         if tightest is None:
             return None
         fraction, label, used, limit = tightest
-        # Amber starts at the same fraction at which the context gauge warns. A
+        # Amber starts at the same share at which the context gauge warns. A
         # user who has learned one reading then knows what the other one means.
+        # The share is asked on each read, as the daemon asks it for each status
+        # of the root, so the two readings never disagree.
         return StatusReading(
             text=f"{label} {used}/{limit}",
-            level="warning" if fraction >= WARN_FRACTION else "normal",
+            level="warning" if fraction >= _warns_at(ctx) else "normal",
         )
 
     status = ctx.get(TUI_STATUS)

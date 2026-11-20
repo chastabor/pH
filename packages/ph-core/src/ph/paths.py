@@ -137,10 +137,11 @@ class PathRoots:
         return self.runtime / "daemon.sock"
 
     def daemon_log(self) -> Path:
-        """Where `phern daemon` writes what it would otherwise say on a stderr that
-        `launch._detach` points at the null device. Under `$PH_HOME`, with the
-        sessions it reports on, rather than under the runtime directory a logout
-        reaps."""
+        """Where `phern daemon` writes its log. A daemon that a UI spawned has no
+        terminal: `launch._detach` points its stderr at a file (`daemon_stderr`),
+        which keeps only what comes before this log is open. Under `$PH_HOME`,
+        with the sessions it reports on, rather than under the runtime directory a
+        logout reaps."""
         return self.home / "logs" / "daemon.log"
 
     def daemon_stderr(self) -> Path:

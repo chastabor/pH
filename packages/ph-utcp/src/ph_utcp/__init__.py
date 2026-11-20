@@ -278,7 +278,12 @@ class Manual(WireModel):
     deployment. The scrub removes every variable whose name looks like a
     credential, and a template cannot get such a variable by naming it. This
     setting is how a deployment lets one pass. The name is in a profile. The row
-    reads the value each time it starts a command, and stores it nowhere."""
+    reads the value each time it starts a command, and stores it nowhere.
+
+    Every command of the manual gets the values: its discovery (`<cli>
+    manual`), each tool call and background run, and the `install` and `status`
+    that a person runs. Discovery and a command of a person run unconfined, so
+    the values also reach a command that no sandbox holds."""
     background: Background | None = None
     """The tools of this manual that run in the background, or none."""
     tools: dict[str, ToolTraits] = Field(default_factory=dict)
@@ -547,9 +552,9 @@ class UtcpSeam:
         self, manual: Manual, agent: AgentHandle | None, owner: AgentHandle | None
     ) -> tuple[dict[str, str], tuple[str, ...]]:
         """The variables that a command of this manual gets when it runs for
-        `agent`, and the paths outside the workspace that it may write. A tool
-        call, a background run, and a provisioning command that a person runs all
-        use this one derivation."""
+        `agent`, and the paths outside the workspace that it may write.
+        Discovery, a tool call, a background run, and a provisioning command that
+        a person runs all use this one derivation."""
         env = dict(manual.env)
         for name in manual.pass_env:
             # Read from the harness's own environment, not the scrubbed one. That

@@ -473,8 +473,7 @@ class Config(WireModel):
     """Whether mounting this row kills children a hard-killed run left behind.
 
     On by default because a re-parented child is burning CPU now, and off is what
-    a deployment sharing `$PH_RUNTIME` with something pH does not own would set.
-    `code-runtime-python` carries the same switch for the same reason."""
+    a deployment sharing `$PH_RUNTIME` with something pH does not own would set."""
     scrub: list[str] = Field(default_factory=lambda: list(DEFAULT_SCRUB))
     """Substrings that mark an environment variable as a credential a child never
     inherits (I-4). Case-insensitive, matched anywhere in the name.

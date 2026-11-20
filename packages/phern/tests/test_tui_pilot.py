@@ -18,6 +18,7 @@ appeared.
 
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -507,6 +508,38 @@ async def test_the_model_picker_lists_the_profile_s_models_and_moves_the_root(
         await until(pilot, lambda: root.agent.options.model == "fake-9")
         await until(pilot, lambda: front.state.model == "fake-9")
         assert front.state.model_key == "fake-fake-9", "an unlisted route joins the list by name"
+
+
+async def test_a_typed_model_moves_the_root_without_the_picker(
+    make_tui_app: MakeApp, tui_daemon: Daemon
+) -> None:
+    """`/model fake/fake-9` moves the root as the picker's value would. Textual
+    calls an action with only as many arguments as it accepts, and
+    `action_open_models` took none. The typed route was dropped without a word,
+    and the picker opened instead."""
+    async with running(make_tui_app()) as (app, pilot):
+        front = not_none(app.front)
+
+        await app._dispatch_command("/model fake/fake-9")
+
+        root = root_of(tui_daemon)
+        await until(pilot, lambda: root.agent.options.model == "fake-9")
+        await until(pilot, lambda: front.state.model == "fake-9")
+        assert not isinstance(app.screen, ChoicePicker), "the picker opened anyway"
+
+
+async def test_a_typed_argument_to_a_verb_that_takes_none_is_refused(
+    make_tui_app: MakeApp,
+) -> None:
+    """`/theme dark` names no argument that `/theme` takes. The line is refused
+    and says so, and the picker does not open as if nothing had been typed."""
+    async with running(make_tui_app()) as (app, pilot):
+        await app._dispatch_command("/theme dark")
+        await pilot.pause()
+
+        said = [str(one.message) for one in app._notifications]
+        assert not isinstance(app.screen, ChoicePicker), "the argument was dropped"
+        assert "/theme takes no argument" in said, said
 
 
 async def test_the_terminal_s_own_route_rides_its_session_new(
@@ -1195,6 +1228,11 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
     held here, every consumer of this table had to filter. `VIEW_KEYS` is
     checked below instead: a binding id that it names must be remappable and
     must fire an action that exists.
+
+    A verb's `argument_hint` and its action must also agree. Textual calls an
+    action with only as many arguments as it accepts, so an action without a
+    parameter loses a typed argument without a word, and a hint is the only
+    thing that makes `_RunAction` pass one on.
     """
     from ph_app.tui.commands import TUI_VERBS, VIEW_KEYS, VIEWABLE
 
@@ -1210,7 +1248,12 @@ async def test_every_verb_is_a_command_an_action_and_maybe_a_key(
         bound = _bound_ids(app)
         for verb in TUI_VERBS:
             assert verb.name in registered
-            assert hasattr(app, f"action_{verb.action}"), verb.action
+            action = getattr(app, f"action_{verb.action}")
+            takes = any(
+                one.kind in (one.POSITIONAL_ONLY, one.POSITIONAL_OR_KEYWORD)
+                for one in inspect.signature(action).parameters.values()
+            )
+            assert takes == bool(verb.argument_hint), f"/{verb.name}: hint and action disagree"
             if verb.key is not None:
                 assert verb.key in bound
                 assert hasattr(app.keys, verb.key), verb.key

@@ -1011,7 +1011,8 @@ class Mount:
         and `Row` is frozen, so the new config is recorded here and `topology`
         marks the row `reconfigured live`. Called only from `ph.session_profile` —
         its `override`, which records the change in the session's log before this
-        runs, and `opened`, which brings a mount to what that log already says (S4).
+        runs, its `clear_overrides`, which records the clear in the same way, and
+        `opened`, which brings a mount to what that log already says (S4).
         `test_session_profile` holds every caller to it.
 
         Refused for a row that is disabled (there is no fork to replace; enable it

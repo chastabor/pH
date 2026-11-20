@@ -1,11 +1,12 @@
 # ph-stabilize: the stabilization features of Deep Agents as plugins, over
 # `ph-base`.
 #
-# Every row here attaches to a waterfall that already exists. That is D12, the
-# integration thesis: todo planning is a tool plus a prompt section, offloading
-# is `tools/post-execute`, and summarization is `agent/pre-step`. None of them
-# is a parameter on the loop, and none of them needs the loop to know that it is
-# there.
+# Every row here attaches to an event that ph-core already dispatches. Most are
+# waterfalls. `skill-steps` hears an emit (`skills/read`) and a serial event
+# (`agent/turn-stopping`). That is D12, the integration thesis: todo planning is
+# a tool plus a prompt section, offloading is `tools/post-execute`, and
+# summarization is `agent/pre-step`. None of them is a parameter on the loop,
+# and none of them needs the loop to know that it is there.
 #
 # A profile layers this bundle, and `ph-base` does not. A deployment that wants
 # the plain harness must get the plain harness, and `ph-base` composed alone is

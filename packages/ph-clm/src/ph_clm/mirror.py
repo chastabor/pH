@@ -581,9 +581,9 @@ async def apply(ctx: Context, config: None) -> None:
     async def before_request(
         proposal: RequestProposal, next_: Next[LlmCallConfig]
     ) -> LlmCallConfig:
-        # Run after the rest of the chain. A listener that revises the surface on
-        # the way to the request (for example, a paste that is offloaded) is then
-        # in the file that the model edits.
+        # Write the file after the rest of the chain. A listener that revises the
+        # surface on the way to the request is then in the file that the model
+        # edits: a paste that is offloaded, or a compaction at the request itself.
         config = await next_(proposal)
         await service.refresh(proposal.session, proposal.agent)
         return config
@@ -591,24 +591,35 @@ async def apply(ctx: Context, config: None) -> None:
     async def after_call(
         execution: ToolExecution, result: ToolExecutionResult, next_: Next[PostToolDecision]
     ) -> PostToolDecision:
-        decision = await next_(execution, result)
         # Handle only the call that the model made, not a dispatch inside a Code
         # Mode cell. The call of the cell itself ends after every write that the
         # cell made, including the writes of its Python.
         if execution.parent is not None or execution.session is None or execution.agent is None:
-            return decision
+            return await next_(execution, result)
+        # Land the edit before the rest of the chain runs, so that a listener
+        # that measures the context (the readouts of `clm-context`) measures it
+        # after the edit.
         said = await service.read_back(
             execution.session, execution.agent, call_id=execution.call_id
         )
+        decision = await next_(execution, result)
         if said is None or not isinstance(decision, Accept):
             return decision
+        # Append the receipt after the rest of the chain. A row that spills a
+        # large result (`tool-result-offload`) then spills only what the tool
+        # printed, and the receipt stays in the context.
         content = ctx.require(TOOLS).projected_content(execution, decision, result)
         if content is None:
             return decision
         return replace(decision, content=[*content, TextBlock(text=said)])
 
-    ctx.on("agent/request", before_request)
-    ctx.on("tools/post-execute", after_call)
+    # Both listeners are prepended, so they run outside every row that mounted
+    # before this one. Each acts after the rest of its chain, so it must be
+    # outside every row that revises the surface or the result. Those rows
+    # (`compaction`, `input-offload`, `tool-result-offload`) never prepend, so
+    # this holds in any mount order.
+    ctx.on("agent/request", before_request, prepend=True)
+    ctx.on("tools/post-execute", after_call, prepend=True)
 
     def section(request: AssembleContext) -> str:
         agent, session = request.agent, request.session

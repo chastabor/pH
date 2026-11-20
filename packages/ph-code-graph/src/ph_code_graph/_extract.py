@@ -36,6 +36,19 @@ only what typescript adds (interfaces, signatures, abstract classes). `class`,
 matched against the typescript query alone yields two tags and no calls
 (measured). `INHERITS` records that fact.
 
+## Supplements
+
+A query of the pack can miss a definition that its grammar has. The python query
+writes a module-level constant as `(module (expression_statement (assignment
+…)))`. The python grammar of the pack puts an assignment directly under `module`,
+so that pattern matched only the inner half of a chained assignment (`B` of
+`A = B = 2`), and no other module-level constant reached the index (measured with
+tree-sitter 0.26.0 and pack 1.16.2). `SUPPLEMENTS` adds a pattern that matches the
+tree, joined to the query of the pack so that a file is walked one time. When a
+later grammar makes the pattern impossible, the joined query does not compile,
+and the query of the pack is used alone, with a warning. That costs the
+supplement, not every file of the language.
+
 @module ph_code_graph._extract
 """
 
@@ -53,6 +66,7 @@ from ._config import GRAMMAR_CACHE_ENV
 
 __all__ = [
     "INHERITS",
+    "SUPPLEMENTS",
     "Definition",
     "Extraction",
     "Reference",
@@ -101,6 +115,12 @@ INHERITS: dict[str, tuple[str, ...]] = {
 }
 """The languages whose own tags query is only part of the query. See the module
 docstring."""
+
+SUPPLEMENTS: dict[str, str] = {
+    "python": "(module (assignment left: (identifier) @name) @definition.constant)",
+}
+"""Patterns for a definition that the query of the pack misses, by language. See
+the module docstring."""
 
 REFERENCE_KINDS = ("call",)
 """The `@reference.*` captures that become edges.
@@ -410,8 +430,8 @@ def ensure(languages: Sequence[str]) -> tuple[list[str], list[str]]:
 
 @cache
 def _tags_query(language: str) -> Any:  # noqa: ANN401
-    """The compiled tags query for one language. **It is cached, and the saving
-    is measured.**
+    """The compiled tags query for one language, with its supplement when
+    `SUPPLEMENTS` has one. **It is cached, and the saving is measured.**
 
     Compilation is work for each language, but it was done for each *file*:
     2.8 ms for python, 22 ms for ruby, and 35.7 ms for typescript. Typescript is
@@ -427,9 +447,21 @@ def _tags_query(language: str) -> Any:  # noqa: ANN401
     from tree_sitter import Query  # noqa: PLC0415
 
     pack = _pack()
+    grammar = pack.get_language(language)
     sources = [pack.get_tags_query(one) for one in INHERITS.get(language, ())]
     sources.append(pack.get_tags_query(language))
-    return Query(pack.get_language(language), "\n".join(one for one in sources if one))
+    query = "\n".join(one for one in sources if one)
+    supplement = SUPPLEMENTS.get(language)
+    if supplement:
+        try:
+            return Query(grammar, f"{query}\n{supplement}")
+        except Exception:
+            log.warning(
+                "ph_code_graph: the %s supplement does not fit the grammar; it is skipped",
+                language,
+                exc_info=True,
+            )
+    return Query(grammar, query)
 
 
 def extract(path: str, text: str, language: str) -> Extraction:

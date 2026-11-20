@@ -403,7 +403,8 @@ that changes for a 0.11 setup:
 - **`serve`, `$PH_TOOL_HOST`, `$PH_TOOL_AGENT` and `progress.json` are removed.**
   Another harness can no longer start a host. `call <tool> --progress` reports
   a run on stderr instead, as JSONL: `working` lines as it goes and exactly one
-  last line, `done` or `failed`. A stream that ends with no last line is a
+  last line, `done`, `failed` or `busy` (another run held the index, and this
+  one did nothing). A stream that ends with no last line is a
   command that was killed or died. `call <tool> --wait SECONDS` says how long a
   call waits for another run that holds the index.
 - **`state: indexing` means another run holds the index.** One run at a time

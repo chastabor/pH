@@ -12,8 +12,8 @@ between a session and this command is which process mounted it.
 One command is one call: there is no process that stays up. A tool whose work is
 long — an indexing run — says how far it has got on **stderr**, as JSONL, when
 it is called with `--progress` (`Progress`, `reported`): a line as it begins, a
-line at most every `REPORT_EVERY_S`, and exactly one last line, `done` or
-`failed`. Whoever started the command reads that stream for a footer, and knows
+line at most every `REPORT_EVERY_S`, and exactly one last line, `done`, `failed`
+or `busy`. Whoever started the command reads that stream for a footer, and knows
 the run stopped when the stream ends: with a last line, or without one. stdout
 is unchanged — one envelope. Not for a UTCP client, which merges the two
 streams: the flag is for a caller that reads them apart, as `ph-utcp` does for a
@@ -1071,8 +1071,8 @@ def _parser(cli: ToolCli) -> argparse.ArgumentParser:
         "--progress",
         action="store_true",
         help="Report how far the run has got on stderr, as JSONL: `working` lines as "
-        "it goes and one last line, `done` or `failed`. For a caller that reads "
-        "stderr apart from stdout; a UTCP client merges them.",
+        "it goes and one last line, `done`, `failed` or `busy`. For a caller that "
+        "reads stderr apart from stdout; a UTCP client merges them.",
     )
     call.add_argument(
         "--wait",

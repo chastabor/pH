@@ -15,8 +15,8 @@ turn/start
   ├ step/start                (one batch with the splice → agent/inbox/claimed)
   │    user/message*          (the batch, surface: append)
   │    agent/request          → LlmCallConfig
-  │    request/header         (appended only when it changed — A12)
-  │    request/context        (appended only when the route changed)
+  │    request/header         (on this driver's first request, then on a change — A12)
+  │    request/context        (appended only when the route or its window changed)
   │    llm/stream             → assistant/chunk* → assistant/message
   │    agent/request-error    → retry | None
   ├ step/end
@@ -32,8 +32,8 @@ Two rules are easy to lose in a port and expensive to lose in production:
   downgrade the outcome, or a truncated answer is reported as a clean one.
 
 The driver runs inside the scope `ctx.agents` created for it. Services resolve
-through that scope most-specific-first, so `self.ctx.llm` is the global adapter
-seam unless something shadowed it for this agent alone.
+through that scope most-specific-first, so `self.ctx.require(LLM)` is the global
+adapter seam unless something shadowed it for this agent alone.
 
 @module ph.agent_loop.driver
 """

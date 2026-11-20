@@ -67,7 +67,8 @@ class TuiVerb:
     the binding id, which is what `App.set_keymap` remaps."""
     argument_hint: str = ""
     """What follows the name, when the verb takes an argument. The palette row
-    shows it, and it is the reason why `_RunAction` forwards the typed argument."""
+    shows it, and it is the reason why `_RunAction` forwards the typed argument.
+    A verb with no hint takes no argument, and `_RunAction` refuses one."""
     work: Literal["replace", "queue"] | None = None
     """How the body reaches the harness, or `None` if it never leaves the app (H7).
 
@@ -153,7 +154,13 @@ VIEW_USAGE = f"usage: /view {' | '.join(VIEWABLE)}"
 
 TUI_VERBS: tuple[TuiVerb, ...] = (
     TuiVerb("commands", "Browse every command.", "open_commands", "command_palette"),
-    TuiVerb("model", "Choose the provider and model.", "open_models", "model_picker"),
+    TuiVerb(
+        "model",
+        "Choose the provider and model.",
+        "open_models",
+        "model_picker",
+        argument_hint="<key> | <provider>/<model>",
+    ),
     TuiVerb("theme", "Choose a color theme.", "open_themes", "theme_picker"),
     TuiVerb(
         "sessions", "Reopen a stored session.", "open_sessions", "session_picker", work="replace"
@@ -302,7 +309,10 @@ def action_command(
     which is the same constraint that every key handler already has.
     """
     return CommandDefinition(
-        name=name, summary=summary, run=_RunAction(app, action), argument_hint=argument_hint
+        name=name,
+        summary=summary,
+        run=_RunAction(app, name, action, takes_argument=bool(argument_hint)),
+        argument_hint=argument_hint,
     )
 
 
@@ -313,14 +323,20 @@ class _RunAction:
     needs are the fields that it holds."""
 
     app: AppSurface
+    name: str
     action: str
+    takes_argument: bool
+    """Whether the verb declares an argument (`TuiVerb.argument_hint`)."""
 
-    async def __call__(self, argument: str, _context: object) -> None:
+    async def __call__(self, argument: str, _context: object) -> str | None:
+        # A typed argument for a verb that takes none is refused, and the
+        # refusal is what the prompt shows. Textual calls an action with only as
+        # many arguments as it accepts, so the argument was dropped without a
+        # word: `/model local` opened the picker.
+        if argument and not self.takes_argument:
+            return f"/{self.name} takes no argument"
         # The argument is forwarded as a Python literal, which is what the
         # action parser of Textual reads (`ast.literal_eval`), so a path with
-        # spaces survives the round trip. An action that takes no argument is
-        # called bare, as before.
-        if argument:
-            await self.app.run_action(f"{self.action}({argument!r})")
-        else:
-            await self.app.run_action(self.action)
+        # spaces survives the round trip.
+        await self.app.run_action(f"{self.action}({argument!r})" if argument else self.action)
+        return None

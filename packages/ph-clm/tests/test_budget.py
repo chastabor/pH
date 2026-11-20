@@ -27,6 +27,7 @@ from clm_helpers import (
     mounted,
     readout_share,
     sections_of,
+    without_section,
 )
 
 from ph.agent_loop.driver import ReactLoopAgent
@@ -83,8 +84,11 @@ async def _emit(ctx: Context, agent: ReactLoopAgent, tokens: int) -> str:
 
 
 def _readout(said: str) -> str | None:
-    last = said.rstrip().splitlines()[-1]
-    return last if last.startswith("[context: ") else None
+    """The readout line of a result, or `None`. It is the last line, unless the
+    call also edited the context file. The receipt of that edit comes after it."""
+    return next(
+        (line for line in reversed(said.splitlines()) if line.startswith("[context: ")), None
+    )
 
 
 async def test_a_result_that_crosses_a_share_ends_with_a_readout(mount: MountProfile) -> None:
@@ -158,13 +162,11 @@ async def test_the_readout_measures_after_the_files_edit_lands(mount: MountProfi
     service = ctx.require(CLM_MIRROR)
     path = await service.render(agent.session, agent)
     step = sections_of(ctx, agent.session)[1]
-    text = path.read_text(encoding="utf-8")
-    start = text.index(f"\n[[SECTION {step.name} ")
-    end = text.index("\n[[SECTION ", start + 1)
+    tidied = without_section(path.read_text(encoding="utf-8"), step.name)
     filler = "word " * (window // 10)
 
     def tidy(_args: Any, _run: Any) -> str:  # noqa: ANN401
-        path.write_text(text[:start] + text[end:], encoding="utf-8")
+        path.write_text(tidied, encoding="utf-8")
         return filler
 
     ctx.require(TOOLS).register(simple_tool("tidy", tidy))

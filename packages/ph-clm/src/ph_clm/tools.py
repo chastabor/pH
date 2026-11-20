@@ -8,11 +8,12 @@ context to say that the edit happened. In Code Mode the tools are
 and make it.
 
 **Readouts are appended to tool results** (`ph_clm.budget`). When a result takes
-the context past a share of its window (`remindAt`), that result ends with one
+the context past a share of its window (`remindAt`), that result gets one more
 line that gives the size of the context and says how to free space. The readout
-listener is the outermost listener on the result, so it measures what is logged.
-It runs after the read-back of the context file has landed the edit of the call,
-and after any row that spills or trims the result.
+listener is outside every row that spills or trims the result, so it measures
+what is logged. The row of the context file (`clm-mirror`) is outside the
+readout listener. It lands the edit of the call before the readout measures, and
+it appends its receipt after the readout.
 
 An edit lands inside the step that asked for it, on sections that the step
 cannot be part of. The step in flight is protected (`SectionMap._protection`).
@@ -263,8 +264,8 @@ async def apply(ctx: Context, config: Config) -> None:
         return replace(decision, content=[*content, TextBlock(text=line)])
 
     if config.remind_at:
-        # Make this the outermost listener, whatever the mount order of the rows
-        # (see the module docstring).
+        # Put this outside every row that spills or trims the result, whatever
+        # the mount order of the rows (see the module docstring).
         ctx.on("tools/post-execute", after_call, prepend=True)
 
     def sections_tool(args: SectionsArgs, run: ToolRunContext) -> JsonObject:

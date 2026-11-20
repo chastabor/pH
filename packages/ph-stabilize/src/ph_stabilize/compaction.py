@@ -20,8 +20,9 @@ Invariants that this row holds:
   over the surface in current order (the `tool-pairing` of dsh), not over step
   markers, because a previous compaction has already changed what "position"
   means. If the only balanced cut is the start of the conversation, nothing is
-  compacted and the attempt **reports that**. To send an orphaned `tool-result`
-  to a provider that rejects it is not a repair.
+  compacted. The automatic path records nothing, and `/compact` **says that**
+  there is no compactable history yet. To send an orphaned `tool-result` to a
+  provider that rejects it is not a repair.
 * **Two cheaper remedies run before the expensive one.** On every pressure
   check, over-long call arguments in history older than the retained tail are
   elided (§7.4 item 2). On overflow, the trailing tool-result batch is spilled

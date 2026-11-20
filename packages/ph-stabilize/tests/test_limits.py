@@ -676,6 +676,16 @@ def _limits_reading(ctx: Context, session: Session) -> Any:  # noqa: ANN401
     )
 
 
+def _three_tool_calls(session: Session) -> None:
+    """One step of turn 1 that made three tool calls."""
+    log_event(session, "turn/start", {"turn": 1})
+    log_event(session, "step/start", {"turn": 1, "step": 1})
+    for index in range(3):
+        log_event(
+            session, "tool/call", {"turn": 1, "step": 1, "callId": f"c{index}", "name": "bash"}
+        )
+
+
 async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None:
     """A live reading, not only the notice that arrives when the budget is spent.
 
@@ -688,24 +698,48 @@ async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None
         row("limits", modelCalls={"turnLimit": 10}, toolCalls={"turnLimit": 4}), profile=PROFILE
     )
     session = ctx.require(SESSIONS).create("gauged")
-    log_event(session, "turn/start", {"turn": 1})
-    log_event(session, "step/start", {"turn": 1, "step": 1})
-    for index in range(3):
-        log_event(
-            session, "tool/call", {"turn": 1, "step": 1, "callId": f"c{index}", "name": "bash"}
-        )
+    _three_tool_calls(session)
 
     reading = _limits_reading(ctx, session)
 
     # 3/4 tools is tighter than 1/10 model calls, so it is the one that is shown.
     assert reading.text == "tools 3/4"
-    assert reading.level == "normal", "0.75 is short of the gauge's own 0.85"
+    assert reading.level == "normal", "0.75 is short of the default share, 0.85"
 
     log_event(session, "tool/call", {"turn": 1, "step": 1, "callId": "c3", "name": "bash"})
     reading = _limits_reading(ctx, session)
 
     assert reading.text == "tools 4/4"
     assert reading.level == "warning"
+
+
+@pytest.mark.parametrize(
+    ("compaction", "level"),
+    [
+        pytest.param({"triggerFraction": 0.7}, "warning", id="the-profile-s-share"),
+        pytest.param({"auto": False}, "normal", id="no-compaction-the-default-share"),
+    ],
+)
+async def test_the_footer_turns_amber_where_the_root_compacts(
+    mount: MountProfile, compaction: dict[str, object], level: str
+) -> None:
+    """The reading turns amber at the share that the context gauge warns at: the
+    share at which this root compacts on its own. That share was a fixed 0.85, so
+    a profile that compacted at 0.7 had a gauge and a reading that turned amber
+    at different shares. With nothing compacting on pressure, the reading uses
+    the default share, so a budget still warns before it runs out."""
+    ctx = await mount(
+        row("limits", toolCalls={"turnLimit": 4}),
+        row("compaction-summarize", **compaction),
+        profile=PROFILE,
+    )
+    session = ctx.require(SESSIONS).create("shared-share")
+    _three_tool_calls(session)
+
+    reading = _limits_reading(ctx, session)
+
+    assert reading.text == "tools 3/4"
+    assert reading.level == level, "0.75 is past 0.7 and short of 0.85"
 
 
 async def test_the_footer_says_nothing_when_no_budget_is_set(mount: MountProfile) -> None:

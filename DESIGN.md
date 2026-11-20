@@ -771,16 +771,23 @@ they are typed rather than duck-typed: a drifted method would fail *inside the
 seam's `except`* and be reported to the operator as `shared` or *unconfined* —
 "the one direction this seam must never fail in silently".
 
-**2. Runtime `isinstance`, for capability probes only.** Exactly two Protocols
-are ever `isinstance`-checked, and both are *second* Protocols asking "can this
-provider also do X":
+**2. Runtime `isinstance`, for capability probes only.** Only *second*
+Protocols are ever `isinstance`-checked. Each one asks "can this provider also
+do X". Two examples:
 
 - `ReclaimingProvider` — can the mounted tier release a tree it did not create?
   (`seams/workspace.py`)
 - `RehydratableProvider` — can this provider re-attach a runtime to a settled
   child? (`seams/subagents.py`)
 
-Both are a Protocol rather than a `getattr` probe on purpose: "a provider whose
+The others work the same way. The workspace seam also probes for
+`LocatingProvider`, `ExportingProvider`, `ArtifactProvider`,
+`EnumeratingProvider`, `CheckpointingProvider`, `VersionedProvider` and
+`SnapshottingProvider`. The subagent seam also probes for `ReadmittingProvider`
+and `RevokingProvider`. The sandbox seam probes for `DenialReader`, and the
+containment seam for `DescribingProvider`.
+
+Each is a Protocol rather than a `getattr` probe on purpose: "a provider whose
 method is misnamed or has the wrong arity would then fail silently as 'cannot
 rehydrate'".
 
@@ -1980,8 +1987,9 @@ Consumer. The implementation adds two things the statement does not:
 
 **Areas affected — the benefits.** Containment tiers, code runtimes,
 compaction engines and persistence backends are provider swaps. The `worktree`
-tier is a row; removing it degrades every agent to `shared` with a recorded
-reason rather than breaking a consumer. The subagent seam holds *many* providers
+tier is a row; removing it degrades every agent to `shared` rather than breaking
+a consumer. No decline is recorded, because no tier was asked: a workspace
+record without `declined` is how the log says that no tier is configured. The subagent seam holds *many* providers
 by name because "run a child" legitimately has several answers in one deployment.
 
 **And one benefit dsh's notes state that this document had not: the prefix
@@ -2042,14 +2050,12 @@ Stated here rather than left to be discovered, per the codebase's own rule.
 |---|---|
 | `sandbox-local` ships `bwrap` and Seatbelt, both verified against a real kernel — the blind Seatbelt profile was wrong in four places a Mac found (P6-40). Landlock is unwritten | P6-04, P6-40; Landlock open |
 | `TurnEndReason(kind="interrupted")` is never constructed as a dataclass — it reaches logs only as repair's wire payload | dead vocabulary |
-| `SubagentRun.dispose` has no production caller; a model `delete()` leaves the parent-scope effect registered (it no-ops via re-entry) | dead handle |
 | **A writer can be forged on purpose.** Every log write goes through a module's own writer, which refuses a type its row in `WRITERS` does not grant — a third-party row appending `sandbox/mode` is refused at the write (T6, closing F12). What the runtime cannot refuse is a module that imports another's writer, constructs a `LogWriter`, or calls `Session._append`: each is deliberate, and `test_log_writers.py` fails on all three | T6, by design (rule 6) |
 | **A workspace tree is not an intent kind.** Its openness is folded from `seed_length` and only over tiers with a fresh root (`workspace_survivors`), which a key-pair fold from seq 0 cannot express; `WorkspaceSeam.reconcile` stays its settler, and repair leaves it as it leaves an `owner-settles` kind | P10-11, by decision |
 | **A package's log type is known to a reader only once the package is imported.** `declare_log_type` has no entry-point group, so a stored log carrying a *required* plugin type is refused by a reader that never mounted the plugin. The first declared types, ph-clm's `clm/revised` and `clm/declined`, are ignorable: a build without ph-clm skips them, and phern's trajectory viewer renders any unknown ignorable type from its payload | P10-03 |
 | `phern attachments gc` is cited as precedent in two docstrings but **does not exist** | doc drift |
 | `DowngradeReason` has one member and one producer; tier-driven narrowing records none (§6.6) | incomplete |
 | `_enforce`'s containment refusal (a scope outside the parent's) has **no test**; the no-scope branch does | untested |
-| Tool-call limit with `exit: "error"` — the "one failed `tool/result`, not a turn stop" reading is traced, not tested | untested |
 | **A kernel's namespace is restored lazily, and not after a crash.** `rlm-kernel-snapshot` records one `kernel/snapshot` per changed variable; `KernelManager._rehydrate` hands them to a freshly started kernel and records `kernel/restored`, naming what could not be read. That happens when the namespace runs its first cell after a resume, not at mount, so a resumed agent that never runs code restores nothing. A kernel restarted after it died mid-session starts empty on purpose: the model is told the namespace is gone | wired; lazy by design (`ph_rlm/kernel/manager.py`, `ph_rlm/snapshot.py`) |
 | **A staged attachment is not durable.** `session/stage` puts a reference on the root's shared tray so an upload becomes a chip in every attached composer — composer state, shared but transient, deliberately not in the log. A daemon restart loses the tray with the blob still in the store, so a person who dropped a file and then reopened has to drop it again | by decision, P7-06 |
 | **No chunked upload.** `attachment/put` carries the whole file in one frame, capped at 5 MiB; a larger one is refused by name rather than truncated. Both doors say so — the browser gets a sentence, `/attach` gets `attachment_too_large` | P7-06, stated |
