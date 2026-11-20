@@ -1,35 +1,39 @@
 # ph-base: the shared core of every pH profile.
 #
-# Row order carries no load semantics — activation is service-availability
-# driven, so a row waits for whatever it injects regardless of where it sits.
-# It does carry the unwind: rows unwind in reverse, which is why the log layer
-# sits beneath the agents. Otherwise the grouping below is for readers.
+# Row order has no effect on loading. Activation depends on which services are
+# available, so a row waits for whatever it injects, wherever it sits. Row
+# order does decide the unwind: rows unwind in reverse, which is why the log
+# layer sits beneath the agents. Apart from that, the grouping below is for
+# readers.
 #
-# A later bundle or the user's profile addresses these rows by id. A patch
-# replaces the targeted row's WHOLE config rather than merging into it, so a
-# row's effective value is always one layer's and readable in one place.
+# A later bundle or the profile of the user addresses these rows by id. A patch
+# replaces the WHOLE config of the row that it targets and does not merge into
+# it. The effective value of a row therefore always comes from one layer, and
+# can be read in one place.
 
 # --- the log, the vocabulary, the loop -------------------------------------
 - id: llm
   name: llm
 
-# The models this profile means, by key, and the one a root runs on (item 8 of
-# the session-profiles plan). Empty here because this bundle registers no
-# adapter: a profile that inserts one lists what it serves, and a root on a
-# profile that lists nothing runs only on a route a person names.
+# The models that this profile lists, by key, and the model that a root runs on
+# (item 8 of the session-profiles plan). The list is empty here because this
+# bundle registers no adapter. A profile that inserts an adapter lists what the
+# adapter serves. A root on a profile that lists nothing runs only on a route
+# that a user names.
 - id: models
   name: models
 
 - id: session
   name: session
 
-# The log layer: the log's storage, its export, and when it reaches disk,
-# beneath every row that writes to the log. Rows unwind in reverse, so these go
-# last: what the agents append as they let go is flushed by the checkpoint
-# policy's last barrier and shipped while every row here is still mounted. Each
-# of these rows says so in its plugin (`log_layer`), and the composition gathers
-# the layer here, in that order. So a row that redacts or sinks telemetry joins
-# it wherever a profile writes it: the OTel sink is
+# The log layer: the storage of the log, its export, and when it reaches disk.
+# The layer is beneath every row that writes to the log. Rows unwind in
+# reverse, so these rows go last. The last barrier of the checkpoint policy
+# flushes what the agents append as they let go, and that tail is shipped while
+# every row here is still mounted. Each of these rows declares its place in its
+# plugin (`log_layer`), and the composition gathers the layer here, in the
+# order of those places. A row that redacts telemetry or sinks it therefore
+# joins the layer wherever a profile writes it. The OTel sink is
 # `{id: telemetry-otel, name: session-telemetry-otel}`, in `daemon.yaml`.
 - id: session-persistence
   name: session-persistence-jsonl
@@ -62,31 +66,33 @@
 - id: tools-prompt
   name: tools-prompt
 
-# The row that makes `ToolDefinition.timeout_ms` true. Its own row, as in dsh,
-# so a deployment wanting a different timeout policy swaps it.
+# The row that enforces `ToolDefinition.timeout_ms`. It is a row of its own, as
+# in dsh, so a deployment that wants a different timeout policy swaps it.
 - id: tools-timeout
   name: tools-timeout
 
-# What `phern doctor` says about this deployment (P4-12). `ctx.tui_status` minus
-# the `Session`: a row hands the report a reading, so the one command whose job
-# is to be complete does not have to import three packages to be it. A
-# contributor offers its section through `diagnostics.contribute`, which waits
-# on the key rather than reading it at `apply` — so this row keeps the promise
-# at the top of this file and may sit anywhere, above or below the rows it
-# collects from.
+# What `phern doctor` says about this deployment (P4-12). This seam is
+# `ctx.tui_status` without the `Session`: a row gives the report a reading. The
+# one command whose job is to be complete therefore does not have to import
+# three packages to be complete. A contributor offers its section through
+# `diagnostics.contribute`, which waits for the key and does not read it at
+# `apply`. This row therefore keeps the promise at the top of this file: it may
+# sit anywhere, above or below the rows that it collects from.
 - id: diagnostics
   name: diagnostics
 
-# What the mount *became* — which rows activated, what each waits on, which
-# layer disabled one, which realms exist — as against `--dump-config`, which is
-# the composition before anything runs. dsh's rule: once structure comes from
-# configuration, the static code no longer says what is running.
+# What the mount *became*: which rows activated, what each row waits for, which
+# layer disabled a row, and which realms exist. Compare `--dump-config`, which
+# shows the composition before anything runs. The rule comes from dsh: when
+# structure comes from configuration, the static code no longer says what is
+# running.
 - id: topology
   name: topology
 
 # --- capability seams ------------------------------------------------------
-# Definition + one local provider each. A deployment swaps a provider by
-# addressing the row; consumers never learn which one answered (I5).
+# Each seam is a definition plus one local provider. A deployment swaps a
+# provider by addressing the row. Consumers never learn which provider answered
+# (I5).
 - id: subprocess
   name: subprocess-local
 
@@ -95,21 +101,22 @@
   config:
     defaultMode: read-only
 
-# The backend (P6-04): bwrap on Linux, Seatbelt on macOS. Mounted here rather
-# than left to a profile, so a host that can confine does — out of the box — and
-# a host that cannot says so in `phern doctor` and declines rather than pretending.
-# Two probes at mount, each claimed only when it held: a write outside the
-# workspace must fail, and a `CONNECT` through the egress shim must reach the
-# proxy and be refused.
+# The backend (P6-04): bwrap on Linux, Seatbelt on macOS. It is mounted here
+# and not left to a profile. A host that can confine therefore does so with no
+# setup. A host that cannot confine says so in `phern doctor` and declines, and
+# does not pretend. Two probes run at mount, and the row claims each capability
+# only when its probe held: a write outside the workspace must fail, and a
+# `CONNECT` through the egress bridge must reach the proxy and be refused.
 - id: sandbox-local
   name: sandbox-local
 
 # What a confined command may reach beyond its workspace (P6-38): directories
-# writable outside it, and the network posture. No `config:` here because the
-# seam's defaults are the shipped answer — `network.mode: allowlist` over the
-# package indexes and documentation hosts in `DEFAULT_HOSTS`; `phern doctor` and
-# `/sandbox` print them. A profile that spells `config:` replaces the whole
-# statement, so write the list you want rather than the difference:
+# that are writable outside it, and the network posture. There is no `config:`
+# here because the defaults of the seam are the shipped answer:
+# `network.mode: allowlist` over the package indexes and documentation hosts in
+# `DEFAULT_HOSTS`. `phern doctor` and `/sandbox` print them. A profile that
+# writes `config:` replaces the whole statement, so write the list that you
+# want and not the difference:
 #
 #   - id: sandbox-allow
 #     config:
@@ -118,49 +125,53 @@
 #         mode: allowlist
 #         hosts: [pypi.org, files.pythonhosted.org, github.com]
 #
-# `/sandbox allow host <h>` and `/sandbox allow path <dir>` change it while the
-# harness runs, and keep it in a drop-in under `$PH_HOME/profiles/<name>.d/`.
+# `/sandbox allow host <h>` and `/sandbox allow path <dir>` change it for one
+# session while the harness runs. The change is an override that is recorded in
+# the log of that session, and the next start of the session applies it again.
 - id: sandbox-allow
   name: sandbox-allow
 
-# The human half of the row above: `/sandbox` shows the posture in force and
-# edits it, and the footer counts the refusals this session. Beside
-# `sandbox-allow` rather than in a TUI profile because `phern -p` can print it too.
+# The half of the row above that a user works with. `/sandbox` shows the
+# posture in force and edits it, and the footer counts the refusals of this
+# session. The row is beside `sandbox-allow` and not in a TUI profile, because
+# `phern -p` can print it too.
 - id: sandbox-commands
   name: sandbox-commands
 
 - id: shell
   name: shell-local
 
-# Where an agent's writes land (D21, §4.8). Mounted with the shared provider,
-# which returns the session cwd — today's behavior, no checkout, no cost — so
-# layering this changes nothing until a profile names a containment tier. The
-# seam is here rather than in a profile because `acquire` must never fail, and a
-# fallback a profile might not have layered is not a fallback.
+# Where the writes of an agent land (D21, §4.8). The row is mounted with the
+# shared provider, which returns the session cwd. That is the behavior of today,
+# with no checkout and no cost, so layering this row changes nothing until a
+# profile names a containment tier. The seam is here and not in a profile
+# because `acquire` must never fail, and a fallback that a profile might not
+# have layered is not a fallback.
 - id: workspace
   name: workspace-shared
 
-# Who acquires, and when (P4-08). Separate from the seam because the two answer
-# different questions, and because a deployment driving the lifecycle itself
-# wants the seam without this. Under `workspace-shared` the root it hands an
-# agent *is* the process's directory, so this changes nothing until a profile
-# names a tier.
+# Who acquires, and when (P4-08). This row is separate from the seam because
+# the two answer different questions, and because a deployment that drives the
+# lifecycle itself wants the seam without this row. Under `workspace-shared`,
+# the root that this row gives an agent *is* the directory of the process, so
+# this row changes nothing until a profile names a tier.
 - id: workspace-lifecycle
   name: workspace-lifecycle
 
 # The crash half of the same pair (F6). `ctx.effect` unwinds a workspace when
-# the process exits cleanly; a process that dies does not unwind anything, and
-# the only thing that can tell that leak from a tree the disposal policy *kept*
-# on purpose is the log — both leave a worktree git reports identically. So an
-# `acquired` with no `disposed` is reconciled the next time the session opens.
+# the process exits cleanly. A process that dies unwinds nothing. Only the log
+# can tell that leak from a tree that the disposal policy *kept* on purpose,
+# because both leave a worktree that git reports identically. An `acquired`
+# with no `disposed` is therefore reconciled the next time the session opens.
 - id: workspace-reconcile
   name: workspace-reconcile
 
-# Which rung of the ladder this deployment asked for (E1, E8, P4-11). **No rung
-# by default** — which is not the same as `advisory`: mounting this must not opt
-# a profile out of a tier provider it deliberately layered, so an unset `tier`
-# means nobody chose and a provider that is present is used. A profile says
-# `advisory` when it means "this agent stays in the person's own checkout".
+# Which rung of the ladder this deployment asked for (E1, E8, P4-11). **There
+# is no rung by default**, and that is not the same as `advisory`. To mount this
+# row must not opt a profile out of a tier provider that it layered on purpose.
+# An unset `tier` therefore means that nobody chose, and a provider that is
+# present is used. A profile says `advisory` when it means "this agent stays in
+# the checkout of the user".
 - id: containment
   name: containment
 
@@ -191,84 +202,89 @@
 - id: skills
   name: skills
 
-# Progressive disclosure (G9): the catalog goes in the prompt, a body only when
-# the model asks for it by name. `paths` is empty here deliberately — scanning a
-# well-known directory at every start would make "install a skill" mean "drop a
-# file somewhere", and a skill is something a distribution or a user installs
-# on purpose (I7).
+# Progressive disclosure (G9): the catalog goes in the prompt, and a body goes
+# there only when the model asks for it by name. `paths` is empty here on
+# purpose. A scan of a well-known directory at every start would make "install
+# a skill" mean "drop a file somewhere", and a skill is something that a
+# distribution or a user installs on purpose (I7).
 - id: skills-progressive
   name: skills-progressive
 
 - id: spill
   name: spill-local
 
-# Media the log points at but cannot rebuild. Beside the spill store and
-# deliberately not part of it: a spilled result is a forwarding address, an
-# attachment is content, and clearing a cache must never delete conversation.
+# Media that the log points at but cannot rebuild. The store is beside the
+# spill store and deliberately not part of it. A spilled result is a forwarding
+# address, and an attachment is content. To clear a cache must never delete
+# conversation.
 - id: attachments
   name: attachments-local
 
-# A provider's own copy of an attachment, and the handle to reference it by
-# (P7-03). A cache under `$PH_CACHE`, not the log: a handle is a prediction with
-# an expiry and the log cannot take one back, while the *upload* is a fact and is
-# recorded. Mounted with no uploader — each adapter row registers its own — so a
-# profile with no file API pays nothing and every route sends bytes inline.
+# The copy of an attachment that a provider holds, and the handle that
+# references it (P7-03). This is a cache under `$PH_CACHE` and not the log. A
+# handle is a prediction with an expiry, and the log cannot take a prediction
+# back. The *upload* is a fact, and it is recorded. The row is mounted with no
+# uploader, because each adapter row registers its own. A profile with no file
+# API therefore pays nothing, and every route sends bytes inline.
 - id: uploads
   name: uploads-local
 
 - id: token-meter
   name: token-meter
 
-# Delegation. The seam only: "run a child agent" has genuinely different
-# answers in one deployment, so providers are named and a profile registers the
-# one it wants (`rlm-child` in the rlm bundle).
+# Delegation. This row is the seam only. "Run a child agent" has different
+# answers within one deployment, so providers are named, and a profile
+# registers the provider that it wants (`rlm-child` in the rlm bundle).
 - id: subagents
   name: subagents
 
-# Work a root will do later (P5-06). The seam only: it records and folds, and
-# the thing that *drives* ticks is whatever is running long enough to notice
-# them — the daemon. A CLI run mounts this row and simply never fires anything,
-# which is correct: a schedule created in a one-shot run is still in the log for
-# the daemon to find.
+# Work that a root will do later (P5-06). This row is the seam only: it records
+# and folds. What *drives* the ticks is whatever runs long enough to notice
+# them, which is the daemon. A CLI run mounts this row and never fires
+# anything. That is correct, because a schedule that a one-shot run created is
+# still in the log for the daemon to find.
 - id: schedule
   name: schedule
 
-# An autonomous run's objective, budget and quality gates (P5-07). The seam
-# records and folds; `/autonomous` is the command that drives it — a command
-# and not a host handler, so the governed pipeline sees every step (C2).
+# The objective, the budget and the quality gates of an autonomous run (P5-07).
+# The seam records and folds. `/autonomous` is the command that drives it. It
+# is a command and not a host handler, so the governed pipeline sees every step
+# (C2).
 - id: goals
   name: goals
 
 - id: autonomous
   name: autonomous
 
-# Named kinds of child a deployment is willing to spawn (P4-13b) — a `reviewer`
-# is `skills: [code-review]`, written once. **A menu, never a grant**: a parent
-# selecting one still gets only what it holds itself, because a preset that
-# widened whatever selected it would put an escalation one indirection away and
-# under the model's control. Empty here; a profile names its own.
+# The named kinds of child that a deployment is willing to spawn (P4-13b). For
+# example, a `reviewer` is `skills: [code-review]`, written one time. **A
+# preset is a menu, never a grant.** A parent that selects one still gets only
+# what it holds itself. A preset that widened whatever selected it would put an
+# escalation one indirection away, under the control of the model. The list is
+# empty here, and a profile names its own.
 - id: subagent-presets
   name: subagent-presets
 
 - id: code-runtime
   name: code-runtime
 
-# Replacing history with a summary. The seam only, like the two above: *when* a
-# conversation is too long and *what* a summary should say are policy, and a
-# deployment that wants the plain harness should get a session that grows until
-# the provider says no. `ph-stabilize` layers the engine (P4-03).
+# The replacement of history with a summary. This row is the seam only, like
+# `subagents` and `schedule` above. *When* a conversation is too long and
+# *what* a summary should say are policy. A deployment that wants the plain
+# harness should get a session that grows until the provider refuses.
+# `ph-stabilize` layers the engine (P4-03).
 - id: compaction
   name: compaction
 
-# The front end's own registration seam (P4-17). Here rather than in a TUI
-# profile because a seam is a seam: a headless run that mounts a row
-# registering a screen nothing draws needs no special case for it.
+# The registration seam of the front end (P4-17). It is here and not in a TUI
+# profile because a seam is a seam. A headless run can mount a row that
+# registers a screen that nothing draws, and it needs no special case for that.
 - id: tui-screens
   name: tui-screens
 
-# The other half of the same idea: a row contributes one live *reading* to
-# the footer rather than a whole screen. The context gauge is the shape being
-# generalized — the number worth seeing is the one where the harness will act.
+# The other half of the same idea: a row contributes one live *reading* to the
+# footer, and not a whole screen. This generalizes the context gauge: the
+# number that is worth seeing is the one where the harness will act.
 - id: tui-status
   name: tui-status
 
@@ -279,44 +295,48 @@
 - id: tool-bash
   name: tool-bash
 
-# Asking the person a question (P7-09). `disabled` here and enabled by `tui.yaml`
-# — the `tool-todo` idiom — because a row that stops the work to wait for a human
-# has no meaning in a posture with no human: headless, `phern -p`, a scheduled tick.
-# Disabled rather than merely unanswerable, so an unattended run pays nothing for
-# it at all: the model is never offered the tool, so no turn is spent calling it
-# and no prompt tokens describe it. `--patch '{id: tool-ask-user, disabled: false}'`
-# arms it anywhere.
+# Ask the user a question (P7-09). The row is `disabled` here and enabled by
+# `tui.yaml`, which is the `tool-todo` idiom. A row that stops the work to wait
+# for a human has no meaning in a posture with no human: headless, `phern -p`,
+# or a scheduled tick. The row is disabled and not only unanswerable, so that
+# an unattended run pays nothing for it. The model is never offered the tool,
+# so no turn is spent on a call of it and no prompt tokens describe it.
+# `--patch '{id: tool-ask-user, disabled: false}'` arms it anywhere.
 - id: tool-ask-user
   name: tool-ask-user
   disabled: true
 
-# The model door of I-9 (P7-01): a file the model found, read through `ctx.fs`
-# so `permissions-fs` and the workspace tier bound it, and put in front of its
-# own eyes as media. Enabled here rather than `disabled` like `tool-ask-user`,
-# because it needs no human and no screen — and it registers nothing at all
-# without an attachment store, so a profile that mounts none pays nothing.
+# The model door of I-9 (P7-01). The model found a file. This tool reads it
+# through `ctx.fs`, so `permissions-fs` and the workspace tier bound the read,
+# and shows it to the model as media. The row is enabled here, unlike
+# `tool-ask-user`, because it needs no human and no screen. It also registers
+# nothing without an attachment store, so a profile that mounts no store pays
+# nothing.
 - id: tool-attach
   name: tool-attach
 
-# Delegation the model can await (P4-13). The seam has no provider in `ph-base`,
-# and this row registers nothing until one is mounted — a tool advertised in
-# every prompt and refused on every call teaches the model a capability the
-# deployment does not have. A profile that layers `rlm-child` gets it.
+# Delegation that the model can await (P4-13). The seam has no provider in
+# `ph-base`, and this row registers nothing until a provider is mounted. A tool
+# that is advertised in every prompt and refused on every call teaches the
+# model a capability that the deployment does not have. A profile that mounts
+# a provider such as `rlm-child` gets the tool, unless it disables this row as
+# the rlm bundle does.
 - id: subagent-task
   name: subagent-task
 
-# What the user told this agent to remember (G8): `AGENTS.md` from the agent's
-# own root upward, then `$PH_HOME`. A **post-cache snapshot**, not a prompt
-# section — the file exists to be edited, and an edit that moved the cached
-# prefix would bill every earlier token again. The same placement is what makes
-# an edit take effect in the turn after it, rather than after a restart.
+# What the user told this agent to remember (G8): `AGENTS.md` from the root of
+# the agent upward, then `$PH_HOME`. It is a **post-cache snapshot** and not a
+# prompt section. The file exists to be edited, and an edit that moved the
+# cached prefix would bill every earlier token again. The same placement makes
+# an edit take effect in the next turn, and not only after a restart.
 - id: memory-agents-md
   name: memory-agents-md
 
 # --- resilience ------------------------------------------------------------
-# Media the routed model cannot read, replaced with a pointer it can — above
-# every adapter, because whether a route takes a MIME type is not a question
-# about the wire. Does nothing until something attaches a file (P7-01).
+# Media that the routed model cannot read is replaced with a pointer that it
+# can read. This happens above every adapter, because whether a route takes a
+# MIME type is not a question about the wire. The row does nothing until
+# something attaches a file (P7-01).
 - id: media-degrade
   name: media-degrade
 
@@ -324,10 +344,11 @@
   name: llm-retry
 
 # --- invariants ------------------------------------------------------------
-# Checked at runtime, not only in tests: a harness that can only prove these in
-# CI cannot prove them about your session. The registry is what makes the set
-# *visible* — every one of these rows is optional, so "pH enforces I3" was only
-# ever true of a profile, and `phern doctor` now says which.
+# These are checked at runtime, not only in tests. A harness that can prove
+# them only in CI cannot prove them about your session. The registry makes the
+# set *visible*. Every one of these rows is optional, so "pH enforces I3" was
+# only ever true of a profile, and `phern doctor` now says which invariants a
+# profile enforces.
 - id: invariants
   name: invariants
 

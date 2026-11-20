@@ -1,16 +1,16 @@
 """Context, services, effects, scopes and the four dispatch modes.
 
-The Python subset of Cordis that pH needs (D1). A `Context` is three things at
-once, exactly as in dsh:
+This module is the Python subset of Cordis that pH needs (D1). A `Context` is
+three things at the same time, exactly as in dsh:
 
-* a **repository of services** — a plugin claims `ctx.<key>` with `provide()`
-  and every other plugin finds it by key rather than by import;
-* an **event bus** — `emit` / `parallel` / `serial` / `waterfall`,
-  with the dispatch mode fixed by the declaration (see `ph.cordis.events`);
-* a **disposal scope** — every registration and every acquired artifact is an
+* A **repository of services**. A plugin claims `ctx.<key>` with `provide()`,
+  and every other plugin finds the service by key and not by import.
+* An **event bus**: `emit` / `parallel` / `serial` / `waterfall`. The declaration
+  of an event fixes its dispatch mode (see `ph.cordis.events`).
+* A **disposal scope**. Every registration and every acquired artifact is an
   effect that unwinds when the scope disposes (invariant I2).
 
-There are three kinds of context, and the difference is load-bearing:
+There are three kinds of context, and the difference between them matters:
 
 | kind | built by | provides into | its listeners reach |
 |---|---|---|---|
@@ -18,18 +18,18 @@ There are three kinds of context, and the difference is load-bearing:
 | activation scope | `reconcile()`, for a plugin | the realm the row was mounted in | everything |
 | isolated scope | `ctx.scope()`, for an agent | itself | that agent alone |
 
-A row's service is therefore visible to every sibling row, while an agent's
-registration shadows the global one for that agent only. One rule,
+The service of a row is therefore visible to every sibling row. A registration
+on the scope of an agent shadows the global one for that agent only. One rule,
 `reaches()`, decides visibility for event dispatch and for every scoped registry.
 
-Two deliberate departures from the TypeScript original, both because Python has
-no synchronous-await:
+This module departs from the TypeScript original in two places on purpose. Both
+exist because Python has no synchronous await:
 
-* activation is driven by an explicit ``await ctx.reconcile()`` rather than by
-  a microtask, so a test or a loader knows exactly when the plugin tree has
-  settled;
-* ``effect()`` is a coroutine (an artifact may need awaiting to acquire), while
-  ``add_disposer()`` is the synchronous path used by `on()` and `provide()`.
+* An explicit ``await ctx.reconcile()`` drives activation, and not a microtask.
+  A test or a loader therefore knows exactly when the plugin tree has settled.
+* ``effect()`` is a coroutine, because an artifact can need an await to be
+  acquired. ``add_disposer()`` is the synchronous path that `on()` and
+  `provide()` use.
 
 @module ph.cordis.context
 """
@@ -69,73 +69,82 @@ __all__ = [
 log = logging.getLogger("ph.cordis")
 
 Disposer: TypeAlias = Callable[[], object]
-"""A teardown callable. It may return an awaitable; `dispose()` awaits it.
+"""A teardown callable. It may return an awaitable, and `dispose()` awaits it.
 
-`object` rather than `Any` because nothing here inspects what a disposer hands
-back — `dispose()` awaits it and drops it — and `Any` invited a caller to.
-Narrower would be wrong: a disposer is often an existing call that happens to
-return something, and `None | Awaitable[None]` would make every one of those
-spell a discard.
+The return type is `object` and not `Any`, because nothing here inspects what a
+disposer returns. `dispose()` awaits the value and drops it, and `Any` invited a
+caller to inspect it. A narrower type would be wrong. A disposer is often an
+existing call that happens to return something, and `None | Awaitable[None]`
+would make each of those calls discard its result explicitly.
 """
 
 Listener: TypeAlias = Callable[..., object]
-"""One registered listener. The arguments stay open — fourteen chains across the
-tree take different ones — but the return is `object` for `Disposer`'s reason:
-`_invoke` hands it to `is_bailed` and `maybe_await`, both of which take `object`,
-and every chain's answer is made good by `settled`."""
+"""One registered listener. The arguments stay open, because the sixteen
+`waterfall` chains across the tree take different ones. The return type is
+`object` for the same reason as in `Disposer`. The dispatch methods pass what
+`_invoke` returns to `is_bailed` and `maybe_await`, which both take `object`, and
+`settled` checks the answer of every chain."""
 
 AtDispose: TypeAlias = Literal["cancel", "finish", "leave"]
-"""What the scope `detach` was called on does, at its dispose, with that work still
-running. `cancel` stops it: an `emit` listener's task, whose row going away ends what
-it was for. `finish` waits for it inside the unwind's budget: a writer whose batch is
-a write already promised. `leave` does neither, for work something else stops: a
-job's owner cancels its token, and a second, harder stop from the scope that only
-runs it would land before that owner's own. Nor does `drain` wait for it: how long
-it gets is that owner's to say too."""
+"""What a scope does at its dispose with work that `detach` started on it and
+that still runs.
+
+- `cancel` stops the work. Example: the task of an `emit` listener, which has no
+  purpose after its row goes away.
+- `finish` waits for the work inside the budget of the unwind. Example: a writer
+  whose batch is a write that was already promised.
+- `leave` does neither. It is for work that something else stops. Example: the
+  owner of a job cancels the token of the job. A second, harder stop from the
+  scope that only runs the job would arrive before the stop of that owner.
+  `drain` does not wait for this work either, because that owner also decides
+  how long the work gets."""
 
 type MaybeAwaitable[T] = T | Awaitable[T]
-"""A `T`, or a `T` that has to be awaited first — what `maybe_await` takes.
+"""A `T`, or a `T` that must be awaited first. This is what `maybe_await` takes.
 
-The seam between a row's ordinary code and this runtime's. A body, a listener or
-a prompt section is written by whoever mounted the row; requiring `async def` of
-all of them would make every synchronous one spell a coroutine it has no use for,
-so the runtime accepts either and `maybe_await` settles it. `Disposer` above is
-the deliberate exception — it is return-agnostic rather than maybe-awaited, and
-`object` already subsumes an awaitable.
+This type is the seam between the ordinary code of a row and the code of this
+runtime. Whoever mounted the row writes a body, a listener or a prompt section.
+If the runtime required `async def` for all of them, every synchronous one would
+have to be written as a coroutine that it has no use for. The runtime therefore
+accepts either, and `maybe_await` resolves the value. `Disposer` above is the
+deliberate exception. It does not care what is returned, and is not
+maybe-awaited: `object` already includes an awaitable.
 
-Use it where the mixture is real. It is an *inference* trap in a parameter that
-has to solve `T` from a body's declared return, which is why the tool pipeline
-overloads on the body kind instead of spelling this union.
+Use this type where the mixture is real. It is an *inference* trap in a
+parameter that must solve `T` from the declared return of a body. For that
+reason the tool pipeline overloads on the kind of body and does not spell this
+union.
 
-Named because every declaration that takes a body spelled it by hand, and read
-differently at each: `T | Awaitable[T]`, `Awaitable[T] | T`, and
-`str | Awaitable[str | None] | None` are one type wearing three faces. The last
-is what `RUF036` leaves you with once `T` is itself optional, which is the point
-at which the hand-spelling stops being readable at all."""
+The type has a name because every declaration that takes a body spelled it by
+hand, and each spelled it differently: `T | Awaitable[T]`, `Awaitable[T] | T`,
+and `str | Awaitable[str | None] | None` are one type in three forms. The last
+form is what `RUF036` leaves when `T` is itself optional, and at that point the
+hand-written form is no longer readable."""
 
 type Next[T] = Callable[..., Awaitable[T]]
-"""The rest of a `waterfall` chain, as the listener wrapping it sees.
+"""The rest of a `waterfall` chain, as the listener that wraps it sees it.
 
-`T` is the chain's own type, which `waterfall` reads off the producer's `inner`
-— so a listener on `agent/pre-step` takes a `Next[PreStepDecision]` and returns
-one. Named because twenty listeners across twelve files spell this shape, and
-ten of them imported `Callable` and `Awaitable` for nothing else.
+`T` is the type of the chain, which `waterfall` reads from the `inner` of the
+producer. A listener on `agent/pre-step` therefore takes a
+`Next[PreStepDecision]` and returns a `PreStepDecision`. The type has a name
+because twenty listeners across twelve files spell this shape, and ten of them
+imported `Callable` and `Awaitable` for nothing else.
 
-It states a convention, not a check: `on` takes a `Listener`, so a listener's own
-annotation is what it claims rather than what anything verifies."""
+It states a convention and not a check. `on` takes a `Listener`, so the
+annotation of a listener is a claim that nothing verifies."""
 
 _MAX_RECONCILE_ROUNDS = 64
 _MISSING: Final = object()
 
 
 async def maybe_await[T](value: MaybeAwaitable[T]) -> T:
-    """Await `value` when it is awaitable, otherwise return it unchanged.
+    """Await `value` when it is awaitable. Otherwise return it unchanged.
 
-    Generic for the reason `waterfall` is: the caller knows what it handed in,
-    and an `Any` here erased it again at every call site — `effect` got back an
-    untyped `dispose`, `code_mode` an untyped namespace. A caller whose own
-    argument is `Any` still gets `Any`, which is the honest answer: the erasure
-    is that caller's to fix, not this one's.
+    The function is generic for the same reason as `waterfall`. The caller knows
+    what it passed in, and an `Any` here erased that type again at every call
+    site: `effect` got back an untyped `dispose`, and `code_mode` got an untyped
+    namespace. A caller whose own argument is `Any` still gets `Any`, which is the
+    correct answer. That caller must fix the erasure, and this function cannot.
     """
     if inspect.isawaitable(value):
         return await value
@@ -145,29 +154,31 @@ async def maybe_await[T](value: MaybeAwaitable[T]) -> T:
 def settled[T](
     event: str, value: object, kind: type[T], *, refusal: type[Exception] = TypeError
 ) -> T:
-    """What the chain returned, checked — `waterfall`'s last step is a `cast`.
+    """Return what the chain returned, after a type check. The last step of
+    `waterfall` is only a `cast`.
 
-    A listener arrives through an entry point and `on` takes a `Listener`, so no
-    checker between the row and here sees what one returns. `waterfall` states
-    the chain's type; this is where that claim is made good, once per producer.
+    A listener arrives through an entry point, and `on` takes a `Listener`. No
+    checker between the row and this function therefore sees what a listener
+    returns. `waterfall` states the type of the chain. This function checks that
+    claim, one time for each producer.
 
-    Here rather than hand-written at each: of nine producers, three raised a
-    `TypeError`, three quietly substituted a default, two coerced with `str()`
-    and one never looked — so a single broken row ended a turn in one chain and
-    went unnoticed in another. The message names the event because that is what
-    a person goes and looks at.
+    The check is here and not hand-written in each producer. Of nine producers,
+    three raised a `TypeError`, three silently substituted a default, two coerced
+    with `str()` and one never checked. A single broken row therefore ended a
+    turn in one chain and went unnoticed in another. The message names the event
+    because the event is what a person then looks at.
 
     **A seam that owns a refusal vocabulary names it.** `refusal=` exists for
-    `ctx.fs`, whose `FsDenied` is a `HarnessError` on purpose: a veto has to
-    reach a consumer as a *denial*, because a Code Mode program can `except` a
-    `failed` and route around it. A wrong answer from a policy listener is still
-    a refusal, so it must not arrive wearing the other kind.
+    `ctx.fs`, whose `FsDenied` is a `HarnessError` on purpose. A veto must reach
+    a consumer as a *denial*, because a Code Mode program can `except` a `failed`
+    and route around it. A wrong answer from a policy listener is still a
+    refusal, so it must not arrive as the other kind.
 
-    Two limits, and they are separate. Mechanically this needs a type
-    `isinstance` can test, so the union chains — `tools/pre-execute`,
-    `tools/post-execute` — narrow by arm instead. Separately, `approval/request`
-    keeps its own lookup *and denies rather than raising*, which is a policy
-    choice: on that path refusing is the safe answer and an exception is not.
+    There are two separate limits. First, this function needs a type that
+    `isinstance` can test, so the union chains (`tools/pre-execute`,
+    `tools/post-execute`) narrow by arm instead. Second, `approval/request` keeps
+    its own lookup *and denies instead of raising*. That is a policy choice: on
+    that path a refusal is the safe answer and an exception is not.
     """
     if not isinstance(value, kind):
         raise refusal(f"{event} must resolve to a {kind.__name__}, not {value!r}")
@@ -182,11 +193,11 @@ def settled_or_none[T](
 
 
 def is_bailed(value: object) -> bool:
-    """Whether a listener's return value stops a `serial` dispatch.
+    """Whether the return value of a listener stops a `serial` dispatch.
 
-    Ported verbatim from cordis: anything but `None` and `False` bails. `0` and
-    `""` bail, deliberately — a decision object is never falsy by accident, and
-    treating a legitimate zero as "no answer" is the bug this rule prevents.
+    Ported verbatim from cordis: any value except `None` and `False` bails. `0`
+    and `""` bail on purpose. A decision object is never falsy by accident, and
+    this rule prevents the bug of treating a legitimate zero as "no answer".
     """
     return value is not None and value is not False
 
@@ -204,27 +215,30 @@ class Hook:
 def _invoke(hook: Hook, *args: object, detach_for: str | None = None) -> object:
     """Call one listener as an effect of the scope that registered it (P6-25).
 
-    **The one place ownership is established for a dispatch.** A function rather
-    than a line in each loop: there are five dispatch modes, and a sixth cannot omit
-    what it never writes.
+    **This is the one place that establishes ownership for a dispatch.** It is a
+    function and not a line in each loop. There are four dispatch modes, and a
+    fifth cannot omit a step that it never writes.
 
-    Sync and async are one path. A listener returning an awaitable gets it back
-    wrapped in `_as_owner`, so whoever awaits it receives a coroutine that binds
-    itself; one returning a value has already run inside the binding. Callers need
-    no idea which kind they have.
+    Sync and async listeners use one path. When a listener returns an awaitable,
+    the awaitable comes back wrapped in `_as_owner`, so whoever awaits it
+    receives a coroutine that binds itself. A listener that returns a value has
+    already run inside the binding. Callers do not need to know which kind they
+    have.
 
-    **`emit` spawns instead, inside the binding** (`detach_for`, the event's name).
-    A task copies the context it is created in, so it runs as the owner with no
-    wrapper, and a stop landing before its first step means it never runs. Wrapped,
-    the listener only started at that step, to be cancelled at its first `await`
-    after its scope had gone, and a stop sooner than that left it never awaited.
+    **`emit` spawns instead, inside the binding** (`detach_for`, the name of the
+    event). A task copies the context in which it is created, so the task runs as
+    the owner with no wrapper. A stop that arrives before its first step means
+    that it never runs. With the wrapper, the listener started only at that step
+    and was then canceled at its first `await` after its scope had gone. A stop
+    that arrived sooner left the listener never awaited.
 
-    The binding is spelled inline rather than through `running` because `emit` fires
-    once per streamed chunk, where even a context manager's own frame is too much.
+    The binding is written inline and does not go through `running`, because
+    `emit` fires one time for each streamed chunk. At that rate even the frame of
+    a context manager costs too much.
     """
-    # Inline, and through the scope's memoized self-pair: building a `Running`
-    # per call means a frozen dataclass setting its fields through
-    # `object.__setattr__`, once per listener per chunk.
+    # Inline, and through the memoized self-pair of the scope. To build a
+    # `Running` for each call means that a frozen dataclass sets its fields
+    # through `object.__setattr__`, one time for each listener for each chunk.
     owner = hook.ctx
     pair = owner._running_self
     if pair is None:
@@ -232,9 +246,10 @@ def _invoke(hook: Hook, *args: object, detach_for: str | None = None) -> object:
     token = _ACTIVATING.set(pair)
     try:
         result = hook.callback(*args)
-        # `None` first, and it is most of the win: a listener that returns nothing
-        # is the overwhelming case, and the awaitability question costs more per
-        # listener than the binding it was added to serve.
+        # `None` is tested first, and this gives most of the gain. A listener that
+        # returns nothing is by far the most common case, and the awaitability
+        # test costs more for each listener than the binding it was added to
+        # serve.
         if result is None or not inspect.isawaitable(result):
             return result
         if detach_for is not None:
@@ -247,32 +262,33 @@ def _invoke(hook: Hook, *args: object, detach_for: str | None = None) -> object:
 
 @dataclass(slots=True, weakref_slot=True)
 class _Effect:
-    """One registered teardown, and two facts about it that are not the same.
+    """One registered teardown, and two facts about it that are different.
 
-    `done` means **claimed** — somebody has taken responsibility for running
-    this, so nobody else may. `ran` means **completed** — nothing is owed. One
-    flag served both until the unwind gained a deadline, and then the difference
-    became the whole story: at the moment the budget expires the loop marks each
-    remaining effect claimed and never runs it, so a single flag reported a tree
-    that had torn down nothing as a tree that owed nothing.
+    `done` means **claimed**: somebody has taken responsibility for running this
+    teardown, so nobody else may run it. `ran` means **completed**: nothing is
+    owed. One flag served both until the unwind got a deadline. After that the
+    difference mattered. When the budget expires, the effect that is in flight
+    is claimed and has not completed (`_unwind`). A single flag reported that
+    effect as owing nothing.
 
-    `homes` is every scope's effect list it sits on: one, or two for a teardown that
-    goes when either of a pair of scopes does (`Running.add_disposer`). Settled, it
-    leaves all of them and keeps none.
+    `homes` holds the effect list of every scope that the effect sits on. That is
+    one list, or two for a teardown that goes when either scope of a pair goes
+    (`Running.add_disposer`). A settled effect leaves all of them and keeps none.
     """
 
     dispose: Disposer
     label: str
     homes: tuple[list[_Effect], ...] = field(compare=False, repr=False)
-    """Out of `==` and `repr`: each home holds the other effects, so comparing or
-    printing one would walk them all."""
+    """Excluded from `==` and `repr`. Each home holds the other effects, so a
+    comparison or a print of one effect would walk them all."""
     done: bool = False
     ran: bool = False
 
     def settle(self) -> bool:
-        """Claim it as owing nothing, outside an unwind, and take it off its scopes;
-        `False` if somebody claimed it already. Marked before removed, so an unwind
-        that gets here first finds it claimed."""
+        """Claim the effect as owing nothing, outside an unwind, and take it off
+        its scopes. Return `False` if somebody already claimed it. The effect is
+        marked before it is removed, so an unwind that arrives first finds it
+        claimed."""
         if self.done:
             return False
         self.done = self.ran = True
@@ -280,18 +296,21 @@ class _Effect:
         return True
 
     def leave(self) -> None:
-        """Off every scope it sits on. By identity: two registrations of one bound
-        method with one label produce equal `_Effect`s (A8)."""
+        """Take the effect off every scope that it sits on. Removal is by
+        identity, because two registrations of one bound method with one label
+        produce equal `_Effect`s (A8)."""
         for home in self.homes:
             remove_identical(home, self)
         self.homes = ()
 
 
 def _register(dispose: Disposer, label: str, homes: tuple[list[_Effect], ...]) -> _Effect:
-    """One teardown, now the newest effect of every scope whose list is in `homes`.
+    """Register one teardown as the newest effect of every scope whose list is in
+    `homes`.
 
-    A tuple the caller already has, rather than varargs: a scope keeps its own
-    one-list tuple (`Context._homes`), so a registration builds none."""
+    `homes` is a tuple that the caller already has, and not varargs. A scope
+    keeps its own one-list tuple (`Context._homes`), so a registration builds no
+    tuple."""
     effect = _Effect(dispose, label, homes)
     for home in homes:
         home.append(effect)
@@ -299,21 +318,24 @@ def _register(dispose: Disposer, label: str, homes: tuple[list[_Effect], ...]) -
 
 
 class Releaser:
-    """What `add_disposer` and `effect` hand back: one registered teardown, held.
+    """What `add_disposer` and `effect` return: a hold on one registered teardown.
 
-    **Called, it runs the teardown now** and takes it off the scope. Once: a second
-    call does nothing, and neither does a call after the scope's unwind claimed the
-    teardown. So it is a `Disposer`, and may be registered as one.
+    **A call runs the teardown now** and takes it off the scope. This happens one
+    time: a second call does nothing, and a call after the unwind of the scope
+    claimed the teardown also does nothing. A `Releaser` is therefore a
+    `Disposer`, and can be registered as one.
 
-    **`drop()` takes it off the scope without running it**, for the holder that has
-    already let the artifact go another way and so owes nothing. Without it the only
-    way to remove a teardown was to run it once it could find nothing to do, which
-    made the order of two steps the thing correctness hung on. A dropped teardown is
-    settled like one that ran: `Abandoned` reports it as neither outstanding nor
-    unreclaimable. A drop after a run, a run after a drop, and a drop the unwind got
-    ahead of all do nothing; in the last the teardown is running, or about to.
+    **`drop()` takes the teardown off the scope and does not run it.** It is for
+    a holder that has already let the artifact go another way and so owes
+    nothing. Without `drop()`, the only way to remove a teardown was to run it
+    after it could find nothing to do, and correctness then depended on the order
+    of two steps. A dropped teardown is settled like one that ran: `Abandoned`
+    reports it as neither outstanding nor unreclaimable. A drop after a run, a
+    run after a drop, and a drop that the unwind got ahead of all do nothing. In
+    the last case the teardown is running, or is about to run.
 
-    A teardown registered on two scopes (`Running.add_disposer`) is dropped from both.
+    A teardown registered on two scopes (`Running.add_disposer`) is dropped from
+    both.
     """
 
     __slots__ = ("_effect",)
@@ -330,52 +352,55 @@ class Releaser:
 
 
 GRACE_SECONDS = 10.0
-"""How long one scope tree's unwind may take before it stops waiting on itself.
+"""How long the unwind of one scope tree may take before it stops waiting for
+itself.
 
-**Here rather than in `ph.resources`, because this is what now bounds it.** The
-number was `resources.GRACE_SECONDS`, where the process-level shutdown path
-wrapped `ctx.dispose()` in a shielded `move_on_after` — a caller hand-rolling a
-guarantee the primitive should own, while every other caller had none. `dispose`
-applies it itself now, and `ph.resources` re-exports the name so the shutdown
-path reads unchanged.
+**The number is here and not in `ph.resources`, because this module now
+enforces it.** The number was `resources.GRACE_SECONDS`. There, the
+process-level shutdown path wrapped `ctx.dispose()` in a shielded
+`move_on_after`. That caller hand-wrote a guarantee that the primitive should
+own, and every other caller had no guarantee. `dispose` now applies the number
+itself, and `ph.resources` re-exports the name so that the shutdown path reads
+unchanged.
 
-Ten seconds because it is a budget for *finishing*, not a timeout for one
-operation: a worktree to unlink, a child to reap, a proxy to close. The
-`server.py` shutdown says the other half — a root that will not unwind must not
-become a process that will not exit — which is why this is a deadline and not a
-bare shield.
+The value is ten seconds because it is a budget for *finishing*, and not a
+timeout for one operation: a worktree to unlink, a child to reap, a proxy to
+close. The shutdown in `daemon/server.py` states the other half: a root that
+will not unwind must not become a process that will not exit. For that reason
+this is a deadline and not a bare shield.
 """
 
 
 def releasing() -> anyio.CancelScope:
     """A cleanup scope that survives the cancel that sent it, but not for ever.
 
-    The `finally` that hands a kernel resource back — an overlay unmount, a
-    worktree deregistration, a child's disposer — is reachable under raw
-    cancellation, and unshielded its `await` is simply skipped: a live FUSE mount
-    nobody unmounted, a registration that makes `git branch -D` refuse the branch
-    an export just produced, a subagent still spending tokens for a turn that was
-    abandoned.
+    A `finally` that returns a kernel resource (an overlay unmount, a worktree
+    deregistration, the disposer of a child) can be reached under raw
+    cancellation. Without a shield its `await` is skipped. The result is a live
+    FUSE mount that nobody unmounted, a registration that makes `git branch -D`
+    refuse the branch that an export just produced, or a subagent that still
+    spends tokens for a turn that was abandoned.
 
-    **Shielded with a deadline, not shielded.** An unmount that hangs because the
-    backend is wedged is the other way to lose a process, and a shield with no
-    bound makes it unkillable — which is the failure `dispose` already argues
-    against. `GRACE_SECONDS` is what the rest of the tree unwinds in, so a
-    cleanup does not get to be slower than the runtime that owns it; if it
-    expires the cleanup is abandoned, which is where this started, the difference
-    being that it has been tried.
+    **It is shielded with a deadline, and not only shielded.** An unmount that
+    hangs because the backend is stuck is the other way to lose a process. A
+    shield with no bound makes that process unkillable, which is the failure that
+    `dispose` already argues against. `GRACE_SECONDS` is the time in which the
+    rest of the tree unwinds, so a cleanup may not be slower than the runtime
+    that owns it. If the deadline expires, the cleanup is abandoned. That is the
+    same outcome as with no shield, except that the cleanup has been tried.
 
-    Here rather than in the seam that first needed it, because the pattern was
-    already written out inline at six sites across the tree and the seventh
-    author would have written a seventh.
+    The function is here and not in the seam that first needed it. The pattern
+    was already written inline at six sites across the tree, and the next author
+    would have written a seventh.
 
-    **Inside an unwind it takes the tree's deadline, not a fresh one** (L10). It
-    used to take `GRACE_SECONDS` unconditionally, so a cleanup reached *during* a
-    dispose opened a second budget inside the tree's — "ten roots, ten budgets",
-    the shape `unwind_by` exists to prevent, one layer down. `_UNWIND_BUDGET`
-    carries the instant the shield above this task expires, so the whole teardown
-    still finishes by the number its caller chose. Outside one there is nothing
-    to inherit and this is the first budget, which is the original behavior.
+    **Inside an unwind it takes the deadline of the tree, and not a fresh one**
+    (L10). It used to take `GRACE_SECONDS` unconditionally. A cleanup reached
+    *during* a dispose therefore opened a second budget inside the budget of the
+    tree. That is "ten roots, ten budgets", the shape that `unwind_by` exists to
+    prevent, one layer down. `_UNWIND_BUDGET` carries the instant at which the
+    shield above this task expires, so the whole teardown still finishes by the
+    number that its caller chose. Outside an unwind there is nothing to inherit
+    and this is the first budget, which is the original behavior.
     """
     budget = _UNWIND_BUDGET.get()
     deadline = anyio.current_time() + GRACE_SECONDS if budget is None else budget
@@ -383,99 +408,108 @@ def releasing() -> anyio.CancelScope:
 
 
 DRAIN_SECONDS = GRACE_SECONDS / 2
-"""How long `drain` waits on detached work before the unwind behind it starts.
+"""How long `drain` waits for detached work before the unwind behind it starts.
 
-**Derived from `GRACE_SECONDS` rather than declared beside it**, because the two
-are spent back to back by a host tearing a mount down and the relation is the
-whole point: a listener still running here is stopped by its own scope's unwind
-anyway, while the effects behind it are worktrees, leases and child processes
-that outlive the process if nobody hands them back. When both cannot be
-afforded, the unwind is the one that must run. Written as a literal, that
-sentence would stop being true the first time somebody raised the grace period.
+**The value is derived from `GRACE_SECONDS` and not declared beside it.** A host
+that tears a mount down spends the two back to back, and the relation between
+them is the purpose. A listener that still runs here is stopped by the unwind of
+its own scope anyway. The effects behind it are worktrees, leases and child
+processes, which outlive the process if nobody returns them. When there is not
+time for both, the unwind is the one that must run. If the value were a literal,
+that statement would become false the first time somebody raised the grace
+period.
 """
 
 _UNWIND_BUDGET: ContextVar[float | None] = ContextVar("ph.cordis.unwind-budget", default=None)
-"""The instant the shield above this task expires, or `None` outside one (L10).
+"""The instant at which the shield above this task expires, or `None` outside a
+shield (L10).
 
-`_UNWINDING`'s companion, and set in the same two places for the same reason: that
-one answers *whether* there is a shield above me, this one answers *until when*.
-Split rather than folded into one optional float, because `drain` shields to
-`min(share, whole)` while `dispose` shields to the whole — two different instants
-for one boolean fact, and a reader asking "am I nested" should not have to know
-which one it got.
+This is the companion of `_UNWINDING`, and it is set in the same two places for
+the same reason. `_UNWINDING` answers *whether* there is a shield above this
+task. This variable answers *until when*. The two are separate and not folded
+into one optional float, because `drain` shields to `min(share, whole)` while
+`dispose` shields to the whole. Those are two different instants for one boolean
+fact, and a reader that asks "am I nested" should not need to know which instant
+it got.
 
-Read only by `releasing`, which is the cleanup that has to fit inside whatever is
-already running."""
+Only `releasing` reads it. `releasing` is the cleanup that must fit inside
+whatever is already running."""
 
 _UNWINDING: ContextVar[bool] = ContextVar("ph.cordis.unwinding", default=False)
 """Whether the caller is already inside a shielded unwind.
 
-**Per task rather than per tree, and the distinction is the whole of it.** This
-was a field on `_Runtime`, which every scope in one tree shares, and it answered
-the nested case correctly: `dispose` recurses into children, and a second shield
-per layer costs 232% on a 341-scope tree for no guarantee the outer one is not
-already giving. What it could not tell apart was a *sibling* — two scopes of one
-tree disposed concurrently on two tasks — which found the flag set by the other
-and ran its whole unwind bare, so the first one's cancellation stranded the
-second one's effects. That is the shape a daemon reaches whenever a passivation
+**The value is per task and not per tree, and that difference is the reason for
+this variable.** It was a field on `_Runtime`, which every scope in one tree
+shares. That field answered the nested case correctly: `dispose` recurses into
+children, and a second shield for each layer costs 232% on a 341-scope tree and
+adds no guarantee that the outer shield does not already give. The field could
+not distinguish a *sibling*: two scopes of one tree that are disposed
+concurrently on two tasks. The second scope found the flag set by the first and
+ran its whole unwind with no shield, so the cancellation of the first stranded
+the effects of the second. A daemon reaches that shape whenever a passivation
 overlaps a shutdown.
 
-A `ContextVar` answers the question that was being asked all along: is there a
-shield above *me*. A nested `dispose` inherits the value on the same task; a
-sibling on another task does not, and raises its own.
+A `ContextVar` answers the question that was always meant: is there a shield
+above *me*. A nested `dispose` inherits the value on the same task. A sibling on
+another task does not inherit it, and raises its own shield.
 """
 
 ABANDONED_LEDGER = 64
 """How many cut-short unwinds one tree remembers.
 
-Bounded because the ledger holds the abandoned disposers alive — deliberately,
-since they are still callable and each stands for a resource nobody has freed —
-and an unbounded list of them in a process that keeps abandoning would be a leak
-about a leak. 64 is far past the point where a reader has stopped counting and
-started asking what is wrong with the deployment; the count of what fell off is
-kept, so the report never quietly under-states.
+The ledger is bounded because a process that keeps abandoning would otherwise
+grow it without limit. An entry holds only labels and weak references (see
+`Abandoned`), but an unbounded list of entries would still be a leak caused by
+the report of a leak. 64 is far more than a reader counts before they ask what
+is wrong with the deployment. The number of entries that were discarded is kept,
+so the report never silently understates.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class Abandoned:
-    """One scope whose unwind was cut short, and the teardown it left holding.
+    """One scope whose unwind was cut short, and the teardowns that it still held.
 
     **`outstanding` is derived, not recorded.** The entry watches the live
-    effects rather than snapshotting their names, so one released or dropped
-    afterwards through the `Releaser` `add_disposer` handed out leaves the report
-    by itself. A name-snapshot would keep accusing a deployment of a lease somebody
-    had already returned — and `dispose()` cannot be that somebody, since its
-    early return makes a second call a no-op, so those releasers are the only way
-    back and the ledger has to notice them being used.
+    effects and does not snapshot their names. An effect that is released or
+    dropped afterwards, through the `Releaser` that `add_disposer` returned,
+    therefore leaves the report by itself. A snapshot of names would keep
+    accusing a deployment of a lease that somebody had already returned.
+    `dispose()` cannot be that somebody, because its early return makes a second
+    call a no-op. Those releasers are the only way back, so the ledger must
+    notice when they are used.
 
-    **Weakly, because the alternative is a leak about a leak.** A strong
-    reference pins far more than the disposer: `provide`'s `unprovide` captures
-    the `Context` and the service, and `on`'s `off` captures a `Hook` holding the
-    same context — so any scope that ever called either kept its whole subtree
-    and every service in it alive for the life of the tree, none of which
-    `outstanding` ever mentioned. Real disposers here are bound methods on live
-    objects (an httpx client and its pool, a subprocess handle), which CPython
-    reclaims on the last reference and cannot while a diagnostic holds one.
+    **The references are weak, because a strong reference would be a leak caused
+    by the report of a leak.** A strong reference keeps far more than the
+    disposer alive. The `unprovide` of `provide` captures the `Context` and the
+    service, and the `off` of `on` captures a `Hook` that holds the same context.
+    Any scope that ever called either therefore kept its whole subtree and every
+    service in it alive for the life of the tree, and `outstanding` mentioned
+    none of that. Real disposers here are bound methods on live objects (an httpx
+    client and its pool, a subprocess handle). CPython reclaims such an object on
+    its last reference, and cannot while a diagnostic holds one.
 
-    The label is cached beside the reference because it outlives it, and the two
-    cases are different answers rather than one: a live reference not yet done is
-    **outstanding** — somebody still holds the releaser and can call it — while
-    a dead one is `unreclaimable`, since nothing can ever call it again.
+    The label is cached beside the reference because the label outlives the
+    reference. The two cases are different answers. A live reference that is not
+    yet done is **outstanding**: somebody still holds the releaser and can call
+    it. A dead reference is `unreclaimable`, because nothing can ever call it
+    again.
     """
 
     path: str
     watched: tuple[tuple[str, ref[_Effect]], ...]
-    """Each undisposed effect's label and a weak reference to it. Read through
-    `outstanding` and `unreclaimable`; never dereferenced elsewhere."""
+    """The label of each undisposed effect and a weak reference to the effect.
+    Read it through `outstanding` and `unreclaimable`. Nothing else dereferences
+    it."""
 
     @property
     def outstanding(self) -> tuple[str, ...]:
-        """Effects nobody has claimed, that a holder could still run.
+        """The effects that nobody has claimed and that a holder could still run.
 
-        Unclaimed *and* still referenced. A `Releaser` refuses an effect the unwind
-        already claimed — that guard is what stops a disposer running twice — so
-        a claimed one is not something anybody can act on, however incomplete.
+        An effect here is unclaimed *and* still referenced. A `Releaser` refuses
+        an effect that the unwind already claimed, and that guard stops a
+        disposer from running twice. Nobody can therefore act on a claimed
+        effect, however incomplete it is.
         """
         return tuple(
             label for label, watch in self.watched if (one := watch()) is not None and not one.done
@@ -483,18 +517,20 @@ class Abandoned:
 
     @property
     def unreclaimable(self) -> tuple[str, ...]:
-        """Effects nothing will ever run, for either of the two reasons.
+        """The effects that nothing will ever run, for either of two reasons.
 
-        The last holder is gone, so no releaser survives to call — or the unwind
-        claimed it and never finished it, which a `Releaser` then refuses on the
-        `done` guard. The second is the case a deadline creates: the disposer cut
-        off mid-unmount is the one most likely to have left something half-done,
-        and it is also the one nobody can retry.
+        First, the last holder is gone, so no releaser remains to call. Second,
+        the unwind claimed the effect and never finished it, and a `Releaser`
+        then refuses it on the `done` guard. A deadline creates the second case.
+        The disposer that was cut off in the middle of an unmount is the one most
+        likely to have left something half-done, and it is also the one that
+        nobody can retry.
 
-        Kept apart from `outstanding` because they ask different things of a
-        reader. One names work somebody can still do; this names a resource that
-        is stranded until the process ends, and telling an operator to go and act
-        on it would be telling them to do something impossible.
+        These are kept apart from `outstanding` because the two ask different
+        things of a reader. `outstanding` names work that somebody can still do.
+        This property names a resource that is stranded until the process ends.
+        To tell an operator to act on it would be to ask for something
+        impossible.
         """
         return tuple(
             label
@@ -515,11 +551,11 @@ class _Provision:
 
 @dataclass(slots=True)
 class _Dependent:
-    """A registration waiting for services: a mounted plugin or an `inject()`.
+    """A registration that waits for services: a mounted plugin or an `inject()`.
 
-    Owns the one deactivation sequence. Every path that tears an activation
-    down — a service disappearing, an unmount, a failed `apply` — goes through
-    `deactivate()`, so the protocol lives in one place.
+    It owns the one deactivation sequence. Every path that tears an activation
+    down (a service that disappears, an unmount, a failed `apply`) goes through
+    `deactivate()`, so the protocol is in one place.
     """
 
     ctx: Context
@@ -527,66 +563,72 @@ class _Dependent:
     activate: Callable[[Context], Any]
     label: str
     transparent: bool = False
-    """Whether this activation's scope is transparent, as an ordinary row's is.
+    """Whether the scope of this activation is transparent, as the scope of an
+    ordinary row is.
 
-    Set only by the loader, for the row that asked for a realm (A9). `Context`
+    Only the loader sets it, for the row that asked for a realm (A9). `Context`
     already promises that "a plugin's activation scope is transparent and
-    answers `None`" — but a realm mount inherits the realm's isolation, so the
-    promise was false there and the row became invisible to `reaches`: no
-    dispatch, and no tool, prompt section, fs screen or skill restriction it
-    registered could be seen either. Restoring the transparency fixes all of
-    them at once, rather than one knob per registry."""
+    answers `None`". A realm mount inherits the isolation of the realm, so the
+    promise was false there, and the row became invisible to `reaches`. It got no
+    dispatch, and nobody could see a tool, prompt section, fs screen or skill
+    restriction that it registered. Restoring the transparency fixes all of them
+    at one time, with no separate setting for each registry."""
     module: str = ""
     """The module whose code runs in the activation scope, when one is known.
 
-    A plugin's, stamped by `ForkScope` from its `apply`. It reaches
-    `Context._module`, which is what `ctx.on` reports to `note_consumer` — so
-    this field is the whole reason `phern events` can name who listens to an event
-    rather than printing an empty column. Blank for an `inject` callback, which
-    is code the calling row already owns and which therefore inherits it."""
+    For a plugin, `ForkScope` stamps it from the `apply` of the plugin. It
+    reaches `Context._module`, which is what `ctx.on` reports to `note_consumer`.
+    This field is therefore the reason that `phern events` can name who listens
+    to an event and does not print an empty column. It is blank for an `inject`
+    callback. That callback is code that the calling row already owns, so it
+    inherits the module of that row."""
     plugin: str = ""
-    """The mounted plugin's name, stamped by `ForkScope`; blank for an `inject`,
-    which runs as the row that asked. Reaches `Context.plugin_name`, which is how
-    `waterfall_attributed` names the row that answered."""
+    """The name of the mounted plugin, stamped by `ForkScope`. It is blank for an
+    `inject`, which runs as the row that asked. It reaches `Context.plugin_name`,
+    which is how `waterfall_attributed` names the row that answered."""
     row: str = ""
-    """The profile row the plugin was mounted for, when the loader said; reaches
-    `Context.row_id`. Blank for an `inject`, and for a plugin mounted by hand."""
+    """The profile row that the plugin was mounted for, when the loader said. It
+    reaches `Context.row_id`. It is blank for an `inject`, and for a plugin that
+    was mounted by hand."""
     active: bool = False
     ever_active: bool = False
-    """Whether this has ever activated — the bit that tells `waiting on fs` for a
-    fiber that never came up from the same words for one that came up and was
-    unwound when `fs` went away. Only the second is a provider swap, which is what
-    a live reader of the topology is asking about."""
+    """Whether this dependent has ever activated. `waiting on fs` can describe a
+    fiber that never came up, and also one that came up and was unwound when `fs`
+    went away. This bit tells them apart. Only the second is a provider swap,
+    which is what a live reader of the topology asks about."""
     scope: Context | None = None
     disposed: bool = False
     failure: str | None = None
-    """Why this dependent's activation raised, or `None`. Set once; never retried.
+    """Why the activation of this dependent raised, or `None`. It is set one time,
+    and the activation is never retried.
 
-    **What stops the next `reconcile` running a failed `apply` again.**
-    `deactivate()` marks the tree dirty, so a dependent left `ready()` after its
-    `apply` raised was re-activated on the very next round — the same `apply`,
-    raising the same way, ahead of every row still waiting its turn in the list.
-    A profile with one broken row therefore mounted nothing behind it and re-ran
-    whatever that row had already done, once per `reconcile`, for the life of the
-    process.
+    **This field stops the next `reconcile` from running a failed `apply`
+    again.** `deactivate()` marks the tree dirty. A dependent that was still
+    `ready()` after its `apply` raised was therefore activated again on the next
+    round: the same `apply`, which raised the same way, ahead of every row that
+    still waited for its turn in the list. A profile with one broken row
+    therefore mounted nothing behind that row. It also re-ran whatever that row
+    had already done, one time for each `reconcile`, for the life of the process.
 
-    A reason rather than a flag, for `Abandoned`'s reason: the state is reported
-    to a person — `phern doctor` prints it beside `waiting on` — and "failed" with
-    no sentence is a report that sends the reader to the logs. `None` rather than
-    an empty string so the test below is a comparison and not a truthiness that
-    happens to hold because the message is never blank.
+    The field is a reason and not a flag, for the same reason as in `Abandoned`.
+    The state is reported to a person: `phern doctor` prints it beside
+    `waiting on`, and "failed" with no sentence is a report that sends the reader
+    to the logs. It is `None` and not an empty string, so that the test below is
+    a comparison. A truthiness test would hold only because the message is never
+    blank.
     """
 
     def ready(self) -> bool:
         return self.ctx.active and self.failure is None and not self.missing()
 
     def missing(self) -> list[str]:
-        """The inject keys not yet provided at this dependent's own scope.
+        """The inject keys that are not yet provided at the scope of this
+        dependent.
 
-        One predicate for `ready`, for the loader's refusal, and for `phern doctor`'s
-        `waiting on …` — asked against `self.ctx`, which for a private copy in a
-        realm is the realm. Two callers had spelled it against two different
-        scopes."""
+        This is one predicate for `ready`, for the refusal of the loader, and for
+        the `waiting on …` of `phern doctor`. It is asked against `self.ctx`,
+        which for a private copy in a realm is the realm. Two callers had written
+        it against two different scopes."""
         return [key for key in self.keys if not self.ctx.has(key)]
 
     def deactivate(self) -> MaybeAwaitable[None]:
@@ -609,39 +651,44 @@ class _Runtime:
     dependents: list[_Dependent] = field(default_factory=list)
     dirty: bool = True
     background: set[asyncio.Future[Any]] = field(default_factory=set)
-    """Detached tasks `drain` waits for: every `detach` but `leave`'s."""
+    """The detached tasks that `drain` waits for: every `detach` except one with
+    `leave`."""
     elsewhere: set[asyncio.Future[Any]] = field(default_factory=set)
-    """Detached tasks with `leave`, which `drain` does not wait for. Held only so the
-    loop's weak reference is not their last: asyncio keeps none of its own."""
+    """The detached tasks with `leave`, which `drain` does not wait for. They are
+    held only so that the weak reference of the loop is not their last reference:
+    asyncio keeps no strong reference of its own."""
     unwind_deadline: float | None = None
-    """The instant this tree's unwind must finish by, or `None` when none is set.
+    """The instant by which the unwind of this tree must finish, or `None` when
+    none is set.
 
-    **One budget per tree, not one per scope.** `dispose` recurses into children,
-    so a deadline computed fresh at each level would multiply down the depth of
-    the tree — `GRACE_SECONDS` at every layer, which is exactly the failure
-    `daemon/server.py` names when it insists on one shared number.
+    **There is one budget for each tree, and not one for each scope.** `dispose`
+    recurses into children, so a deadline computed fresh at each level would
+    multiply down the depth of the tree: `GRACE_SECONDS` at every layer. That is
+    exactly the failure that `daemon/server.py` names when it insists on one
+    shared number.
 
-    Read by `drain` and by `dispose`, which spend it in that order. Set by
-    whoever starts the unwind, or *before* it by `Context.unwind_by` —
-    which is how a caller holding several trees spends one budget across all of
-    them. Cleared when that unwind ends.
+    `drain` and `dispose` read it, and spend it in that order. Whoever starts the
+    unwind sets it, or `Context.unwind_by` sets it *before* the unwind. That is
+    how a caller that holds several trees spends one budget across all of them.
+    It is cleared when that unwind ends.
     """
     abandoned: list[Abandoned] = field(default_factory=list)
-    """Unwinds this tree could not finish, newest last, capped at
-    `ABANDONED_LEDGER`. On the runtime rather than on the scope because the scope
-    that could not finish is, by the end of `_leave_tree`, unreachable from
-    anything — which is precisely why this was invisible."""
+    """The unwinds that this tree could not finish, newest last, capped at
+    `ABANDONED_LEDGER`. The list is on the runtime and not on the scope. By the
+    end of `_leave_tree`, nothing can reach the scope that could not finish, and
+    that is the reason why these unwinds were invisible."""
     abandoned_dropped: int = 0
-    """How many entries the cap discarded, so a report can say so rather than
-    imply the oldest abandonment was the first."""
+    """How many entries the cap discarded. A report can then say so, and does not
+    imply that the oldest abandonment in the list was the first."""
 
 
 class ForkScope:
-    """A mounted plugin: its config, and the scope its activation owns.
+    """A mounted plugin: its config, and the scope that its activation owns.
 
-    A fork survives deactivation. When an injected service disappears the
-    activation scope is disposed — unwinding everything the plugin registered —
-    but the fork stays mounted, so re-providing the service re-activates it.
+    A fork survives deactivation. When an injected service disappears, the
+    activation scope is disposed, which unwinds everything that the plugin
+    registered. The fork stays mounted, so the plugin activates again when the
+    service is provided again.
     """
 
     __slots__ = ("_config", "_dependent", "_parent", "_spec", "_unmount")
@@ -665,12 +712,12 @@ class ForkScope:
             plugin=spec.name,
             row=row,
             transparent=transparent,
-            # Where the plugin's code lives, which nothing else in the mount path
-            # knows: the loader has a name and an entry point, and the *module* is
-            # the thing `ctx.on` reports as a consumer. Without it every scope
-            # inherited the root's empty string and `note_consumer` — whose guard
-            # is `if module` — recorded nothing, for every event, in every
-            # profile.
+            # Where the code of the plugin lives. Nothing else in the mount path
+            # knows it: the loader has a name and an entry point, and the
+            # *module* is what `ctx.on` reports as a consumer. Without it, every
+            # scope inherited the empty string of the root. `note_consumer` has
+            # the guard `if module`, so it recorded nothing, for every event, in
+            # every profile.
             module=getattr(spec.apply, "__module__", ""),
         )
 
@@ -684,7 +731,8 @@ class ForkScope:
 
     @property
     def ever_active(self) -> bool:
-        """Whether it has activated at least once; with `active` false, it was unwound."""
+        """Whether it has activated at least one time. If `active` is also false,
+        it was unwound."""
         return self._dependent.ever_active
 
     @property
@@ -696,20 +744,20 @@ class ForkScope:
     def state(self) -> ForkState:
         """Where this fork stands, as one of six names.
 
-        **The set is closed, so it is a `Literal` and not a ladder each reader
-        rebuilds.** `Mount.topology` publishes this through the `topology` seam,
-        so it is a surface rather than a log line, and the printer that used to
-        derive it from five booleans owned the *ordering* as well — that `failed`
-        has to be answered before `waiting on`, because a row that raised may
-        also be missing a key and the reason it raised is the more useful
-        sentence. A second consumer deriving that for itself is a second chance
-        to get it wrong.
+        **The set is closed, so it is a `Literal` and not a ladder that each
+        reader rebuilds.** `Mount.topology` publishes this through the `topology`
+        seam, so it is a surface and not a log line. The printer that used to
+        derive it from five booleans also owned the *ordering*: `failed` must be
+        answered before `waiting on`, because a row that raised can also be
+        missing a key, and the reason it raised is the more useful sentence. A
+        second consumer that derives the state for itself has a second chance to
+        get the ordering wrong.
 
         `failed` is the one state that does not resolve itself. A waiting row
-        comes up when its key arrives; a failed one stays down however the tree
-        settles, because `ready()` refuses to hand the same `apply` a second
-        chance. `activating` means every key is met and `reconcile` has not
-        reached it yet, which only a reader inside the fixpoint ever sees.
+        comes up when its key arrives. A failed row stays down however the tree
+        settles, because `ready()` does not give the same `apply` a second
+        chance. `activating` means that every key is met and `reconcile` has not
+        reached the fork yet. Only a reader inside the fixpoint ever sees it.
         """
         dependent = self._dependent
         if dependent.disposed:
@@ -724,12 +772,14 @@ class ForkScope:
 
     @property
     def unmounted(self) -> bool:
-        """Whether `dispose()` has run: retired from the tree, never to reactivate."""
+        """Whether `dispose()` has run. The fork is then retired from the tree and
+        never activates again."""
         return self._dependent.disposed
 
     @property
     def injects(self) -> tuple[str, ...]:
-        """The service keys this plugin waits on — what `Mount.topology` names."""
+        """The service keys that this plugin waits for. `Mount.topology` names
+        them."""
         return self._spec.inject
 
     @property
@@ -748,7 +798,7 @@ class ForkScope:
 
     @property
     def spec(self) -> PluginSpec:
-        """The plugin this fork mounted — its config model and its narrower."""
+        """The plugin that this fork mounted: its config model and its narrower."""
         return self._spec
 
     async def _apply(self, ctx: Context) -> None:
@@ -762,24 +812,28 @@ class ForkScope:
 
 @dataclass(frozen=True, slots=True)
 class Deployment:
-    """Everything this deployment holds — the widest boundary, said out loud (P6-32).
+    """Everything that this deployment holds: the widest boundary, with a name
+    (P6-32).
 
-    **"Widest" along the restriction axis only.** A reader given `DEPLOYMENT`
-    resolves the *mount's* isolation chain, which no restriction narrows — but an
-    **agent-scoped registration is not on it**: `view(DEPLOYMENT)` does not see a
-    tool registered on one agent's scope. It is the view `scope=None` always read,
-    named. "Is this available to *anyone*" is a per-layer question this sentinel does
-    not answer.
+    **It is "widest" along the restriction axis only.** A reader that is given
+    `DEPLOYMENT` resolves the isolation chain of the *mount*, which no
+    restriction narrows. An **agent-scoped registration is not on that chain**:
+    `view(DEPLOYMENT)` does not see a tool registered on the scope of one agent.
+    `DEPLOYMENT` is the view that `scope=None` always read, with a name. "Is this
+    available to *anyone*" is a per-layer question that this sentinel does not
+    answer.
 
-    **The point is that it has a name.** `scope: Context | None = None` made two
-    different things one spelling — "I did not state a boundary", an absence of
-    information, and "I mean the deployment", a legitimate answer. With one spelling
-    every reader has to default the ambiguous case, and the convenient default is
-    the mount: the widest boundary there is.
+    **The purpose is that it has a name.** `scope: Context | None = None` gave
+    two different things one spelling. One is "I did not state a boundary", which
+    is an absence of information. The other is "I mean the deployment", which is
+    a legitimate answer. With one spelling, every reader must choose a default
+    for the ambiguous case, and the convenient default is the mount: the widest
+    boundary there is.
 
-    Not `None` meaning "nothing", which trades a silent-wide failure for a
-    silent-narrow one. The half that does the work is removing the *default*, so a
-    call site stating no boundary fails mypy rather than a runtime rule.
+    It is not `None` with the meaning "nothing", which replaces a failure that is
+    silently wide with one that is silently narrow. The part that does the work
+    is the removal of the *default*. A call site that states no boundary then
+    fails mypy, and not a runtime rule.
     """
 
 
@@ -789,32 +843,36 @@ DEPLOYMENT = Deployment()
 Boundary: TypeAlias = "Context | Deployment"
 """What a policy reader takes: a scope, or `DEPLOYMENT` for all of them.
 
-Deliberately **not** `| None`. A reader whose parameter has no default cannot be
-called without answering the question, and mypy asks at build time against every
-call site rather than only the paths a test drives.
+It is deliberately **not** `| None`. A reader whose parameter has no default
+cannot be called without an answer to the question. mypy asks at build time, at
+every call site, and not only on the paths that a test drives.
 
-**A *registration* takes a `Context`, never this**, and so do the two
-dispatch-time resolvers, `Context.owner_for` and `Context.layer_for`, which read
-the running binding rather than a stated value: a scope is what a registration is
-an *effect of* and what it is visible *to* (P6-12's two questions). `DEPLOYMENT`
-is neither — there is nothing for it to unwind with.
+**A *registration* takes a `Context`, never this.** The two dispatch-time
+resolvers, `Context.owner_for` and `Context.layer_for`, also take a `Context`.
+They read the running binding and not a stated value. A scope is what a
+registration is an *effect of* and what it is visible *to* (the two questions of
+P6-12). `DEPLOYMENT` is neither, because there is nothing for it to unwind with.
 """
 
 
 def remove_identical[T](entries: list[T], value: T) -> None:
-    """Remove **that object** from `entries`, not one equal to it; nothing if absent.
+    """Remove **that object** from `entries`, and not an object equal to it. Do
+    nothing if it is absent.
 
-    `list.remove` compares with `==`, and two registrations of one value are equal
-    by field — so disposing the second deleted the first, and the first's disposer
-    then deleted the survivor, reordering what was left. Every registry of values
-    releases through this: a hook (`Context.on`), a contribution (`claim_entry`), a
-    per-scope filter (`ScopedEntries`), a scope's own effects.
+    `list.remove` compares with `==`, and two registrations of one value are
+    equal by field. Disposing the second therefore deleted the first, and the
+    disposer of the first then deleted the survivor, which reordered what was
+    left. Every registry of values releases through this function: a hook
+    (`Context.on`), a contribution (`claim_entry`), a per-scope filter
+    (`ScopedEntries`), and the effects of a scope.
 
-    **Newest first.** Registrations unwind newest first, so the newest occurrence is
-    the one usually going: an effect `_unwind` just ran, a detached task's stop. And
-    for one object claimed twice, it is the occurrence the later claim put there, so
-    undoing that claim leaves the earlier one where it was. From the front, the
-    survivor moved behind everything claimed between the two.
+    **The search starts from the newest.** Registrations unwind newest first, so
+    the newest occurrence is usually the one that goes: an effect that `_unwind`
+    just ran, or the stop of a detached task. For one object that was claimed
+    twice, the newest occurrence is the one that the later claim put there, so
+    undoing that claim leaves the earlier one where it was. With a search from
+    the front, the survivor moved behind everything that was claimed between the
+    two.
     """
     for index in reversed(range(len(entries))):
         if entries[index] is value:
@@ -826,32 +884,34 @@ def drop_dead_chains(cache: MutableMapping[tuple[Context | None, ...], Any]) -> 
     """Delete every memo entry whose innermost scope has been disposed (I2).
 
     A chain-keyed cache holds its keys **strongly**, so an entry outlives the
-    scope it describes: an agent is disposed, its `Context` is retained by the
-    key tuple, and nothing drops it until the registry's next invalidation —
-    which for a deployment that has stopped registering is never. Measured at
-    ~2 KiB per agent and unbounded: 500 agents through a daemon leave 500 entries
-    in each of the two caches.
+    scope that it describes. An agent is disposed, the key tuple retains its
+    `Context`, and nothing drops the entry until the next invalidation of the
+    registry. For a deployment that has stopped registering, that never happens.
+    The cost was measured at ~2 KiB for each agent, with no bound: 500 agents
+    through a daemon leave 500 entries in each of the two caches.
 
-    **Only `chain[0]` is asked**, not every key: the innermost scope is the one
-    that dies, and `dispose` unwinds children inside the parent's own dispose, so
-    an ancestor cannot be dead while its descendant is live except for the
-    moment mid-unwind — and that entry is caught on the next miss. Scanning the
-    whole chain cost 4x more to answer the same question.
+    **Only `chain[0]` is tested**, and not every key. The innermost scope is the
+    one that dies. `dispose` unwinds children inside the dispose of the parent,
+    so an ancestor cannot be dead while its descendant is live, except for a
+    moment in the middle of an unwind. The next miss catches that entry. A scan
+    of the whole chain cost 4x more to answer the same question.
 
-    **Swept rather than unwound, and the alternative is real.** `Context` has a
-    `__weakref__` slot, so an eviction disposer per scope with a `WeakSet` of
-    hooked scopes would retain nothing and need no re-registration — it is not
-    ruled out by the mechanics. The sweep is chosen because it is smaller: no
-    per-registry hook table and no disposer per scope. A cache is a thing
-    legitimately allowed to forget — unlike a registry's own table, which holds a
-    disposer per entry anyway and drops a scope with its last (`ScopedTable`).
+    **The cache is swept and not unwound, although the alternative is possible.**
+    `Context` has a `__weakref__` slot. An eviction disposer for each scope, with
+    a `WeakSet` of hooked scopes, would retain nothing and need no
+    re-registration, so the mechanics do not rule it out. The sweep was chosen
+    because it is smaller: no hook table for each registry and no disposer for
+    each scope. A cache may legitimately forget. The table of a registry is
+    different: it holds a disposer for each entry anyway, and drops a scope with
+    its last entry (`ScopedTable`).
 
-    Called on a **miss**, which keeps it O(live scopes): a miss is the only moment
-    the table grows, and sweeping then keeps the count proportional to what is
-    alive rather than to what has ever run.
+    It is called on a **miss**, which keeps it O(live scopes). A miss is the only
+    moment at which the table grows. A sweep at that moment keeps the count
+    proportional to what is alive, and not to what has ever run.
 
-    Here, beside `chain_label` and `isolation_chain`, because the key's shape is
-    the only thing the tool-view and skill-reach caches share.
+    The function is here, beside `chain_label` and `isolation_chain`, because the
+    shape of the key is the only thing that the tool-view cache and the
+    skill-reach cache share.
     """
     dead = [chain for chain in cache if chain and chain[0] is not None and not chain[0].active]
     for chain in dead:
@@ -859,18 +919,19 @@ def drop_dead_chains(cache: MutableMapping[tuple[Context | None, ...], Any]) -> 
 
 
 def chain_label(chain: Sequence[Context | None]) -> str:
-    """How a report names a cache entry keyed by an isolation chain.
+    """The name that a report gives a cache entry keyed by an isolation chain.
 
-    `chain[0]` rather than a scan for the first non-`None`, and the difference is
-    a property rather than a shortcut: `isolation_chain` appends only non-`None`
-    keys and then exactly one trailing `None`, so the innermost key is the first
-    and `None` can only be last. A scan would read as though an interior `None`
-    were possible, which is the shape neither caller could handle anyway.
+    It reads `chain[0]` and does not scan for the first non-`None`. That is a
+    property of the chain and not a shortcut: `isolation_chain` appends only
+    non-`None` keys and then exactly one trailing `None`. The innermost key is
+    therefore the first, and `None` can only be last. A scan would suggest that
+    an interior `None` is possible, and neither caller could handle that shape
+    anyway.
 
-    Here rather than in either caller because both chain-keyed caches — the tool
-    view and the skill reach — print this in the same `phern doctor` section, and
-    two spellings of one ordering invariant is how the two rows come to disagree
-    about which scope an entry belongs to.
+    The function is here and not in either caller, because both chain-keyed
+    caches (the tool view and the skill reach) print this label in the same
+    `phern doctor` section. With two spellings of one ordering invariant, the two
+    rows could disagree about which scope an entry belongs to.
     """
     return chain[0].path if chain and chain[0] is not None else "the deployment"
 
@@ -878,58 +939,65 @@ def chain_label(chain: Sequence[Context | None]) -> str:
 def boundary_of(scope: Boundary, mount: Context) -> Context:
     """Resolve a stated boundary to the scope that answers it.
 
-    One narrowing site rather than one per seam, and mypy is the reason it has to
-    be: `scope is DEPLOYMENT` reads as the obvious spelling and does **not**
-    narrow the union — identity against a value is not a type guard — so every
-    seam writing it by hand would either repeat an `isinstance` or reach for a
-    cast. Written once, the union is discharged here and a reader gets a
-    `Context`.
+    There is one narrowing site and not one for each seam, and mypy is the
+    reason. `scope is DEPLOYMENT` looks like the obvious spelling, but it does
+    **not** narrow the union, because identity against a value is not a type
+    guard. Every seam that wrote it by hand would either repeat an `isinstance`
+    or use a cast. Written one time here, the union is resolved and a reader gets
+    a `Context`.
     """
     return mount if isinstance(scope, Deployment) else scope
 
 
 @dataclass(frozen=True, slots=True)
 class Running:
-    """Who is running — as the *two* questions it has to answer (P6-29).
+    """Who is running, as the *two* questions that it must answer (P6-29).
 
-    Public because it is also **what a registry records at registration time**.
-    Every registry invokes a row's body later — a tool, a command, a compaction
-    note, a prompt section, a status field, a diagnostic, a telemetry sink, each of
-    the five single-slot providers — and to enter the right binding then it must have
-    kept both answers now. `Context.running_for` hands them exactly this object.
+    The class is public because it is also **what a registry records at
+    registration time**. Every registry invokes the body of a row later: a tool,
+    a command, a compaction note, a prompt section, a status field, a diagnostic,
+    a telemetry sink, each of the five single-slot providers. To enter the right
+    binding at that time, the registry must have kept both answers at
+    registration. `Context.running_for` gives it exactly this object.
 
-    The two come apart precisely when a **registry** invokes the body: a tool's
-    `execute` belongs to the row that registered the tool (I2 — whose code it is)
-    while it is visible to the *agent* it was invoked for (B7 — a different scope).
+    The two answers differ exactly when a **registry** invokes the body. The
+    `execute` of a tool belongs to the row that registered the tool (I2: whose
+    code it is). It is visible to the *agent* that it was invoked for (B7: a
+    different scope).
 
-    Two fields rather than a second `ContextVar` because they are one fact — *who is
-    running* — read two ways, and two variables can be set out of step. The only way
-    to bind one is `running()`, which takes both.
+    There are two fields and not a second `ContextVar`, because they are one
+    fact, *who is running*, read two ways. Two variables can be set out of step.
+    The only way to bind one field is `running()`, which takes both.
     """
 
     owner: Context
-    """Whose lifetime a registration made now joins — `Context.owner_for`."""
+    """The scope whose lifetime a registration made now joins. See
+    `Context.owner_for`."""
     layer: Context
-    """Which scope it is visible to — `Context.layer_for`."""
+    """The scope that the registration is visible to. See `Context.layer_for`."""
 
     def add_disposer(self, dispose: Disposer, *, label: str = "") -> Releaser:
-        """Release when **either** scope ends — the pair's lifetime, not a half's.
+        """Release when **either** scope ends: the lifetime of the pair, and not
+        of one half.
 
-        Once a body a registry invokes registers as its row *for* an agent, the two are
-        unrelated branches and either can end first. Picking one is wrong in a different
-        direction each way: owning it by the row alone leaves whatever the layer keyed on
-        a disposed scope, and owning it by the agent alone lets a registration outlive
-        the row whose code made it, which is I2 verbatim. The registration is meaningful
-        only while both are alive.
+        When a body that a registry invokes registers as its row *for* an agent,
+        the two scopes are unrelated branches and either can end first. Each
+        single choice is wrong in a different direction. If the row alone owns
+        the registration, the entry that a registry keys on the layer stays under
+        a disposed scope. If the agent alone owns it, the registration can
+        outlive the row whose code made it, which is I2 verbatim. The
+        registration has meaning only while both are alive.
 
-        **Here rather than in each registry**, because more than one registry keys on the
-        layer (`ToolRuntime._layers`, `ph.seams.skills._restrictions`). On `Running` and
-        not on `Context` because `Context.add_disposer(..., also=)` would ask one scope
-        to know about a pair it does not hold.
+        **The method is here and not in each registry**, because more than one
+        registry keys on the layer (`ToolRuntime._layers`,
+        `ph.seams.skills._restrictions`). It is on `Running` and not on
+        `Context`, because `Context.add_disposer(..., also=)` would ask one scope
+        to know about a pair that it does not hold.
 
-        **One effect on both scopes' lists**, so whichever unwinds first runs it and
-        takes it off the other, and the releaser runs or drops it on both. It was two
-        effects, the layer's running the owner's, kept in step by a closure and a link.
+        **It is one effect on the lists of both scopes.** Whichever scope unwinds
+        first runs the effect and takes it off the other, and the releaser runs
+        or drops it on both. It used to be two effects: the effect of the layer
+        ran the effect of the owner, and a closure and a link kept them in step.
         """
         if self.layer is self.owner:
             return self.owner.add_disposer(dispose, label=label)
@@ -939,39 +1007,43 @@ class Running:
 
 
 _ACTIVATING: ContextVar[Running | None] = ContextVar("ph.cordis.activating", default=None)
-"""Whose code is running: an `apply`'s activation scope, a listener's owner, or
-the (row, target) pair a registry enters around a body it invokes.
+"""Whose code is running: the activation scope of an `apply`, the owner of a
+listener, or the (row, target) pair that a registry enters around a body that it
+invokes.
 
-See `Context.current_owner` and `Context.current_layer`, and `_invoke` for the
+See `Context.current_owner` and `Context.current_layer`. See `_invoke` for the
 listener half."""
 
 
 class running:
     """Bind "who is running" for the duration of a block.
 
-    **It takes the `Running` itself**, which is how every registry calls it: the pair
-    exists so a registry stops keeping two fields it can pair up wrongly, and
-    `running(a.owner, b.layer)` at nine call sites would be silently valid. `layer=`
-    beside a pair *overrides* the visibility half — the one thing a caller
-    legitimately knows better (`ph.seams.fs` binds the agent whose path is being
-    resolved, not the scope the resolver registered on).
+    **It takes the `Running` itself**, and every registry calls it that way. The
+    pair exists so that a registry does not keep two fields that it can pair up
+    wrongly, and `running(a.owner, b.layer)` at each of those call sites would be
+    silently valid. `layer=` beside a pair *overrides* the visibility half. That
+    is the one thing that a caller legitimately knows better: `ph.seams.fs` binds
+    the agent whose path is being resolved, and not the scope that the resolver
+    registered on.
 
-    **`None` binds nothing**, for the empty half of an at-most-one slot: five seams
-    hold a provider that may not be registered.
+    **`None` binds nothing.** This is for the empty half of an at-most-one slot:
+    five seams hold a provider that might not be registered.
 
-    **`layer` defaults to `owner`**, which is the whole of the ordinary case — an
-    `apply` and a listener each run as one scope, so `running(scope)` means what it
-    always did. One call with a default rather than two functions, because the
-    *shape of the call* then says whether the two questions have one answer, and the
-    record it binds cannot be half-set.
+    **`layer` defaults to `owner`**, which covers the ordinary case. An `apply`
+    and a listener each run as one scope, so `running(scope)` means what it
+    always meant. There is one call with a default and not two functions,
+    because the *shape of the call* then shows whether the two questions have one
+    answer, and the record that it binds cannot be half-set.
 
-    **Single-use**, like every context manager built at its `with`: the token lives
-    on the instance, so re-entering one object would lose the outer token.
+    **It is single-use**, like every context manager that is built at its `with`.
+    The token is on the instance, so entering one object a second time would lose
+    the outer token.
 
-    A class rather than a `@contextmanager`, because the generator form costs a
-    frame, a `StopIteration` and two `send`s at each of the twenty-one call sites —
-    this is entered once per tool call, once per slash command, once per prompt row
-    per `assemble`, and once per telemetry sink per record.
+    It is a class and not a `@contextmanager`, because the generator form costs a
+    frame, a `StopIteration` and two `send`s at each of the forty call sites. It
+    is entered one time for each tool call, one time for each slash command, one
+    time for each prompt row in each `assemble`, and one time for each telemetry
+    sink for each record.
     """
 
     __slots__ = ("_pair", "_token")
@@ -983,11 +1055,11 @@ class running:
         elif isinstance(owner, Running):
             pair = owner if layer is None or layer is owner.layer else Running(owner.owner, layer)
         elif layer is None or layer is owner:
-            # The coinciding case, which is every `apply` and every listener: the
-            # scope keeps one record rather than building one per entry. Cleared
-            # in `dispose`, because the pair holds `self` twice and a disposed
-            # context is meant to become collectable the moment its parent drops
-            # it.
+            # The case where the two are the same scope, which is every `apply`
+            # and every listener. The scope keeps one record and does not build
+            # one for each entry. The record is cleared at dispose (in
+            # `_leave_tree`), because the pair holds `self` twice, and a disposed
+            # context must become collectable at the moment its parent drops it.
             pair = owner._running_self
             if pair is None:
                 pair = owner._running_self = Running(owner, owner)
@@ -1007,19 +1079,20 @@ class running:
 
 
 async def _as_owner(scope: Context, awaitable: Awaitable[object]) -> object:
-    """Await something as an effect of `scope`, binding when the body *runs*.
+    """Await something as an effect of `scope`, and bind when the body *runs*.
 
-    An `async def` listener only *builds* a coroutine when `_invoke` calls it — the
-    body runs later, when `serial`, `parallel` or `waterfall` awaits it, which is after
-    the binding around the *call* has been reset. Wrapping the awaitable moves the
-    binding inside the body, where it is the coroutine's own first act rather than
-    something its creator did before handing it over. `emit` needs no wrapper: it
-    spawns inside the binding instead (`_invoke`).
+    When `_invoke` calls an `async def` listener, the call only *builds* a
+    coroutine. The body runs later, when `serial`, `parallel` or `waterfall`
+    awaits it, and by then the binding around the *call* has been reset. Wrapping
+    the awaitable moves the binding inside the body. The binding is then the
+    first act of the coroutine itself, and not something that its creator did
+    before it passed the coroutine on. `emit` needs no wrapper: it spawns inside
+    the binding instead (`_invoke`).
     """
-    # Through `running` rather than the inline pair `_invoke` uses: this is
-    # already an extra coroutine frame around an `await`, so a generator's
-    # `__enter__`/`__exit__` is noise beside a scheduler hop — and it leaves the
-    # module with two spellings of the binding instead of three.
+    # This goes through `running` and not the inline pair that `_invoke` uses.
+    # There is already an extra coroutine frame around an `await` here, so the
+    # cost of `__enter__` and `__exit__` is small beside a scheduler hop. The
+    # module also then has two spellings of the binding, and not three.
     with running(scope):
         return await awaitable
 
@@ -1045,7 +1118,7 @@ class Context:
         "_services",
     )
 
-    # Declared for the type checker; `__slots__` still owns the storage.
+    # Declared for the type checker. `__slots__` still owns the storage.
     _parent: Context | None
     _label: str
     _module: str
@@ -1054,7 +1127,8 @@ class Context:
     _children: list[Context]
     _effects: list[_Effect]
     _homes: tuple[list[_Effect]]
-    """`(_effects,)`, built once: what an effect registered here sits on."""
+    """`(_effects,)`, built one time: the `homes` of an effect that is registered
+    here."""
     _services: dict[str, _Provision]
     _active: bool
     _isolation: Context | None
@@ -1074,8 +1148,8 @@ class Context:
         self._parent = parent
         self._label = label
         self._module = module
-        # Inherited, so a scope a plugin opens for itself still answers as the
-        # plugin; `_activation_scope` is what sets it.
+        # Inherited, so a scope that a plugin opens for itself still answers as
+        # the plugin. `_activation_scope` is what sets it.
         self._plugin = parent._plugin if parent is not None else ""
         self._row = parent._row if parent is not None else ""
         self._children = []
@@ -1108,16 +1182,17 @@ class Context:
         if dependent.transparent:
             # **A deployment row mounted into its own realm is still a
             # deployment row** (A9). `isolate:` narrows its *service lookup*,
-            # not who can see what it registers — but the scope inherits the
-            # realm's isolation, so `reaches` found it an ancestor of no
-            # dispatch target and every registry answered "nobody". Restoring
-            # the transparency an unisolated row's activation scope already has
-            # fixes dispatch, tools, prompt sections, fs screens and skills
-            # together, because they all ask `reaches`.
+            # and not who can see what it registers. But the scope inherits the
+            # isolation of the realm, so `reaches` found that it was an ancestor
+            # of no dispatch target, and every registry answered "nobody". This
+            # restores the transparency that the activation scope of an
+            # unisolated row already has. That fixes dispatch, tools, prompt
+            # sections, fs screens and skills together, because they all ask
+            # `reaches`.
             #
-            # `provide` is unaffected — it goes through `_provide_to`, still the
-            # realm — and `isolation_chain()` walks *parents*, so a lookup from
-            # here still finds the realm first.
+            # `provide` is unaffected: it goes through `_provide_to`, which is
+            # still the realm. `isolation_chain()` walks *parents*, so a lookup
+            # from here still finds the realm first.
             parent = owner._parent
             scope._isolation = parent._isolation if parent is not None else None
         return scope
@@ -1125,25 +1200,29 @@ class Context:
     def owner_for(self, scope: Context | None = None) -> Context:
         """Whose lifetime a registration made *now* belongs to (I2, P6-12).
 
-        Called as `self.ctx.owner_for(scope)` from a seam, where `self.ctx` is the seam's
-        own context and is therefore the fallback rather than the answer. Three cases, in
-        order:
+        A seam calls this as `self.ctx.owner_for(scope)`. `self.ctx` is the
+        context of the seam itself, so it is the fallback and not the answer.
+        There are three cases, in order:
 
-        * **an explicit `scope=`** — the caller said so, and the only thing that
-          overrides the rest. It means *"register on someone else's lifetime"*;
-        * **the activation scope**, when a row's `apply` is what is running — the scope
-          cordis disposes when the row unmounts, so the registration goes with it;
-        * **this context**, outside any activation: for callers that are not rows at all
-          (a test standing a service up by hand, a mode wiring one directly).
+        * **An explicit `scope=`.** The caller said so, and this is the only
+          thing that overrides the rest. It means *"register on someone else's
+          lifetime"*.
+        * **The activation scope**, when the `apply` of a row is what is running.
+          Cordis disposes that scope when the row unmounts, so the registration
+          goes with it.
+        * **This context**, outside any activation. This is for callers that are
+          not rows at all: a test that sets a service up by hand, or a mode that
+          wires one directly.
 
-        **This does not take a `Boundary`** (P6-32): `None` here resolves through
-        `_ACTIVATING` to whoever is running, which is the *narrowest* correct answer, not
-        "give me everything".
+        **This does not take a `Boundary`** (P6-32). `None` here resolves through
+        `_ACTIVATING` to whoever is running, which is the *narrowest* correct
+        answer and not "give me everything".
 
-        **A disposed activation scope declines, and says so.** Contextvars propagate into
-        tasks spawned from `apply`, so a background task registering after its row
-        unmounted would otherwise leak quietly onto the seam. That is the only branch
-        here that fails open, and §5 rule 6 wants it visible where it happens.
+        **A disposed activation scope declines, and logs a warning.** Contextvars
+        propagate into tasks spawned from `apply`. A background task that
+        registers after its row unmounted would otherwise leak silently onto the
+        seam. That is the only branch here that fails open, and §5 rule 6
+        requires that it is visible where it happens.
         """
         if scope is not None:
             return scope
@@ -1162,30 +1241,35 @@ class Context:
         return self
 
     def layer_for(self, scope: Context | None = None) -> Context:
-        """Which scope a registration is *visible to* — the other question (P6-12).
+        """Which scope a registration is *visible to*: the other question (P6-12).
 
-        Separate from `owner_for` because they are different questions that used to have
-        the same answer. Visibility is `scope or this context`, and deliberately *not*
-        the activating row: moving it would change what an agent can see (B7) rather than
-        when a registration goes away.
+        It is separate from `owner_for` because the two are different questions
+        that used to have the same answer. A change to this answer changes what
+        an agent can see (B7), and not when a registration goes away. Visibility
+        is the explicit `scope`, then the layer of the running binding, then this
+        context.
 
-        **It does not take a `Boundary` either** (P6-32), for `owner_for`'s reason: both
-        are dispatch-time *resolvers* reading `_ACTIVATING`, where a `Boundary` parameter
-        is a caller **stating** something. `None` means "ask the binding".
+        **It does not take a `Boundary` either** (P6-32), for the same reason as
+        `owner_for`. Both are dispatch-time *resolvers* that read `_ACTIVATING`,
+        and a `Boundary` parameter is a caller **stating** something. `None`
+        means "ask the binding".
 
-        **It follows the running binding, and `isolation` is why that is safe** (P6-26).
-        A row's activation scope is not isolated, so it inherits the mount's and a root
-        row's registration still lands on the global layer. An agent's scope *is* its own
-        isolation, so a body running for an agent lands on that agent's layer — which is
-        the containment P6-27 made structural, and the last way to escape it was a tool
-        body inside a contained child installing globally visible tools.
+        **It follows the running binding, and `isolation` makes that safe**
+        (P6-26). The activation scope of a row is not isolated, so it inherits
+        the isolation of the mount, and the registration of a root row still
+        lands on the global layer. The scope of an agent *is* its own isolation,
+        so a body that runs for an agent lands on the layer of that agent. That
+        is the containment that P6-27 made structural. The last way to escape it
+        was a tool body inside a contained child that installed globally visible
+        tools.
 
-        **The disposed branch fails open and deliberately does not warn.** Falling back
-        to `self` means the global layer, so a body that outlived its scope registers
-        something the whole deployment can see — the mirror of `owner_for`'s fail-open,
-        in B7's direction. Silent because all five call sites ask `owner_for` about the
-        same `scope` a line or two later, and that is where it is logged; two lines for
-        one registration makes the honest one easier to miss.
+        **The disposed branch fails open and deliberately does not warn.** The
+        fallback to `self` means the global layer, so a body that outlived its
+        scope registers something that the whole deployment can see. This
+        mirrors the fail-open of `owner_for`, in the direction of B7. It is
+        silent because every call site also asks `owner_for` about the same
+        `scope`, and `owner_for` logs the case. Two log lines for one
+        registration make the line that matters easier to miss.
         """
         if scope is not None:
             return scope
@@ -1196,15 +1280,17 @@ class Context:
         return layer if layer.active else self
 
     def running_for(self, scope: Context | None = None) -> Running:
-        """Both answers at once, for a registry that has to *record* them (P6-29).
+        """Both answers in one call, for a registry that must *record* them
+        (P6-29).
 
-        **Every site that needs both should ask once**, because `owner_for` logs when the
-        activation scope it would return has already been disposed, and two calls for one
-        registration make that warning audible twice.
+        **Every site that needs both should ask one time.** `owner_for` logs when
+        the activation scope that it would return has already been disposed, and
+        two calls for one registration log that warning twice.
 
-        It matters most for a registry that will invoke the body *later*, which must keep
-        both until then: two fields on its own record is two things to hold in step, and
-        the failure mode is silent. One object cannot be half-updated.
+        This matters most for a registry that will invoke the body *later*, which
+        must keep both answers until then. Two fields on its own record are two
+        things to hold in step, and the failure is silent. One object cannot be
+        half-updated.
         """
         return Running(self.owner_for(scope), self.layer_for(scope))
 
@@ -1212,29 +1298,33 @@ class Context:
     def current_owner() -> Context | None:
         """Whose *lifetime* the running code belongs to, or `None` (P6-12).
 
-        **The owner a seam registration defaults to.** Cordis builds the right scope in
-        `_activation_scope` and hands it to `apply`, but a seam only ever saw `ctx`, so
-        `ctx.commands.register(...)` gave the registry no way to know who was calling and
-        every seam defaulted the owner to its *own* context — making a row's
-        registration an effect of the **seam**, outliving the row that made it.
+        **This is the owner that a seam registration defaults to.** Cordis builds
+        the right scope in `_activation_scope` and passes it to `apply`, but a
+        seam only ever saw `ctx`. `ctx.commands.register(...)` therefore gave the
+        registry no way to know who was calling, and every seam defaulted the
+        owner to its *own* context. That made the registration of a row an effect
+        of the **seam**, and the registration outlived the row that made it.
 
-        A `ContextVar` rather than a parameter threaded through forty signatures, because
-        the answer is a property of *who is running*, not of what they are asking for —
-        and the seam methods are the API rows use, which cannot grow a mandatory
-        argument.
+        It is a `ContextVar` and not a parameter threaded through forty
+        signatures. The answer is a property of *who is running*, and not of what
+        they ask for. The seam methods are also the API that rows use, and that
+        API cannot gain a mandatory argument.
 
-        **It answers "whose code is running", across both ways cordis runs any** (P6-25):
-        an `apply` binds its activation scope, and a dispatch binds the scope that
-        registered the listener. So a registration belongs to the row that made it
-        whether that row is being mounted, is handling another row's event, or is
-        handling one fired long after every `apply` returned.
+        **It answers "whose code is running", for both ways in which cordis runs
+        code** (P6-25). An `apply` binds its activation scope, and a dispatch
+        binds the scope that registered the listener. A registration therefore
+        belongs to the row that made it in all three cases: the row is being
+        mounted, it is handling the event of another row, or it is handling an
+        event fired long after every `apply` returned.
 
-        Contextvars propagate into tasks, so a coroutine spawned from a bound callback
-        carries the binding; `Context.owner_for` declines a *disposed* scope and warns.
+        Contextvars propagate into tasks, so a coroutine spawned from a bound
+        callback carries the binding. `Context.owner_for` declines a *disposed*
+        scope and warns.
 
-        **What is bound and what still runs unbound is enumerated by introspection**,
-        and the enumeration fails on anything unclassified — so that list is checked
-        rather than believed, and this docstring does not keep a second copy of it.
+        **Introspection enumerates what is bound and what still runs unbound**,
+        and the enumeration fails on anything unclassified. That list is
+        therefore checked and not only believed, and this docstring does not keep
+        a second copy of it.
         """
         activating = _ACTIVATING.get()
         return activating.owner if activating is not None else None
@@ -1243,14 +1333,15 @@ class Context:
     def current_layer() -> Context | None:
         """Which scope the running code is *visible to*, or `None` (P6-29).
 
-        The other half of `current_owner` above, and equal to it for everything
-        cordis itself runs: an `apply` and a listener each run as one scope, so
-        both readers answer the same object and the distinction costs nothing to
-        carry. It is a registry-invoked body that separates them — a tool's
-        `execute` is the registering row's code (`current_owner`) run for one
-        agent (`current_layer`) — and `Context.layer_for` is where that answer is
-        actually consumed. This exists so a *test* can ask the question a body
-        can otherwise only ask by registering something and seeing where it went.
+        This is the other half of `current_owner` above. The two are equal for
+        everything that cordis itself runs: an `apply` and a listener each run as
+        one scope, so both readers return the same object and the distinction
+        costs nothing to carry. A body that a registry invokes separates them:
+        the `execute` of a tool is the code of the registering row
+        (`current_owner`), run for one agent (`current_layer`).
+        `Context.layer_for` is where that answer is used. This method exists so
+        that a *test* can ask the question. A body can otherwise ask it only by
+        registering something and looking at where it went.
         """
         activating = _ACTIVATING.get()
         return activating.layer if activating is not None else None
@@ -1266,20 +1357,22 @@ class Context:
 
     @property
     def plugin_name(self) -> str:
-        """The mounted plugin this scope belongs to, or `""` outside one.
+        """The mounted plugin that this scope belongs to, or `""` outside one.
 
-        A field rather than a parse of `label`: the label is prose for a person
-        reading a tree, and a name a decision is keyed on should not depend on
-        how that prose is spelled."""
+        It is a field and not a parse of `label`. The label is prose for a person
+        who reads a tree, and a name that a decision is keyed on must not depend
+        on how that prose is spelled."""
         return self._plugin
 
     @property
     def row_id(self) -> str:
-        """The profile row this scope belongs to, or `""` outside one — stamped by the
-        loader beside `plugin_name` and inherited the same way, so a registry can
-        say which row gave what it holds (an assigned child's narrowing, S7b)
-        without walking up to the mount. A private copy mounted in a row's realm is
-        that row's: it exists because the row isolates."""
+        """The profile row that this scope belongs to, or `""` outside one.
+
+        The loader stamps it beside `plugin_name`, and it is inherited the same
+        way. A registry can therefore say which row gave what it holds (the
+        narrowing of an assigned child, S7b) and does not need to walk up to the
+        mount. A private copy mounted in the realm of a row belongs to that row:
+        it exists because the row isolates."""
         return self._row
 
     @property
@@ -1288,13 +1381,13 @@ class Context:
 
     @property
     def children(self) -> tuple[Context, ...]:
-        """The scopes this one will unwind, in creation order.
+        """The scopes that this one will unwind, in creation order.
 
-        A copy, not the list: `dispose` iterates `_children` and clears it, so a
-        caller holding the live list would be mutating the unwind underneath it.
-        The read-only counterpart of `parent`, and the other half of what a walk
-        of the tree needs — `scope_invariant` is the caller, and it exists to
-        find a scope this list should no longer contain.
+        It is a copy and not the list. `dispose` iterates `_children` and clears
+        it, so a caller that held the live list would mutate the unwind while it
+        ran. This is the read-only counterpart of `parent`, and the other half of
+        what a walk of the tree needs. `scope_invariant` is the caller, and it
+        exists to find a scope that this list should no longer contain.
         """
         return tuple(self._children)
 
@@ -1305,15 +1398,16 @@ class Context:
 
     @property
     def abandoned(self) -> tuple[Abandoned, ...]:
-        """Unwinds in this tree that were cut short, oldest first.
+        """The unwinds in this tree that were cut short, oldest first.
 
-        A tree-wide fact read from any scope, because the record is on the shared
-        runtime — the scope it describes is gone by the time the entry exists.
-        Empty is the ordinary answer and the one a healthy process keeps.
+        This is a fact about the whole tree that can be read from any scope. The
+        record is on the shared runtime, because the scope that it describes is
+        gone by the time the entry exists. An empty tuple is the ordinary answer,
+        and a healthy process keeps it.
 
-        A copy, for `children`'s reason: the list is appended to from
-        `_leave_tree`, which runs in a `finally` during cancellation, and a
-        caller iterating the live list would be walking it as it grew.
+        It is a copy, for the same reason as `children`. `_leave_tree` appends to
+        the list, and it runs in a `finally` during cancellation. A caller that
+        iterated the live list would walk it while it grew.
         """
         return tuple(self._runtime.abandoned)
 
@@ -1323,12 +1417,13 @@ class Context:
         return self._runtime.abandoned_dropped
 
     def descendants(self) -> Iterator[Context]:
-        """Every scope beneath this one, itself first, with a cycle guard.
+        """Every scope beneath this one, with this one first, and with a cycle
+        guard.
 
-        The one tree walk, for `Mount.topology` and `scope_invariant` alike. The
-        guard matters for the second caller: a tampered tree is exactly what a
-        health check is asked to report on, and a walk that hung there would
-        take `phern doctor` down with it.
+        This is the one tree walk, for both `Mount.topology` and
+        `scope_invariant`. The guard matters for the second caller. A tampered
+        tree is exactly what a health check must report on, and a walk that hung
+        there would stop `phern doctor` too.
         """
         seen: set[int] = set()
         pending = [self]
@@ -1360,19 +1455,21 @@ class Context:
 
     @property
     def isolation(self) -> Context | None:
-        """The scope a registration made here belongs to; `None` for global.
+        """The scope that a registration made here belongs to, or `None` for
+        global.
 
-        The key every scoped registry (tools, prompt sections) files a
-        registration under, so "who can see this" is one question with one
-        answer. A plugin's activation scope is transparent and answers `None`.
+        Every scoped registry (tools, prompt sections) files a registration under
+        this key, so "who can see this" is one question with one answer. A
+        plugin's activation scope is transparent and answers `None`.
         """
         return self._isolation
 
     def isolation_chain(self) -> list[Context | None]:
-        """This context's isolation scopes, most specific first, ending in `None`.
+        """The isolation scopes of this context, most specific first, ending in
+        `None`.
 
-        A scoped registry walks this to resolve a name: the innermost scope that
-        registered one wins, and the global layer is consulted last.
+        A scoped registry walks this chain to resolve a name. The innermost scope
+        that registered the name wins, and the global layer is consulted last.
         """
         chain: list[Context | None] = []
         for node in self._chain():
@@ -1383,11 +1480,12 @@ class Context:
         return chain
 
     def reaches(self, target: Context) -> bool:
-        """Whether a registration made here applies to work happening in `target`.
+        """Whether a registration made here applies to work that happens in
+        `target`.
 
-        The one visibility rule, shared by event dispatch and by every scoped
-        registry (tools, prompt sections): a global registration reaches
-        everything, an agent-scoped one reaches that agent alone.
+        This is the one visibility rule, shared by event dispatch and by every
+        scoped registry (tools, prompt sections). A global registration reaches
+        everything, and an agent-scoped one reaches that agent alone.
         """
         return self._isolation is None or self._isolation.is_ancestor_of(target)
 
@@ -1402,15 +1500,16 @@ class Context:
     @overload
     def provide(self, key: str, service: object) -> Disposer: ...
     def provide(self, key: str | ServiceKey[Any], service: object) -> Disposer:
-        """Claim `ctx.<key>` for `service` in this context's provisioning realm.
+        """Claim `ctx.<key>` for `service` in the provisioning realm of this
+        context.
 
-        Returns a disposer registered as an effect of the calling scope, so the
-        service unregisters when its plugin unloads (invariant I2).
+        It returns a disposer that is registered as an effect of the calling
+        scope, so the service unregisters when its plugin unloads (invariant I2).
 
-        **Overloaded on the key, and the typed arm is where a seam's contract is
-        checked.** `provide(LLM, adapter)` refuses anything that is not an
-        `LlmRuntime` at type-check time; the `str` arm takes an `object`, as it
-        always did, for the caller that has only a name.
+        **It is overloaded on the key, and the typed arm checks the contract of a
+        seam.** `provide(LLM, adapter)` refuses anything that is not an
+        `LlmRuntime` at type-check time. The `str` arm takes an `object`, as it
+        always did, for a caller that has only a name.
         """
         self._assert_active()
         name = service_name(key)
@@ -1445,11 +1544,11 @@ class Context:
     @overload
     def get(self, key: str, default: object = None) -> Any: ...  # noqa: ANN401
     def get(self, key: str | ServiceKey[Any], default: object = None) -> Any:
-        """The service under `key`, or `default` — the optional read.
+        """The service under `key`, or `default`. This is the optional read.
 
-        Typed through the key: `ctx.get(ATTACHMENTS)` is an `AttachmentStore |
-        None`, so the `if store is None` a caller writes next is checked rather
-        than habitual.
+        It is typed through the key: `ctx.get(ATTACHMENTS)` is an
+        `AttachmentStore | None`. The `if store is None` that a caller writes
+        next is therefore checked, and is not only a habit.
         """
         value = self._provision(service_name(key))
         return default if value is _MISSING else value
@@ -1462,12 +1561,14 @@ class Context:
     @overload
     def require(self, key: str) -> Any: ...  # noqa: ANN401
     def require(self, key: str | ServiceKey[Any]) -> Any:
-        """The service under `key`, or `ServiceNotFoundError` — the required read.
+        """The service under `key`, or `ServiceNotFoundError`. This is the
+        required read.
 
-        The typed spelling of `ctx.llm`: same lookup, same refusal, and the
-        result is an `LlmRuntime` rather than `Any`. Named for what it does on
-        absence — the seams' own `require()` methods set the precedent — so a
-        reader can tell a call that may get `None` (`get`) from one that cannot.
+        It is the typed read of a seam such as `ctx.llm`: `require(LLM)` returns
+        an `LlmRuntime` and not `Any`. It is named for what it does when the
+        service is absent, and the `require()` methods of the seams set the
+        precedent. A reader can therefore tell a call that can get `None` (`get`)
+        from one that cannot.
         """
         name = service_name(key)
         value = self._provision(name)
@@ -1478,17 +1579,20 @@ class Context:
     # -------------------------------------------------------------- effects --
 
     def add_disposer(self, dispose: Disposer, *, label: str = "") -> Releaser:
-        """Register an already-acquired teardown as an effect of this scope.
+        """Register a teardown that is already acquired as an effect of this
+        scope.
 
-        The `Releaser` handed back runs it early, or drops it unrun.
+        The `Releaser` that it returns runs the teardown early, or drops it
+        without running it.
 
-        **Refused once the scope is down, though its unwind may still be running**,
-        and callers count on that: a subagent spawned under a parent that went away
-        turns this refusal into its coded `parent_went_away`. Accepted mid-unwind,
-        the child would be built into the dying scope and torn down at once, with
-        the spawn reporting a run. `_hold`, which every held `detach` goes
-        through, is the one registration that joins an unwind under way; its
-        docstring says why.
+        **It is refused when the scope is down, even if the unwind of the scope
+        still runs**, and callers depend on that. A subagent spawned under a
+        parent that went away turns this refusal into its coded
+        `parent_went_away`. If the registration were accepted in the middle of an
+        unwind, the child would be built into the dying scope and torn down at
+        once, and the spawn would report a run. `_hold`, which every held
+        `detach` goes through, is the one registration that joins an unwind that
+        is under way. Its docstring gives the reason.
         """
         self._assert_active()
         return Releaser(_register(dispose, label, self._homes))
@@ -1498,30 +1602,33 @@ class Context:
     ) -> Releaser:
         """Acquire an artifact and register its release as an effect.
 
-        Every external artifact an agent takes — a child process, a worktree, a
-        temp path, a lock — is acquired through here, so cleanup is structural
-        rather than remembered (§4.9, invariant I2).
+        Every external artifact that an agent takes (a child process, a worktree,
+        a temp path, a lock) is acquired through here. Cleanup is therefore
+        structural and not remembered (§4.9, invariant I2).
 
-        **An artifact acquired into a scope that died mid-acquire is released
-        here rather than leaked.** `enter()` is awaited, and a `dispose()` on
-        another task can land inside that await, so the registration below would
-        refuse a disposer for a thing that already exists — the one window where
-        I2's "everything unwinds" turned on timing. Releasing it at once is the
-        only answer left: this scope's effect list has already drained, so an
-        entry added to it now is an entry nothing will ever run.
+        **An artifact acquired into a scope that died during the acquire is
+        released here and not leaked.** `enter()` is awaited, and a `dispose()`
+        on another task can land inside that await. The registration below would
+        then refuse a disposer for a thing that already exists. That was the one
+        window in which the "everything unwinds" of I2 depended on timing. To
+        release the artifact at once is the only answer left. The effect list of
+        this scope has already drained, so nothing would ever run an entry that
+        is added to it now.
 
-        **Shielded**, for `dispose`'s own reason one layer down. The cancellation
-        that disposed the scope is usually still pending, so an unshielded
-        release would strand precisely the artifact this branch exists to rescue.
+        **The release is shielded**, for the same reason as in `dispose`, one
+        layer down. The cancellation that disposed the scope is usually still
+        pending, so an unshielded release would strand exactly the artifact that
+        this branch exists to rescue.
 
-        A release that itself raises is logged and the refusal still raised, as
-        in `_unwind`: one situation answers with one exception, and the caller
-        can act on neither the disposer's failure nor this one.
+        A release that itself raises is logged, and the refusal is still raised,
+        as in `_unwind`. One situation gets one exception, and the caller can act
+        on neither the failure of the disposer nor this one.
 
-        The one property this cannot keep is LIFO order — the effects registered
-        before it have already run — so an artifact whose release depends on one
-        of them is released after that one is gone. Nothing better is available
-        once the scope is down, and it is still strictly ahead of the leak.
+        The one property that this cannot keep is LIFO order, because the effects
+        registered before it have already run. An artifact whose release depends
+        on one of them is therefore released after that one is gone. Nothing
+        better is available when the scope is down, and it is still strictly
+        better than the leak.
         """
         self._assert_active()
         dispose = await maybe_await(enter())
@@ -1547,17 +1654,19 @@ class Context:
     def scope(self, label: str = "scope", *, module: str = "") -> Context:
         """Create an isolated child scope that owns its own registrations.
 
-        Used for `agent.ctx`: a registration made on the child shadows the
-        global one for that agent alone, and its listeners hear only that agent.
+        This is used for `agent.ctx`. A registration made on the child shadows
+        the global one for that agent alone, and its listeners hear only that
+        agent.
         """
         self._assert_active()
         # `Context.__init__` appends to `self._children`, and `dispose` already
-        # cascades over those *before* its own effects — so an `add_disposer`
-        # here would be a second copy of the same teardown, and one `dispose`
-        # never releases: the effect stays on the parent with `done=False` for
-        # the parent's whole life, pinning every child that ever finished.
-        # Measured at 1.0 KB per settled child, unbounded, and since P6-27 the
-        # parent it pins is a live agent rather than the registry.
+        # cascades over the children *before* its own effects. An `add_disposer`
+        # here would therefore be a second copy of the same teardown, and one
+        # that `dispose` never releases. The effect would stay on the parent with
+        # `done=False` for the whole life of the parent, and keep alive every
+        # child that ever finished. This was measured at 1.0 KB for each settled
+        # child, with no bound. Since P6-27 the parent it pins is a live agent
+        # and not the registry.
         child = Context(self, label=label, module=module or self._module, isolated=True)
         return child
 
@@ -1566,13 +1675,14 @@ class Context:
     ) -> ForkScope:
         """Mount `plugin` as a child fork of this context.
 
-        The fork's `apply` runs only once every key in its `inject` list
-        resolves from this context — the load order is expressed through
-        service requirements, never through file order.
+        The `apply` of the fork runs only when every key in its `inject` list
+        resolves from this context. The load order is expressed through service
+        requirements, and never through file order.
 
-        `transparent` is the loader's, for an isolating row mounted into its own
-        realm (A9): see `_Dependent.transparent`. It is **not** for the private
-        copies mounted beside it, whose invisibility is the isolation working.
+        `transparent` belongs to the loader, for an isolating row mounted into
+        its own realm (A9). See `_Dependent.transparent`. It is **not** for the
+        private copies mounted beside that row, whose invisibility is the
+        isolation doing its work.
         """
         self._assert_active()
         return ForkScope(self, normalize_plugin(plugin), config, transparent=transparent, row=row)
@@ -1584,10 +1694,10 @@ class Context:
         *,
         label: str = "inject",
     ) -> Disposer:
-        """Run `fn(scope)` once every key in `keys` is available.
+        """Run `fn(scope)` when every key in `keys` is available.
 
-        `fn` receives a fresh child scope; when any key disappears that scope is
-        disposed, and it is re-created when the key returns.
+        `fn` receives a fresh child scope. When any key disappears, that scope is
+        disposed. It is created again when the key returns.
         """
         _, release = self._register_dependent(keys, fn, label=label)
         return release
@@ -1622,8 +1732,8 @@ class Context:
     async def reconcile(self) -> None:
         """Settle the plugin tree: activate what is ready, deactivate what is not.
 
-        Runs to a fixpoint, because activating one plugin may provide the
-        service another was waiting on.
+        It runs to a fixpoint, because the activation of one plugin can provide
+        the service that another plugin was waiting for.
         """
         runtime = self._runtime
         for _ in range(_MAX_RECONCILE_ROUNDS):
@@ -1641,19 +1751,19 @@ class Context:
                     dependent.ever_active = True
                     runtime.dirty = True
                     # Bound around the activation, and released on the way out
-                    # rather than left to the task ending: `reconcile` activates
-                    # every ready dependent in one loop on one task, so a token
-                    # left behind would make the next row's registrations land on
-                    # the previous row's scope (P6-12).
+                    # and not when the task ends. `reconcile` activates every
+                    # ready dependent in one loop on one task, so a token left
+                    # behind would make the registrations of the next row land
+                    # on the scope of the previous row (P6-12).
                     with running(scope):
                         try:
                             await maybe_await(dependent.activate(scope))
                         except BaseException as error:
                             # Recorded *before* the unwind, so a `deactivate`
-                            # that fails in turn cannot lose the reason the
-                            # activation failed — and so `ready()` is already
-                            # false by the time `deactivate` marks the tree
-                            # dirty, which is what keeps this from being retried.
+                            # that also fails cannot lose the reason that the
+                            # activation failed. `ready()` is then already false
+                            # when `deactivate` marks the tree dirty, and that
+                            # keeps this activation from being retried.
                             dependent.failure = f"{type(error).__name__}: {error}"
                             await maybe_await(dependent.deactivate())
                             raise
@@ -1667,43 +1777,47 @@ class Context:
         )
 
     async def dispose(self, *, deadline: float | None = None) -> None:
-        """Unwind this scope: children first, then own effects LIFO.
+        """Unwind this scope: children first, then its own effects in LIFO order.
 
-        The order is load-bearing for anything that registers an effect *about* a
-        child — a subagent's tombstone, a supervisor's bookkeeping — because such
-        an effect runs after that child's scope is already gone. See
-        `ph_rlm.subagents._release`, which is exactly that shape.
+        The order matters for anything that registers an effect *about* a child
+        (the tombstone of a subagent, the bookkeeping of a supervisor), because
+        such an effect runs after the scope of that child is already gone. See
+        `ph_rlm.subagents._release`, which has exactly that shape.
 
-        **Leaving the tree is guaranteed, whatever the unwind does** (I2). Every
-        `await` below can be canceled, and `CancelledError` is a `BaseException`
-        that the effect loop's `except Exception` deliberately does not catch — so
-        without the `finally` a cancellation partway through left this scope
-        `_active=False`, still in its parent's `_children`, still holding its
-        services, and unretryable, because the early return above makes a second
-        `dispose()` a no-op. That state is a leak of everything beneath it, and it
-        is the one path a live process can reach it by.
+        **The scope always leaves the tree, whatever the unwind does** (I2).
+        Every `await` below can be canceled, and `CancelledError` is a
+        `BaseException` that the `except Exception` of the effect loop
+        deliberately does not catch. Without the `finally`, a cancellation
+        partway through left this scope with `_active=False`, still in the
+        `_children` of its parent, and still holding its services. The scope also
+        could not be retried, because the early return of `dispose` makes a
+        second `dispose()` a no-op. That state leaks everything beneath the
+        scope, and a cancellation is the one path by which a live process can
+        reach it.
 
-        **Shielded, so an outside cancellation cannot strand the teardown it
-        interrupted** — the larger half of the same failure. Until this was here,
-        a Ctrl-C or a task group closing during unwind abandoned every effect
-        after the one in flight: the worktree unlinked but the child unreaped, the
-        lease held, and a `log.warning` nobody handled. `ph.resources` had
-        hand-rolled exactly this around its own `ctx.dispose()`; every other
-        caller — the agent registry, the loader, `ph_app.runtime.mounted`, and the
-        recursive call below — had nothing.
+        **The unwind is shielded, so an outside cancellation cannot strand the
+        teardown that it interrupted.** This is the larger half of the same
+        failure. Before the shield was here, a Ctrl-C or a task group that closed
+        during the unwind abandoned every effect after the one in flight: the
+        worktree was unlinked but the child was not reaped, the lease was still
+        held, and nobody handled the `log.warning`. `ph.resources` had
+        hand-written exactly this shield around its own `ctx.dispose()`. Every
+        other caller had nothing: the agent registry, the loader,
+        `ph_app.runtime.mounted`, and the recursive call below.
 
-        **A deadline and not a bare shield**, for `daemon/server.py`'s reason: a
-        root that will not unwind must not become a process that will not exit. So
-        a disposer that hangs still loses the effects behind it once the budget is
-        spent — recorded by `_leave_tree`, which is the case the abandonment
-        ledger genuinely exists for now that cancellation is handled here.
+        **It is a deadline and not a bare shield**, for the reason that
+        `daemon/server.py` gives: a root that will not unwind must not become a
+        process that will not exit. A disposer that hangs therefore still loses
+        the effects behind it when the budget is spent. `_leave_tree` records
+        them. Now that cancellation is handled here, that is the case that the
+        abandonment ledger exists for.
 
-        **`deadline` is how a caller spends one budget over several trees.** A
-        tree handed none takes `GRACE_SECONDS` from now, and nested scopes inherit
-        it through `_Runtime.unwind_deadline`, so one unwind is one budget however
-        deep it goes. What that cannot express is *several roots*, which are
-        several runtimes: a daemon closing ten of them would otherwise spend ten
-        budgets, so it passes one instant to each.
+        **`deadline` lets a caller spend one budget over several trees.** A tree
+        that is given no deadline takes `GRACE_SECONDS` from now. Nested scopes
+        inherit the deadline through `_Runtime.unwind_deadline`, so one unwind is
+        one budget however deep it goes. That cannot express *several roots*,
+        which are several runtimes. A daemon that closes ten of them would
+        otherwise spend ten budgets, so it passes one instant to each.
         """
         if not self._active:
             return
@@ -1715,23 +1829,24 @@ class Context:
             runtime.unwind_deadline = anyio.current_time() + GRACE_SECONDS
         budget = runtime.unwind_deadline
         owns_budget = not _UNWINDING.get()
-        # Set unconditionally: `reset` restores whatever was there, so True over
+        # Set unconditionally. `reset` restores whatever was there, so True over
         # True is a no-op and `owns_budget` stays the one name for the decision.
         token = _UNWINDING.set(True)
         budget_token = _UNWIND_BUDGET.set(budget)
         try:
             if owns_budget:
-                # **Entered once per unwind, not once per scope.** Every nested
-                # `dispose` already runs inside this scope with the same
-                # deadline, so its own would be a second shield against nothing —
-                # measured at +232% on a 341-scope tree, which is the ordinary
-                # shape of a mounted profile going away. `_UNWINDING` is what
-                # makes "nested" mean nested rather than merely "somewhere in
-                # this tree"; see its own note.
+                # **Entered one time for each unwind, and not for each scope.**
+                # Every nested `dispose` already runs inside this scope with the
+                # same deadline, so its own scope would be a second shield
+                # against nothing. That was measured at +232% on a 341-scope
+                # tree, which is the ordinary shape of a mounted profile that
+                # goes away. `_UNWINDING` makes "nested" mean nested, and not
+                # only "somewhere in this tree". See its own note.
                 #
-                # `CancelScope(deadline=)` rather than `move_on_after(delay)`:
-                # the budget is an instant, and a nested call re-deriving a delay
-                # from it would drift by however long the layers above it took.
+                # `CancelScope(deadline=)` and not `move_on_after(delay)`: the
+                # budget is an instant, and a nested call that derived a delay
+                # from it again would drift by the time that the layers above it
+                # took.
                 with anyio.CancelScope(deadline=budget, shield=True):
                     await self._unwind()
             else:
@@ -1744,33 +1859,35 @@ class Context:
             self._leave_tree()
 
     def unwind_by(self, deadline: float) -> None:
-        """Set the instant this tree's unwind must finish by, before it starts.
+        """Set the instant by which the unwind of this tree must finish, before
+        the unwind starts.
 
-        For the caller that disposes several trees and wants **one** budget
-        across them — a daemon closing ten roots, each its own `Context` with its
-        own runtime, each reached through an `AsyncExitStack` that `dispose`'s
-        own `deadline` argument cannot be threaded through. Without this each
-        root took a fresh `GRACE_SECONDS` behind its own shield, so a bound the
-        caller wrote as ten seconds was ten times that.
+        This is for a caller that disposes several trees and wants **one** budget
+        across them. Example: a daemon closes ten roots. Each root is its own
+        `Context` with its own runtime, and each is reached through an
+        `AsyncExitStack`, through which the `deadline` argument of `dispose`
+        cannot be passed. Without this method each root took a fresh
+        `GRACE_SECONDS` behind its own shield, so a bound that the caller wrote
+        as ten seconds was ten times that.
 
-        Idempotent and harmless on a tree that is never disposed: the field is
-        read only by `dispose`.
+        It is idempotent, and harmless on a tree that is never disposed: only
+        `drain` and `dispose` read the field.
         """
         self._runtime.unwind_deadline = deadline
 
     async def _unwind(self) -> None:
-        """Children first, then this scope's own effects, LIFO.
+        """Children first, then the effects of this scope, in LIFO order.
 
-        Split out of `dispose` so the shielded and nested paths share one body
-        rather than one being a copy of the other under a `with`.
+        This is split out of `dispose` so that the shielded path and the nested
+        path share one body, and neither is a copy of the other under a `with`.
         """
         for child in reversed(list(self._children)):
             await child.dispose()
         while self._effects:
-            # Peeked, and popped only once it has actually run. Popping first
-            # made the effect in flight when the budget expired invisible to
-            # `_leave_tree` — the one most likely to be half-done, and the one a
-            # reader most needs named.
+            # Peeked, and popped only after it has run. With a pop first, the
+            # effect that was in flight when the budget expired was invisible to
+            # `_leave_tree`. That effect is the one most likely to be half-done,
+            # and the one whose name a reader needs most.
             effect = self._effects[-1]
             if effect.done:
                 self._effects.pop()
@@ -1779,45 +1896,45 @@ class Context:
             try:
                 await maybe_await(effect.dispose())
             except Exception:
-                # A disposer that raised still ran; what it left behind is its
-                # own business, and the traceback is the account of it.
+                # A disposer that raised still ran. What it left behind is its
+                # own responsibility, and the traceback is the record of it.
                 log.exception("ph.cordis: effect %r failed to dispose", effect.label)
             effect.ran = True
-            # **That effect, not the last one**, and off every scope it sits on. A
-            # `detach` during the await above appends its stop here even though this
-            # scope is down (`_hold`), and a bare `pop()` took that newcomer unrun in
-            # place of this one.
+            # **That effect, and not the last one**, off every scope that it sits
+            # on. A `detach` during the await above appends its stop here even
+            # though this scope is down (`_hold`). A bare `pop()` took that new
+            # effect, which had not run, in place of this one.
             effect.leave()
 
     def _leave_tree(self) -> None:
         """Unlink from the parent and drop what this scope served. Cannot fail.
 
-        Nothing here awaits, which is the property that lets it run in a `finally`
-        during cancellation: an `await` there would re-raise before finishing the
-        job it is there to guarantee.
+        Nothing here awaits. That property lets it run in a `finally` during
+        cancellation: an `await` there would re-raise before it finished the job
+        that it is there to guarantee.
 
-        Not `detach`, which on this class already means the opposite — running a
-        coroutine *outside* the caller's lifetime.
+        The name is not `detach`, which on this class already means the opposite:
+        to run a coroutine *outside* the lifetime of the caller.
 
-        **What was left behind is named, never destroyed.** A non-empty `_effects`
-        or `_children` here means a cancellation cut the unwind short; on the
-        ordinary path both are already empty, since every child unlinks itself
-        here and the effect loop drains as it goes. Those disposers were *already*
-        unreachable through `dispose` before this method existed — the early
-        return above makes a second call a no-op — so nothing that would otherwise
-        have run is lost by arriving here. They stay callable through the
-        `Releaser` `add_disposer` handed out, which is why this reports
-        them and leaves them alone.
+        **What was left behind is named, and never destroyed.** A non-empty
+        `_effects` or `_children` here means that a cancellation cut the unwind
+        short. On the ordinary path both are already empty, because every child
+        unlinks itself here and the effect loop drains as it goes. Those
+        disposers were *already* unreachable through `dispose` before this method
+        existed, because the early return in `dispose` makes a second call a
+        no-op. Nothing that would otherwise have run is therefore lost by
+        arriving here. The disposers stay callable through the `Releaser` that
+        `add_disposer` returned, so this method reports them and does not touch
+        them.
 
-        **Recorded as well as logged**, on the runtime rather than here, because
-        by the last line of this method the scope that could not finish is
-        unreachable from anything — unlinked from its parent, holding services it
-        has dropped — which is exactly why a stranded lease or worktree used to
-        be invisible to everything but a log nobody was reading. `scope_invariant`
-        turns the ledger into a pollable invariant, so `phern doctor` and the
-        daemon's own poll both report it without either learning what an effect
-        is.
-
+        **It is recorded as well as logged**, on the runtime and not here. By the
+        last line of this method nothing can reach the scope that could not
+        finish: it is unlinked from its parent and has dropped its services. That
+        is the reason why a stranded lease or worktree used to be invisible to
+        everything except a log that nobody read. `scope_invariant` turns the
+        ledger into an invariant that can be polled, so `phern doctor` and the
+        poll of the daemon both report it, and neither needs to know what an
+        effect is.
         """
         if self._effects or self._children:
             entry = Abandoned(
@@ -1832,23 +1949,23 @@ class Context:
                 list(entry.outstanding),
             )
             ledger = self._runtime.abandoned
-            # Entries nothing is owed on go first: `outstanding` is derived, so an
-            # entry whose effects were all released afterwards is a record of
-            # history the log already carries, and evicting it before a live one
-            # keeps the cap spent on what a person can still act on.
+            # Entries on which nothing is owed go first. `outstanding` is derived,
+            # so an entry whose effects were all released afterwards is a record
+            # of history that the log already has. Evicting it before a live
+            # entry keeps the cap for what a person can still act on.
             if len(ledger) >= ABANDONED_LEDGER:
                 ledger[:] = [one for one in ledger if one.outstanding or one.unreclaimable]
             ledger.append(entry)
-            # One entry is appended per call and the cap is enforced on every
-            # one, so the ledger can only ever be a single entry over it. A
-            # general slice-and-count here defended a case that cannot arise, and
+            # One entry is appended in each call, and the cap is enforced in each
+            # call, so the ledger can be at most one entry over the cap. A
+            # general slice-and-count here defended a case that cannot occur, and
             # its comment claimed the opposite of the invariant.
             if len(ledger) > ABANDONED_LEDGER:
                 del ledger[0]
                 self._runtime.abandoned_dropped += 1
         self._services.clear()
-        # Breaks the `self -> Running -> self` cycle the memo makes, in the
-        # same breath as the parent/child one below: a context that has been
+        # This breaks the `self -> Running -> self` cycle that the memo makes, at
+        # the same time as the parent/child cycle below. A context that has been
         # disposed and dropped by its parent must not need a gc pass.
         self._running_self = None
         parent = self._parent
@@ -1863,7 +1980,7 @@ class Context:
     ) -> Disposer:
         """Register a listener owned by this scope.
 
-        `prepend` places the listener before existing ones — reserve it for a
+        `prepend` places the listener before the existing ones. Use it only for a
         listener that must run before ordinary registrations. `global_` opts out
         of scope filtering.
         """
@@ -1878,36 +1995,39 @@ class Context:
             hooks.append(hook)
 
         def off() -> None:
-            """Remove **that hook**, not one equal to it (A8).
+            """Remove **that hook**, and not a hook equal to it (A8).
 
             `list.remove` compares with `==`, and two registrations of one
-            callback on one scope are equal by field — so disposing the second
-            deleted the first, and the first's disposer then deleted the
-            survivor. The damage is ordering: with a third listener between
-            them the survivor moves from in front of it to behind, so a listener
-            registered first starts running last, which is the one thing `on`
-            and `prepend` promise.
+            callback on one scope are equal by field. Disposing the second
+            therefore deleted the first, and the disposer of the first then
+            deleted the survivor. The damage is to the order. With a third
+            listener between them, the survivor moves from in front of it to
+            behind it, so a listener that was registered first starts to run
+            last. Order is the one thing that `on` and `prepend` promise.
 
-            `remove_identical`, as `ph.seams._registry.claim_entry` releases. Identity
-            rather than `eq=False` on `Hook`, which would answer this one question
-            by silently changing what equality and hashing mean for the type.
+            It uses `remove_identical`, as `ph.seams._registry.claim_entry` does
+            to release. Identity is used and not `eq=False` on `Hook`, which
+            would answer this one question by silently changing what equality and
+            hashing mean for the type.
             """
             remove_identical(hooks, hook)
 
         return self.add_disposer(off, label=f"on({event})")
 
     def _hooks(self, event: str, *, scope: Context | None = None) -> list[Hook]:
-        """The hook *records* one dispatch would reach, in registration order.
+        """The hook *records* that one dispatch would reach, in registration
+        order.
 
-        Records rather than bare callables, because a `Hook` carries the scope that
-        registered it and `_invoke` needs it: a listener runs as an effect of the row
-        that wrote it (P6-25). There is deliberately no public route that returns bare
-        callables — hand-rolling `for cb in ctx.collect(e)` is a dispatch with no
-        binding.
+        These are records and not bare callables, because a `Hook` carries the
+        scope that registered it, and `_invoke` needs that scope: a listener runs
+        as an effect of the row that wrote it (P6-25). There is deliberately no
+        public route that returns bare callables. A hand-written
+        `for cb in ctx.collect(e)` is a dispatch with no binding.
 
-        **Deliberately a list, not a generator.** `serial` returns out of the loop
-        early, so a generator holding a binding across its `yield` would be closed
-        by the collector on some other task and release the token in the wrong context.
+        **It is deliberately a list and not a generator.** `serial` returns out
+        of the loop early. A generator that held a binding across its `yield`
+        would then be closed by the collector on some other task, and would
+        release the token in the wrong context.
         """
         hooks = self._runtime.hooks.get(event)
         if not hooks:
@@ -1916,23 +2036,23 @@ class Context:
         return [hook for hook in hooks if hook.global_ or hook.ctx.reaches(target)]
 
     def emit(self, event: str, *args: object, scope: Context | None = None) -> None:
-        """Dispatch synchronously, ignoring listener return values.
+        """Dispatch synchronously, and ignore the return values of listeners.
 
         A listener that returns a coroutine is scheduled and not awaited, which
-        is cordis's behavior, as detached work of the scope that registered it:
-        that scope's dispose cancels it if it is still running, and the
-        emitter's own ends nothing. **A listener that raises is logged, and the
-        dispatch goes on**: an emitted event records something that already
-        happened, so no listener may un-happen it, nor keep the listeners after it
-        from hearing it. A listener that must be able to refuse belongs on a
-        `serial` or `waterfall` event, which is where every refusal in the tree
-        already lives.
+        is the behavior of cordis. The coroutine is detached work of the scope
+        that registered the listener: the dispose of that scope cancels it if it
+        still runs, and the dispose of the emitter ends nothing. **A listener
+        that raises is logged, and the dispatch continues.** An emitted event
+        records something that already happened. No listener may undo it, or keep
+        the listeners after it from hearing it. A listener that must be able to
+        refuse belongs on a `serial` or `waterfall` event, which is where every
+        refusal in the tree already is.
 
-        **The mode's rule, not each producer's.** It was a `contained=True` each
-        producer passed, and about half of them never did: a raising listener on
-        `agent/created` left `AgentRegistry.create` raising over an agent it had
-        already registered, and one on `session/created` did the same to a
-        published session.
+        **This is the rule of the mode, and not of each producer.** It was a
+        `contained=True` that each producer passed, and about half of them never
+        did. A raising listener on `agent/created` left `AgentRegistry.create`
+        raising over an agent that it had already registered, and one on
+        `session/created` did the same to a published session.
         """
         event_registry.check(event, "emit")
         for hook in self._hooks(event, scope=scope):
@@ -1964,7 +2084,7 @@ class Context:
     ) -> None:
         """Run every listener concurrently and await all of them.
 
-        Every listener runs even if one fails; the failures are collected and
+        Every listener runs even if one fails. The failures are collected and
         raised together, which is `Promise.allSettled` + `AggregateError`.
         """
         event_registry.check(event, "parallel")
@@ -1994,33 +2114,33 @@ class Context:
     ) -> T:
         """Around-middleware: each listener wraps the rest of the chain.
 
-        Listeners run outermost-first and receive `(*args, next)`. Calling
-        `next()` delegates; returning without calling it vetoes the rest of the
-        chain, `inner` included — that veto is how a policy plugin replaces
-        built-in behavior without the built-in knowing.
+        Listeners run outermost first and receive `(*args, next)`. A call to
+        `next()` delegates. A return without that call vetoes the rest of the
+        chain, `inner` included. That veto is how a policy plugin replaces
+        built-in behavior without the knowledge of the built-in code.
 
-        `next(*replacement)` additionally hands the rest of the chain different
+        `next(*replacement)` also gives the rest of the chain different
         arguments. Cordis expects a listener to mutate a shared payload instead,
-        which is not available here: pH's payloads are frozen values, and a
-        rewrite that has to be explicit is a rewrite a reader can see.
+        which is not possible here: the payloads of pH are frozen values. A
+        rewrite that must be explicit is also a rewrite that a reader can see.
 
-        **The chain's type comes from `inner`.** Every waterfall settles on one
-        type — `agent/pre-step` on a `PreStepDecision`, `approval/request` on an
-        `ApprovalAnswer` — and that type was previously restated by hand at every
-        listener, twenty of them across twelve files, with nothing checking any
-        against the producer.
+        **The type of the chain comes from `inner`.** Every waterfall settles on
+        one type: `agent/pre-step` on a `PreStepDecision`, `approval/request` on
+        an `ApprovalAnswer`. That type was previously restated by hand at every
+        listener, twenty of them across twelve files, and nothing checked any of
+        them against the producer.
 
-        What that buys is asymmetric, and worth being exact about. A *caller's*
-        result is now checked: `T` flows from the `inner` it passed. A
-        *listener's* `Next[T]` is not — `on` takes a `Listener`, so a listener's
-        annotation is what it claims rather than what anything verifies. The
-        convention is one declaration instead of twenty; the checking stops at
-        the producer.
+        The benefit is asymmetric, and it is worth being exact about it. The
+        result of a *caller* is now checked: `T` flows from the `inner` that it
+        passed. The `Next[T]` of a *listener* is not checked: `on` takes a
+        `Listener`, so the annotation of a listener is a claim that nothing
+        verifies. The convention is one declaration in place of twenty, and the
+        checking stops at the producer.
 
-        So an `inner` must declare what the *chain* resolves to rather than what
-        its own default happens to be: `tools/pre-execute` returns an `Allow`
-        while the chain is a four-way `PreToolDecision`, and inferring `T` from
-        the default there would be wrong for every other listener.
+        An `inner` must therefore declare what the *chain* resolves to, and not
+        what its own default happens to be. `tools/pre-execute` returns an
+        `Allow` while the chain is a four-way `PreToolDecision`, and to infer `T`
+        from the default there would be wrong for every other listener.
         """
         value, _ = await self._waterfall(event, args, inner, scope)
         return value
@@ -2032,19 +2152,19 @@ class Context:
         inner: Callable[..., Awaitable[T]],
         scope: Context | None = None,
     ) -> tuple[T, str]:
-        """`waterfall`, and the plugin whose listener produced the answer.
+        """`waterfall`, plus the plugin whose listener produced the answer.
 
         **The producer is the outermost listener that returned something other
-        than what its `next_` gave it** — or that never called `next_`. A
-        listener handing the rest of the chain's answer back unchanged is a
-        pass-through however much it inspected on the way, which is what a
-        policy row that only *might* veto looks like. `""` when the answer is
-        `inner`'s own, or came from a listener registered outside any plugin.
+        than what its `next_` gave it**, or that never called `next_`. A listener
+        that returns the answer of the rest of the chain unchanged is a
+        pass-through, however much it inspected on the way. A policy row that
+        only *might* veto looks like that. The result is `""` when the answer is
+        from `inner` itself, or from a listener registered outside any plugin.
 
-        For a producer that must know *who* decided rather than only *what*:
-        the agent loop counts retries by the row that granted each one (G13),
-        and a row naming itself on its answer was a claim the loop could not
-        check and a second spelling of an id cordis already holds.
+        This is for a producer that must know *who* decided and not only *what*.
+        The agent loop counts retries by the row that granted each one (G13). A
+        row that named itself on its answer made a claim that the loop could not
+        check, and was a second spelling of an id that cordis already holds.
         """
         return await self._waterfall(event, args, inner, scope)
 
@@ -2055,38 +2175,41 @@ class Context:
         inner: Callable[..., Awaitable[T]],
         scope: Context | None,
     ) -> tuple[T, str]:
-        """The chain, and who produced its answer — see `waterfall_attributed`."""
+        """The chain, and who produced its answer. See `waterfall_attributed`."""
         event_registry.check(event, "waterfall")
         hooks = self._hooks(event, scope=scope)
-        # Appended innermost-first as frames unwind, so the last is the answer's.
+        # Appended innermost first as frames unwind, so the last entry is the
+        # producer of the answer.
         producers: list[Hook] = []
 
         async def frame(position: int, *state: object) -> object:
-            """The chain from `position` on. Its own cursor, deliberately (A6).
+            """The chain from `position` on. It has its own cursor on purpose (A6).
 
-            A shared `index` advanced by every `next_` made re-entry silently
-            wrong: a listener that awaited `next_()` twice — which is what a
-            *retry* is — got the whole inner chain the first time and `inner`
-            alone the second, because the cursor was already past everything.
-            No shipped listener does this today (`media-degrade`, `llm-retry`
-            and `permissions-fs` all call it in exclusive branches), which is
-            exactly why it would have been found by the first one that did, in
+            A shared `index` that every `next_` advanced made re-entry silently
+            wrong. A listener that awaited `next_()` twice, which is what a
+            *retry* is, got the whole inner chain the first time and only `inner`
+            the second time, because the cursor was already past everything. No
+            shipped listener does this today (`media-degrade`, `llm-retry` and
+            `permissions-fs` all call it in exclusive branches). For that reason
+            the first listener that did it would have found the defect in
             production, as a policy row that stopped running under retry.
 
-            Recursion gives each frame its own position, so calling `next_`
-            twice runs the rest of the chain twice — the thing a retry means —
-            and a replacement handed down is scoped to the call that passed it
-            rather than mutating a list its siblings also read.
+            Recursion gives each frame its own position. A second call to `next_`
+            therefore runs the rest of the chain a second time, which is what a
+            retry means. A replacement that is passed down is scoped to the call
+            that passed it, and does not mutate a list that its siblings also
+            read.
             """
             if position >= len(hooks):
-                # `inner` is the *producer's* body rather than a listener —
-                # nothing registered it, so it runs under whatever binding the
+                # `inner` is the body of the *producer* and not a listener.
+                # Nothing registered it, so it runs under whatever binding the
                 # caller of `waterfall` already had. That is still true after
-                # P6-26, which bound the bodies a *registry* owns:
-                # `tools/execute`'s inner is one of them and binds itself from
-                # the inside, before calling on. The other thirteen are a seam's
-                # own fallback, which is the row's code and wants the row's
-                # binding — exactly what it inherits here.
+                # P6-26, which bound the bodies that a *registry* owns. The
+                # `inner` of `tools/execute` is one of them, and it binds itself
+                # from the inside before it calls on. The others are the
+                # fallback of a seam itself, which is the code of the row and
+                # needs the binding of the row. That is exactly what it inherits
+                # here.
                 return await inner(*state)
 
             handed: list[object] = []
@@ -2101,40 +2224,42 @@ class Context:
                 producers.append(hooks[position])
             return result
 
-        # The one place the chain's type is unverifiable: `on` takes a
-        # `Listener`, rows load through entry points, so a listener's return is
-        # never seen by this repo's checker. `settled` is where each producer
-        # makes the claim good, and this cast is what lets them state it once
-        # instead of at every listener.
+        # This is the one place where the type of the chain cannot be verified.
+        # `on` takes a `Listener` and rows load through entry points, so the
+        # checker of this repo never sees what a listener returns. `settled` is
+        # where each producer checks the claim, and this cast lets them state it
+        # one time and not at every listener.
         #
-        # Not a `kind=` parameter here: of the fourteen chains only four could
-        # pass a bare `type[T]` and five more a `T | None`, so it would be
-        # omitted at ten and buy none of the can't-forget property that is its
-        # whole point — while letting `T` be solved from two places, which is
-        # what this signature exists to stop.
+        # There is no `kind=` parameter here. Of the sixteen chains only four
+        # could pass a bare `type[T]` and seven more a `T | None`, so it would be
+        # omitted at twelve. It would then give none of the can't-forget property
+        # that is its purpose. It would also let `T` be solved from two places,
+        # which is what this signature exists to stop.
         value = cast("T", await frame(0, *args))
         return value, producers[-1].ctx.plugin_name if producers else ""
 
     def detach(self, coro: Any, *, label: str, at_dispose: AtDispose) -> None:  # noqa: ANN401
-        """Run `coro` outside the caller's lifetime, held, and stopped as `at_dispose` says.
+        """Run `coro` outside the lifetime of the caller. The task is held, and it
+        is stopped as `at_dispose` says.
 
-        For work that must outlive the call that started it and must not be
-        awaited by it: an async `emit` listener, a job running on after the step
-        that started it. The task is held, so "fire and forget" does not mean
-        collected mid-flight, and a failure is logged at its own boundary, because
-        there is no caller left to raise into.
+        This is for work that must outlive the call that started it, and that the
+        call must not await: an async `emit` listener, or a job that runs on
+        after the step that started it. The task is held, so "fire and forget"
+        does not mean that it is collected in mid-flight. A failure is logged at
+        its own boundary, because there is no caller left to raise into.
 
-        **This scope stops it, unless `leave` names another owner.** With `cancel`
-        or `finish` the stop is an effect of this scope, registered now, so it
-        unwinds in the place its start earned: after what this scope took on later,
-        before what it already held. That work is also what `drain()` waits for, so
-        a host's teardown gives it its chance to finish first. `leave` registers no
-        stop and is not drained: a job's owner stops it through its token. Required
-        rather than defaulted, because who stops the work is the one thing a caller
-        of this cannot leave to chance.
+        **This scope stops the work, unless `leave` names another owner.** With
+        `cancel` or `finish`, the stop is an effect of this scope, registered
+        now. It therefore unwinds at the position that its start earned: after
+        what this scope took on later, and before what it already held. `drain()`
+        also waits for that work, so the teardown of a host gives it a chance to
+        finish first. `leave` registers no stop and is not drained: the owner of
+        a job stops it through its token. The argument is required and has no
+        default, because who stops the work is the one thing that a caller of
+        this method cannot leave to chance.
 
-        With no running loop the coroutine is closed rather than leaked, and the
-        drop is logged: a sync host that cannot run it should not silently hold a
+        With no running loop the coroutine is closed and not leaked, and the drop
+        is logged. A sync host that cannot run it should not silently hold a
         never-awaited coroutine either.
         """
         try:
@@ -2152,8 +2277,9 @@ class Context:
         def done(finished: asyncio.Future[Any]) -> None:
             pool.discard(finished)
             if held is not None:
-                # Over, so nothing is owed. Settled rather than released, which
-                # would call the stop: for `finish`, a coroutine nobody awaits.
+                # The task is over, so nothing is owed. It is settled and not
+                # released, because a release would call the stop. For `finish`,
+                # that stop is a coroutine that nobody awaits.
                 held.settle()
             if not finished.cancelled() and finished.exception() is not None:
                 log.error("ph.cordis: detached %s failed", label, exc_info=finished.exception())
@@ -2163,14 +2289,16 @@ class Context:
     def _hold(
         self, task: asyncio.Future[Any], at_dispose: Literal["cancel", "finish"], label: str
     ) -> _Effect:
-        """Make stopping `task` this scope's newest effect, whether it is active or not.
+        """Make the stop of `task` the newest effect of this scope, whether the
+        scope is active or not.
 
-        Not `add_disposer`, which refuses a scope that is down — and a scope's
-        listeners still hear events while its children unwind, because their
-        `off` runs with the effects after them. A refusal there raised out of
-        `emit` into whatever was being disposed; appended instead, the stop runs
-        in the unwind already under way. Past an unwind cut short by its deadline
-        nothing runs it, and the task goes on as it always did.
+        It does not use `add_disposer`, which refuses a scope that is down. The
+        listeners of a scope still hear events while its children unwind, because
+        their `off` runs with the effects after them. A refusal there raised out
+        of `emit` into whatever was being disposed. Appended instead, the stop
+        runs in the unwind that is already under way. After an unwind that its
+        deadline cut short, nothing runs the stop, and the task continues as it
+        always did.
         """
         stop: Disposer
         if at_dispose == "cancel":
@@ -2184,64 +2312,69 @@ class Context:
         return _register(stop, label, self._homes)
 
     async def drain(self) -> None:
-        """Await the detached work this tree stops itself: async `emit` listeners,
-        and every `detach()` but `leave`'s.
+        """Await the detached work that this tree stops itself: async `emit`
+        listeners, and every `detach()` except one with `leave`.
 
-        **Not `leave`'s, because its owner's stop costs nothing a wait would save.**
-        A job's owner stops it in `dispose`: a child is suspended with its inbox and
-        resumed later, a refinement writes nothing and is considered again at the
-        next turn. Waiting here was five seconds of every teardown with a job
-        running, spent on work that rarely finishes in them (a refinement is a
-        review call and a plan call, minutes on a local model) and is stopped the
-        same way afterwards. A listener is different: its scope's cancel loses
-        what it was doing, so the wait is its one chance to finish.
+        **It does not wait for `leave` work, because the stop by the owner loses
+        nothing that a wait would save.** The owner of a job stops it in
+        `dispose`. A child is suspended with its inbox and resumed later. A
+        refinement writes nothing and is considered again at the next turn. A
+        wait here was five seconds of every teardown with a job running. Those
+        seconds were spent on work that rarely finishes in them (a refinement is
+        a review call and a plan call, minutes on a local model) and that is
+        stopped the same way afterwards. A listener is different: the cancel of
+        its scope loses what it was doing, so the wait is its one chance to
+        finish.
 
-        **Shielded and bounded, exactly as `dispose` is and for its reason.** The
-        two are called as a pair by a host unwinding a mount, and `dispose`
-        raises its own shield before its first await — so a bare drain left that
-        pair with an unprotected first half, and a cancellation arriving during
-        it took the whole unwind with it. The protection belongs here rather than
-        around the call: `ph.resources` records what a caller's own scope buys
-        against a self-shielding callee, which is that the outer deadline is
-        inert, and the one host doing it by hand is how a rule gets two
-        spellings.
+        **It is shielded and bounded, exactly as `dispose` is and for the same
+        reason.** A host that unwinds a mount calls the two as a pair, and
+        `dispose` raises its own shield before its first await. A bare drain
+        therefore left that pair with an unprotected first half, and a
+        cancellation that arrived during it took the whole unwind with it. The
+        protection belongs here and not around the call. `daemon/server.py`
+        records what a scope of the caller gives against a callee that shields
+        itself: the outer deadline has no effect. When one host does it by hand,
+        a rule gets two spellings.
 
-        The bound is the other half of the same decision. Waiting on detached
-        work is waiting on somebody else's checkpoint, so a listener that never
-        reaches one would otherwise trade a skipped unwind for a shutdown that
-        never finishes.
+        The bound is the other half of the same decision. To wait for detached
+        work is to wait for the checkpoint of somebody else. A listener that
+        never reaches one would otherwise replace a skipped unwind with a
+        shutdown that never finishes.
 
-        **Its own share, or whatever is left of a budget somebody seeded for the
-        whole teardown, whichever ends sooner.** A shield is opaque to a deadline
-        outside it, so a drain that answered only to `DRAIN_SECONDS` would spend
-        that much *per tree* inside a caller's total — ten roots closing under one
-        ten-second bound could take fifty. `unwind_by` is how that total is
-        declared, and reading it here is what makes the two halves of a teardown
-        add up to it rather than to a multiple of it. The share still applies, so
-        a drain cannot eat an unwind's time either.
+        **The budget is its own share, or what is left of a budget that somebody
+        set for the whole teardown, whichever ends sooner.** A shield is opaque
+        to a deadline outside it. A drain that answered only to `DRAIN_SECONDS`
+        would therefore spend that much *for each tree* inside the total of a
+        caller: ten roots that close under one ten-second bound could take fifty
+        seconds. `unwind_by` declares that total. Because `drain` reads it here,
+        the two halves of a teardown add up to the total and not to a multiple of
+        it. The share still applies, so a drain cannot use up the time of an
+        unwind either.
 
-        **`asyncio.wait`, so the deadline ends the wait and nothing else.**
-        `detach` hands every one of these to `ensure_future`, so they are already
-        running and awaiting them in turn would not serialize anything (measured
-        identical); and `wait` raises nothing a member did, so one listener
-        canceled on its own account does not end the drain for all of them.
-        Failures are logged by the done callback `detach` attached, so nothing is
-        swallowed twice. What is still running at the deadline is left to its
-        owner, whose `dispose` stops it. It was `gather`, which hands its waiter's
-        cancellation to every member and then raises one made from the last of
-        them: a member running an anyio task group (`raced`) took that for its own
-        and returned, the error carried no message, and the scope below let it
-        through to the caller, past the `dispose` behind it.
+        **It uses `asyncio.wait`, so the deadline ends the wait and nothing
+        else.** `detach` passes every one of these to `ensure_future`, so they
+        are already running, and awaiting them in turn would not serialize
+        anything (measured identical). `wait` raises nothing that a member did,
+        so one listener that is canceled on its own account does not end the
+        drain for all of them. The done callback that `detach` attached logs
+        failures, so nothing is swallowed twice. What still runs at the deadline
+        is left to its owner, whose `dispose` stops it. It used to be `gather`.
+        `gather` passes the cancellation of its waiter to every member and then
+        raises one made from the last of them. A member that ran an anyio task
+        group (`raced`) took that cancellation for its own and returned, the
+        error carried no message, and the scope below let it through to the
+        caller, past the `dispose` behind it.
         """
         if not self._runtime.background:
-            # Nothing to wait on, so nothing to protect. The scope below costs a
-            # clock read and about 3 µs to guarantee an empty loop, and this runs
-            # once per unmount and some seventy times across the suite.
+            # There is nothing to wait for, so there is nothing to protect. The
+            # scope below costs a clock read and about 3 µs to guarantee an empty
+            # loop, and this runs one time for each unmount and about seventy
+            # times across the suite.
             return
         if _UNWINDING.get():
-            # Already inside a teardown's shield. That is `dispose`'s rule and
-            # this is its second reader: another scope here would be a shield
-            # against nothing, at the cost `_UNWINDING` records.
+            # Already inside the shield of a teardown. That is the rule of
+            # `dispose`, and this is its second reader. Another scope here would
+            # be a shield against nothing, at the cost that `_UNWINDING` records.
             await self.settled()
             return
         share = anyio.current_time() + DRAIN_SECONDS
@@ -2257,16 +2390,19 @@ class Context:
             _UNWINDING.reset(token)
 
     async def settled(self) -> None:
-        """Wait until the pool `drain` waits on is empty: unbounded and unshielded.
+        """Wait until the pool that `drain` waits for is empty, with no bound and
+        no shield.
 
-        `drain` is this under a shield and a deadline, for a teardown. A caller that
-        wants the wait itself, a test above all, bounds it as it chooses, and a
-        deadline it sets reaches in here, where `drain`'s shield would make it inert
-        and its own deadline would end the wait without saying so.
+        `drain` is this method under a shield and a deadline, for a teardown. A
+        caller that wants the wait itself, most of all a test, bounds it as it
+        chooses. A deadline that the caller sets reaches in here. The shield of
+        `drain` would make that deadline have no effect, and the deadline of
+        `drain` itself would end the wait without a report.
         """
         while self._runtime.background:
             settling = set(self._runtime.background)
             await asyncio.wait(settling)
             # Discarded here as well as by the done callback, so the loop ends on
-            # what this call awaited rather than on when `call_soon` ran them.
+            # what this call awaited and not on when `call_soon` ran the
+            # callbacks.
             self._runtime.background -= settling

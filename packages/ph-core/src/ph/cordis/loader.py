@@ -1,17 +1,19 @@
 """Rows in, plugin tree out.
 
 A pH profile is a list of rows. Each row names one plugin module and carries
-its config. A bundle contributes rows through a **patch** — either an
-`insert:` of new rows or an id-addressed replacement of one row's *whole*
-config. Layers apply in order, last write wins per row, and `--dump-config`
-prints the composed result with the layer each row came from.
+its config. A bundle contributes rows through a **patch**. A patch is either an
+`insert:` of new rows or an entry that addresses one row by id. An entry by id
+replaces the *whole* config of the row, disables the row, removes it, or sets
+its `isolate:`. Layers apply in order, and the last write wins for each row.
+`--dump-config` prints the composed result with the layer that each row came
+from.
 
-Two rules make this data rather than code (D9, invariant I-8):
+Two rules make this data and not code (D9, invariant I-8):
 
-* the only interpolation is `${env:VAR:-default}`;
-* YAML is parsed with a **safe** loader whose implicit-resolver set is
-  narrowed further, so a `!!python/...`-style tag is a load error rather than a
-  call — dsh's `!!js` idiom is deliberately not ported.
+* The only interpolation is `${env:VAR:-default}`.
+* YAML is parsed with a **safe** loader whose set of implicit resolvers is
+  narrowed further. A `!!python/...`-style tag is therefore a load error and
+  not a call. The `!!js` idiom of dsh is deliberately not ported.
 
 @module ph.cordis.loader
 """
@@ -70,12 +72,13 @@ _ENV_PATTERN = re.compile(
 )
 """`${env:NAME}` or `${env:NAME:-default}`.
 
-The default is **not** `[^}]*` (A10). A JSON-shaped fallback is the ordinary
-thing to want there — `${env:PH_EXTRA:-{"tier":"none"}}` — and under the old
-class it matched up to the *first* `}`, so the row silently received
-`{"tier":"none"` and whatever followed stayed literal. One level of balanced
-braces is what a default is ever written with, and it keeps the pattern a
-regular expression rather than a parser.
+The character class of the default is **not** `[^}]*` (A10). A fallback in JSON
+shape is an ordinary thing to write there, for example
+`${env:PH_EXTRA:-{"tier":"none"}}`. The old class matched up to the *first*
+`}`, so the row silently received `{"tier":"none"` and the text after it stayed
+literal. Nobody writes a default with more than one level of balanced braces.
+The pattern accepts one level, so it stays a regular expression and does not
+become a parser.
 """
 _PREDICATE_PATTERN = re.compile(r"^\$\{(?P<kind>platform|env):(?P<value>[^}]*)\}$")
 
@@ -90,60 +93,80 @@ events.declare(
         "rather than refusal must return None."
     ),
 )
-"""The one moment a profile is whole and nothing has run yet.
+"""The one moment at which a profile is whole and nothing has run yet.
 
-Two uses, and the second arrived after the first (P4-13). A row may **refuse the
-deployment** it finds itself in (E8, `containment.strict`), and a row may
-**collect what the whole profile turned out to contain** — whether any subagent
-provider was mounted, whether any skill was installed — which is a question with
-no final answer until this moment and which `ctx.inject` cannot express, since
-neither is a service key.
+The event has two uses, and the second arrived after the first (P4-13):
 
-The two share a dispatch, so the rules of the shared one apply to both: `serial`
-bails on a non-null return, so a collector that returned a value would silently
-skip the refusals registered after it, and it propagates exceptions, so a
-collector that raises stops the process. Collect by side effect, return `None`,
-and let the refusals be the only listeners that can end a run.
+* A row may **refuse the deployment** that it is mounted in (E8,
+  `containment.strict`).
+* A row may **collect what the whole profile contains**: whether any subagent
+  provider was mounted, or whether any skill was installed. Such a question has
+  no final answer until this moment. `ctx.inject` cannot express it, because
+  neither fact is a service key.
 
-Declared here rather than in a seam because the loader is what dispatches it, and
-a declaration in a module the loader never imports is one that has not happened
-by the time the dispatch checks for it."""
+The two uses share one dispatch, so the rules of that dispatch apply to both.
+`serial` stops at a return value that is not null, so a collector that returned
+a value would silently skip the refusals registered after it. `serial` also
+propagates exceptions, so a collector that raises stops the process. A collector
+must therefore collect by side effect and return `None`. The refusals are then
+the only listeners that can end a run.
+
+The event is declared here and not in a seam, because the loader dispatches it.
+A declaration in a module that the loader never imports has not happened by the
+time the dispatch checks for it."""
 
 
 class SafeRowLoader(yaml.SafeLoader):
     """`yaml.SafeLoader` with every non-scalar implicit conversion removed.
 
-    **Deliberately not libyaml's `CSafeLoader`**, which is 8x faster on a real
-    document and was tried. Subclassed here, with the two customizations below,
-    it makes `Resolver.resolve` answer `None` for *every* node kind — so every
-    tag becomes undefined and the first profile load dies with "could not
-    determine a constructor for the tag None". It reproduces only when this
-    module is imported while `coverage` is tracing, which is to say: under CI's
-    own `--cov` gate, at collection, and not in an ordinary run. Each ingredient
-    is fine alone — a bare `CSafeLoader` subclass built under coverage parses, and
-    so does one carrying the resolver rebuild — so the interaction is not
-    understood and the speed is not worth shipping a loader that fails only where
-    it is measured.
+    **This class deliberately does not use `CSafeLoader` of libyaml.**
+    `CSafeLoader` is 8x faster on a real document, and it was tried. A subclass
+    of it with the two customizations below makes `Resolver.resolve` return
+    `None` for *every* node kind. Every tag then becomes undefined, and the
+    first profile load fails with "could not determine a constructor for the tag
+    None". The failure reproduces only when this module is imported while
+    `coverage` is tracing: under the `--cov` gate of CI, at collection, and not
+    in an ordinary run. Each ingredient works alone. A bare `CSafeLoader`
+    subclass built under coverage parses, and so does one that carries the
+    resolver rebuild. The interaction is therefore not understood. The speed is
+    not worth a loader that fails only where it is measured.
 
-    The base already refuses `!!python/object`. This subclass additionally
-    refuses timestamps and sexagesimals, so a row value that looks like a date
-    stays the string the author wrote — a config file is data, and a silent
-    type change is the same class of surprise as evaluation.
+    The base class already refuses `!!python/object`. This subclass also
+    declines to convert timestamps and sexagesimals. A row value that looks
+    like a date (`2026-08-26`) or like a time (`1:30`, which YAML 1.1 reads as
+    the integer 90) stays the string that the author wrote. A config file is
+    data, and a silent type change is the same class of surprise as evaluation.
     """
 
 
 _UNRESOLVED = frozenset({"tag:yaml.org,2002:timestamp"})
 """Implicit tags this loader declines to apply. See `SafeRowLoader`."""
 
-# **Rebound on the subclass, never item-assigned into the inherited table.**
-# `yaml_implicit_resolvers` is one dict shared by every loader PyYAML defines, so
-# `SafeRowLoader.yaml_implicit_resolvers[first] = ...` — which is what this was —
-# reached through to `Resolver`'s own copy and took timestamps away from
-# `yaml.safe_load` **process-wide**, for pH and for any library sharing the
-# interpreter. PyYAML's own `add_implicit_resolver` copies before it writes for
-# exactly this reason; this is that copy, done once.
+_NUMERIC = frozenset({"tag:yaml.org,2002:int", "tag:yaml.org,2002:float"})
+"""Implicit tags that this loader applies only to a value with no colon.
+
+PyYAML reads `1:30` as base 60, and gives the integer 90. The colon is in no
+other form of a number, so a value that has one is not resolved as a number
+and stays a string. See `SafeRowLoader`."""
+
+
+def _kept(tag: str, regexp: re.Pattern[str]) -> re.Pattern[str]:
+    """The pattern of one implicit resolver, as this loader applies it."""
+    if tag not in _NUMERIC:
+        return regexp
+    return re.compile(f"(?!.*:){regexp.pattern}", regexp.flags)
+
+
+# **The table is rebound on the subclass. It is never item-assigned into the
+# inherited table.** `yaml_implicit_resolvers` is one dict that every loader
+# defined by PyYAML shares. An earlier version of this code wrote
+# `SafeRowLoader.yaml_implicit_resolvers[first] = ...`. That write reached the
+# copy that `Resolver` holds, and took timestamps away from `yaml.safe_load`
+# **process-wide**: for pH and for any library in the same interpreter.
+# `add_implicit_resolver` of PyYAML copies before it writes for exactly this
+# reason. This assignment is that copy, done one time.
 SafeRowLoader.yaml_implicit_resolvers = {
-    first: [(tag, regexp) for tag, regexp in resolvers if tag not in _UNRESOLVED]
+    first: [(tag, _kept(tag, regexp)) for tag, regexp in resolvers if tag not in _UNRESOLVED]
     for first, resolvers in SafeRowLoader.yaml_implicit_resolvers.items()
 }
 
@@ -162,10 +185,10 @@ SafeRowLoader.add_multi_constructor("tag:", _reject_unknown_tag)
 def safe_yaml_load(text: str, *, origin: str = "<string>") -> JsonValue:
     """Parse YAML with no code evaluation and no implicit date coercion.
 
-    `SafeRowLoader` is what makes the result a JSON tree rather than `yaml.load`'s
-    `Any` — no custom tags, no implicit dates, so the only things it can build are
-    the ones `JsonValue` names. This is the one YAML entry point, so that is said
-    here instead of at each reader.
+    `SafeRowLoader` makes the result a JSON tree and not the `Any` of
+    `yaml.load`. It has no custom tags and no implicit dates, so it can build
+    only the things that `JsonValue` names. This function is the one YAML entry
+    point, so the fact is stated here and not at each reader.
     """
     try:
         value: JsonValue = yaml.load(text, Loader=SafeRowLoader)
@@ -186,26 +209,28 @@ class Row:
     config: JsonValue = None
     disabled: bool = False
     layer: str = ""
-    """Which profile document contributed this row's current config."""
+    """The profile document that contributed the current config of this row."""
     isolate: dict[str, JsonValue] | None = None
-    """Row ids this row wants private copies of, each with a config override or `None`.
+    """The row ids that this row wants private copies of. Each id maps to a config
+    override or to `None`.
 
-    dsh's `isolate.fs`: an isolated realm for one service. Here it is spelled
-    against **row ids** rather than service keys, because a row does not declare
-    what it provides — `provide` is a runtime call — so `fs` names the row whose
+    This is the `isolate.fs` of dsh: an isolated realm for one service. Here it
+    names **row ids** and not service keys, because a row does not declare what
+    it provides (`provide` is a runtime call). So `fs` names the row whose
     `apply` provides `ctx.fs`, and the loader mounts a second copy of that row
-    inside this row's realm. The two spellings sometimes coincide (`fs` →
-    `ctx.fs`, `tools` → `ctx.tools`) and in `base.yaml` often do not — `session`
-    provides `ctx.sessions`, `agent` provides `ctx.agents` — so this is a row id
-    and not a service key, which is also the half that can be checked at compose
-    time."""
+    inside the realm of this row. The row id and the service key are sometimes
+    the same (`fs` → `ctx.fs`, `tools` → `ctx.tools`). In `base.yaml` they often
+    differ: `session` provides `ctx.sessions`, and `agent` provides
+    `ctx.agents`. So this is a row id and not a service key. A row id is also
+    the one of the two that can be checked at compose time."""
 
     def to_entry(self) -> dict[str, JsonValue]:
-        """This row as a profile document declares it — what the loader reads back.
+        """This row in the form that a profile document declares it, which is the
+        form that the loader reads back.
 
-        `to_dump` without its provenance: `layer` is where a row came from, which a
-        document cannot say about itself, so a saved profile made of dumps would be
-        one the loader refuses.
+        It is `to_dump` without the provenance. `layer` says where a row came
+        from, and a document cannot say that about itself. A saved profile made
+        of dumps would therefore be one that the loader refuses.
         """
         entry: dict[str, JsonValue] = {"id": self.id, "name": self.name}
         if self.config is not None:
@@ -213,13 +238,14 @@ class Row:
         if self.disabled:
             entry["disabled"] = True
         if self.isolate is not None:
-            # Always the mapping: `isolate: [fs]` dumps as `{fs: null}`, which
-            # `_as_isolate` reads back to the same thing. One dump shape.
+            # Always write the mapping. `isolate: [fs]` dumps as `{fs: null}`,
+            # and `_as_isolate` reads that back to the same value. So there is
+            # one dump shape.
             entry["isolate"] = dict(self.isolate)
         return entry
 
     def to_dump(self) -> dict[str, JsonValue]:
-        """`to_entry` and the layer it came from, for `--dump-config`."""
+        """`to_entry` plus the layer that the row came from, for `--dump-config`."""
         return {**self.to_entry(), "layer": self.layer}
 
 
@@ -229,10 +255,10 @@ class Row:
 def interpolate(value: object, env: Mapping[str, str] | None = None) -> object:
     """Expand `${env:VAR:-default}` through a value tree.
 
-    A whole-string match keeps the environment value's own type only insofar as
-    it is a string: pH does not guess numbers out of the environment, because a
-    row whose meaning changes with an accidental `"0"` is exactly the failure
-    a typed config model exists to catch.
+    A match of the whole string still gives a string, and no other type. pH does
+    not guess numbers from the environment. A row whose meaning changes with an
+    accidental `"0"` is exactly the failure that a typed config model exists to
+    catch.
     """
     source = os.environ if env is None else env
     if isinstance(value, str):
@@ -259,11 +285,11 @@ def interpolate(value: object, env: Mapping[str, str] | None = None) -> object:
 
 
 def evaluate_predicate(value: object, env: Mapping[str, str] | None = None) -> bool:
-    """Resolve a row's `disabled:` field.
+    """Resolve the `disabled:` field of a row.
 
-    Accepts a literal boolean or one of two closed predicates:
-    `${platform:win32}` and `${env:VAR}` (truthy when set and not empty).
-    Anything else is a config error rather than an expression to evaluate.
+    The field accepts a literal boolean or one of two closed predicates:
+    `${platform:win32}` and `${env:VAR}` (true when the variable is set and not
+    empty). Anything else is a config error, and not an expression to evaluate.
     """
     if isinstance(value, bool):
         return value
@@ -316,13 +342,13 @@ def _id_of(entry: Mapping[str, JsonValue]) -> str:
 
 
 def _as_isolate(value: object, layer: str) -> dict[str, JsonValue] | None:
-    """`isolate:` as a list of row ids, or a mapping of row id to config override.
+    """`isolate:` as a list of row ids, or as a mapping of row id to config override.
 
-    Two spellings for one fact, and both normalize to the mapping: `[fs]` is
-    "a private `fs` with the row's own config", `{fs: {root: /tmp/x}}` is "a
-    private `fs` rooted somewhere else" — which is the case the feature exists
-    for, since a private copy with identical config is a second instance and
-    nothing more.
+    The two spellings state one fact, and both normalize to the mapping. `[fs]`
+    means "a private `fs` with the config of the `fs` row".
+    `{fs: {root: /tmp/x}}` means "a private `fs` with a different root". The
+    feature exists for the second case, because a private copy with an identical
+    config is only a second instance.
     """
     if value is None:
         return None
@@ -338,7 +364,7 @@ def _as_isolate(value: object, layer: str) -> dict[str, JsonValue] | None:
 
 
 def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
-    """Apply one patch entry to `rows`, in place, and answer the rows it touched."""
+    """Apply one patch entry to `rows` in place, and return the rows that it touched."""
     unknown = set(patch) - {"insert", "id", "config", "disabled", "remove", "isolate"}
     if unknown:
         raise LoaderError(f"{layer}: patch has unknown keys {sorted(unknown)}")
@@ -346,9 +372,10 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
         inserted = patch["insert"]
         if not isinstance(inserted, list):
             raise LoaderError(f"{layer}: insert: must be a list of rows")
-        # No duplicate check here: `_check_unique_ids` runs over the composed
-        # list and subsumes it, with a better message — it names the layer that
-        # declared the id first, which an insert-local check cannot see.
+        # There is no duplicate check here. `_check_unique_ids` runs over the
+        # composed list and covers this case with a better message. It names
+        # the layer that declared the id first, which a check local to the
+        # insert cannot see.
         added = _as_rows(inserted, layer)
         rows.extend(added)
         return added
@@ -363,9 +390,10 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
             return [row]
         updated = row
         if "config" in patch:
-            # A patch replaces the row's WHOLE config rather than merging into
-            # it, so a row's effective value is always one layer's, readable in
-            # one place (dsh's rule, kept deliberately).
+            # A patch replaces the WHOLE config of the row and does not merge
+            # into it. The effective value of a row is therefore always the
+            # value of one layer, readable in one place. This is the rule of
+            # dsh, kept deliberately.
             updated = replace(updated, config=patch["config"], layer=layer)
         if "disabled" in patch:
             updated = replace(updated, disabled=evaluate_predicate(patch["disabled"]), layer=layer)
@@ -379,19 +407,19 @@ def _apply_patch(rows: list[Row], patch: JsonObject, layer: str) -> list[Row]:
 def _check_unique_ids(rows: Sequence[Row]) -> None:
     """No two composed rows share an id (A7).
 
-    `insert:` has refused this since it was written; a plain row list did not,
-    and the two halves of a profile are written by the same people. A duplicate
-    is not a second copy of the row — it is a row that **cannot be addressed**:
-    `_apply_patch` returns at the first match, so a later layer's `config:`
-    lands on one of them and the other keeps the old value silently, and
-    `Mount.forks` is keyed by id so only one is ever forked.
+    `insert:` has refused a duplicate since it was written. A plain row list did
+    not, and the same people write both halves of a profile. A duplicate is not
+    a second copy of the row. It is a row that **cannot be addressed**.
+    `_apply_patch` returns at the first match, so a `config:` from a later layer
+    is applied to one of the two rows, and the other silently keeps the old
+    value. `Mount.forks` is keyed by id, so only one is ever forked.
 
-    Checked over the composed list rather than per document, because the
-    collision that matters is between layers: a local profile re-declaring a row
-    `ph-base` already layers is exactly how this is reached, and neither
-    document is wrong on its own. `insert:` had its own copy of this refusal
-    until the general one existed; it is gone, because two spellings of one rule
-    means whichever somebody edits is the one that stays right.
+    The check runs over the composed list and not per document, because the
+    collision that matters is between layers. A local profile that declares
+    again a row that `ph-base` already layers is exactly how the collision
+    happens, and neither document is wrong alone. `insert:` had its own copy of
+    this refusal until the general one existed. That copy is gone. With two
+    spellings of one rule, only the one that somebody edits stays right.
     """
     seen: dict[str, str] = {}
     for row in rows:
@@ -405,12 +433,13 @@ def _check_unique_ids(rows: Sequence[Row]) -> None:
 
 
 def _check_isolation(rows: Sequence[Row]) -> None:
-    """Every `isolate:` names a row that exists, is enabled, and is not itself.
+    """Every `isolate:` names a row that exists, is enabled, and is not the row itself.
 
-    Checked once the layers are composed rather than at mount, so `--dump-config`
-    refuses the same profile `phern` would — a private copy of a row a later layer
-    removed is a mount that fails after the person has read a dump that looked
-    fine.
+    The check runs when the layers are composed and not at mount, so that
+    `--dump-config` refuses the same profile that `phern` would refuse. Suppose
+    that a later layer removed a row that another row wants a private copy of.
+    Without this check, the mount would fail after the user had read a dump
+    that looked correct.
     """
     by_id = {row.id: row for row in rows}
     for row in rows:
@@ -433,37 +462,40 @@ def _check_isolation(rows: Sequence[Row]) -> None:
 class ProfileDocument:
     """One parsed layer of a profile: where it came from, its entries, and what it may set.
 
-    The provenance is a *name*, not a path, because not every layer has a file — a
-    `--patch` on the command line is a document like any other — and a name is what
-    `Row.layer` carries and `--dump-config` prints.
+    The provenance is a *name* and not a path, because not every layer has a
+    file. A `--patch` on the command line is a document like any other. A name
+    is also what `Row.layer` carries and what `--dump-config` prints.
     """
 
     layer: str
     entries: JsonValue
     sets: Affects | None = None
-    """The one kind of row this layer may touch, or `None` for any.
+    """The one kind of row that this layer may touch, or `None` for any kind.
 
-    `None` for a layer pH ships: a bundle defines rows of every kind, and the
-    person's layers are written against what it defines. A layer a person writes
-    names its kind, because each kind has one owner (`CONFIGURED_IN`): a session
-    profile that switched off persistence, or a daemon configuration that armed a
-    tool, would be a setting kept where the configuration that owns it cannot see
-    it — and a restart that compares the session's environment would compare
-    something it does not own."""
+    `None` is for a layer that pH ships. A bundle defines rows of every kind,
+    and the layers of the user are written against what the bundle defines. A
+    layer that a user writes names its kind, because each kind has one owner
+    (`CONFIGURED_IN`). A session profile that switched off persistence, or a
+    daemon configuration that armed a tool, would be a setting kept where the
+    configuration that owns it cannot see it. A restart that compares the
+    environment of the session would then compare something that it does not
+    own."""
     override: bool = False
-    """A start option — `--patch` — rather than part of the profile a session starts
-    on. Composed like any layer, and left out of a session's saved base
-    (`ph.session_profile`), which is the named profile as it composes: a start
-    option is what the session deviates from it by, and S4 logs it as such."""
+    """True for a start option (`--patch`), and false for part of the profile that a
+    session starts on. A start option is composed like any layer. It is left out
+    of the saved base of a session (`ph.session_profile`), which is the named
+    profile as it composes. A start option is how the session deviates from that
+    profile, and S4 logs it as such."""
 
 
 def _check_kind(document: ProfileDocument, touched: Sequence[Row]) -> None:
-    """Refuse an entry whose rows — added, patched or removed — are of a kind its
-    layer does not own.
+    """Refuse an entry whose rows are of a kind that its layer does not own. The rows
+    are the ones that the entry added, patched or removed.
 
-    Handed the rows the one dispatcher in `compose_rows` touched, so the grammar of
-    an entry is read once. Resolving the plugin imports it, which the mount would do
-    anyway; asked here so `--dump-config` refuses the same layer `phern` would.
+    The caller passes the rows that the one dispatcher in `compose_rows` touched,
+    so the grammar of an entry is read one time. Resolving the plugin imports
+    it, which the mount would do anyway. The check runs here so that
+    `--dump-config` refuses the same layer that `phern` would refuse.
     """
     if document.sets is None:
         return
@@ -479,10 +511,10 @@ def _check_kind(document: ProfileDocument, touched: Sequence[Row]) -> None:
 def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
     """Compose ordered profile documents into the final row list.
 
-    Each document is either a plain list of rows or a list of patch entries.
-    Rows keep file order, but for the log layer (`_place_log_layer`); patches
-    address rows by id. A document that says what it `sets` has every entry
-    checked against the kind of the row it touches.
+    Each entry of a document is either a plain row or a patch entry. Rows keep
+    file order, except for the log layer (`_place_log_layer`). Patches address
+    rows by id. When a document says what it `sets`, every entry is checked
+    against the kind of the row that it touches.
     """
     rows: list[Row] = []
     for document in documents:
@@ -506,13 +538,14 @@ def compose_rows(documents: Sequence[ProfileDocument]) -> list[Row]:
 
 
 def _place_log_layer(rows: list[Row]) -> list[Row]:
-    """Gather the log layer where its first row is, in `LOG_LAYER` order (`LogLayer`
-    says why), and keep the other rows' order around it.
+    """Gather the log layer at the position of its first row, in `LOG_LAYER` order
+    (`LogLayer` gives the reason), and keep the order of the other rows around it.
 
-    An enabled row only. A disabled row does not mount, so it has no place to keep,
-    and resolving it could refuse a profile over a row that is off (`resolve_row`'s
-    rule). Nor a row whose plugin does not resolve: it stays where it was written,
-    and mounting it is what refuses it.
+    Only an enabled row is gathered. A disabled row does not mount, so it has no
+    place to keep, and resolving it could refuse a profile because of a row that
+    is off (the rule of `resolve_row`). A row whose plugin does not resolve is
+    not gathered either. It stays where it was written, and the mount is what
+    refuses it.
     """
     rank = {
         row.id: LOG_LAYER.index(place)
@@ -528,8 +561,8 @@ def _place_log_layer(rows: list[Row]) -> list[Row]:
 
 
 def _log_layer_of(row: Row) -> LogLayer | None:
-    """The log-layer place `row`'s plugin declares, or `None` when it declares none
-    or does not resolve."""
+    """The place in the log layer that the plugin of `row` declares, or `None` when
+    the plugin declares none or does not resolve."""
     try:
         return normalize_plugin(resolve_plugin(row.name)).log_layer
     except LoaderError:
@@ -537,17 +570,19 @@ def _log_layer_of(row: Row) -> LogLayer | None:
 
 
 def _warn_unflushed(rows: Iterable[Row]) -> None:
-    """Warn when `rows` keep the log and none of them says when it reaches disk.
+    """Warn when `rows` keep the log and none of them says when the log reaches disk.
 
-    Without a `checkpoint` row nothing flushes before a model request or a tool
-    body, so a crash loses what no other write took, and the one write left at
-    shutdown is the mount's last (`ph.persistence.write_on_unwind`), which runs after
-    telemetry has gone. A warning rather than a refusal, since the log is still
-    written and the trade is the deployment's to make.
+    Without a `checkpoint` row, nothing flushes before a model request or a tool
+    body. A crash then loses whatever no other write put on disk. The one write
+    left at shutdown is the last write of the mount
+    (`ph.persistence.write_on_unwind`), which runs after telemetry has gone. This
+    is a warning and not a refusal, because the log is still written and the
+    deployment may choose this trade.
 
-    Asked of the rows a mount activated, once it has settled: a checkpoint row still
-    waiting on a service flushes nothing, and a mount a row refused warns of nothing.
-    Not in `compose_rows`, which runs again whenever a session's environment is
+    The check reads the rows that a mount activated, after the mount has
+    settled. A checkpoint row that still waits for a service flushes nothing,
+    and a mount that a row refused warns of nothing. The check is not in
+    `compose_rows`, which runs again whenever the environment of a session is
     compared.
     """
     places = {row.id: _log_layer_of(row) for row in rows}
@@ -562,17 +597,19 @@ def _warn_unflushed(rows: Iterable[Row]) -> None:
 
 
 def resolve_row(row: Row) -> dict[str, JsonValue]:
-    """One row as it would mount: its config through its plugin's model, defaults
-    included, and every field stated — the ones a document may leave out too. A route's
-    unset `sampling` is the exception, left off as everywhere it is written
-    (`Sampling.is_empty`); absent and empty read back as one value, so a saved profile
-    and the named one still compare.
+    """One row as it would mount: its config passed through the model of its plugin,
+    with defaults included and every field stated, including the fields that a
+    document may leave out. The unset `sampling` of a route is the exception. It
+    is left off, as it is everywhere that it is written (`Sampling.is_empty`).
+    Absent and empty read back as one value, so a saved profile and the named
+    profile still compare.
 
-    Interpolated as a mount interpolates, so a `${env:...}` setting reads as the value
-    it would run with. A row whose plugin takes no config says `config: null`, which
-    is its whole state. A *disabled* row whose config its model refuses keeps the
-    config as written: it does not mount, so nothing ever checked it, and a listing of
-    a profile must not fail over a row that is off.
+    The config is interpolated as a mount interpolates it, so a `${env:...}`
+    setting reads as the value that it would run with. A row whose plugin takes
+    no config says `config: null`, which is its whole state. A *disabled* row
+    whose config its model refuses keeps the config as written. It does not
+    mount, so nothing ever checked it, and a listing of a profile must not fail
+    because of a row that is off.
     """
     spec = normalize_plugin(resolve_plugin(row.name))
     config: JsonValue
@@ -590,22 +627,23 @@ def resolve_row(row: Row) -> dict[str, JsonValue]:
 
 
 def _is_patch(entry: JsonObject) -> bool:
-    """Whether an entry addresses rows already composed, rather than declaring one."""
+    """Whether an entry addresses rows that are already composed, and declares none."""
     return bool({"insert", "remove"} & set(entry)) or ("id" in entry and "name" not in entry)
 
 
 def new_declarations(entry: JsonObject, held: Collection[str]) -> JsonObject | None:
-    """`entry` less each row it declares whose id is in `held`; `None` when that
-    leaves nothing of it.
+    """`entry` without each row that it declares whose id is in `held`, or `None` when
+    nothing of the entry is left.
 
-    For an entry that may be given again to what already holds it — a start
-    option at a session's second start (`ph.session_profile`). An entry that
-    patches a row by id declares none and comes back as it is: composed twice it
-    says what it said once. A declaration composed twice is a row declared twice,
-    which `_check_unique_ids` refuses, so the rows `held` names are left out —
-    config and all: a row held keeps the config it is held with, and one given
-    differently here is not applied (a setting is changed by id). A malformed
-    entry comes back as it is, for `compose_rows` to refuse."""
+    This is for an entry that may be given again to a session that already holds
+    it: a start option at the second start of a session (`ph.session_profile`).
+    An entry that patches a row by id declares no row and comes back unchanged.
+    Composed twice, it says what it said the first time. A declaration composed
+    twice is a row declared twice, which `_check_unique_ids` refuses. So the
+    rows that `held` names are left out, with their config. A held row keeps the
+    config that it is held with, and a different config given here is not
+    applied (a setting is changed by id). A malformed entry comes back
+    unchanged, for `compose_rows` to refuse."""
     if "insert" in entry:
         inserted = entry["insert"]
         if not isinstance(inserted, list):
@@ -618,8 +656,9 @@ def new_declarations(entry: JsonObject, held: Collection[str]) -> JsonObject | N
 
 
 def entry_ids(entry: JsonObject) -> list[str]:
-    """The row ids one profile entry adds, patches or removes — the grammar
-    `compose_rows` reads, stated for a caller that needs it without composing."""
+    """The row ids that one profile entry adds, patches or removes. This is the
+    grammar that `compose_rows` reads, stated for a caller that needs it without
+    composing."""
     if "insert" in entry:
         inserted = entry["insert"]
         return [row.id for row in _as_rows(inserted if isinstance(inserted, list) else [], "entry")]
@@ -632,17 +671,21 @@ def entry_ids(entry: JsonObject) -> list[str]:
 def sparse_entries(base: Sequence[Row], rows: Sequence[Row]) -> list[JsonObject]:
     """The fewest entries that, composed over `base`, give `rows` (session profiles, S2).
 
-    What a saved named profile holds: only the rows that differ from the profile
-    it extends. A row `base` has and `rows` does not is removed; one `rows` adds
-    is declared whole; one in both is patched by the fields that differ, and a
-    patch replaces a row's *whole* config, so the config it carries is the row's
-    entire config and never a delta of it. A row whose plugin changed under the
-    same id is removed and declared again, since no patch changes a `name`.
+    This is what a saved named profile holds: only the rows that differ from the
+    profile that it extends.
 
-    `compose_rows([*base_documents, (layer, sparse_entries(base, rows))])` gives
-    back `rows`, in order, for every `rows` a composition over `base` can
-    produce: added rows land at the end, which is where a later layer put them,
-    and a log-layer row is placed again where its plugin says.
+    * A row that `base` has and `rows` does not have is removed.
+    * A row that `rows` adds is declared whole.
+    * A row in both is patched by the fields that differ. A patch replaces the
+      *whole* config of a row, so the config in the patch is the entire config
+      of the row and never a delta of it.
+    * A row whose plugin changed under the same id is removed and declared
+      again, because no patch changes a `name`.
+
+    `compose_rows([*base_documents, ProfileDocument(layer, sparse_entries(base, rows))])`
+    gives back `rows`, in order, for every `rows` that a composition over `base`
+    can produce. Added rows are placed at the end, which is where a later layer
+    put them, and a log-layer row is placed again where its plugin says.
     """
     kept = {row.id for row in rows}
     before = {row.id: row for row in base}
@@ -671,10 +714,10 @@ def sparse_entries(base: Sequence[Row], rows: Sequence[Row]) -> list[JsonObject]
 def load_profile_documents(
     paths: Sequence[Path], *, sets: Affects | None = None
 ) -> list[ProfileDocument]:
-    """Read and parse each layer; the path is the provenance its rows carry.
+    """Read and parse each layer. The path is the provenance that its rows carry.
 
-    `sets` is every layer's, for a caller reading a person's files — see
-    `ProfileDocument.sets`.
+    `sets` applies to every layer, for a caller that reads the files of a user.
+    See `ProfileDocument.sets`.
     """
     return [
         ProfileDocument(
@@ -689,12 +732,12 @@ def load_profile_documents(
 
 @cache
 def entry_point_targets(group: str) -> dict[str, str]:
-    """One entry-point group's `{name: target}`, scanned once per process.
+    """The `{name: target}` of one entry-point group, scanned one time per process.
 
-    Reading every installed distribution's metadata is the expensive part of
-    resolution, and the set cannot change while the process runs. Cached per
-    group so a second group — `ph.bundles` — pays the same once and there is one
-    place a cache would ever have to be cleared.
+    Reading the metadata of every installed distribution is the expensive part
+    of resolution, and the set cannot change while the process runs. The cache
+    is per group, so a second group (`ph.bundles`) pays the same cost one time,
+    and there is one place where a cache would ever have to be cleared.
     """
     return {entry.name: entry.value for entry in entry_points(group=group)}
 
@@ -705,15 +748,16 @@ def resolve_entry_point(
     *,
     default_attribute: str = "",
 ) -> object:
-    """Import what `name` registers in `group`, or `None` if nothing does.
+    """Import what `name` registers in `group`, or return `None` if nothing registers it.
 
-    The mechanical half of resolution — look up, import, `getattr` — with no
-    policy: a caller that wants an exception raises its own, and one that wants
-    to offer an alternative gets `None`. `ph.bundles.resolve_bundle` is a thin
-    wrapper over this. `resolve_plugin` is **not**: it needs a dotted-path
-    fallback, a `LoaderError` rather than `None`, and two attribute candidates
-    rather than one, so it carries its own copy of the dance — a third group
-    wanting any of those three should widen this rather than add a fourth.
+    This is the mechanical half of resolution (look up, import, `getattr`), with
+    no policy. A caller that wants an exception raises its own, and a caller
+    that wants to offer an alternative gets `None`. `ph.bundles.resolve_bundle`
+    is a thin wrapper over this function. `resolve_plugin` is **not**. It needs
+    a dotted-path fallback, a `LoaderError` in place of `None`, and two
+    attribute candidates in place of one, so it has its own copy of the
+    sequence. A third group wanting any of those three should widen this rather
+    than add a fourth.
     """
     target = _entry_point_targets(group).get(name)
     if target is None:
@@ -730,15 +774,15 @@ def _entry_point_targets(group: str = ENTRY_POINT_GROUP) -> dict[str, str]:
 
 
 def _state(fork: ForkScope) -> str:
-    """One fork's state, as `Mount.topology` prints it.
+    """The state of one fork, as `Mount.topology` prints it.
 
-    Formatting only: which of the six names applies is `ForkScope.state`'s to
-    answer, and the ordering that used to live in the ladder here — `failed`
-    ahead of `waiting on`, because a row that raised may also be missing a key —
-    lives with it. Two of the six take a phrase rather than the bare name, which
-    is the whole of what is left: `waiting on <key>` names what is missing, and
-    `unwound · waiting on <key>` says it was up and a provider swap took it down,
-    which is the case a running daemon is asked about.
+    This function only formats. `ForkScope.state` decides which of the six names
+    applies. The ordering that was in the ladder here is now with it: `failed`
+    comes before `waiting on`, because a row that raised may also be missing a
+    key. Two of the six states take a phrase in place of the bare name, and that
+    is all that is left here. `waiting on <key>` names what is missing.
+    `unwound · waiting on <key>` says that the row was up and a provider swap
+    took it down, which is the case that a running daemon is asked about.
     """
     injects = ", ".join(fork.injects) or "nothing"
     match fork.state:
@@ -750,17 +794,18 @@ def _state(fork: ForkScope) -> str:
         case "unmounted" | "active" | "activating" as state:
             return f"{state} · injects {injects}"
         case _ as unhandled:
-            # Named rather than captured, so a seventh `ForkState` is a build
-            # failure here instead of a row that formats as its own name.
+            # The states above are named, and not captured by this case. A
+            # seventh `ForkState` is therefore a build failure here, and not a
+            # row that formats as its own name.
             assert_never(unhandled)
 
 
 def import_plugin_modules() -> list[ModuleType]:
     """Import the module behind every registered plugin, in name order.
 
-    Event declarations live in the modules that own them, so a tool that wants
-    the complete registry — `phern events` — imports the plugin surface rather
-    than a hand-kept list. Third-party wheels are covered by the same call.
+    Event declarations are in the modules that own them. A tool that wants the
+    complete registry (`phern events`) therefore imports the plugin surface and
+    does not keep a list by hand. The same call covers third-party wheels.
     """
     modules: list[ModuleType] = []
     for name in sorted(_entry_point_targets()):
@@ -770,11 +815,11 @@ def import_plugin_modules() -> list[ModuleType]:
 
 
 def resolve_plugin(name: str) -> object:
-    """Resolve a row's `name:` to a plugin object.
+    """Resolve the `name:` of a row to a plugin object.
 
-    Looked up first in the `ph.plugins` entry-point group — the compatibility
-    surface a third-party wheel registers into — then as a dotted module path,
-    then as `module:attribute`.
+    The name is looked up first in the `ph.plugins` entry-point group, which is
+    the compatibility surface that a third-party wheel registers into. It is
+    then tried as a dotted module path, and then as `module:attribute`.
     """
     target = _entry_point_targets().get(name, name)
     module_path, _, attribute = target.partition(":")
@@ -801,24 +846,24 @@ def resolve_plugin(name: str) -> object:
 
 @dataclass(slots=True)
 class Profile:
-    """A composed profile: the rows, and the documents they came from.
+    """A composed profile: the rows, and the documents that they came from.
 
-    Composed **once** — at `profile_or_exit` for a command, at its fixture for a
-    test — and mounted as many times as there are deployments to mount it on; the
-    daemon holds one of these and a `Mount` per root. Sharing is safe because `Row`
-    is frozen and `interpolate` copies each config on its way into a fork, so two
-    mounts of one profile never hold the same config object.
+    A profile is composed **one time**: at `profile_or_exit` for a command, and
+    at its fixture for a test. It is then mounted one time for each deployment.
+    The daemon holds one profile and a `Mount` per root. Sharing is safe because
+    `Row` is frozen and `interpolate` copies each config on its way into a fork.
+    Two mounts of one profile therefore never hold the same config object.
     """
 
     documents: list[ProfileDocument] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
     name: str = ""
-    """Which named composition this is — `headless`, `rlm` — and `""` for one built
+    """The named composition that this is (`headless`, `rlm`), or `""` for one built
     from a path or assembled ad hoc.
 
-    Opaque provenance, deliberately: cordis takes rows in and produces a plugin
-    tree, and where a named profile's files live on disk is `ph.paths`'s to say.
-    What this enables is that a row writing on the person's behalf can tell the two
+    The name is deliberately opaque provenance. Cordis takes rows in and produces
+    a plugin tree, and `ph.paths` says where the files of a named profile are on
+    disk. The name lets a row that writes on behalf of the user tell the two
     cases apart, because an ad-hoc composition has no name to write under."""
 
     @classmethod
@@ -843,31 +888,32 @@ class Profile:
         ]
 
     def resolved(self, kinds: Collection[Affects] | None = None) -> list[dict[str, JsonValue]]:
-        """Every row as it would mount (`resolve_row`), narrowed to the rows of `kinds` —
-        `{"environment"}` is a session's profile. Decision 8's "full" profile."""
+        """Every row as it would mount (`resolve_row`), narrowed to the rows of `kinds`.
+        `{"environment"}` gives the profile of a session. This is the "full" profile
+        of Decision 8."""
         return [resolve_row(row) for row in (self.rows if kinds is None else self.rows_of(kinds))]
 
     async def mount(self, ctx: Context, *, project: Path | None = None) -> Mount:
         """Mount every enabled row onto `ctx`, settle the tree, and return the mount.
 
-        Rows mount in the order composed, but nothing runs until `reconcile()`:
-        activation is service-availability driven, so a row that needs `llm`
-        waits for whichever row provides it regardless of where it sits.
+        Rows mount in the order composed, but nothing runs until `reconcile()`.
+        Activation is driven by service availability, so a row that needs `llm`
+        waits for the row that provides it, wherever that row is in the order.
 
-        `project` is where this mount works — see `PROJECT_ROOT`, which it
-        provides beside `ctx.mount` and for the same reason. Omitted, nothing is
-        provided and `fs-local` falls back to the process's own directory, which
-        is right for a host that *is* in the project and wrong for a daemon
-        holding roots in several.
+        `project` is the directory that this mount works in. See `PROJECT_ROOT`,
+        which this method provides beside `ctx.mount` for the same reason. When
+        `project` is omitted, nothing is provided, and `fs-local` falls back to
+        the directory of the process. That is right for a host that *is* in the
+        project, and wrong for a daemon that holds roots in several projects.
 
-        **The `Mount` is provided as `ctx.mount` before the first row**: `ph.seams`
-        may import `ph.cordis` and never the reverse, so this is how the
-        `topology` row reaches what only the mount knows. Deliberately a widening,
-        and worth naming as one — every row can now read the whole composition,
-        disabled rows included. It grants no *capability* a row lacked, since
-        `ctx.plugin` and `ctx.scope` are public, and the composition is the profile
-        the person wrote, which `--dump-config` prints for anyone who can start the
-        process.
+        **The `Mount` is provided as `ctx.mount` before the first row.**
+        `ph.seams` may import `ph.cordis` and never the reverse, so this is how
+        the `topology` row reaches what only the mount knows. This is
+        deliberately a widening, and it is named as one here: every row can now
+        read the whole composition, disabled rows included. It grants no
+        *capability* that a row lacked, because `ctx.plugin` and `ctx.scope` are
+        public. The composition is the profile that the user wrote, and
+        `--dump-config` prints it for anyone who can start the process.
         """
         mount = Mount(profile=self, root=ctx)
         ctx.provide(MOUNT, mount)
@@ -881,26 +927,28 @@ class Profile:
                     resolve_plugin(row.name), interpolate(row.config), row=row.id
                 )
                 continue
-            # dsh's `isolate.fs`. The row's own scope becomes an isolation
-            # boundary and its own provisioning realm — `scope()` is exactly
-            # that, and it is the same scope an agent gets — and a second copy of
-            # each named row is mounted *inside* it. That copy's `provide` lands
-            # in the realm, so `ctx.fs` resolves to the private instance for this
-            # row and for everything beneath it, while every other row keeps the
-            # shared one. Nothing is redirected: `_provision` walks up from the
-            # realm and finds the nearer provision first.
+            # This is the `isolate.fs` of dsh. The scope of the row becomes an
+            # isolation boundary and a provisioning realm of its own. `scope()`
+            # does exactly that, and an agent gets the same kind of scope. A
+            # second copy of each named row is mounted *inside* the realm. The
+            # `provide` of that copy lands in the realm, so `ctx.fs` resolves to
+            # the private instance for this row and for everything beneath it,
+            # while every other row keeps the shared instance. Nothing is
+            # redirected: `_provision` walks up from the realm and finds the
+            # nearer provision first.
             #
-            # Settled before this row mounts, and then **checked**. `has(key)` is
-            # true from the realm the moment root provides the key, so the
-            # isolating row is ready immediately — against the shared service —
-            # and only registration order would make the private copy win. A
-            # reconcile here fixes the order for a copy that is ready, and does
-            # nothing for one that is not: a copy whose own `inject` is unmet
-            # stays waiting, the row activates against root's instance, and the
-            # realm silently falls through to exactly what it was meant to
-            # replace. So a private copy that did not activate is a refusal,
-            # naming the key it lacks: what it needs has to be provided above the
-            # realm, by a row earlier in the profile.
+            # The copies are settled before this row mounts, and then
+            # **checked**. `has(key)` is true from the realm as soon as root
+            # provides the key. The isolating row is therefore ready
+            # immediately, against the shared service, and only registration
+            # order would make the private copy win. A reconcile here fixes the
+            # order for a copy that is ready. It does nothing for a copy that
+            # is not ready. A copy whose own `inject` is unmet stays waiting,
+            # the row activates against the instance of root, and the realm
+            # silently falls through to exactly the service that it was meant
+            # to replace. So a private copy that did not activate is a refusal
+            # that names the key it lacks. What the copy needs must be provided
+            # above the realm, by a row earlier in the profile.
             realm = ctx.scope(f"realm:{row.id}")
             privates: dict[str, ForkScope] = {}
             for source_id, override in row.isolate.items():
@@ -919,106 +967,123 @@ class Profile:
                         "provided by rows above it, or the realm would fall through to the "
                         "shared service it exists to replace"
                     )
-            # **Transparent, and only this mount** (A9). This row's activation
-            # scope would otherwise inherit the realm's isolation, and `reaches`
-            # answers "nobody" for it — no dispatch, and no tool, prompt
-            # section, fs screen or skill restriction it registers is visible
-            # either. It is a deployment row with a narrower view of one
-            # service, so it gets a deployment row's visibility.
+            # **This mount is transparent, and only this mount** (A9). Without
+            # that, the activation scope of this row would inherit the
+            # isolation of the realm, and `reaches` would answer "nobody" for
+            # it. The row would get no dispatch, and no tool, prompt section,
+            # fs screen or skill restriction that it registers would be
+            # visible. It is a deployment row with a narrower view of one
+            # service, so it gets the visibility of a deployment row.
             #
-            # Never the private copies above: a second `fs` that answered every
-            # dispatch would double-handle events with the instance it exists to
-            # shadow, and register a second copy of whatever it registers.
+            # The private copies above are never transparent. A second `fs`
+            # that answered every dispatch would handle each event a second
+            # time, beside the instance that it exists to shadow, and would
+            # register a second copy of whatever it registers.
             forks[row.id] = realm.plugin(
                 resolve_plugin(row.name), interpolate(row.config), transparent=True, row=row.id
             )
         await ctx.reconcile()
-        # The one moment a composed profile is whole and nothing has run yet, so
-        # a row can refuse the deployment it finds itself in (E8). `serial`
-        # rather than `emit`: a listener that raises must stop the process, and
-        # an `emit` contains what its listeners raise — exactly this refusal. A row
-        # cannot check this in its own `apply` — a backend it depends on may be
-        # layered after it, so a verdict computed then would be wrong for
-        # precisely the profile that orders things that way.
+        # This is the one moment at which a composed profile is whole and
+        # nothing has run yet, so a row can refuse the deployment that it is
+        # mounted in (E8). The dispatch is `serial` and not `emit`. A listener
+        # that raises must stop the process, and an `emit` contains what its
+        # listeners raise, which is exactly this refusal. A row cannot check
+        # this in its own `apply`. A backend that it depends on may be layered
+        # after it, so a verdict computed in `apply` would be wrong for exactly
+        # the profile that orders its rows that way.
         await ctx.serial("profile/mounted")
         _warn_unflushed(row for row in self.enabled_rows() if forks[row.id].active)
         return mount
 
 
 MOUNT: ServiceKey[Mount] = ServiceKey("mount")
-"""The mount itself, provided before the first row so a seam can ask the
-composition what it is (`ph.seams.topology`)."""
+"""The mount itself. It is provided before the first row, so that a seam can ask
+the composition what it is (`ph.seams.topology`)."""
 
 PROJECT_ROOT: ServiceKey[Path] = ServiceKey("project_root")
-"""Where this mount works: the directory a session's own header names (P5-14).
+"""The directory that this mount works in: the directory that the header of the
+session names (P5-14).
 
-**Declared and provided beside `MOUNT` because it is the same kind of fact** —
-something true of *this* mount rather than of the profile, needed by a row while
-it applies. `fs-local` reads it as its root, and `workspace-lifecycle` then
-branches its worktrees from it. A profile setting could not carry it: one daemon
-mounts one composition many times, once per session, and those sessions are in
-different repositories; composing a profile per root would re-import every
-plugin to change one path.
+**It is declared and provided beside `MOUNT` because it is the same kind of
+fact.** It is true of *this* mount and not of the profile, and a row needs it
+while the row applies. `fs-local` reads it as its root, and `workspace-lifecycle`
+then branches its worktrees from it. A profile setting could not carry it. One
+daemon mounts one composition many times, one time per session, and those
+sessions are in different repositories. Composing a profile per root would import
+every plugin again to change one path.
 
-It lived in `ph.keys` and was provided by `ph_app.runtime` — the key in the
-package that reads it, the provision in the package above. That split made the
-fact reachable only through an undocumented protocol (provide it, *then* mount),
-so every other caller of `Profile.mount` — the tests, the plugins' own mounts, a
-library embedder — had no way to say where it worked and silently took
-`Path.cwd()`. Now the door that needs it takes it."""
+The key was in `ph.keys`, and `ph_app.runtime` provided it: the key in the
+package that reads it, and the provision in the package above. That split made
+the fact reachable only through an undocumented protocol (provide it, *then*
+mount). Every other caller of `Profile.mount` (the tests, the mounts that the
+plugins make, a library embedder) had no way to say where it worked, and
+silently took `Path.cwd()`. Now `Profile.mount`, which needs the fact, takes it
+as an argument."""
 
 
 @dataclass(slots=True)
 class Mount:
-    """What one `Profile` became on one context — the half a `Profile` cannot know.
+    """What one `Profile` became on one context: the half that a `Profile` cannot know.
 
-    The composition is `profile`; this is what happened when it was mounted: the
-    fork each row became, on the root it was mounted on. Two objects because they
-    are two lifetimes — a `Profile` outlives every mount of it, a `Mount` goes with
-    its root — and so that nothing composes twice: the daemon composes once and
-    mounts per root.
+    The composition is `profile`. This object is what happened when the profile
+    was mounted: the fork that each row became, on the root that it was mounted
+    on. They are two objects because they have two lifetimes. A `Profile`
+    outlives every mount of it, and a `Mount` ends with its root. The split also
+    means that nothing composes twice: the daemon composes one time and mounts
+    per root.
     """
 
     profile: Profile
     root: Context
-    """The deployment context, for `topology`'s realm walk. Held here so a reader
-    need not know to pass the *root* rather than its own scope — a walk from a
-    row's scope finds no realms and reports "none", silently."""
+    """The deployment context, for the realm walk of `topology`. It is held here so
+    that a reader need not know to pass the *root* and not its own scope. A walk
+    from the scope of a row finds no realms and silently reports "none"."""
     forks: dict[str, ForkScope] = field(default_factory=dict)
-    """Every mounted plugin by row id. A private copy mounted into a realm is keyed
-    `"<isolating row>/<source row>"`, which is also how `topology` labels it."""
+    """Every mounted plugin by row id. A private copy mounted into a realm has the
+    key `"<isolating row>/<source row>"`, which is also the label that `topology`
+    gives it."""
     reconfigured: set[str] = field(default_factory=set)
-    """Row ids re-applied live on this mount — what `topology` marks.
+    """The ids of the rows that were applied again live on this mount. `topology`
+    marks them.
 
-    A set, not the configs: the only question anyone asks of it is whether a row
-    was, and the config each fork runs is already on the fork (`ForkScope.config`).
-    Keeping a parallel dict was a second statement of one fact, and it retained
-    every superseded config for the life of the mount."""
+    This is a set and not the configs. The only question asked of it is whether
+    a row was reconfigured, and the config that each fork runs is already on the
+    fork (`ForkScope.config`). A parallel dict was a second statement of one
+    fact, and it retained every superseded config for the life of the mount."""
 
     async def reconfigure(self, row_id: str, config: object) -> ForkScope:
-        """Re-apply one row with a new config, on this mount, and touch nothing else.
+        """Apply one row again with a new config, on this mount, and touch nothing else.
 
-        **Cordis's own shape, used for what it is for.** A row's `apply` registers
-        into seams, and every registration is an effect of the row's activation
-        scope (I2): disposing the fork unwinds them all, and mounting the row again
-        with the new config makes them all again. No other row is asked to do
-        anything — a seam whose slot was released and refilled answers its next
-        call with the new value, and an agent mid-command notices only when its
-        next command asks. That is what lets `/sandbox allow host` take effect
-        with the agent still running.
+        **This uses the shape of cordis for its purpose.** The `apply` of a row
+        registers into seams, and every registration is an effect of the
+        activation scope of the row (I2). Disposing the fork unwinds all of
+        them, and mounting the row again with the new config makes all of them
+        again. No other row is asked to do anything. A seam whose slot was
+        released and refilled answers its next call with the new value, and an
+        agent in the middle of a command notices only when its next command
+        asks. That is how `/sandbox allow host` takes effect while the agent is
+        still running.
 
-        Per *mount*, not per profile: a daemon mounts one `Profile` once per root
-        and `Row` is frozen, so the new config is recorded here and `topology`
-        marks the row `reconfigured live`. Called only from `ph.session_profile` —
-        its `override`, which records the change in the session's log before this
-        runs, its `clear_overrides`, which records the clear in the same way, and
-        `opened`, which brings a mount to what that log already says (S4).
-        `test_session_profile` holds every caller to it.
+        The change is per *mount* and not per profile. A daemon mounts one
+        `Profile` one time per root and `Row` is frozen, so the new config is
+        recorded here, and `topology` marks the row `reconfigured live`. Only
+        `ph.session_profile` calls this method, from three functions:
 
-        Refused for a row that is disabled (there is no fork to replace; enable it
-        in the profile), that isolates others (its realm holds private copies this
-        would orphan), or that others isolate (their private copies would keep the
-        old config while the shared instance moved).
+        * `override`, which records the change in the log of the session before
+          this method runs.
+        * `clear_overrides`, which records the clear in the same way.
+        * `opened`, which brings a mount to what that log already says (S4).
+
+        `test_session_profile` checks that no other module calls it.
+
+        The method refuses three kinds of row:
+
+        * A row that is disabled. There is no fork to replace. Enable the row in
+          the profile.
+        * A row that isolates others. Its realm holds private copies that this
+          method would orphan.
+        * A row that others isolate. Their private copies would keep the old
+          config while the shared instance moved.
         """
         row = next((one for one in self.profile.rows if one.id == row_id), None)
         if row is None:
@@ -1047,42 +1112,44 @@ class Mount:
         return fork
 
     def inactive(self) -> list[str]:
-        """Row ids whose plugin is not active, whatever is keeping it down.
+        """The ids of the rows whose plugin is not active, whatever keeps it down.
 
-        Through `state` rather than `not fork.active`, because the two stopped
-        meaning the same thing when `failed` joined the set: this said "an unmet
-        `inject` key" and a row whose `apply` raised now lands in the same list
-        for a different reason. `_state` is where a caller reads which.
+        The method reads `state` and not `not fork.active`, because the two
+        stopped meaning the same thing when `failed` joined the set. This list
+        used to mean "an unmet `inject` key". A row whose `apply` raised is now
+        in the same list for a different reason. A caller reads the reason from
+        `_state`.
         """
         return [row_id for row_id, fork in self.forks.items() if fork.state != "active"]
 
     def topology(self) -> list[tuple[str, str]]:
-        """What the mount *became*, row by row — the half `Profile.dump()` cannot show.
+        """What the mount *became*, row by row: the half that `Profile.dump()` cannot show.
 
-        `dump()` is the composition before anything runs, and it is honest about
-        that. But a row that mounted and never activated — an unmet `inject` key
-        — looks identical there to one that runs, and a reader of the YAML has no
-        way to tell which they have. dsh's rule is that the dump has to show what
-        *is* running, because once structure comes from configuration the static
-        code no longer says. `inactive()` had that answer and nothing called it.
+        `dump()` is the composition before anything runs, and it claims nothing
+        more. But a row that mounted and never activated (an unmet `inject`
+        key) looks identical there to a row that runs, and a reader of the YAML
+        cannot tell which of the two they have. The rule of dsh is that the dump
+        must show what *is* running, because when structure comes from
+        configuration the static code no longer says. `inactive()` had that
+        answer, and nothing called it.
 
-        One line per row: its state (`_state` — active, activating, waiting on a
-        key, unwound, unmounted), what it injects, and which layer put it there.
-        Disabled rows are listed too — "this was turned off by `rlm-stable.yaml`"
-        is what a person asking "why isn't X running" needs, and omitting it would
-        make a disabled row indistinguishable from an absent one. Then the
-        isolated realms under the root: none at `phern doctor` time, since an agent's
-        scope is created when it runs, and that absence is stated rather than left
-        as a missing line.
+        There is one line per row: its state (`_state`: active, activating,
+        failed, waiting on a key, unwound, unmounted), what it injects, and the
+        layer that put it there. Disabled rows are listed too. "This was turned
+        off by `rlm-stable.yaml`" is what a user who asks "why isn't X running"
+        needs, and without that line a disabled row would look the same as an
+        absent row. The isolated realms under the root come last. There are none
+        at `phern doctor` time, because the scope of an agent is created when
+        the agent runs. That absence is stated, and not left as a missing line.
         """
         lines: list[tuple[str, str]] = []
         for row in self.profile.rows:
             fork = self.forks.get(row.id)
-            # The last two path components — `bundles/base.yaml`,
-            # `ph_rlm/bundle.yaml`, `profiles/rlm-stable.yaml` — because every
-            # bundle file is called `bundle.yaml` and its directory is the name
-            # that distinguishes them, while the full absolute path is a table
-            # column nobody can read.
+            # Show the last two path components (`bundles/base.yaml`,
+            # `ph_rlm/bundle.yaml`, `profiles/rlm-stable.yaml`). Every bundle
+            # file is called `bundle.yaml`, so its directory is the name that
+            # distinguishes it. The full absolute path would be a table column
+            # that nobody can read.
             layer = "/".join(Path(row.layer).parts[-2:])
             if fork is None:
                 lines.append((row.id, f"disabled · by {layer}"))

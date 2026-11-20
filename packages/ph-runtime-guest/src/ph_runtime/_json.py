@@ -27,16 +27,19 @@ from __future__ import annotations
 
 
 def as_str(value: object, default: str = "") -> str:
-    """A JSON string, or `default` — the fourth of the family, and the copied one.
+    """A JSON string, or `default`. This is the fourth of the family, and the
+    one that `ph_runtime` copies.
 
-    One policy, the one `as_int`'s docstring argues for: a mis-shaped field
-    answers with the empty value rather than raising, because a reader of a log
-    some other build wrote must lose a row and not a session.
+    It follows one policy, the policy that the docstring of `as_int` argues for.
+    A mis-shaped field answers with the empty value and does not raise, because
+    a reader of a log that some other build wrote must lose a row and not a
+    session.
 
-    **Not `str(value)`**, which is what a reader writes without this and is worse
-    than useless: `str(None)` is `"None"` and `str(3)` is `"3"`, so a field that
-    is absent or of the wrong type comes back as a plausible-looking answer that
-    no assertion catches. Narrowing says "this was not a string" by giving back
-    nothing, which is the same thing `as_obj` and `as_seq` say.
+    **This is not `str(value)`.** A reader without this function writes
+    `str(value)`, and that is worse than useless. `str(None)` is `"None"` and
+    `str(3)` is `"3"`. A field that is absent or of the wrong type then comes
+    back as an answer that looks plausible, and no assertion catches it. A
+    narrowing reports "this was not a string" by returning nothing. `as_obj` and
+    `as_seq` report the same thing in the same way.
     """
     return value if isinstance(value, str) else default

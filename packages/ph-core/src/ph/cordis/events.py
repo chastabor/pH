@@ -1,7 +1,7 @@
 """The event declaration registry.
 
-dsh checks every dispatch site against an `@mode`-tagged catalog at build time.
-Python has no such tag, so pH declares events at import time instead: an event
+dsh checks every dispatch site at build time against a catalog tagged with
+`@mode`. Python has no such tag, so pH declares events at import time. An event
 name carries exactly one dispatch mode, and dispatching it through a different
 method raises. The same registry backs `phern events`, the producer/consumer
 matrix (P0-04).
@@ -25,17 +25,17 @@ _MODES: frozenset[str] = frozenset({"emit", "parallel", "serial", "waterfall"})
 
 @dataclass(frozen=True, slots=True)
 class EventDeclaration:
-    """One event name's public contract."""
+    """The public contract of one event name."""
 
     name: str
     mode: DispatchMode
     payload: type[Any] | None = None
     """The payload type, when the event carries one structured argument."""
     owner: str = ""
-    """The declaring module — the event's producer of record."""
+    """The declaring module, which is the producer of record of the event."""
     doc: str = ""
     consumers: set[str] = field(default_factory=set, compare=False)
-    """Modules that have registered a listener at least once, for the matrix."""
+    """The modules that have registered a listener at least one time, for the matrix."""
 
 
 class EventRegistry:
@@ -55,17 +55,19 @@ class EventRegistry:
     ) -> EventDeclaration:
         """Declare one event name and its dispatch mode.
 
-        Re-declaring the same name with the same mode is a no-op, so a module
-        imported twice under different paths does not fail. Re-declaring it with
-        a different mode raises: the mode is part of the event's contract.
+        Declaring the same name again with the same mode is a no-op, so a module
+        imported twice under different paths does not fail. Declaring it again
+        with a different mode raises, because the mode is part of the contract
+        of the event.
 
-        **And so does re-declaring it with a different owner** (A13). The no-op
-        exists for the *same* declaration arriving twice; two modules declaring
-        one name are two owners for one contract, and returning the first
-        silently dropped the second's `owner` and `doc` — so `/events` named one
-        module for an event two dispatch, and the loser's documentation was
-        simply gone. Latent today because no name is declared twice; it is the
-        kind of thing that arrives with a plugin somebody else wrote.
+        **Declaring it again with a different owner also raises** (A13). The
+        no-op exists for the *same* declaration that arrives twice. Two modules
+        that declare one name are two owners for one contract. Returning the
+        first declaration silently dropped the `owner` and `doc` of the second.
+        `phern events` then named one module for an event that two modules
+        dispatch, and the documentation of the second was lost. The problem is
+        latent today, because no name is declared twice. It is the kind of
+        problem that arrives with a plugin that somebody else wrote.
         """
         if mode not in _MODES:
             raise EventModeError(f'unknown dispatch mode "{mode}" for event "{name}"')
@@ -115,7 +117,7 @@ class EventRegistry:
     def matrix(self) -> list[dict[str, Any]]:
         """The producer/consumer matrix, as data.
 
-        dsh generates `event-producer-consumer.md` from its catalog; `phern events`
+        dsh generates `event-producer-consumer.md` from its catalog. `phern events`
         renders this list instead.
         """
         return [

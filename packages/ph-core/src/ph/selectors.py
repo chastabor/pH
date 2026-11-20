@@ -3,7 +3,7 @@
 pH has two unrelated event vocabularies that share a `namespace/name` spelling:
 the **cordis bus** (in-process pub/sub between plugins, listed by `phern events`)
 and the **session log** (durable, frozen-JSON, append-only). A selector names
-vocabulary and namespace at once:
+the vocabulary and the namespace at once:
 
 ```
 log:workspace            every workspace/* session-log type
@@ -13,13 +13,15 @@ log:*                    every session-log type
 workspace                whichever vocabulary the surface serves
 ```
 
-Invariants enforced here:
+This module enforces these invariants:
 
-* **Matching compares whole segments, never substrings** — the log's `tool/*`
-  is one letter from the bus's `tools/*`, and `log:tool` must not reach it.
+* **Matching compares whole segments, never substrings.** The `tool/*` of the
+  log is one letter from the `tools/*` of the bus, and `log:tool` must not reach
+  it.
 * `workspace` and `workspace/*` select the same set.
-* An explicit scheme a surface cannot serve is refused, not answered empty.
-* No selectors at all admits everything.
+* An explicit scheme that a surface cannot serve is refused, and is not answered
+  with an empty result.
+* An empty list of selectors admits everything.
 
 @module ph.selectors
 """
@@ -42,7 +44,7 @@ __all__ = [
 ]
 
 Scheme: TypeAlias = Literal["log", "bus"]
-"""Which vocabulary a selector is about — the durable session log
+"""Which vocabulary a selector is about: the durable session log
 (`KNOWN_SESSION_EVENT_TYPES`) or the cordis dispatch registry (`EventRegistry`).
 """
 
@@ -58,8 +60,8 @@ class SelectorError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class Selector:
-    """One vocabulary, and a namespace prefix within it. `segments` empty means
-    *everything in this scheme* — the parsed form of `*`.
+    """One vocabulary, and a namespace prefix within it. Empty `segments` means
+    *everything in this scheme*, which is the parsed form of `*`.
     """
 
     scheme: Scheme
@@ -69,24 +71,25 @@ class Selector:
         return f"{self.scheme}:{'/'.join(self.segments) or _ANY}"
 
     def matches(self, name: str) -> bool:
-        """Whether `name` is at or under this selector's namespace.
+        """Whether `name` is at or under the namespace of this selector.
 
-        **Segment-aware, never a substring test**: `log:tool` must not match
-        `tools/change`. The scheme is deliberately *not* checked here — a bare type
-        string does not say which vocabulary it came from, so `parse_all` settles that
-        once, against the surface that knows.
+        **The test compares segments, and is never a substring test**: `log:tool`
+        must not match `tools/change`. The scheme is deliberately *not* checked
+        here. A bare type string does not say which vocabulary it came from, so
+        `parse_all` settles that one time, against the surface that knows.
         """
-        # A slice shorter than `segments` never compares equal to it, so no length
-        # guard is needed; `parts[:0] == ()` answers the match-everything case.
+        # A slice shorter than `segments` never compares equal to it, so no
+        # length guard is needed. `parts[:0] == ()` answers the match-everything
+        # case.
         return tuple(name.split("/"))[: len(self.segments)] == self.segments
 
 
 def parse(text: str, *, scheme: Scheme | None = None) -> Selector:
-    """One selector, with `scheme` supplying the vocabulary when the text omits it.
+    """One selector. `scheme` supplies the vocabulary when the text omits it.
 
-    An explicit `log:` or `bus:` in the text wins. A trailing `/*` is sugar for the
-    namespace itself. Raises `SelectorError` on an empty, unscoped or malformed
-    pattern rather than guessing at it.
+    An explicit `log:` or `bus:` in the text wins. A trailing `/*` is another
+    way to write the namespace itself. The function raises `SelectorError` on an
+    empty, unscoped or malformed pattern, and does not guess at it.
     """
     raw = text.strip()
     if not raw:
@@ -99,7 +102,7 @@ def parse(text: str, *, scheme: Scheme | None = None) -> Selector:
                 f"expected one of {', '.join(SCHEMES)}"
             )
         # The guard above narrows `str` to `Scheme`, so the prefix can replace
-        # the fallback rather than needing a second name.
+        # the fallback, and a second name is not needed.
         scheme, raw = head, tail.strip()
     if scheme is None:
         raise SelectorError(
@@ -108,8 +111,9 @@ def parse(text: str, *, scheme: Scheme | None = None) -> Selector:
         )
     if not raw:
         raise SelectorError(f"{text!r} names a vocabulary and no namespace; write {scheme}:{_ANY}")
-    # No early return for a bare `*`: it falls through as a one-element list
-    # whose trailing star is popped, leaving the empty segments that mean "all".
+    # There is no early return for a bare `*`. It falls through as a one-element
+    # list whose trailing star is popped. That leaves the empty segments that
+    # mean "all".
     parts = raw.split("/")
     if parts[-1] == _ANY:
         parts.pop()
@@ -117,8 +121,8 @@ def parse(text: str, *, scheme: Scheme | None = None) -> Selector:
         if not part:
             raise SelectorError(f"{text!r} has an empty path segment")
         if _ANY in part:
-            # A selector is a namespace prefix, not a glob: `work*/acquired` is
-            # refused rather than given a second, richer matching language.
+            # A selector is a namespace prefix, not a glob. `work*/acquired` is
+            # refused, and is not given a second, richer matching language.
             raise SelectorError(
                 f'{text!r}: "{_ANY}" is only a whole trailing segment, not part of one'
             )
@@ -128,10 +132,10 @@ def parse(text: str, *, scheme: Scheme | None = None) -> Selector:
 def parse_all(patterns: Iterable[str], *, vocabulary: Scheme) -> list[Selector]:
     """Parse for one surface: default the scheme, and refuse a foreign one.
 
-    `vocabulary` is what this surface can answer about, so it is both the default
-    for a bare pattern and the check on an explicit one. A scheme the surface
-    cannot serve is a **refusal, not an empty result** — one refusal listing every
-    offender.
+    `vocabulary` is what this surface can answer about, so it is both the
+    default for a bare pattern and the check on an explicit one. A scheme that
+    the surface cannot serve is a **refusal, not an empty result**. One refusal
+    lists every offender.
     """
     selectors = [parse(pattern, scheme=vocabulary) for pattern in patterns]
     foreign = [one for one in selectors if one.scheme != vocabulary]
@@ -151,12 +155,14 @@ def matches_any(name: str, selectors: Sequence[Selector]) -> bool:
 
 
 def unknown_namespaces(selectors: Iterable[Selector], known: Collection[str]) -> list[str]:
-    """Selectors whose namespace no known name occupies — a typo report.
+    """Selectors whose namespace no known name occupies. This is a report of
+    typos.
 
-    **Never consulted by `matches`**: a stored log may legitimately carry types this
-    build does not know, so matching stays mechanical and this is the opt-in half.
-    Returns the selectors' own strings, in order, deduplicated; a catch-all names no
-    namespace, so it is never reported.
+    **`matches` never consults this.** A stored log may legitimately carry types
+    that this build does not know. So matching stays mechanical, and this check
+    is the optional part. The function returns the strings of the selectors, in
+    order, without duplicates. A catch-all names no namespace, so it is never
+    reported.
     """
     return list(
         dict.fromkeys(

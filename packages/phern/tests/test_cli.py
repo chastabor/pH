@@ -586,6 +586,33 @@ def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults(
     assert "40" in configured.output, "a ceiling a run would actually hit"
 
 
+def test_the_catalog_lists_the_options_inside_a_list_of_models() -> None:
+    """`profiles` of `llm-openai-compatible` is a list of routes. The table lists
+    what one route accepts, under the path that a profile writes. Before, the
+    row was the one line `profiles`.
+
+    The profile column of a nested option is blank, because the line of the
+    option that holds it prints the whole value that the profile set. `limits`
+    shows that: every shipped profile mounts it.
+
+    Sabotage: look a nested option up in the profile, as a top option is, and
+    its line says that the default stands.
+    """
+    result = _config("--row", "llm-openai-compatible")
+
+    nested = [line for line in result.output.splitlines() if "profiles[].baseUrl" in line]
+    assert len(nested) == 1, result.output
+    assert "'https://api.openai.com/v1'" in nested[0]
+
+    cells = [
+        [cell.strip() for cell in line.split("│")]
+        for line in _config("--row", "limits").output.splitlines()
+    ]
+    in_profile = {line[3]: line[6] for line in cells if len(line) > 6 and line[3]}
+    assert in_profile["modelCalls"] == "—", "the option that holds it answers for the profile"
+    assert in_profile["modelCalls.turnLimit"] == ""
+
+
 def test_every_option_of_the_limits_row_says_what_it_does() -> None:
     """The column was blank for this row: four options, none of them nested-doc'd.
 
@@ -593,9 +620,12 @@ def test_every_option_of_the_limits_row_says_what_it_does() -> None:
     failure this catches is a *new* option arriving with nothing said about it,
     and a test naming four fixed substrings could not see that — while going red
     on any rewording, which is the opposite of what it is for.
+
+    The options inside the four are listed too (`parent` names the option that
+    holds each), and the rule applies to them as well.
     """
     entry = json.loads(_config("--row", "limits", "--json").output)[0]
-    assert {field["name"] for field in entry["config"]} == {
+    assert {field["name"] for field in entry["config"] if field["parent"] is None} == {
         "modelCalls",
         "toolCalls",
         "children",

@@ -1,52 +1,60 @@
-"""One cross-process file lock, spelled once.
+"""One cross-process file lock, written in one place.
 
-`filelock` is used at five places in this repo, and each one had written out the
-same three things: `thread_local=False`, the parent `mkdir`, and a `Timeout`
-translated into whatever error that caller's domain uses. Four got it right and
-`ph_rlm.harness.service` did not — it omits `thread_local=False`, and is correct
-only by accident, because the one method that takes it never crosses a thread.
+`filelock` was used at five places in this repo, and each place had written out
+the same three things: `thread_local=False`, the parent `mkdir`, and a
+`Timeout` translated into whatever error the domain of that caller uses. Four
+got it right and `ph_rlm.harness.service` did not. It omitted
+`thread_local=False`, and it was correct only by accident, because the one
+method that took the lock never crossed a thread.
 
 **`thread_local=False` is the property worth centralizing**, for the reason
-`ph.persistence.lease` states: filelock keeps its re-entrancy counter in a
-thread-local by default, so a lock acquired on a worker thread and released from
-the event loop finds a counter of zero and returns *having released nothing* —
-no error, no warning, and a lock file held until the process dies. A lock here
-belongs to the process, not to whichever thread took it. That is the whole
-reason this module exists: an invariant whose absence is silent cannot be left
-to five call sites to remember.
+that `ph.persistence.lease` states. filelock keeps its re-entrancy counter in a
+thread-local by default. So a lock that is acquired on a worker thread and
+released from the event loop finds a counter of zero and returns *having
+released nothing*. There is no error and no warning, and the lock file is held
+until the process dies. A lock here belongs to the process, not to whichever
+thread took it. That is the reason this module exists: an invariant whose
+absence is silent cannot be left to five call sites to remember.
 
-**The lock is `flock(2)`, and nothing else is accepted** (P13-11). The library's
-`FileLock` is whichever lock the host can offer: its unix lock where `fcntl` imports,
-and otherwise an *existence* lock — a file whose presence is the claim — with a
-warning nobody reads at import. The unix lock itself switches to that existence
-lock when a filesystem answers `flock` with "not supported", again with a warning.
-An existence lock is not a lease a crash gives back: `ph.persistence.lease`'s whole
-argument is that a killed process releases its sessions by dying, since the kernel
-holds the lock on the open descriptor, and a lock file left behind by a kill would
-refuse the next daemon every session it had. So this asks for the unix lock by name,
-pins its fallback off (`fallback_to_soft=False`), and turns the refusal into
-`LockUnsupported`, which names the path: a daemon on such a filesystem must not
-start, and `phern doctor` says which filesystem (`describe_lock`).
+**The lock is `flock(2)`, and nothing else is accepted** (P13-11). The
+`FileLock` of the library is whichever lock the host can offer. Where `fcntl`
+imports, it is the unix lock. Otherwise it is an *existence* lock (a file whose
+presence is the claim), with a warning at import that nobody reads. The unix
+lock itself switches to that existence lock when a filesystem answers `flock`
+with "not supported", again with a warning. An existence lock is not a lease
+that a crash gives back. The argument of `ph.persistence.lease` is that a
+killed process releases its sessions by dying, because the kernel holds the
+lock on the open descriptor. A lock file that a kill left behind would refuse
+the next daemon every session that the killed process had. So this module asks
+for the unix lock by name, turns its fallback off (`fallback_to_soft=False`),
+and turns the refusal into `LockUnsupported`, which names the path. A daemon on
+such a filesystem must not start, and `phern doctor` says which filesystem it
+is (`describe_lock`).
 
-**What is deliberately not here: the timeout, and the error.** They are the two
-things that genuinely differ. A best-effort cache write bounds an event-loop
-stall at 0.25 s and gives up; a `uv pip install` waits fifteen minutes because
-giving up means building over another process's tree. And each caller raises the
-error its own callers already catch. So this owns the mechanism and `LockBusy`
-is the one thing it throws for contention, for the caller to translate.
+**What is deliberately not here: the timeout, and the error.** These are the
+two things that really differ. A best-effort index write
+(`ph.seams._json_index`) waits 5 s on a worker thread and then gives up. A
+`uv pip install` waits fifteen minutes, because giving up means building over
+the tree of another process. And each caller raises the error that its own
+callers already catch. So this module owns the mechanism, and `LockBusy` is the
+one thing that it raises for contention, for the caller to translate.
 
-**And one that is not a file at all** (`KeyedLocks`): an `anyio.Lock` per key, for
-work in this process that one key's callers must take turns at — a parent's resume
-sweeps, an index's copy. Here because the table that holds them is the part that
-was got wrong twice: kept per key for good, it grew one lock per key ever asked.
+**And one lock that is not a file at all** (`KeyedLocks`): an `anyio.Lock` for
+each key, for work in this process that the callers of one key must take turns
+at. Examples: the resume sweeps of a parent, the copy of an index. It is here
+because the table that holds the locks was written wrong twice: when a lock was
+kept for each key forever, the table grew by one lock for every key that was
+ever asked for.
 
-**Two locks are spelled elsewhere.**
-- **The orphan journal's** (`OrphanJournal._locked`). Its appends share a lock that
-  its compaction takes whole, which `filelock` does not offer, and it is taken on
-  every spawn, where this measured 80 µs.
-- **The schedule index's claims** (`ScheduleIndex.claim`). A claim is held for as
-  long as its change is on the way and probed without waiting, and `filelock`
-  opens with `O_CREAT`, so a probe would make again the claim it was asking after.
+**Two locks are written elsewhere.**
+- **The lock of the orphan journal** (`OrphanJournal._locked`). Its appends
+  share a lock that its compaction takes exclusively, which `filelock` does not
+  offer. It is also taken on every spawn, where the lock of this module
+  measured 80 µs.
+- **The claims of the schedule index** (`ScheduleIndex.claim`). A claim is held
+  for as long as its change is on the way, and it is probed without waiting.
+  `filelock` opens with `O_CREAT`, so a probe would create again the claim that
+  it was asking about.
 
 @module ph.locks
 """
@@ -81,46 +89,49 @@ __all__ = [
 
 
 class LockBusy(RuntimeError):
-    """Somebody else holds the lock, and waiting for it ran out.
+    """Somebody else holds the lock, and the wait for it ran out.
 
-    A message and nothing else. The first cut carried `path`, `what` and
+    A message and nothing else. The first version carried `path`, `what` and
     `timeout` as attributes "so a caller can write its own message", and no
-    caller does: all four already hold those values in scope and raise their own
-    domain error from this one. Fields nobody reads are a claim about how this
-    is used that is not true.
+    caller does. All four already hold those values in scope and raise their
+    own domain error from this one. Fields that nobody reads are a claim about
+    how this is used, and the claim is not true.
     """
 
 
 class LockUnsupported(RuntimeError):
     """This filesystem does not offer `flock`, and an existence lock is refused.
 
-    Not `LockBusy`: nobody holds the lock, and waiting would not help. A caller
-    that catches `LockBusy` to say "already active" must not say that here, so the
-    two are different types, and this one is left to reach the top: a daemon
-    whose leases cannot be kernel locks must not start.
+    This is not `LockBusy`: nobody holds the lock, and waiting would not help.
+    A caller that catches `LockBusy` to say "already active" must not say that
+    here, so the two are different types. This one is left to reach the top: a
+    daemon whose leases cannot be kernel locks must not start.
     """
 
 
 _UNSUPPORTED = frozenset({errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOLCK})
-"""The errnos `flock(2)` answers with on a filesystem that does not implement it —
-the library's own test for switching to its existence lock (`ENOSYS`), and the ones
-a networked filesystem answers directly."""
+"""The errnos that `flock(2)` answers with on a filesystem that does not
+implement it. `ENOSYS` is the test that the library itself uses to switch to
+its existence lock. The others are what a networked filesystem answers
+directly."""
 
 PROBE = ".doctor.lock"
 """The lock file `describe_lock` takes and lets go, beside the leases."""
 
 
 def acquire_file_lock(path: Path | str, *, timeout: float, what: str) -> Callable[[], None]:
-    """Take the lock and hand back its release, for a caller that holds it open.
+    """Take the lock and return its release, for a caller that holds the lock open.
 
-    The shape `ph.persistence.lease` needs: a lease is released by the scope
-    unwinding rather than by leaving a `with`, so the release has to be a value.
+    This is the shape that `ph.persistence.lease` needs. A lease is released
+    when the scope unwinds and not when a `with` is left, so the release has to
+    be a value.
 
-    **No `mkdir`**, which this got wrong once: filelock calls
-    `ensure_directory_exists(self.lock_file)` on every acquire, and its body is
-    `Path(filename).parent.mkdir(parents=True, exist_ok=True)` on the same
-    directory. `lease.py` carried a comment saying exactly that, and centralizing
-    the idiom deleted the comment and re-added the call it was warning about.
+    **No `mkdir`**, which this function got wrong one time. filelock calls
+    `ensure_directory_exists(self.lock_file)` on every acquire, and the body of
+    that function is `Path(filename).parent.mkdir(parents=True, exist_ok=True)`
+    on the same directory. `lease.py` carried a comment that said exactly that.
+    Centralizing the idiom deleted the comment and added back the call that the
+    comment warned about.
     """
     resolved = Path(path)
     lock = UnixFileLock(str(resolved), timeout=timeout, thread_local=False, fallback_to_soft=False)
@@ -142,8 +153,8 @@ def acquire_file_lock(path: Path | str, *, timeout: float, what: str) -> Callabl
 
 
 def try_file_lock(path: Path | str, *, what: str) -> Callable[[], None] | None:
-    """The lock if it is free this instant, else `None`. `LockUnsupported` still
-    raises: nobody holds that lock, and asking again would not help."""
+    """The lock if it is free at this instant, else `None`. `LockUnsupported` is
+    still raised: nobody holds that lock, and asking again would not help."""
     try:
         return acquire_file_lock(path, timeout=0, what=what)
     except LockBusy:
@@ -151,15 +162,16 @@ def try_file_lock(path: Path | str, *, what: str) -> Callable[[], None] | None:
 
 
 def file_lock_held(path: Path | str) -> bool:
-    """Whether some process holds the lock at `path` this instant.
+    """Whether some process holds the lock at `path` at this instant.
 
-    For a reader that wants to say "a run is building this" and must not take the
-    lock to find out. Asked with a *shared*, non-blocking `flock`, which only an
-    exclusive holder refuses — so two processes asking at one moment never see
-    each other, as two that each tried the lock itself would. Opened without
-    `O_CREAT`: a lock nobody has made is a lock nobody holds, and asking must not
-    make it. Any other failure to ask — a filesystem with no `flock` — answers
-    no: nobody is known to hold it.
+    For a reader that wants to say "a run is building this" and must not take
+    the lock to find out. The question is asked with a *shared*, non-blocking
+    `flock`, which only an exclusive holder refuses. So two processes that ask
+    at the same moment never see each other, as two that each tried the lock
+    itself would. The file is opened without `O_CREAT`: a lock that nobody has
+    made is a lock that nobody holds, and asking must not make it. Any other
+    failure to ask (a filesystem with no `flock`) answers no: nobody is known
+    to hold the lock.
     """
     try:
         descriptor = os.open(path, os.O_RDONLY)
@@ -183,10 +195,11 @@ async def wait_for_file_lock(
 ) -> Callable[[], None]:
     """The lock, waited for as long as another holder has it.
 
-    For a writer that is expected to queue behind another — an index being built
-    by a second process — rather than be refused. **Polled rather than blocked in
-    a worker thread**, so a canceled call stops waiting, and no abandoned thread
-    takes the lock after its caller has gone and holds it for nobody.
+    For a writer that is expected to queue behind another writer and not be
+    refused: an index that a second process is building. **Polled, not blocked
+    in a worker thread**, so that a canceled call stops waiting. No abandoned
+    thread then takes the lock after its caller has gone and holds it for
+    nobody.
     """
     while (release := try_file_lock(path, what=what)) is None:
         await anyio.sleep(poll)
@@ -205,11 +218,12 @@ def file_lock(path: Path | str, *, timeout: float, what: str) -> Iterator[None]:
 
 def describe_lock(directory: Path) -> list[tuple[str, str]]:
     """The lease mechanism as `phern doctor` prints it: what the lock is, which
-    filesystem `directory` is on, and whether one was just taken and let go there.
+    filesystem `directory` is on, and whether a lock was just taken and released
+    there.
 
-    The probe is the real thing — a lock in the lease directory, held for no time —
-    because the question is about the filesystem, and only the filesystem answers
-    it. The directory is made if it is missing, as the first lease would make it.
+    The probe is a real lock in the lease directory, held for no time. The
+    question is about the filesystem, and only the filesystem answers it. The
+    directory is made if it is missing, as the first lease would make it.
     """
     rows = [
         ("mechanism", "flock(2) on a lock file, held by the open descriptor until it closes"),
@@ -235,11 +249,13 @@ class _Turn:
 
 
 class KeyedLocks[K: Hashable]:
-    """One `anyio.Lock` per key, made when first wanted and gone with the last caller
-    holding or waiting for it — so the table is only as large as what is in use now.
+    """One `anyio.Lock` for each key. A lock is made when it is first wanted and
+    removed with the last caller that holds it or waits for it. So the table is
+    only as large as what is in use now.
 
-    `hold(key)` is an async context manager that can be entered again and again, as
-    an `anyio.Lock` can: a run that takes its turn many times keeps one handle.
+    `hold(key)` is an async context manager that can be entered again and again,
+    as an `anyio.Lock` can. A run that takes its turn many times keeps one
+    handle.
     """
 
     __slots__ = ("_turns",)

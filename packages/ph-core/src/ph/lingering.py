@@ -1,61 +1,69 @@
 """Whether a daemon outlives the login session that started it (I-6, P5-11).
 
-`$PH_RUNTIME` resolves to `$XDG_RUNTIME_DIR/ph` on Linux, and tier 1's whole
-argument in `paths.py` is that **the OS owns that directory's properties** —
-mode, owner, tmpfs, and *removal at session end*. Every one of those is a
-reason to prefer it, and the last one is what Phase 5 walks into.
+`$PH_RUNTIME` resolves to `$XDG_RUNTIME_DIR/ph` on Linux. The argument for
+tier 1 in `paths.py` is that **the OS owns the properties of that directory**:
+mode, owner, tmpfs, and *removal at session end*. Each of those is a reason to
+prefer it, and the last one is the problem that Phase 5 meets.
 
-`phern daemon` exists so a run that takes an hour does not stop because a laptop
-lid closed. But logind reaps `/run/user/$UID` when a user's last session ends
-unless that user is *lingering*, so a daemon started from an ordinary login
-session meets one of two ends at logout, and `loginctl enable-linger` is the
-one fix for both:
+`phern daemon` exists so that a run that takes an hour does not stop because a
+laptop lid closed. But logind reaps `/run/user/$UID` when the last session of a
+user ends, unless that user is *lingering*. So a daemon that was started from
+an ordinary login session meets one of two ends at logout, and
+`loginctl enable-linger` is the one fix for both:
 
-* `KillUserProcesses=no` (the Debian and Ubuntu default) — the daemon keeps
+* `KillUserProcesses=no` (the Debian and Ubuntu default). The daemon keeps
   running and **loses its socket**. Every client afterwards reports "no daemon
-  socket at …" and is told to start one, while the first daemon is still
-  holding this user's session leases (I-5) and will refuse the second every
-  root it already owns. Nothing anywhere says the word "logout".
-* `KillUserProcesses=yes` (systemd's own default) — the daemon is signaled at
-  logout, which is at least a teardown that runs, but is not what "long
-  running" promised either.
+  socket at …" and is told to start one. The first daemon still holds the
+  session leases of this user (I-5), and it will refuse the second daemon
+  every root that it already owns. Nothing anywhere says the word "logout".
+* `KillUserProcesses=yes` (the default of systemd itself). The daemon is
+  signaled at logout. That is at least a teardown that runs, but it is not
+  what "long running" promised either.
 
-That first case is the silent failure this module exists to make loud, and it
-has two readers. `phern doctor` and `phern daemon` ask *before*: is this deployment
-one where the socket will survive? The daemon asks *after*, whenever the kernel
-says its socket's entry moved (`ph.path_watch`), of its own socket —
-`socket_identity` — because by then no new client can connect
-to be told anything, and the only surfaces left are the daemon's log and the
-roots' own transcripts.
+The first case is the silent failure that this module exists to make loud. It
+has two readers:
+
+* `phern doctor` and `phern daemon` ask *before*: is this a deployment where
+  the socket will survive?
+* The daemon asks *after*, about its own socket (`socket_identity`), whenever
+  the kernel says that the entry of the socket moved (`ph.path_watch`). By
+  then no new client can connect to be told anything. The only surfaces left
+  are the log of the daemon and the transcripts of the roots.
 
 **The linger state is read from the marker directory, not from `loginctl`.**
-The row asked for "`loginctl` state" and this is it: `enable-linger` creates an
-empty `/var/lib/systemd/linger/<user>`, `disable-linger` removes it, and
-logind's own check at boot is the presence of that file — so the directory is
-the state rather than a cache of it. Reading it directly is a `stat` instead of
-a subprocess and a D-Bus round trip on a command a person runs *because*
-something is already wrong; it needs no `ctx.subprocess` seam, which a
-`Diagnostic.read` (synchronous, by construction) has no way to await; and it
-answers on a host where `loginctl` is absent from `PATH` or logind is not
-running, which is exactly the host whose answer is least obvious. What is lost
-is a host that stores the marker somewhere else — reported as `unknown` rather
-than guessed at, with `loginctl show-user` named as the way to settle it.
+The row asked for "`loginctl` state", and this is that state. `enable-linger`
+creates an empty `/var/lib/systemd/linger/<user>` and `disable-linger` removes
+it. The check that logind itself makes at boot is the presence of that file.
+So the directory is the state and not a cache of it. Reading it directly has
+three benefits:
 
-**Whether logind is here at all is read the same way, from its own directory.**
-It was `sys.platform == "linux"` once, and that answered the wrong question twice
-over: a Linux host without systemd (Alpine, a slim container) was told to check
-with a `loginctl` it does not have, and every test that stood up a simulated
-logind host on a Mac — marker directory and all — was answered `not-applicable`
-before the marker was looked at, so twelve of them failed on macOS for no reason
-the code under test had.
+* It is a `stat`, not a subprocess and a D-Bus round trip, on a command that a
+  user runs *because* something is already wrong.
+* It needs no `ctx.subprocess` seam. A `Diagnostic.read` is synchronous by
+  construction and has no way to await one.
+* It answers on a host where `loginctl` is absent from `PATH` or logind is not
+  running. That is exactly the host whose answer is least obvious.
 
-The evidence is `SYSTEMD_RUN_DIR`, which is systemd's own `sd_booted()` test.
-**Booted, not installed**, and the difference is the whole point: `/var/lib/systemd`
-is created by `systemd-timesyncd` and friends and survives on a host booted under
-sysvinit or in a Debian container where PID 1 is not systemd — so keying off it
-would hand exactly the `loginctl` advice this change removes to a narrower set of
-hosts instead of none. `/run/systemd/system` exists only where systemd is the init
-that booted the machine, which is the only case where logind reaps anything.
+What is lost is a host that stores the marker somewhere else. That host is
+reported as `unknown` and not guessed at, and `loginctl show-user` is named as
+the way to settle it.
+
+**Whether logind is here at all is read the same way, from its own
+directory.** It was `sys.platform == "linux"` before, and that answered the
+wrong question in two ways. A Linux host without systemd (Alpine, a slim
+container) was told to check with a `loginctl` that it does not have. And
+every test that set up a simulated logind host on a Mac, marker directory
+included, was answered `not-applicable` before the marker was looked at. So
+twelve of them failed on macOS for no reason that the code under test had.
+
+The evidence is `SYSTEMD_RUN_DIR`, which is the `sd_booted()` test of systemd
+itself. **Booted, not installed**, and the difference is the purpose.
+`/var/lib/systemd` is created by `systemd-timesyncd` and similar services. It
+survives on a host that was booted under sysvinit, and in a Debian container
+where PID 1 is not systemd. Keying off it would give exactly the `loginctl`
+advice that this change removes to a narrower set of hosts, and not to none.
+`/run/systemd/system` exists only where systemd is the init that booted the
+machine, and that is the only case where logind reaps anything.
 
 @module ph.lingering
 """
@@ -82,41 +90,43 @@ __all__ = [
 ]
 
 SYSTEMD_RUN_DIR = Path("/run/systemd/system")
-"""Systemd's own "am I the init that booted this host" marker (`sd_booted(3)`).
+"""The marker of systemd for "am I the init that booted this host" (`sd_booted(3)`).
 
-A directory systemd creates at boot and nothing else does, so its presence is the
-one cheap answer to "will logind reap a runtime directory here". Its **own**
-constant rather than a fact inferred from `LINGER_DIR`: the linger marker
-directory answers whether a *user* lingers, and reading a second meaning out of it
-made one path carry two questions — and made the "no logind" branch impossible to
-test, since a test pointing `LINGER_DIR` at its own temp directory necessarily
-gave that directory a parent that exists. A module constant for `LINGER_DIR`'s
-reason: a test needs to point it somewhere it controls."""
+Systemd creates this directory at boot and nothing else does. So its presence
+is the one cheap answer to "will logind reap a runtime directory here". It is
+its **own** constant and not a fact inferred from `LINGER_DIR`. The linger
+marker directory answers whether a *user* lingers. Reading a second meaning out
+of it made one path carry two questions. It also made the "no logind" branch
+impossible to test: a test that pointed `LINGER_DIR` at its own temp directory
+necessarily gave that directory a parent that exists. It is a module constant
+for the same reason as `LINGER_DIR`: a test needs to point it at a directory
+that the test controls."""
 
 LINGER_DIR = Path("/var/lib/systemd/linger")
-"""Where logind records the users it keeps a manager running for.
+"""Where logind records the users that it keeps a manager running for.
 
-An empty file per lingering user, named by login name. `loginctl enable-linger`
-creates one and `disable-linger` removes it; a module constant so a test can
-point the probe at a directory it controls, since the real one is root-owned
-and a test that needed to write to it could not run."""
+There is one empty file for each lingering user, named by login name.
+`loginctl enable-linger` creates the file and `disable-linger` removes it. This
+is a module constant so that a test can point the probe at a directory that the
+test controls. The real directory is owned by root, and a test that needed to
+write to it could not run."""
 
 LingerState = Literal["on", "off", "unknown", "not-applicable"]
-"""`on`/`off` when the marker directory settles it; `unknown` when systemd is
-installed but the marker directory is not where logind keeps it (a host that
-stores the state elsewhere); `not-applicable` where systemd is not installed at
-all — macOS, Windows, a Linux without it — and nothing reaps a runtime directory
-at logout because nothing created one."""
+"""`on` or `off` when the marker directory settles it. `unknown` when systemd
+booted the host but the marker directory is not where logind keeps it (a host
+that stores the state elsewhere). `not-applicable` where systemd did not boot
+the host (macOS, Windows, a Linux without it). Nothing there reaps a runtime
+directory at logout, because nothing created one."""
 
 
 def username() -> str:
-    """This process's login name, for the marker file and the advice.
+    """The login name of this process, for the marker file and the advice.
 
-    The marker is named by login name rather than uid, so a numeric fallback
-    would name a file that cannot exist. `$USER` is consulted first because it
-    is what the person will type after `enable-linger`, and `pwd` behind it for
-    a process started without an environment — a cron job, or the daemon's own
-    re-exec.
+    The marker is named by login name and not by uid, so a numeric fallback
+    would name a file that cannot exist. `$USER` is read first because it is
+    what the user will type after `enable-linger`. `pwd` is behind it for a
+    process that was started without an environment: a cron job, or the
+    re-exec of the daemon itself.
     """
     name = os.environ.get("USER") or os.environ.get("LOGNAME")
     if name:
@@ -131,11 +141,12 @@ def username() -> str:
 
 
 def linger_state(user: str = "") -> LingerState:
-    """Whether logind keeps this user's processes and runtime dir after logout.
+    """Whether logind keeps the processes and the runtime directory of this user
+    after logout.
 
-    Never raises: this is read by `phern doctor`, which a person runs *because*
-    something is broken, and an unreadable `/var/lib/systemd` is a fact to
-    report rather than a traceback to replace the rest of the report with.
+    Never raises. `phern doctor` reads this, and a user runs `phern doctor`
+    *because* something is broken. An unreadable `/var/lib/systemd` is a fact
+    to report, and not a traceback that replaces the rest of the report.
     """
     if not logind_present():
         return "not-applicable"
@@ -151,16 +162,19 @@ def linger_state(user: str = "") -> LingerState:
 
 
 def logind_present() -> bool:
-    """Whether this host has a logind to reap anything — read from disk, not from
-    the platform name.
+    """Whether this host has a logind that can reap anything. This is read from
+    disk, not from the platform name.
 
     One `stat` of `SYSTEMD_RUN_DIR`, which is what `sd_booted(3)` does. Never
-    raises, for `linger_state`'s reason: this is read by `phern doctor`.
+    raises, for the same reason as `linger_state`: `phern doctor` reads this.
 
-    The three answers stay distinct downstream, and each earns a different
-    sentence: no logind is `not-applicable` and advises nothing; logind but no
-    marker directory is `unknown` and asks a question; a marker directory settles
-    it into `on`/`off` and, when off, gives an instruction.
+    The three answers stay distinct downstream, and each gets a different
+    sentence:
+
+    - No logind is `not-applicable` and advises nothing.
+    - Logind with no marker directory is `unknown` and asks a question.
+    - A marker directory settles the answer as `on` or `off`. When it is `off`,
+      the sentence gives an instruction.
     """
     try:
         return SYSTEMD_RUN_DIR.is_dir()
@@ -173,50 +187,53 @@ class RuntimeLifetime:
     """What happens to a path under `$PH_RUNTIME` when this login session ends."""
 
     path: Path
-    """The path whose lifetime was asked about — the runtime root, or a
-    daemon's own socket when a daemon is the one asking."""
+    """The path whose lifetime was asked about: the runtime root, or the socket
+    of a daemon when a daemon is the one that asks."""
     tier: RuntimeTier
     derived_from: str
     """The environment variable behind the tier, `""` for the `/tmp` fallback.
 
-    `PathRoots.runtime_source`, copied at construction. It was a `{tier: variable}`
-    table in this module until the review that found it naming `LOCALAPPDATA` for
-    a windows tier whose path can come from `$XDG_CACHE_HOME` or `~/.cache` — a
-    second copy of a decision `paths._resolve_runtime` makes while reading the
-    variable, so the copy could only ever drift or raise `KeyError` inside the one
-    command a person runs because something is already broken."""
+    This is `PathRoots.runtime_source`, copied at construction. It was a
+    `{tier: variable}` table in this module until a review found that the table
+    named `LOCALAPPDATA` for a windows tier whose path can come from
+    `$XDG_CACHE_HOME` or `~/.cache`. The table was a second copy of a decision
+    that `paths._resolve_runtime` makes while it reads the variable. So the
+    copy could only drift, or raise `KeyError` inside the one command that a
+    user runs because something is already broken."""
     runtime_dir: str
-    """`$XDG_RUNTIME_DIR` as the environment gives it, or `""` when unset.
+    """`$XDG_RUNTIME_DIR` as the environment gives it, or `""` when it is unset.
 
-    Carried rather than re-read where it is printed: this is the directory the
-    verdict is *about*, and a sentence naming `path.parent` would name
-    `/run/user/1000/ph` for a runtime root and `/run/user/1000/ph` again for a
-    socket inside it — neither of which is the thing logind removes."""
+    It is carried here and not read again where it is printed, because this is
+    the directory that the verdict is *about*. A sentence naming `path.parent`
+    would name `/run/user/1000/ph` for a runtime root and `/run/user/1000/ph`
+    again for a socket inside it. Neither of those is the thing that logind
+    removes."""
     linger: LingerState
     user: str
 
     @property
     def reaped_at_logout(self) -> bool:
-        """Whether `path` sits inside `$XDG_RUNTIME_DIR`, which logind removes.
+        """Whether `path` is inside `$XDG_RUNTIME_DIR`, which logind removes.
 
-        A containment test rather than `tier == "xdg-runtime"`, because an
-        explicit `PH_RUNTIME=/run/user/1000/ph-dev` is tier `override` and
-        reaped exactly the same — the tier says where the answer came from, not
+        This is a containment test and not `tier == "xdg-runtime"`. An explicit
+        `PH_RUNTIME=/run/user/1000/ph-dev` is tier `override` and is reaped in
+        exactly the same way. The tier says where the answer came from, not
         where it points.
         """
-        # Both sides canonical: `path` comes from `resolve_roots`, which resolves,
-        # so comparing it against a raw `$XDG_RUNTIME_DIR` would answer `False` on
-        # any host reaching it through a link (`/var/run/user/N` where `/var/run`
-        # is `/run`) — the same spelling drift the roots were canonicalized to end.
+        # Both sides are canonical. `path` comes from `resolve_roots`, which
+        # resolves. Comparing it against a raw `$XDG_RUNTIME_DIR` would answer
+        # `False` on any host that reaches the directory through a link
+        # (`/var/run/user/N` where `/var/run` is `/run`). That is the same
+        # spelling drift that the roots were made canonical to end.
         return bool(self.runtime_dir) and is_under(self.path, canonical(Path(self.runtime_dir)))
 
     @property
     def survives_logout(self) -> bool | None:
-        """`None` where the honest answer is "it depends".
+        """`None` where the correct answer is "it depends".
 
-        Three states rather than two, because the failures in the module
-        docstring have different certainties, and `_outlook` is where the four
-        real cases are enumerated — this is the answer column of that table.
+        There are three states and not two, because the failures in the module
+        docstring have different certainties. `_outlook` lists the six real
+        cases, and this property is the answer column of that table.
         """
         return self._outlook()[0]
 
@@ -224,38 +241,40 @@ class RuntimeLifetime:
     def advice(self) -> str:
         """The command that settles it, or `""` when there is nothing to settle.
 
-        One command for both failure shapes, which is the reason a row here can
-        end in an instruction rather than in a discussion: lingering keeps the
-        runtime directory *and* exempts the user from `KillUserProcesses`. The
-        `unknown` host gets a question instead — `show-user` — because "off"
-        earns an instruction and "we could not tell" does not.
+        One command covers both failure shapes, which is why a row here can end
+        in an instruction and not in a discussion: lingering keeps the runtime
+        directory *and* exempts the user from `KillUserProcesses`. The `unknown`
+        host gets a question (`show-user`) and not an instruction, because
+        "off" justifies an instruction and "we could not tell" does not.
         """
         return self._outlook()[2]
 
     @property
     def explanation(self) -> str:
-        """Why the answer is what it is, with no answer in front of it.
+        """Why the answer is what it is, without the answer in front of it.
 
-        Split from `verdict` because it has a reader that is not answering that
-        question. `phern agents` reaches this when a *connect* failed, where the
-        thing on screen above it is "no daemon socket at …" — and a next line
-        beginning "no —" reads as a refusal of something nobody asked.
+        This is split from `verdict` because one of its readers is not
+        answering that question. `phern agents` reaches this when a *connect*
+        failed, and the line on screen above it is "no daemon socket at …". A
+        next line that begins "no —" would read as a refusal of something that
+        nobody asked.
         """
         return self._outlook()[1]
 
     def _outlook(self) -> tuple[bool | None, str, str]:
-        """`(survives, why, what to run)` — the four cases, decided in one place.
+        """`(survives, why, what to run)`: the six cases, decided in one place.
 
-        One `match` over the two facts that carry the information, rather than three
-        ladders re-walking a tri-state that had already thrown some away. **Unknown
-        linger and outside-the-reaped-tree are separate cases**, not one `None`: a host
-        with no `/var/lib/systemd/linger` and a socket inside `$XDG_RUNTIME_DIR` — exactly
-        the host this module says deserves the question — must not be told "the socket
-        outlives logout", which is the one thing nobody could know about it.
+        One `match` over the two facts that carry the information. Before, three
+        ladders each walked a tri-state that had already discarded some of it.
+        **Unknown linger and outside-the-reaped-tree are separate cases**, not
+        one `None`. A host with no `/var/lib/systemd/linger` and a socket inside
+        `$XDG_RUNTIME_DIR` is exactly the host that this module says deserves
+        the question. It must not be told "the socket outlives logout", which
+        is the one thing that nobody could know about it.
 
-        The tuple is returned whole because an answer, its sentence and its command are
-        three views of one decision, and deciding them separately is how they came to
-        disagree.
+        The tuple is returned whole because an answer, its sentence and its
+        command are three views of one decision. Deciding them separately is how
+        they came to disagree.
         """
         match (self.linger, self.reaped_at_logout):
             case ("not-applicable", _):
@@ -304,22 +323,24 @@ class RuntimeLifetime:
     def verdict(self) -> str:
         """The `survives logout` row: the answer, then why.
 
-        `phern daemon` prints it at startup — one line, no table, before it blocks —
-        and taking it from here rather than writing a second sentence is what
-        keeps the warning a person reads at 09:00 and the report they run at
-        17:00 from disagreeing about what is wrong.
+        `phern daemon` prints it at startup when the answer is not yes: one
+        line, no table, before it blocks. It takes the sentence from here and
+        does not write a second one. That keeps the warning that a user reads
+        at 09:00 and the report that the user runs at 17:00 from disagreeing
+        about what is wrong.
         """
         answer = {True: "yes", False: "no", None: "unknown"}[self.survives_logout]
         return f"{answer} — {self.explanation}"
 
     def describe(self) -> list[tuple[str, str]]:
-        """The rows `phern doctor` and `phern agents doctor` print.
+        """The rows that `phern doctor` and `phern agents doctor` print.
 
-        `(label, value)` pairs, which is `PathRoots.describe()`'s shape and
-        `ctx.diagnostics`' — so this reads as one more section rather than as a
-        format either printer has to learn. Rows with nothing to say are left
-        out for the reason `Diagnostic.read` returns none: a report that always
-        prints every row is one where the row that matters cannot be found.
+        These are `(label, value)` pairs, which is the shape of
+        `PathRoots.describe()` and of `ctx.diagnostics`. So this reads as one
+        more section, and not as a format that either printer has to learn.
+        Rows with nothing to say are left out, for the reason that
+        `Diagnostic.read` returns none: in a report that always prints every
+        row, the row that matters cannot be found.
         """
         source = f"${self.derived_from}" if self.derived_from else "no runtime dir in the env"
         rows = [
@@ -347,20 +368,20 @@ def lifetime(path: Path | None = None, *, roots: PathRoots | None = None) -> Run
     """Read the environment and answer for one path. Creates nothing.
 
     `path` defaults to the runtime root, which is what `phern doctor` asks about
-    before any daemon exists. A daemon passes **its own socket**: `serve()`
-    accepts an explicit path, so the socket a daemon bound and the root
-    `resolve_roots()` derives are not always the same file, and a daemon that
-    reported the lifetime of a directory it is not using would be the
+    before any daemon exists. A daemon passes **its own socket**. `serve()`
+    accepts an explicit path, so the socket that a daemon bound and the root
+    that `resolve_roots()` derives are not always the same file. A daemon that
+    reported the lifetime of a directory that it does not use would be the
     re-derivation on the client side that `daemon/status` exists to avoid.
     """
     resolved = roots or resolve_roots()
-    # Once, and handed to the marker lookup rather than left to it: `linger_state`
-    # falls back to `username()` when it is not told, so reading the field
-    # separately probed the same fact twice — `$USER` twice on an ordinary shell,
-    # and two `pwd.getpwuid` calls on the deployment this module is written about
-    # (a unit file, a re-exec, cron), where the passwd backend may be an NSS round
-    # trip. It also makes "the linger answer is about `user`" true by construction
-    # rather than by coincidence.
+    # The name is read one time and handed to the marker lookup. `linger_state`
+    # falls back to `username()` when it is not given a name, so reading the
+    # field separately probed the same fact twice: `$USER` twice on an ordinary
+    # shell, and two `pwd.getpwuid` calls on the deployment that this module is
+    # written about (a unit file, a re-exec, cron), where the passwd backend may
+    # be an NSS round trip. It also makes "the linger answer is about `user`"
+    # true by construction and not by coincidence.
     user = username()
     return RuntimeLifetime(
         path=path or resolved.runtime,
@@ -373,31 +394,32 @@ def lifetime(path: Path | None = None, *, roots: PathRoots | None = None) -> Run
 
 
 def socket_identity(path: Path) -> tuple[int, int] | None:
-    """`(st_dev, st_ino)` for whatever is at `path`, or `None` if nothing is.
+    """`(st_dev, st_ino)` for whatever is at `path`, or `None` if nothing is there.
 
-    The pair rather than "does the file still exist", because the daemon's
-    socket has **two** ways of stopping being the daemon's socket and only one
-    of them is an absence. Logout reaps the directory, which is the removal;
-    then the person logs back in, logind makes `/run/user/$UID` again, and
-    `phern daemon` — following the advice a client just printed — binds a *new*
-    socket at the same path. From then on the path exists and answers, while
-    the first daemon still holds every lease the second one will be refused.
-    An existence check calls that recovery. The inode says it is the worse
-    half of I-5's hazard arriving by a different door.
+    This returns the pair and not "does the file still exist", because the
+    socket of the daemon has **two** ways to stop being the socket of the
+    daemon, and only one of them is an absence. Logout reaps the directory,
+    which is the removal. Then the user logs back in, logind makes
+    `/run/user/$UID` again, and `phern daemon` binds a *new* socket at the
+    same path, following the advice that a client just printed. From then on
+    the path exists and answers, while the first daemon still holds every lease
+    that the second one will be refused. An existence check calls that a
+    recovery. The inode shows that it is the worse half of the hazard of I-5,
+    arriving by a different route.
 
-    `lstat`, so a path replaced by a symlink to somebody else's socket reads as
-    replaced rather than as the target it points at.
+    `lstat`, so a path that was replaced by a symlink to the socket of somebody
+    else reads as replaced, and not as the target that it points at.
 
-    **What makes the pair sound is that the daemon holds its listener open.**
-    An inode number is reusable the moment the last reference to it goes, so a
-    path unlinked and then re-created can legitimately come back with the number
-    it just had — which is not a theoretical hazard, it is what CI does and what
-    caught this module's first tests. The bound socket is different: `serve()`
-    keeps the listener inside `async with listener:` for the life of the
-    process, so the inode stays referenced while the daemon runs and cannot be
-    handed to the socket that replaces it. A caller comparing identities for a
-    path it does *not* hold open has no such guarantee and should not read this
-    as one.
+    **The pair is sound because the daemon holds its listener open.** An inode
+    number can be reused the moment the last reference to it goes. So a path
+    that is unlinked and then created again can legitimately come back with
+    the number that it just had. That is not a theoretical hazard: it is what
+    CI does, and it is what caught the first tests of this module. The bound
+    socket is different. `serve()` keeps the listener inside
+    `async with listener:` for the life of the process, so the inode stays
+    referenced while the daemon runs and cannot be given to the socket that
+    replaces it. A caller that compares identities for a path that it does
+    *not* hold open has no such guarantee and should not read this as one.
     """
     try:
         info = os.lstat(path)

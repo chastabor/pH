@@ -17,7 +17,7 @@ import textwrap
 
 import pytest
 
-from ph.indexable import machine_block, machine_line, triage, unindexable_reason
+from ph.indexable import machine_block, machine_line, triage
 
 PROSE = (
     "The chunker cuts on line boundaries so the span stays exact, which is what a "
@@ -35,6 +35,11 @@ CSV_ROW = ",".join(f"value{number}" for number in range(60))
 CSV_WORDS = ",".join(f"Some Name {number},Austin TX,{number * 7}" for number in range(30))
 MARKDOWN_ROW = "| name | description | default |" * 12
 BLOB = "\n".join(textwrap.wrap(base64.b64encode(b"x" * 400).decode(), 76))
+
+
+def _reason(text: str) -> str:
+    """Why `triage` refuses the whole document, or `""` when it indexes it."""
+    return triage(text).reason
 
 
 @pytest.mark.parametrize(
@@ -117,13 +122,13 @@ def test_a_document_is_judged_on_what_survives_not_on_what_is_dropped() -> None:
     """
     mixed = f"{PROSE}\n\n{BLOB}\n\n{PROSE}"
     assert len(BLOB) > 2 * len(PROSE), "the fixture does not reproduce the weight imbalance"
-    assert unindexable_reason(mixed) == "", "a document with prose in it was refused"
+    assert _reason(mixed) == "", "a document with prose in it was refused"
 
     # Nothing survives: the walk, the read and the embedder call would be spent
     # to index a header comment.
-    assert unindexable_reason(MINIFIED_JS)
-    assert unindexable_reason(BLOB)
-    assert unindexable_reason(f"// vendor bundle\n\n{MINIFIED_JS}")
+    assert _reason(MINIFIED_JS)
+    assert _reason(BLOB)
+    assert _reason(f"// vendor bundle\n\n{MINIFIED_JS}")
 
 
 def test_bytes_that_were_never_text_are_read_as_such_from_what_they_decoded_to() -> None:
@@ -140,19 +145,19 @@ def test_bytes_that_were_never_text_are_read_as_such_from_what_they_decoded_to()
     orders of magnitude apart.
     """
     binary = bytes(range(256)) * 20
-    assert unindexable_reason(binary.decode("utf-8", errors="replace")) == "is not text"
+    assert _reason(binary.decode("utf-8", errors="replace")) == "is not text"
 
     quoting_one = (
         "When a file is not UTF-8 the decoder writes \ufffd in place of the byte, which is "
         "how the read tool reports it rather than raising, and that is what this note is about."
     )
-    assert unindexable_reason(quoting_one) == "", "a note quoting one was mistaken for binary"
+    assert _reason(quoting_one) == "", "a note quoting one was mistaken for binary"
 
 
 def test_an_empty_document_is_left_to_its_callers_own_sentence() -> None:
     """Empty is not waste, and "is empty" is the truer thing to report."""
-    assert unindexable_reason("") == ""
-    assert unindexable_reason("   \n\n  ") == ""
+    assert _reason("") == ""
+    assert _reason("   \n\n  ") == ""
 
 
 def test_a_windows_line_ending_does_not_change_what_a_block_is() -> None:
@@ -173,7 +178,7 @@ def test_a_windows_line_ending_does_not_change_what_a_block_is() -> None:
 
     assert [p.text for p in triage(crlf).kept] == [p.text for p in triage(lf).kept]
     assert len(triage(crlf).kept) == 2, "the blob survived on a CRLF file"
-    assert unindexable_reason(BLOB.replace("\n", "\r\n")), "a CRLF blob read as prose"
+    assert _reason(BLOB.replace("\n", "\r\n")), "a CRLF blob read as prose"
 
     # And `machine_block` on its own, because it is public and a caller may hand
     # it raw text: `triage` is protected by `paragraphs` stripping the `\r`

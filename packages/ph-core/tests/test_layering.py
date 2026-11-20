@@ -39,12 +39,31 @@ Whether the *app* layer may import them is a different question with a different
 answer, asked by `packages/phern/tests/test_app_layering.py`."""
 
 
+BUNDLES = {
+    "ph_rlm",
+    "ph_stabilize",
+    "ph_text_index",
+    "ph_code_graph",
+    "ph_utcp",
+    "ph_clm",
+    "ph_runtime",
+}
+"""The packages that are built on `ph-core`, and the guest package.
+
+Each bundle depends on `ph-core`, so an import in the other direction is a
+cycle between two wheels. `ph-core` reaches a bundle only as it reaches a
+third-party wheel: by name, through the entry points. `ph_runtime` runs in the
+guest venv and has no place in the host core. The test files of `ph-core` may
+import a bundle. This rule is about `src/ph` alone."""
+
+
 def _core_modules() -> list[pathlib.Path]:
     root = pathlib.Path(ph.__path__[0])
     return sorted(root.rglob("*.py"))
 
 
-def test_no_front_end_imports_in_ph_core() -> None:
+def _imports_of(forbidden: set[str]) -> list[str]:
+    """Each import in `src/ph` of a package in `forbidden`, as `file:line imports name`."""
     offenders: list[str] = []
     for path in _core_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -56,8 +75,19 @@ def test_no_front_end_imports_in_ph_core() -> None:
             else:
                 continue
             for name in names:
-                if name.split(".")[0] in FORBIDDEN:
+                if name.split(".")[0] in forbidden:
                     offenders.append(f"{path.name}:{node.lineno} imports {name}")
+    return offenders
+
+
+def test_no_front_end_imports_in_ph_core() -> None:
+    offenders = _imports_of(FORBIDDEN)
+    assert offenders == [], offenders
+
+
+def test_ph_core_imports_no_package_that_is_built_on_it() -> None:
+    """Sabotage: add `import ph_stabilize` to any module under `src/ph`."""
+    offenders = _imports_of(BUNDLES)
     assert offenders == [], offenders
 
 

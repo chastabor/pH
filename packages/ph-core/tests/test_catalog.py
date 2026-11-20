@@ -23,7 +23,7 @@ from typing import Literal
 import pytest
 from pydantic import Field
 
-from ph.cordis.catalog import config_catalog, field_docs, render_annotation
+from ph.cordis.catalog import _fields, config_catalog, field_docs, render_annotation
 from ph.cordis.plugin import Affects
 from ph.wire import WireModel
 
@@ -129,6 +129,83 @@ def test_every_row_reports_what_it_injects_and_what_it_configures() -> None:
     # omitted: "no options" and "no such row" are different answers.
     assert catalog["diagnostics"]["config"] == []
     assert catalog["workspace-git-worktree"]["injects"] == ["workspace", "subprocess"]
+
+
+class _Leaf(WireModel):
+    """What one leaf is."""
+
+    depth: int = 0
+    """How deep the leaf is."""
+
+
+class _Tree(WireModel):
+    """A model that holds itself."""
+
+    children: list[_Tree] = Field(default_factory=list)
+    leaf: _Leaf | None = None
+
+
+class _Nesting(WireModel):
+    one: _Leaf = Field(default_factory=_Leaf)
+    many: list[_Leaf] = Field(default_factory=list)
+    fixed: tuple[_Leaf, ...] = ()
+    named: dict[str, _Leaf] = Field(default_factory=dict)
+    """The leaves by name."""
+    maybe: _Leaf | None = None
+    either: _Leaf | _Tree | None = None
+    tree: _Tree = Field(default_factory=_Tree)
+
+
+def test_the_options_of_a_nested_model_are_listed_under_the_path_a_profile_writes() -> None:
+    """An option whose type holds another model is followed by the options of
+    that model. A list of models was one line before, and the catalog said
+    nothing about what an entry accepts (`profiles` of `llm-openai-compatible`).
+
+    Sabotage: stop the descent in `_fields` and only the seven top lines remain.
+    """
+    fields = {field["name"]: field for field in _fields(_Nesting)}
+
+    assert list(fields) == [
+        "one",
+        "one.depth",
+        "many",
+        "many[].depth",
+        "fixed",
+        "fixed[].depth",
+        "named",
+        "named.<key>.depth",
+        "maybe",
+        "maybe.depth",
+        "either",
+        "either.depth",
+        "either.children",
+        "either.leaf",
+        "either.leaf.depth",
+        "tree",
+        # A model that holds itself is listed one time.
+        "tree.children",
+        "tree.leaf",
+        "tree.leaf.depth",
+    ]
+    assert fields["many[].depth"]["parent"] == "many[]"
+    assert fields["many"]["parent"] is None
+    assert fields["many[].depth"]["doc"] == "How deep the leaf is."
+    # A field with no docstring borrows the docstring of the one model that its
+    # type holds, through any container. Its own docstring is preferred, and a
+    # type that holds two models borrows nothing.
+    assert fields["many"]["doc"] == "What one leaf is."
+    assert fields["named"]["doc"] == "The leaves by name."
+    assert fields["either"]["doc"] == ""
+
+
+def test_a_shipped_row_lists_the_options_of_its_nested_models() -> None:
+    """The descent on a real row: a route of the `models` row holds a `Sampling`."""
+    catalog = {entry["name"]: entry for entry in config_catalog()}
+    names = [field["name"] for field in catalog["models"]["config"]]
+
+    assert "models" in names
+    assert "models.<key>.provider" in names
+    assert "models.<key>.sampling.temperature" in names
 
 
 # A row's kind decides which configuration may set it — the session profile, the

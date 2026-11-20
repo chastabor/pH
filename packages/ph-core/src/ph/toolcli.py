@@ -1,54 +1,58 @@
-"""`ph.toolcli` — a package's tools as a command line, and as a UTCP manual.
+"""`ph.toolcli`: the tools of a package as a command line, and as a UTCP manual.
 
-A package that registers tools through rows gets a console script by naming those
-rows: `ToolCli(program=..., rows=...)` and `main`. The script mounts a small
-profile — the registry, the filesystem, a subprocess door, and the package's own
-rows — and runs a tool **through the registry**, the way `ph.testing.run_tool`
-does. So there is one body per tool: the one the row registers. What differs
-between a session and this command is which process mounted it.
+A package that registers tools through rows gets a console script by naming
+those rows: `ToolCli(program=..., rows=...)` and `main`. The script mounts a
+small profile: the tool registry, the filesystem, a subprocess service, the
+`commands` and `diagnostics` rows, and the rows of the package. It runs a tool
+**through the registry**, as `ph.testing.run_tool` does. Each tool therefore
+has one body: the body that the row registers. The only difference between a
+session and this command is the process that mounted the row.
 
 ## Progress, for a run that takes a while
 
-One command is one call: there is no process that stays up. A tool whose work is
-long — an indexing run — says how far it has got on **stderr**, as JSONL, when
-it is called with `--progress` (`Progress`, `reported`): a line as it begins, a
-line at most every `REPORT_EVERY_S`, and exactly one last line, `done`, `failed`
-or `busy`. Whoever started the command reads that stream for a footer, and knows
-the run stopped when the stream ends: with a last line, or without one. stdout
-is unchanged — one envelope. Not for a UTCP client, which merges the two
-streams: the flag is for a caller that reads them apart, as `ph-utcp` does for a
-run it starts itself.
+One command is one call. No process stays up. A tool whose work is long, such
+as an indexing run, reports its progress on **stderr**, as JSONL, when it is
+called with `--progress` (`Progress`, `reported`). It writes a line when it
+begins, a line at most every `REPORT_EVERY_S`, and exactly one last line:
+`done`, `failed` or `busy`. The process that started the command reads that
+stream for a footer. It knows that the run stopped when the stream ends, with a
+last line or without one. stdout is unchanged: one envelope. The flag is not
+for a UTCP client, which merges the two streams. It is for a caller that reads
+the streams separately, as `ph-utcp` does for a run that it starts itself.
 
-Three audiences, one program:
+One program serves three audiences:
 
-* a **person** trying a query by hand (`call code_graph --mode define --query x
-  --format text`), or asking whether the package is provisioned (`status`);
-* a **UTCP client**, which runs `manual` once to learn the tools and then runs the
-  command each tool's template names;
-* `ph-utcp`, which is the second of those inside a pH session.
+* a **person** who tries a query by hand (`call code_graph --mode define --query x
+  --format text`), or who asks whether the package is provisioned (`status`)
+* a **UTCP client**, which runs `manual` one time to learn the tools and then
+  runs the command that the template of each tool names
+* `ph-utcp`, which is a UTCP client inside a pH session
 
 ## What the UTCP command-line protocol decides here
 
-Read from `utcp_cli` 1.1.5; every item below is a constraint, not a taste.
+These points were read from `utcp_cli` 1.1.5. Every item below is a constraint,
+not a preference.
 
-* **Arguments arrive one at a time, as `str(value)`.** A list arrives as Python's
-  repr, a boolean as `True`, and an optional argument the model left out arrives
-  as the literal `MISSING_ARG_<name>`. So there is one flag per top-level field,
-  and `decode_argument` reads each by the tool's own schema: JSON first, then the
-  Python spellings, then a comma split for an array. The manual declares the true
-  types and this accepts what a client actually sends.
+* **Arguments arrive one at a time, as `str(value)`.** A list arrives as the
+  repr of Python, a boolean arrives as `True`, and an optional argument that the
+  model left out arrives as the literal `MISSING_ARG_<name>`. So there is one
+  flag for each top-level field, and `decode_argument` reads each flag by the
+  schema of the tool: JSON first, then the Python spellings, then a comma split
+  for an array. The manual declares the true types, and this module accepts
+  what a client actually sends.
 * **stderr is merged into stdout, and the exit code is ignored.** So a call
-  prints exactly one JSON object, a failure is reported inside it, logging goes
-  to a file — and for the length of a `call` or a `manual` the process's own
-  stderr is closed to everything in it (`_stderr_discarded`), because a
-  dependency that writes a warning or a progress bar is not ours to silence any
-  other way. Not with a `2>/dev/null` on the template: the client wraps each
-  command as `$(<command> 2>&1)`, and the later redirection wins.
+  prints exactly one JSON object, a failure is reported inside that object, and
+  logging goes to a file. For the length of a `manual`, or of a `call` that
+  prints JSON, the stderr of the process is also closed to everything in the
+  process (`_stderr_discarded`), because this module has no other way to
+  silence a dependency that writes a warning or a progress bar. A `2>/dev/null`
+  on the template does not work: the client wraps each command as
+  `$(<command> 2>&1)`, and the later redirection wins.
 * **The environment is cut to an allowlist.** Naming any variable replaces the
-  client's default list, so the template names the defaults again beside the pH
-  roots — without them a UTCP call would build a different index from the one a
-  session uses for the same checkout. A variable only a row's config names is
-  listed too (`EnvName`).
+  default list of the client, so the template names the defaults again beside
+  the pH roots. Without the roots, a UTCP call would build a different index
+  from the one that a session uses for the same checkout. A variable that only
+  the config of a row names is listed too (`EnvName`).
 
 @module ph.toolcli
 """
@@ -124,35 +128,37 @@ __all__ = [
 log = logging.getLogger("ph.toolcli")
 
 UTCP_VERSION = "1.2.0"
-"""The UTCP version the generated manual is written against — the one read."""
+"""The UTCP version that the generated manual is written against: the one that was read."""
 
 CONFIG_ENV = "PH_TOOL_CONFIG"
 """A JSON object of row configs by row id, for a caller that mounts nothing itself.
 
-How a session's row hands its config across the process boundary: `ph-utcp` sets
-this on the command it runs, so the tool indexes with the settings the profile
-names rather than with the package's defaults. `config_env` writes it and
-`_row_configs` reads it."""
+This is how the row of a session passes its config across the process boundary.
+`ph-utcp` sets the variable on the command that it runs, so the tool indexes
+with the settings that the profile names and not with the defaults of the
+package. `config_env` writes it and `_row_configs` reads it."""
 
 STATE_ENV = "PH_TOOL_STATE"
-"""The directory a tool keeps its working state in, when its caller says where.
+"""The directory where a tool keeps its working state, when its caller names one.
 
-An index, a database, a set of vectors: what a tool builds *about* a workspace
-and does not put in it. `ph-utcp` sets this on each call to a directory of the
-calling agent's scratch, so the state is the agent's own — writable in a
-read-only session, where the workspace is not, and found again by the same agent
-after a restart. `--state` is the same thing typed by a person, and wins. With
-neither, a tool keeps its state where it always has: under `$PH_CACHE`, keyed by
-the workspace. `state_dir` is how a row reads it."""
+Working state is what a tool builds *about* a workspace and does not put in it:
+an index, a database, a set of vectors. `ph-utcp` sets this variable on each
+call to a directory in the scratch directory of the calling agent, so the state
+belongs to that agent. The directory is writable in a read-only session, where
+the workspace is not, and the same agent finds it again after a restart.
+`--state` is the same setting typed by a person, and it wins. With neither, a
+tool keeps its state where it always has: under `$PH_CACHE`, keyed by the
+workspace. A row reads the setting through `state_dir`."""
 
 MISSING_ARGUMENT = "MISSING_ARG_"
 """What `utcp_cli` substitutes for a placeholder whose argument was not given."""
 
 COMMAND_ROWS: tuple[JsonObject, ...] = (
     {"id": "tools", "name": "tools"},
-    # Not a pH start, so it sweeps nothing a hard-killed run left behind. And it
-    # could not judge one: run for an agent it is in the sandbox's own PID
-    # namespace, where every process the journal names looks dead.
+    # This command is not a pH start, so it sweeps nothing that a hard-killed
+    # run left behind. It also could not judge such a run. When it runs for an
+    # agent, it is in the PID namespace of the sandbox, where every process that
+    # the journal names looks dead.
     {"id": "subprocess", "name": "subprocess-local", "config": {"sweepOrphans": False}},
     {"id": "fs", "name": "fs-local"},
     {"id": "commands", "name": "commands"},
@@ -160,13 +166,14 @@ COMMAND_ROWS: tuple[JsonObject, ...] = (
 )
 """What a tool needs around it and no more: no model, no session, no agent.
 
-`subprocess` is here for `ph.seams.changes`, which asks git or jj what changed;
-`commands` and `diagnostics` so a package's provisioning command and its doctor
-section exist for `status` and `install` to read."""
+`subprocess` is here for `ph.seams.changes`, which asks git or jj what changed.
+`commands` and `diagnostics` are here so that the provisioning command of a
+package and its doctor section exist for `status` and `install` to read."""
 
 INHERITED_ENV: tuple[str, ...] = (
-    # `utcp_cli`'s own default list. Naming a variable replaces that list rather
-    # than extending it, so these are repeated or the command loses `PATH`.
+    # The default list of `utcp_cli`. Naming a variable replaces that list and
+    # does not extend it, so these are repeated. Without them the command loses
+    # `PATH`.
     "PATH",
     "HOME",
     "LANG",
@@ -177,85 +184,91 @@ INHERITED_ENV: tuple[str, ...] = (
     "SHELL",
     "TZ",
     "TERM",
-    # Where pH keeps things. Dropped, a call resolves different roots from the
-    # session beside it and the two build separate indexes of one checkout.
+    # Where pH keeps things. Without these, a call resolves different roots from
+    # the session beside it, and the two build separate indexes of one checkout.
     "PH_HOME",
     "PH_CACHE",
     "PH_RUNTIME",
     "XDG_CACHE_HOME",
     "XDG_RUNTIME_DIR",
     CONFIG_ENV,
-    # So another harness can say where a tool's state goes, by setting it.
+    # Another harness sets this to say where the state of a tool goes.
     STATE_ENV,
 )
 
 LOG_BYTES = 1024 * 1024
-"""How large a command's log grows before it is rotated."""
+"""How large the log of a command grows before it is rotated."""
 
 _PLACEHOLDER_NAME = re.compile(r"[A-Za-z0-9_]+")
-"""The names `utcp_cli`'s placeholder pattern can carry."""
+"""The names that the placeholder pattern of `utcp_cli` can carry."""
 
 
 @dataclass(frozen=True, slots=True)
 class ToolCli:
-    """One package's command line: its program, its rows, and what it provisions."""
+    """The command line of one package: its program, its rows, and what it provisions."""
 
     program: str
-    """The console script's name, as it is typed: `ph-code-graph`."""
+    """The name of the console script, as it is typed: `ph-code-graph`."""
     manual: str
-    """The UTCP manual's name. Letters, digits and underscores: `ph_code_graph`."""
+    """The name of the UTCP manual. Letters, digits and underscores: `ph_code_graph`."""
     summary: str
     version: str
     rows: tuple[JsonObject, ...]
-    """The package's rows, as a profile would spell them."""
+    """The rows of the package, as a profile would spell them."""
     providers: tuple[JsonObject, ...] = ()
-    """Rows of which exactly one is mounted, after `rows`: the one the row configs
-    name, or the first when they name none.
+    """Rows of which exactly one is mounted, after `rows`: the one that the row
+    configs name, or the first when they name none.
 
-    For a package whose tools need something only one of several rows supplies —
-    an embedder that is a local model in one deployment and an endpoint in
-    another. Which one is a deployment's choice, and it makes it the way it makes
-    every other: by configuring that row, in the file under `$PH_HOME/tools`, in
-    `$PH_TOOL_CONFIG` (`config_env` names a row even when its config is all
-    defaults, for this) or with `--config`. Naming two is refused."""
+    This is for a package whose tools need something that only one of several
+    rows supplies. An example is an embedder that is a local model in one
+    deployment and an endpoint in another. The deployment chooses the row in the
+    way that it makes every other choice: it configures that row, in the file
+    under `$PH_HOME/tools`, in `$PH_TOOL_CONFIG`, or with `--config`. For this
+    purpose, `config_env` names a row even when its config is all defaults.
+    Naming two rows is refused."""
     command: str = ""
-    """The package's provisioning command (`code-graph`), or empty for none.
+    """The provisioning command of the package (`code-graph`), or empty for none.
 
-    The same `install_or_status` command a session offers as `/code-graph`. It
-    stays out of the manual for the reason the packages give for making it a
-    command: provisioning is something a person asks for."""
+    It is the same `install_or_status` command that a session offers as
+    `/code-graph`. It stays out of the manual for the reason that the packages
+    give for making it a command: provisioning is something that a person asks
+    for."""
     inherit_env: tuple[str, ...] = ()
     """Variables this package reads, beyond `INHERITED_ENV`."""
     module: str = ""
-    """The package's `__main__`, run as `python -P -m <module>` by the interpreter
-    that printed the manual — so its commands run there, whatever `PATH` the
-    calling harness has. Empty spells the program by its script name."""
+    """The `__main__` of the package. The interpreter that printed the manual runs
+    it as `python -P -m <module>`, so the commands of the package run in that
+    interpreter, whatever `PATH` the calling harness has. When this is empty, a
+    template spells the program by its script name."""
 
     def invocation(self) -> tuple[str, ...]:
         """How a generated template spells the program.
 
-        `-P`, because `-m` otherwise puts the working directory first on
-        `sys.path`, and the working directory is the tree the tool is about: a
-        `shlex.py` at a repository's root would be imported in place of the
-        standard library's, in a command that may hold a credential and — for
-        discovery and a person's `status` — runs outside any sandbox."""
+        `-P` is needed because `-m` otherwise puts the working directory first on
+        `sys.path`, and the working directory is the tree that the tool works
+        on. A `shlex.py` at the root of a repository would be imported in place
+        of the standard library module. The command may hold a credential. For
+        discovery, and for a `status` that a person runs, it also runs outside
+        any sandbox."""
         return (sys.executable, "-P", "-m", self.module) if self.module else (self.program,)
 
     def log_file(self) -> Path:
         """Where the command logs. A call prints one object and nothing on stderr,
-        so this is where a traceback goes — and a path a confined command has to
-        be granted."""
+        so a traceback goes here. A confined command must be granted this
+        path."""
         return resolve_roots().cache / "logs" / f"{self.program}.log"
 
 
 def config_env(configs: Mapping[str, BaseModel]) -> tuple[dict[str, str], list[str]]:
-    """What a session hands a command for these rows' configs: the
-    `$PH_TOOL_CONFIG` that carries them, by row id, and the variables they mark
-    (`env_names`) to pass across by name — a `Manual`'s `env` and `pass_env`.
+    """What a session gives a command for the configs of these rows.
 
-    Each row is named, with only what differs from its model's defaults — so a
-    default row travels as `{}`. Named even then, because being named is how a
-    command that mounts one of several provider rows learns which
+    The first value is the `$PH_TOOL_CONFIG` that carries the configs, by row
+    id. The second value is the variables that the configs mark (`env_names`),
+    to pass across by name. They are the `env` and the `pass_env` of a `Manual`.
+
+    Each row is named, with only what differs from the defaults of its model, so
+    a default row travels as `{}`. The row is named even then, because a command
+    that mounts one of several provider rows learns which one from the name
     (`ToolCli.providers`)."""
     settings = {
         row: config.model_dump(by_alias=True, exclude_defaults=True)
@@ -266,30 +279,34 @@ def config_env(configs: Mapping[str, BaseModel]) -> tuple[dict[str, str], list[s
 
 
 def state_dir() -> Path | None:
-    """Where the caller said this process's tools keep their state (`STATE_ENV`),
-    or `None` for the tool's own default.
+    """Where the caller said the tools of this process keep their state
+    (`STATE_ENV`), or `None` for the default of the tool.
 
-    Read from the environment at each use rather than held, so a row asks it
-    where it builds a path and a test that sets the variable is read. Absolute:
-    a relative directory is taken from the working directory, once, here."""
+    The value is read from the environment at each use and is not held. A row
+    therefore asks for it where it builds a path, and a test that sets the
+    variable takes effect. The path is absolute: a relative directory is
+    resolved against the working directory, one time, here."""
     raw = os.environ.get(STATE_ENV, "").strip()
     return Path(raw).expanduser().resolve() if raw else None
 
 
 def state_home(base: Path, workspace: Path) -> Path:
-    """Where a tool keeps what it builds about `workspace`: the directory its
-    caller named (`state_dir`), or `workspace`'s own under `base` — keyed by a
-    digest of the root, so two checkouts do not answer each other's questions."""
+    """Where a tool keeps what it builds about `workspace`: the directory that its
+    caller named (`state_dir`), or the directory of `workspace` under `base`.
+    That directory is keyed by a digest of the root, so two checkouts do not
+    answer the questions of each other."""
     state = state_dir()
     return state if state is not None else base / digest(str(workspace))
 
 
 def claim_home(base: Path, workspace: Path) -> None:
-    """Record that `workspace`'s directory under `base` is in use, and sweep the
-    ones whose workspace has been gone a while (`ph.workspace_caches.use`).
+    """Record that the directory of `workspace` under `base` is in use, and sweep
+    the directories whose workspace has been gone for a while
+    (`ph.workspace_caches.use`).
 
-    Nothing for a directory the caller named: that is its owner's to keep or
-    remove. Blocking — file I/O — so called through a worker thread."""
+    The function does nothing for a directory that the caller named: its owner
+    keeps or removes it. The function blocks on file I/O, so it is called
+    through a worker thread."""
     if state_dir() is None:
         use(base, workspace)
 
@@ -298,36 +315,37 @@ def claim_home(base: Path, workspace: Path) -> None:
 
 
 class Progress(WireModel):
-    """One line of a run's report: how far a long piece of work has got, or how
-    it ended. What `call --progress` writes to stderr, a JSON object a line.
+    """One line of the report of a run: how far a long piece of work has got, or
+    how it ended. `call --progress` writes these lines to stderr, one JSON
+    object per line.
 
-    `working` lines come as the run goes. The last line is `done`, `failed`, or
-    `busy` — another run held what this one writes, and it did nothing — and
-    there is exactly one: a stream that ends without it is a command that was
-    stopped from outside, or died."""
+    `working` lines come while the run goes. The last line is `done`, `failed`,
+    or `busy`. `busy` means that another run held what this run writes, and this
+    run did nothing. There is exactly one last line. A stream that ends without
+    it is a command that was stopped from outside, or that died."""
 
     state: Literal["working", "done", "failed", "busy"]
     done: int = 0
     total: int = 0
-    """Units of work — documents, files — finished, and in all."""
+    """Units of work, such as documents or files: the number finished, and the number in all."""
     what: str = ""
     """What the units are, plural: `documents`."""
     code: str | None = None
-    """On `failed`: the failure's routable code, the envelope's own."""
+    """On `failed`: the routable code of the failure, the same code as in the envelope."""
     failure: str | None = None
     """On `failed`: why, in a sentence."""
     changed: bool | None = None
     """On `done`: whether the run changed what it builds. A run that found
-    everything current says `false`, and nobody needs telling it ended."""
+    everything current says `false`, and nobody needs to be told that it ended."""
     note: str | None = None
-    """On `done`: what the run has to say beyond its count, in sentences — what a
-    caller that waited for it read in the tool's result."""
+    """On `done`: what the run has to say beyond its count, in sentences. A caller
+    that waited for the run read the same text in the result of the tool."""
     spent: dict[str, int] | None = None
-    """What the run has spent so far, by unit, as the tool counts it — an
-    embedder's `requests`, `texts`, and the `tokens` its provider reported. On
-    every line, the last included, so whoever reads the stream can track what a
-    run cost, a run that failed or was killed as well. Absent for a tool that
-    counts nothing."""
+    """What the run has spent so far, by unit, as the tool counts it. An example is
+    the `requests` and `texts` of an embedder, and the `tokens` that its provider
+    reported. It is on every line, the last included, so the reader of the
+    stream can track what a run cost, also for a run that failed or was killed.
+    Absent for a tool that counts nothing."""
 
     def said(self) -> str:
         """One compact phrase, for a footer and for a sentence."""
@@ -341,19 +359,21 @@ class Progress(WireModel):
 
 @dataclass(slots=True)
 class _Reports:
-    """Where this command's progress lines go: the stream `--progress` kept."""
+    """Where the progress lines of this command go: the stream that `--progress` kept."""
 
     out: TextIO
     ended: bool = False
-    """A last line has been written, and nothing more is."""
+    """A last line has been written, and nothing more is written."""
     current: RunProgress | None = None
-    """The run reporting here (`reported`), whose counts and spend a last line
-    written from outside the work carries — as they are, and not as the last
-    line written, which is at most every `REPORT_EVERY_S` behind."""
+    """The run that reports here (`reported`). A last line that is written from
+    outside the work carries the counts and the spend of this run as they are
+    now. It does not repeat the last line written, which is up to
+    `REPORT_EVERY_S` behind."""
 
     def write(self, progress: Progress) -> None:
-        """One line, whole and flushed. Nothing after the last line; and never
-        raises — a reader that has gone must not stop the work it was reading."""
+        """Write one line, whole and flushed. Nothing is written after the last
+        line. The method never raises: a reader that has gone must not stop the
+        work that it was reading."""
         if self.ended:
             return
         self.ended = progress.state != "working"
@@ -365,7 +385,8 @@ class _Reports:
 
     def end(self, *, code: str | None = None, failure: str | None = None) -> None:
         """The last line, for a command whose work wrote none: `done`, or `failed`
-        with the envelope's code and sentence and how far the run had got."""
+        with the code and the sentence of the envelope and how far the run had
+        got."""
         state: Literal["done", "failed"] = "done" if failure is None else "failed"
         run = self.current
         if run is None:
@@ -375,20 +396,21 @@ class _Reports:
 
 
 _REPORTS: ContextVar[_Reports | None] = ContextVar("ph_toolcli_reports", default=None)
-"""Set by `run` for a `call --progress`; `None` for every other command, whose
+"""Set by `run` for a `call --progress`. `None` for every other command, whose
 work then reports to nobody."""
 
 _WAIT: ContextVar[float | None] = ContextVar("ph_toolcli_wait", default=None)
-"""`call --wait`: how long this call waits for another run, over the row's own."""
+"""`call --wait`: how long this call waits for another run. It overrides the setting of the row."""
 
 REPORT_EVERY_S = 0.5
-"""How often a run's progress is written, at most."""
+"""How often the progress of a run is written, at most."""
 
 
 def env_names(*configs: BaseModel) -> list[str]:
-    """The variables `configs` name: each set `EnvName` field's value, a nested
-    model's included, once each, in order. `ToolCli.inherit_env` is what a
-    package always reads; these are what one deployment's settings add."""
+    """The variables that `configs` name: the value of each set `EnvName` field,
+    including the fields of a nested model, one time each, in order.
+    `ToolCli.inherit_env` is what a package always reads. These are what the
+    settings of one deployment add."""
 
     def named(config: BaseModel) -> Iterator[str]:
         for name, field_ in type(config).model_fields.items():
@@ -407,20 +429,22 @@ def env_names(*configs: BaseModel) -> list[str]:
 
 @dataclass(slots=True)
 class RunProgress:
-    """One run's account of itself: how much there is, and how far it has got.
+    """The account that one run gives of itself: how much work there is, and how
+    far it has got.
 
-    Handed to the work by `reported`, which writes the run's end; the work says
-    only what it alone knows — `begin` once it knows how much there is, under
-    whatever lock makes the run its own, and `tick` as it goes."""
+    `reported` passes it to the work and writes the end of the run. The work
+    says only what it alone knows. It calls `begin` when it knows how much work
+    there is, under whatever lock makes the run its own, and `tick` as it goes."""
 
     what: str
     """What the units are, plural: `documents`."""
     reports: _Reports | None = None
-    """Where the lines go: `call --progress`'s stream, or nobody."""
+    """Where the lines go: the stream of `call --progress`, or nobody."""
     spent: Callable[[], Mapping[str, int]] | None = None
-    """How to ask what the run has spent so far (`Progress.spent`), set once by
-    work that counts something: asked as each line is written, so a line —
-    a failed run's last included — says it as it is."""
+    """How to ask what the run has spent so far (`Progress.spent`). Work that
+    counts something sets it one time. It is asked as each line is written, so
+    every line, including the last line of a failed run, gives the current
+    value."""
     total: int = 0
     done: int = 0
     _written: float = 0.0
@@ -431,7 +455,7 @@ class RunProgress:
         self._write()
 
     def tick(self, done: int) -> None:
-        """`done` units are through: written at most every `REPORT_EVERY_S`."""
+        """`done` units are finished. A line is written at most every `REPORT_EVERY_S`."""
         self.done = done
         if time.monotonic() - self._written >= REPORT_EVERY_S:
             self._write()
@@ -480,21 +504,23 @@ async def reported[T](
     changed: Callable[[T], bool],
     busy: Callable[[T], bool],
 ) -> T:
-    """`work`'s value, with the run reported as it goes and its end written —
-    by this door, so no row can forget the last line.
+    """The value of `work`, with the run reported as it goes and its end written.
+    This function writes the end, so no row can forget the last line.
 
-    `said` is what the value says beyond its count, in a few lines: what the
-    tool's result tells a caller that waited, for whoever is told of a run
-    nobody waited for. Required: a run whose note says only "finished" can hide
-    one that skipped everything. `changed` is whether the value changed what the
-    run builds, so a run over a tree that had not moved is not news. `busy` is
-    whether the value is the answer that another run held what this one writes
-    (`run_lock`): its last line says that, and not that it finished.
+    `said` gives what the value says beyond its count, in a few lines. It is
+    what the result of the tool tells a caller that waited, written for whoever
+    is told of a run that nobody waited for. It is required: a run whose note
+    says only "finished" can hide a run that skipped everything. `changed` says
+    whether the value changed what the run builds, so that a run over a tree
+    that had not changed is not news. `busy` says whether the value is the
+    answer that another run held what this run writes (`run_lock`). The last
+    line then says that, and not that the run finished.
 
-    A failure's last line is `run`'s to write, from the envelope the failure
-    becomes — the code and the sentence a caller reads. What is done here is the
-    traceback: one the tool did not raise as its own failure goes to the
-    command's log, where a run nobody waited for would otherwise leave none.
+    `run` writes the last line of a failure, from the envelope that the failure
+    becomes: the code and the sentence that a caller reads. This function
+    handles the traceback. A traceback that the tool did not raise as its own
+    failure goes to the log of the command. Otherwise a run that nobody waited
+    for would leave no traceback.
     """
     reports = _REPORTS.get()
     progress = RunProgress(what, reports)
@@ -519,14 +545,15 @@ async def reported[T](
 
 @asynccontextmanager
 async def run_lock(lock: Path, *, what: str, wait_s: float) -> AsyncIterator[bool]:
-    """Hold `lock` for one run against every other, waited for at most `wait_s` —
-    or `call --wait`, where the caller said. Yields whether it is held.
+    """Hold `lock` for one run against every other run. The wait for the lock is
+    at most `wait_s`, or `call --wait` where the caller gave it. Yields whether
+    the lock is held.
 
-    A second run is expected to queue behind the first and then find most of
-    its work done. But a caller is a call with a limit of its own, so the wait
-    is bounded: past it the body runs with `False`, and answers that another
-    run is working instead of standing behind it. The directory needs no making
-    here — taking the lock makes it."""
+    A second run is expected to queue behind the first and then find most of its
+    work done. But a caller is a call with a limit of its own, so the wait is
+    bounded. After the bound, the body runs with `False`, and answers that
+    another run is working instead of waiting behind it. This function does not
+    need to make the directory, because taking the lock makes it."""
     patience = _WAIT.get()
     release: Callable[[], None] | None = None
     # A free lock is taken before the first await, so a bound of 0 still takes it.
@@ -560,8 +587,8 @@ def _kinds(schema: Mapping[str, object]) -> set[str]:
 
 
 def _plain(value: object) -> JsonValue:
-    """A Python literal as JSON. `ValueError` for one with no JSON spelling — a
-    set, bytes, a key that is not a string."""
+    """A Python literal as JSON. Raises `ValueError` for a literal with no JSON
+    spelling: a set, bytes, a key that is not a string."""
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
@@ -572,8 +599,9 @@ def _plain(value: object) -> JsonValue:
 
 
 def _structured(raw: str) -> list[JsonValue] | dict[str, JsonValue] | None:
-    """`raw` as a list or an object, read as JSON or as a Python literal — the two
-    spellings a client's `str()` produces for one. `None` when it is neither."""
+    """`raw` as a list or an object, read as JSON or as a Python literal. These are
+    the two spellings that the `str()` of a client produces for one. `None` when
+    it is neither."""
     try:
         found: JsonValue = loads(raw)
     except JSONDecodeError:
@@ -589,21 +617,22 @@ _FALSE = frozenset({"false", "0", "no", "off"})
 
 
 def decode_argument(raw: str, schema: Mapping[str, object]) -> JsonValue:
-    """One flag's text as the value its schema asks for.
+    """The text of one flag as the value that its schema asks for.
 
-    **Lenient on the way in, because the registry validates on the way out.** A
-    text this cannot place is handed on as the string it is, and the tool's own
-    model refuses it with a message naming the field — so nothing here raises on
-    a client's phrasing.
+    **Decoding is lenient, because the registry validates afterwards.** A text
+    that this function cannot place is passed on as the string that it is. The
+    model of the tool then refuses it with a message that names the field. So
+    nothing here raises on the phrasing of a client.
 
     A string field takes its text as written, with one exception: where the
-    schema admits `null`, `None` and `null` mean it. That costs a search for a
-    symbol literally named `None` under a nullable field, and buys an explicit
-    null from the Python client, whose `str(None)` is otherwise a query.
+    schema admits `null`, `None` and `null` mean null. The cost is that a search
+    for a symbol literally named `None` is not possible under a nullable field.
+    The benefit is an explicit null from the Python client, whose `str(None)`
+    would otherwise be a query.
 
-    An argument the client left out is not this function's to see: the caller
-    drops a `MISSING_ARG_` placeholder before decoding, because no value — `None`
-    included — is the same as no argument.
+    This function never sees an argument that the client left out. The caller
+    drops a `MISSING_ARG_` placeholder before decoding, because no value, `None`
+    included, is the same as no argument.
     """
     kinds = _kinds(schema)
     text = raw.strip()
@@ -633,7 +662,7 @@ def decode_argument(raw: str, schema: Mapping[str, object]) -> JsonValue:
             return found
         if "array" in kinds and "string" not in kinds:
             # What is left is a bare list: `a,b` from a client that joins, or one
-            # path a person typed. Split on commas and newlines.
+            # path that a person typed. Split on commas and newlines.
             return [one.strip() for one in re.split(r"[,\n]", text) if one.strip()]
     return raw
 
@@ -649,12 +678,12 @@ def _properties(definition: ToolDefinition) -> dict[str, Mapping[str, object]]:
 
 
 def _result_schema(definition: ToolDefinition) -> dict[str, object]:
-    """The envelope `call` prints, with the tool's own output as its `value`.
+    """The envelope that `call` prints, with the output of the tool as its `value`.
 
-    `$defs` is lifted to the envelope's root: pydantic writes its references as
-    `#/$defs/Name`, which resolve from the root of the document they are in, so a
-    definition left inside `value` would be a pointer to nothing. `value_schema`
-    is the inverse."""
+    `$defs` is lifted to the root of the envelope. Pydantic writes its
+    references as `#/$defs/Name`, which resolve from the root of the document
+    that they are in. A definition that was left inside `value` would therefore
+    point to nothing. `value_schema` is the inverse."""
     value = dict(schema_of(definition.output.schema))
     definitions = value.pop("$defs", None)
     schema: dict[str, object] = {
@@ -686,11 +715,11 @@ def _template(cli: ToolCli, definition: ToolDefinition, inherit: list[str]) -> d
                 f'tool "{definition.name}" has a field "{name}" that a UTCP placeholder '
                 "cannot name; placeholders take letters, digits and underscores"
             )
-        # `--name=value`, one word: a value that starts with `-` — a query for
-        # `-x`, a negative number — is then an argument and not a flag.
+        # `--name=value` is one word. A value that starts with `-` (a query for
+        # `-x`, a negative number) is then an argument and not a flag.
         words.append(f"--{name}=UTCP_ARG_{name}_UTCP_END")
-    # Not `shlex.join` for the whole line: a placeholder has to stay a bare word
-    # for the client to substitute it.
+    # `shlex.join` is not used for the whole line: a placeholder must stay a
+    # bare word for the client to substitute it.
     return {
         "call_template_type": "cli",
         "commands": [{"command": " ".join(words)}],
@@ -703,9 +732,9 @@ def utcp_manual(
 ) -> dict[str, object]:
     """The UTCP manual for `definitions`: what `manual` prints.
 
-    Names are the tools' own. A client prefixes each with the manual's name when
-    it registers them (`ph_code_graph.code_index`). `named` is the variables the
-    mounted rows' configs name (`EnvName`)."""
+    The names are the names of the tools. A client prefixes each with the name
+    of the manual when it registers them (`ph_code_graph.code_index`). `named`
+    is the variables that the configs of the mounted rows name (`EnvName`)."""
     inherit = [*_inherited(cli), *named]
     return {
         "utcp_version": UTCP_VERSION,
@@ -725,7 +754,7 @@ def utcp_manual(
 
 
 def manual_call_template(cli: ToolCli) -> dict[str, object]:
-    """What a harness registers to discover this package's tools."""
+    """What a harness registers to discover the tools of this package."""
     return {
         "name": cli.manual,
         "call_template_type": "cli",
@@ -756,11 +785,12 @@ def value_envelope(value: object, text: str | None = None) -> dict[str, object]:
 
 
 def envelope(result: ToolExecutionResult) -> dict[str, object]:
-    """One call's outcome as the object `call` prints.
+    """The outcome of one call as the object that `call` prints.
 
-    `value` is the tool's declared output and `text` is its own `render` — what a
-    model in a session reads. A failure carries its routable code when the error
-    had one, and its kind otherwise. `read_envelope` is the inverse."""
+    `value` is the declared output of the tool. `text` is the `render` of the
+    tool, which is what a model in a session reads. A failure carries its
+    routable code when the error had one, and its kind otherwise.
+    `read_envelope` is the inverse."""
     text = text_of(result.content)
     if not result.is_error:
         return value_envelope(result.value, text)
@@ -772,12 +802,12 @@ def envelope(result: ToolExecutionResult) -> dict[str, object]:
 
 
 def read_envelope(answer: object) -> tuple[JsonValue, str | None]:
-    """The value and the rendering in an answer `call` printed.
+    """The value and the rendering in an answer that `call` printed.
 
-    A failure is raised as the `HarnessError` the tool raised, with its own code,
-    so it reaches a model in another harness as it would have in this one. An
-    answer that is not an envelope is a `ValueError`: the caller knows which
-    tool broke its promise and says so."""
+    A failure is raised as the `HarnessError` that the tool raised, with its own
+    code. It therefore reaches a model in another harness as it would have
+    reached one in this harness. An answer that is not an envelope is a
+    `ValueError`: the caller knows which tool broke its promise, and says so."""
     if not isinstance(answer, Mapping) or not isinstance(answer.get("ok"), bool):
         raise ValueError("not an envelope")
     if not answer["ok"]:
@@ -791,11 +821,12 @@ def read_envelope(answer: object) -> tuple[JsonValue, str | None]:
 
 
 def value_schema(outputs: Mapping[str, object]) -> dict[str, object]:
-    """The schema of an envelope's `value`, from a manual's `outputs` for it.
+    """The schema of the `value` of an envelope, from the `outputs` of a manual
+    for it.
 
-    `_result_schema`'s inverse: there the tool's definitions are lifted to the
-    envelope's root so its references resolve, and here they come back down to
-    the value's root for the same reason."""
+    This is the inverse of `_result_schema`. There, the definitions of the tool
+    are lifted to the root of the envelope so that its references resolve. Here,
+    they come back down to the root of the value for the same reason."""
     properties = outputs.get("properties")
     value = properties.get("value") if isinstance(properties, Mapping) else None
     if not isinstance(value, Mapping):
@@ -825,9 +856,10 @@ def _document(path: Path, origin: str) -> JsonValue:
 def _row_configs(cli: ToolCli, config_file: Path | None) -> dict[str, JsonObject]:
     """Row configs by row id: the package file, then the environment, then `--config`.
 
-    Later wins, row by row. The file under `$PH_HOME/tools` is where a person
-    keeps settings for the command they type; the environment is how a session's
-    row hands its own across (`config_env`); the flag is for trying something once.
+    A later layer wins, row by row. The file under `$PH_HOME/tools` is where a
+    person keeps settings for the command that they type. The environment is
+    how the row of a session passes its own settings across (`config_env`). The
+    flag is for a one-time trial.
     """
     layers: list[tuple[str, JsonValue]] = []
     home = resolve_roots().home / "tools" / f"{cli.program}.yaml"
@@ -862,7 +894,7 @@ def _row_configs(cli: ToolCli, config_file: Path | None) -> dict[str, JsonObject
 
 @asynccontextmanager
 async def _mounted(cli: ToolCli, root: Path, config_file: Path | None) -> AsyncIterator[Context]:
-    """The package's rows over `COMMAND_ROWS`, mounted at `root` and unwound on exit."""
+    """The rows of the package over `COMMAND_ROWS`, mounted at `root` and unwound on exit."""
     configs = _row_configs(cli, config_file)
     rows: list[JsonValue] = [dict(row) for row in COMMAND_ROWS]
     for row in (*cli.rows, *_provider(cli, configs)):
@@ -878,8 +910,8 @@ async def _mounted(cli: ToolCli, root: Path, config_file: Path | None) -> AsyncI
 
 
 def _provider(cli: ToolCli, configs: Mapping[str, JsonObject]) -> tuple[JsonObject, ...]:
-    """The one of `cli.providers` this run mounts: the one a config names, or the
-    first. None for a package that has none."""
+    """The one row of `cli.providers` that this run mounts: the row that a config
+    names, or the first. Empty for a package that has none."""
     if not cli.providers:
         return ()
     named = [row for row in cli.providers if as_str(row["id"]) in configs]
@@ -894,8 +926,9 @@ def _provider(cli: ToolCli, configs: Mapping[str, JsonObject]) -> tuple[JsonObje
 
 
 def _named(ctx: Context) -> list[str]:
-    """The variables the mounted rows' configs name (`env_names`): each as it
-    runs, read off its fork, so a private copy (`isolate`) is read too."""
+    """The variables that the configs of the mounted rows name (`env_names`). Each
+    config is read as it runs, from its fork, so a private copy (`isolate`) is
+    read too."""
     forks = ctx.require(MOUNT).forks.values()
     configs = (fork.spec.resolve_config(fork.config) for fork in forks)
     return env_names(*(config for config in configs if config is not None))
@@ -913,9 +946,11 @@ def _definitions(ctx: Context) -> list[ToolDefinition]:
 def _tool_arguments(
     cli: ToolCli, definition: ToolDefinition, args_json: str | None, rest: Sequence[str]
 ) -> JsonObject:
-    """The call's arguments: `--args-json` first, then one flag per field over it.
+    """The arguments of the call: `--args-json` first, then one flag per field
+    over it.
 
-    A flag whose value is `utcp_cli`'s `MISSING_ARG_` placeholder was not given."""
+    A flag whose value is the `MISSING_ARG_` placeholder of `utcp_cli` was not
+    given."""
     arguments: dict[str, JsonValue] = {}
     if args_json is not None:
         try:
@@ -935,7 +970,7 @@ def _tool_arguments(
         if "_" in name:
             flags.append(f"--{name.replace('_', '-')}")
         if _kinds(schema) - {"null"} == {"boolean"}:
-            # A bare `--forget` for a person; `--forget True` from a client.
+            # A person types a bare `--forget`. A client sends `--forget True`.
             parser.add_argument(*flags, dest=name, nargs="?", const="true", default=None)
         else:
             parser.add_argument(*flags, dest=name, default=None)
@@ -962,8 +997,9 @@ async def _call(
             call_id=f"{cli.program}-{os.getpid()}",
             name=tool,
             arguments=_tool_arguments(cli, definition, args_json, rest),
-            # No agent exists to narrow anything, so this is the deployment's own
-            # view — said on purpose, as `--mode rpc`'s `tools/list` says it.
+            # No agent exists to narrow anything, so this is the view of the
+            # deployment itself. The scope is stated on purpose, as the
+            # `tools/list` of `--mode rpc` states it.
             scope=DEPLOYMENT,
         )
     )
@@ -983,12 +1019,13 @@ def _tools(cli: ToolCli, ctx: Context) -> str:
 
 
 async def _provision(cli: ToolCli, ctx: Context, verb: str) -> str:
-    """The package's own `install_or_status` command, and its doctor section.
+    """The `install_or_status` command of the package, and its doctor section.
 
-    Called on the definition rather than dispatched: `dispatch` records both halves
-    of a command in a session's log, and there is no session here to record in.
-    Reached only for a `cli.command`, which a row of the package must register —
-    one that does not is a declaration missing, and said."""
+    The command is called on the definition and not dispatched. `dispatch`
+    records both halves of a command in the log of a session, and there is no
+    session here to record in. This function is reached only for a
+    `cli.command`, which a row of the package must register. When no row
+    registers it, a declaration is missing, and the refusal says so."""
     definition = ctx.require(COMMANDS).get(cli.command)
     if definition is None:
         raise _Refused(
@@ -1010,17 +1047,18 @@ async def _provision(cli: ToolCli, ctx: Context, verb: str) -> str:
 class _Parser(argparse.ArgumentParser):
     """An `ArgumentParser` whose usage errors are refusals, not `sys.exit(2)`.
 
-    argparse writes its complaint to stderr and exits, and under UTCP stderr is
-    discarded and the exit code ignored — so a mistyped flag would come back as an
-    empty result. Raised instead, so `call` can say it in the envelope."""
+    argparse writes its complaint to stderr and exits. Under UTCP, stderr is
+    discarded and the exit code is ignored, so a mistyped flag would come back
+    as an empty result. The error is raised instead, so that `call` can report
+    it in the envelope."""
 
     def error(self, message: str) -> NoReturn:
         raise _Refused("BAD_ARGUMENTS", f"{self.prog}: {message}")
 
 
 def _parser(cli: ToolCli) -> argparse.ArgumentParser:
-    # No abbreviations anywhere: a tool's own `--for…` field must not be read as
-    # a prefix of one of this parser's flags.
+    # No abbreviations anywhere: a `--for…` field of a tool must not be read as
+    # a prefix of one of the flags of this parser.
     parser = argparse.ArgumentParser(prog=cli.program, description=cli.summary, allow_abbrev=False)
     parser.add_argument("--version", action="version", version=f"{cli.program} {cli.version}")
 
@@ -1105,16 +1143,18 @@ def _parser(cli: ToolCli) -> argparse.ArgumentParser:
 def _logging_to_file(cli: ToolCli, *, verbose: bool) -> Iterator[None]:
     """Send logging to `cli.log_file()` for the body, and to nowhere else.
 
-    A handler is always installed, a `NullHandler` when the file cannot be made:
-    with none, `logging` falls back to writing warnings on stderr, which a UTCP
-    client reads as part of the result. At WARNING unless `--verbose`, because one
-    process per call appends to one file; and rotated at `LOG_BYTES`, keeping one
-    file back, because a deployment fact worth a warning is then a line per call.
-    Processes that rotate at the same moment can lose a line each; it is a
-    diagnostic.
+    A handler is always installed, and it is a `NullHandler` when the file
+    cannot be made. With no handler, `logging` falls back to writing warnings on
+    stderr, which a UTCP client reads as part of the result. The level is
+    WARNING unless `--verbose`, because one process per call appends to one
+    file. The file is rotated at `LOG_BYTES`, with one file kept back, because a
+    deployment fact that deserves a warning is then a line per call. Processes
+    that rotate at the same moment can each lose a line. That is acceptable for
+    a diagnostic.
 
-    Undone on the way out. The process is about to exit, so nothing depends on
-    it there; a caller that runs this in its own process — a test — does.
+    The change is undone on exit. The process is about to exit, so nothing
+    there depends on the undo. A caller that runs this in its own process, such
+    as a test, does depend on it.
     """
     root = logging.getLogger()
     level = root.level
@@ -1145,26 +1185,29 @@ def _logging_to_file(cli: ToolCli, *, verbose: bool) -> Iterator[None]:
 
 @contextmanager
 def _stderr_discarded() -> Iterator[None]:
-    """Point the process's stderr at nothing for the body: `sys.stderr`, and the
-    descriptor under it, so a native library and a child are covered too.
+    """Point the stderr of the process at nothing for the body. This covers
+    `sys.stderr` and the descriptor under it, so a native library and a child
+    are covered too.
 
-    For a run whose stdout is data. A UTCP client merges the two streams, so one
-    progress bar from a model library — "Loading weights: 100%" — is in front of
-    the answer and the answer no longer parses. What would have been written is
-    lost on purpose; a failure is in the object the run prints, and its traceback
-    is in the log file. `--verbose` keeps the stream, for a person.
+    It is for a run whose stdout is data. A UTCP client merges the two streams,
+    so one progress bar from a model library ("Loading weights: 100%") comes
+    before the answer, and the answer no longer parses. What would have been
+    written is lost on purpose. A failure is in the object that the run prints,
+    and its traceback is in the log file. `--verbose` keeps the stream, for a
+    person.
 
-    Put back on the way out, for `_logging_to_file`'s reason.
+    The stream is put back on exit, for the same reason as in `_logging_to_file`.
     """
     sys.stderr.flush()
     with open(os.devnull, "w", encoding="utf-8") as nothing, redirect_stderr(nothing):
-        # `sys.stderr` as well as the descriptor: a host that replaced the object
-        # — a test's capture, an embedding application — writes somewhere else.
+        # `sys.stderr` is redirected as well as the descriptor: a host that
+        # replaced the object (the capture of a test, an embedding application)
+        # writes somewhere else.
         try:
             saved = os.dup(2)
         except OSError:
-            # No descriptor to redirect: a caller closed it, and nothing can be
-            # written to it.
+            # There is no descriptor to redirect: a caller closed it, and nothing
+            # can be written to it.
             yield
             return
         try:
@@ -1177,9 +1220,10 @@ def _stderr_discarded() -> Iterator[None]:
 
 @contextmanager
 def _state_at(directory: Path | None) -> Iterator[None]:
-    """`--state` as `$PH_TOOL_STATE` for the body, so there is one place a row
-    reads it from (`state_dir`). Put back on the way out, for `_logging_to_file`'s
-    reason: a caller that runs this in its own process."""
+    """Set `--state` as `$PH_TOOL_STATE` for the body, so that a row reads the
+    setting from one place (`state_dir`). The variable is put back on exit, for
+    the same reason as in `_logging_to_file`: a caller that runs this in its own
+    process."""
     if directory is None:
         yield
         return
@@ -1206,21 +1250,21 @@ def _set[T](variable: ContextVar[T], value: T) -> Iterator[None]:
 
 @contextmanager
 def reporting_to(out: TextIO) -> Iterator[None]:
-    """Send the progress of the body's runs to `out`, as JSONL: what
-    `call --progress` does with its stderr, for a caller that runs a tool in its
-    own process and wants the report `reported` writes."""
+    """Send the progress of the runs in the body to `out`, as JSONL. `call
+    --progress` does this with its stderr. This function is for a caller that
+    runs a tool in its own process and wants the report that `reported` writes."""
     with _set(_REPORTS, _Reports(out)):
         yield
 
 
 @contextmanager
 def _reporting() -> Iterator[None]:
-    """Keep the process's stderr for progress lines, and for nothing else.
+    """Keep the stderr of the process for progress lines, and for nothing else.
 
-    A copy of the descriptor, taken before `_stderr_discarded` points the
-    original at nothing: what a dependency writes is still lost, and what
-    `reported` writes reaches whoever started the command. A process with no
-    stderr to copy reports to nobody."""
+    The function takes a copy of the descriptor before `_stderr_discarded`
+    points the original at nothing. What a dependency writes is still lost, and
+    what `reported` writes reaches whoever started the command. A process with
+    no stderr to copy reports to nobody."""
     try:
         kept = os.dup(2)
     except OSError:
@@ -1231,11 +1275,11 @@ def _reporting() -> Iterator[None]:
 
 
 def run(cli: ToolCli, argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> int:
-    """Run the command line once. Returns the exit code.
+    """Run the command line one time. Returns the exit code.
 
-    The exit code is for a person and a script: 0, or 1 when the answer is a
-    failure. A UTCP client never sees it, which is why `call` says the same thing
-    in what it prints.
+    The exit code is for a person and for a script: 0, or 1 when the answer is a
+    failure. A UTCP client never sees it, so `call` says the same thing in what
+    it prints.
     """
     out = stdout if stdout is not None else sys.stdout
     parser = _parser(cli)
@@ -1249,7 +1293,8 @@ def run(cli: ToolCli, argv: Sequence[str] | None = None, *, stdout: TextIO | Non
         if known.verb == "call":
             stack.enter_context(_set(_WAIT, known.wait))
             if known.progress:
-                # Before stderr is pointed at nothing: this is the stream kept.
+                # This runs before stderr is pointed at nothing: this is the
+                # stream that is kept.
                 stack.enter_context(_reporting())
         if as_json and not known.verbose:
             stack.enter_context(_stderr_discarded())
@@ -1280,17 +1325,20 @@ def _answered(
     try:
         answer = anyio.run(answered)
     except (_Refused, HarnessError) as error:
-        # A refusal of this command line's, or a provisioning command that could
-        # not do what was asked: a sentence and a code, and a failing exit.
+        # A refusal by this command line, or a provisioning command that could
+        # not do what was asked. The answer is a sentence and a code, and the
+        # exit code is a failure.
         answer = failure_envelope(error.code, str(error))
     except CordisError as error:
-        # A row that declined, or a profile that would not compose: a deployment
-        # fact with a sentence, the same one `phern` prints for it.
+        # A row that declined, or a profile that would not compose. This is a
+        # deployment fact with a sentence, the same sentence that `phern` prints
+        # for it.
         log.warning("%s could not mount", cli.program, exc_info=True)
         answer = failure_envelope("MOUNT_REFUSED", str(error))
     except Exception as error:
-        # A bug, but one a UTCP client would otherwise read as an empty result.
-        # The traceback is in the log file; the sentence is in the answer.
+        # A bug, but one that a UTCP client would otherwise read as an empty
+        # result. The traceback is in the log file, and the sentence is in the
+        # answer.
         log.exception("%s failed", cli.program)
         answer = failure_envelope("INTERNAL_ERROR", f"{type(error).__name__}: {error}")
 
@@ -1300,7 +1348,7 @@ def _answered(
     reports = _REPORTS.get()
     if reports is not None:
         # The last line, where the work wrote none: a tool that reports nothing,
-        # or a failure — said as the envelope says it.
+        # or a failure. A failure is reported as the envelope reports it.
         failed = None if answer["ok"] else as_obj(answer["error"])
         reports.end(
             code=None if failed is None else as_str(failed.get("code")),

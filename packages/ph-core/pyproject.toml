@@ -25,40 +25,42 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    # Ceilinged, and the ceiling is load-bearing. `ph_app.daemon.cancelsafe`
-    # is keyed to how anyio registers a socket readiness wait — a bound
-    # `Future.set_result` handed to `loop.add_reader` — and `ph_rlm.kernel`
-    # depends on the *hardened* free `anyio.wait_readable` staying hardened.
-    # Neither is public API, so a major release that changes either should be
-    # a decision someone makes, not one a resolver makes for them. The floor is
-    # 4.11 for `CancelScope.cancel(reason)`, and `ph.cancel.reason_of` reads that
-    # reason back out of the message the asyncio backend builds, which is not
-    # public either; a change to it degrades to the bare type, and `test_cancel`
-    # says so.
+    # The dependency has a ceiling, and the ceiling matters.
+    # `ph_app.daemon.cancelsafe` depends on how anyio registers a wait for
+    # socket readiness: a bound `Future.set_result` that is passed to
+    # `loop.add_reader`. `ph_rlm.kernel` depends on the *hardened* free
+    # `anyio.wait_readable` staying hardened. Neither is public API. A major
+    # release that changes either should therefore be a decision that someone
+    # makes, and not one that a resolver makes for them. The floor is 4.11 for
+    # `CancelScope.cancel(reason)`. `ph.cancel.reason_of` reads that reason back
+    # out of the message that the asyncio backend builds, which is not public
+    # either. A change to that message degrades the result to the bare type,
+    # and `test_cancel` reports that change.
     "anyio>=4.11,<5",
     "croniter>=3.0",
-    # 3.32 for `fallback_to_soft`, which `ph.locks` pins off: a lease is `flock` or nothing.
+    # The floor is 3.32 for `fallback_to_soft`, which `ph.locks` turns off: a
+    # lease is `flock` or nothing.
     "filelock>=3.32",
     "pydantic>=2.9",
     "pyturso>=0.7",
     "pyyaml>=6.0",
 ]
 
-# Exporting to a collector is opt-in; `session-telemetry-otel` refuses with a
-# message naming this extra rather than failing to import. Both distributions,
-# because the row needs the provider *and* a transport and refuses without
-# either — half of the extra is a sink that ships nowhere.
 [project.urls]
 Homepage = "https://github.com/chastabor/pH"
 Repository = "https://github.com/chastabor/pH"
 Documentation = "https://github.com/chastabor/pH/blob/main/docs/README.md"
 Issues = "https://github.com/chastabor/pH/issues"
 
+# Export to a collector is opt-in. `session-telemetry-otel` refuses with a
+# message that names this extra, and does not fail at import. The extra holds
+# both distributions, because the row needs the provider *and* a transport and
+# refuses without either. Half of the extra is a sink that ships nowhere.
 [project.optional-dependencies]
 otel = ["opentelemetry-sdk>=1.27", "opentelemetry-exporter-otlp-proto-http>=1.27"]
 
-# The plugin discovery group. Reserved in Phase 0 (P0-01) so a third-party
-# wheel can mount a row by name from its first release onward.
+# The plugin discovery group. It was reserved in Phase 0 (P0-01), so that a
+# third-party wheel can mount a row by name from its first release onward.
 [project.entry-points."ph.plugins"]
 # core
 llm = "ph.llm.adapter:apply"
@@ -68,6 +70,7 @@ agent-loop = "ph.agent_loop:apply"
 system-prompt = "ph.system_prompt.assembly:apply"
 memory-agents-md = "ph.system_prompt.memory:apply"
 tools = "ph.tools.registry:apply"
+tools-code-mode = "ph.tools.code_mode:apply"
 tools-prompt = "ph.tools.prompt:apply"
 tools-timeout = "ph.tools.timeout:apply"
 # capability seams
@@ -131,16 +134,15 @@ llm-retry = "ph.llm.retry:apply"
 media-degrade = "ph.llm.media:apply"
 # testing and invariants
 #
-# The first three are test-facing *rows* whose modules are not, and the paths
-# say so: a row is mountable, so it lives with the seam it implements, while
-# `ph.testing` is scaffolding nothing shipped may import. `llm-fake` is the one
-# that made the rule — `headless`, the default profile, mounts it, so an install
-# with no pytest could not compose its own default while this pointed into the
-# test package.
+# The first three are test-facing *rows*, but their modules are not
+# test-facing, and the paths show that. A row is mountable, so it lives with
+# the seam that it implements. `ph.testing` is scaffolding that nothing shipped
+# may import. `llm-fake` is the row that made the rule. `headless`, the default
+# profile, mounts it. An install with no pytest therefore could not compose its
+# own default while this entry pointed into the test package.
 llm-fake = "ph.llm.fake:apply"
 code-runtime-stub = "ph.seams.code_runtime_stub:apply"
 llm-replay = "ph.llm.replay:apply"
-tools-code-mode = "ph.tools.code_mode:apply"
 agent-loop-invariant = "ph.agent_loop.invariant:apply"
 session-invariant = "ph.session.invariant:apply"
 tools-invariant = "ph.tools.invariant:apply"

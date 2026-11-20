@@ -1,10 +1,10 @@
 """Plugin identity: what a row mounts, and how its config is validated.
 
-A plugin is a name, what its settings shape (`Affects`), a list of injected
-service keys, an optional pydantic config model, and an `apply(ctx, config)`
-body. It may be written as a decorated function or as any object carrying those
-attributes — the shape is duck-typed by `normalize_plugin`, not enforced by a
-base class.
+A plugin has a name, a statement of what its settings shape (`Affects`), a list
+of injected service keys, an optional pydantic config model, and an
+`apply(ctx, config)` body. It may be written as a decorated function or as any
+object that carries those attributes. `normalize_plugin` duck-types the shape,
+and no base class enforces it.
 
 @module ph.cordis.plugin
 """
@@ -37,24 +37,27 @@ __all__ = [
 ]
 
 Affects: TypeAlias = Literal["environment", "presentation", "deployment"]
-"""What a row's settings shape, and so which configuration owns them.
+"""What the settings of a row shape, and therefore which configuration owns them.
 
-* `environment` — what the agent sees or can do: its model, tools, skills, sandbox,
-  workspace and posture. A session's profile covers these rows: what it starts
-  with, what is overridden during it, and what a restart compares.
-* `presentation` — only how a front end draws: screens and footer readings. The
-  TUI's configuration owns these.
-* `deployment` — the host's own machinery: persistence, telemetry, invariants,
-  doctor sections, the local stores, the credential source. The daemon's own
-  configuration owns these.
+* `environment`: what the agent sees or can do. This is its model, tools,
+  skills, sandbox, workspace and posture. The profile of a session covers these
+  rows: what the session starts with, what is overridden during it, and what a
+  restart compares.
+* `presentation`: only how a front end draws. This is screens and footer
+  readings. The configuration of the TUI owns these rows.
+* `deployment`: the machinery of the host itself. This is persistence,
+  telemetry, invariants, doctor sections, the local stores, and the credential
+  source. The configuration of the daemon owns these rows.
 
-Declared by every plugin, with no default, so a row that does not say is caught
-where it is written (the decorator's required keyword) rather than guessed at
-when a profile is split by owner. `plans/Session_Profiles_Plan.md` is the design.
+Every plugin declares its kind, and there is no default. A row that does not say
+is therefore caught where it is written (the keyword is required by the
+decorator), and is not guessed when a profile is split by owner.
+`plans/Session_Profiles_Plan.md` is the design.
 """
 
 AFFECTS: Mapping[str, Affects] = literal_lookup(Affects)
-"""Every `Affects` by its spelling, so checking a plugin's word also types it."""
+"""Every `Affects` value, keyed by its spelling. A lookup checks the word that a
+plugin gave and also gives it its type."""
 
 CONFIGURED_IN: Mapping[Affects, str] = {
     "environment": "a session profile, `$PH_HOME/profiles/<name>.yaml`",
@@ -62,30 +65,34 @@ CONFIGURED_IN: Mapping[Affects, str] = {
     "its key remapped",
     "deployment": "the daemon's configuration, `$PH_HOME/daemon.yaml`",
 }
-"""Where a person sets each kind, as the refusal of a misplaced row names it.
+"""Where a user sets each kind, in the words that the refusal of a misplaced row
+uses.
 
-In words rather than paths, because two of the three are a front end's and a
-host's files that `ph.cordis` never reads. Written once, so the loader's refusal
-and the documentation cannot name different files for one kind.
+The values are words and not paths, because two of the three are files of a front
+end and of a host, and `ph.cordis` never reads them. They are written one time,
+so that the refusal of the loader and the documentation cannot name different
+files for one kind.
 """
 
 LogLayer: TypeAlias = Literal["storage", "telemetry", "export", "checkpoint"]
-"""A row's place in the log layer: the rows that keep the log, export it and say when
-it reaches disk, beneath every row that writes to it.
+"""The place of a row in the log layer. The log layer is the rows that keep the log,
+export it, and say when it reaches disk. It is beneath every row that writes to
+the log.
 
-Rows unwind in reverse, so the layer goes last, and in reverse of this order. The
-checkpoint policy's last barrier flushes what the agents appended as they let go,
-while every other row here is still mounted. An `export` row, a sink or a redactor
-of what sinks receive, is there to handle that tail. The telemetry seam outlives
-them, since they register with it. Storage goes last, so no flush announces a write
-after it went.
+Rows unwind in reverse, so the layer unwinds last, and in the reverse of this
+order. The last barrier of the checkpoint policy flushes what the agents
+appended as they let go, while every other row of the layer is still mounted. An
+`export` row (a sink, or a redactor of what sinks receive) is there to handle
+that tail. The telemetry seam outlives the `export` rows, because they register
+with it. Storage unwinds last, so no flush announces a write after storage has
+gone.
 
-**Declared, so nobody has to remember where to write the row.** The composition
-gathers the layer where its first row is written, in this order
-(`ph.cordis.loader`), so a deployment adds a sink by naming it, and a row appended
-at the end, which is all a profile can do, still lands beneath the agents. A
-`storage` row with no `checkpoint` row is warned about at mount, since nothing then
-says when the log reaches disk.
+**The place is declared, so nobody has to remember where to write the row.**
+The composition gathers the layer at the position of its first row, in this
+order (`ph.cordis.loader`). A deployment therefore adds a sink by naming it. A
+row appended at the end, which is all that a profile can do, is still placed
+beneath the agents. A `storage` row with no `checkpoint` row gets a warning at
+mount, because nothing then says when the log reaches disk.
 """
 
 LOG_LAYER: tuple[LogLayer, ...] = get_args(LogLayer)
@@ -95,38 +102,41 @@ _LOG_LAYERS: Mapping[str, LogLayer] = literal_lookup(LogLayer)
 
 @dataclass(frozen=True, slots=True)
 class PluginSpec:
-    """One plugin's normalized identity."""
+    """The normalized identity of one plugin."""
 
     name: str
     apply: Callable[..., Any]
-    """Erased on purpose, and the erasure is the same one `ToolDefinition.output`
-    carries: a spec lives in a table beside every other row, so the config type
-    `plugin()` checked is not recoverable from here. The decorator's overload is
-    what holds a body to the model it declares — this field is what the loader
-    calls, and it calls every row through one signature."""
+    """The type is erased on purpose, in the same way as `ToolDefinition.output`. A
+    spec is in a table beside every other row, so the config type that `plugin()`
+    checked cannot be recovered from here. The overload of the decorator holds a
+    body to the model that it declares. This field is what the loader calls, and
+    the loader calls every row through one signature."""
     affects: Affects
-    """Which configuration owns this row's settings (`Affects`)."""
+    """The configuration that owns the settings of this row (`Affects`)."""
     inject: tuple[str, ...] = ()
     config_model: type[BaseModel] | None = None
     narrows: Callable[..., ChildLimit] | None = None
-    """How a child holds less of this row (`ph.cordis.child_limit`), or `None` when
-    it holds this row as its parent runs it or not at all. Erased as `apply` is, and
-    held to the config model by the same overload."""
+    """How a child holds less of this row (`ph.cordis.child_limit`). `None` means
+    that a child holds this row as its parent runs it, or not at all. The type is
+    erased as the type of `apply` is, and the same overload holds it to the
+    config model."""
     log_layer: LogLayer | None = None
-    """This row's place in the log layer (`LogLayer`), or `None` for a row outside it."""
+    """The place of this row in the log layer (`LogLayer`), or `None` for a row
+    outside it."""
 
     def resolve_config(self, raw: object) -> BaseModel | None:
-        """Validate a row's raw config against the plugin's model.
+        """Validate the raw config of a row against the model of the plugin.
 
-        **A plugin without a model takes no config, and is handed `None`.** It
-        used to be handed the row's config verbatim, which made a `config:` block
-        under a row that never reads one a silent no-op: the profile said
-        something, the mount agreed, and nothing happened. Fifty-two rows in this
-        tree ignore their config; the four that read it raw now declare a model.
-        So a non-empty config on a model-less row is refused, naming the row and
-        the keys — the same sentence `extra="forbid"` gives a mistyped key under a
-        row that *does* have a model. An empty mapping is treated as absent, since
-        `config: {}` says nothing either way.
+        **A plugin without a model takes no config, and receives `None`.** It
+        used to receive the config of the row verbatim. A `config:` block under
+        a row that never reads one was then a silent no-op: the profile said
+        something, the mount agreed, and nothing happened. When this rule was
+        written, fifty-two rows in this tree ignored their config, and the four
+        rows that read it raw were given a model. So a config that is not empty,
+        on a row with no model, is refused. The refusal names the row and the
+        keys. It is the same sentence that `extra="forbid"` gives for a mistyped
+        key under a row that *does* have a model. An empty mapping is treated as
+        absent, because `config: {}` says nothing either way.
         """
         model = self.config_model
         if model is None:
@@ -184,18 +194,20 @@ def plugin(
     async def apply(ctx: Context, config: SessionConfig) -> None: ...
     ```
 
-    `affects` has no default (`Affects` says why).
+    `affects` has no default (`Affects` gives the reason).
 
-    **Overloaded on `config=`, so the body's second parameter is checked against
-    the model the decorator names.** Forty-five rows declare a model and read
-    `config.field` in the body; before this, a row that declared `Config` and
-    annotated `config: OtherConfig` type-checked, and the first field read at
-    mount was where the difference surfaced. A row with no model takes `None`,
-    and `resolve_config` above is what makes that annotation true.
+    **The decorator is overloaded on `config=`, so the second parameter of the
+    body is checked against the model that the decorator names.** When the
+    overload was written, forty-five rows declared a model and read
+    `config.field` in the body. Before the overload, a row that declared `Config`
+    and annotated `config: OtherConfig` passed the type check, and the difference
+    first appeared at the first field read at mount. A row with no model takes
+    `None`, and `resolve_config` above makes that annotation true.
 
-    `narrows` is how a child's copy of this row holds less than its parent's
-    (`ph.cordis.child_limit`), and takes the config model too, so it comes only with
-    one: a row with no config has nothing to narrow but whether it runs.
+    `narrows` says how the copy of this row in a child holds less than the copy
+    in its parent (`ph.cordis.child_limit`). It takes the config model too, so it
+    is accepted only with one: a row with no config has nothing to narrow except
+    whether it runs.
 
     `log_layer` places a row that keeps, exports or flushes the log (`LogLayer`).
     """

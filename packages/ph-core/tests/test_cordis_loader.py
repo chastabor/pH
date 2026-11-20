@@ -125,6 +125,30 @@ def test_timestamps_stay_strings() -> None:
     assert parsed == [{"id": "a", "name": "mod.a", "config": {"when": "2026-08-26"}}]
 
 
+def test_a_value_that_looks_like_a_time_stays_a_string() -> None:
+    """YAML 1.1 reads `1:30` as base 60 and gives the integer 90. A profile
+    value keeps the text that its author wrote (DESIGN §2.2). Every other form
+    of a number still converts.
+
+    Sabotage: keep the patterns of PyYAML in `_kept` and `1:30` becomes 90.
+    """
+    parsed = safe_yaml_load(
+        "at: 1:30\nlong: 190:20:30\nfraction: 1:30.5\nsigned: -1:30\n"
+        "count: 1_000\nratio: 0.5\nbig: 1.0e+3\nhex: 0x1F\nport: '8:30'\n"
+    )
+    assert parsed == {
+        "at": "1:30",
+        "long": "190:20:30",
+        "fraction": "1:30.5",
+        "signed": "-1:30",
+        "count": 1000,
+        "ratio": 0.5,
+        "big": 1000.0,
+        "hex": 31,
+        "port": "8:30",
+    }
+
+
 def test_the_row_loader_does_not_take_timestamps_from_everyone_else() -> None:
     """The customization above belongs to `SafeRowLoader`, not to PyYAML.
 

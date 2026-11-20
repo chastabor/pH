@@ -1,35 +1,38 @@
 """The three path roots, and why there are three (Q1).
 
-One dotdir mixes four lifecycles. `~/.ph` would accumulate a rebuildable
-multi-gigabyte venv, irreplaceable session state, a secret, a unix socket and a
-PID journal — so a user cannot back up sessions without the venv, and a `~/.ph`
-inside Dropbox or iCloud syncs a socket and a `processes.jsonl` full of another
-machine's PIDs. That does not merely waste space: it makes the orphan journal
-*wrong*, because those PIDs mean something else here.
+One dot directory mixes four lifecycles. `~/.ph` would collect a rebuildable
+multi-gigabyte venv, irreplaceable session state, a secret, a unix socket, and
+a PID journal. A user then cannot back up the sessions without the venv. A
+`~/.ph` inside Dropbox or iCloud also syncs a socket and a `processes.jsonl`
+that is full of the PIDs of another machine. That does more than waste space.
+It makes the orphan journal *wrong*, because those PIDs mean something else on
+this machine.
 
 | root | default | holds |
 |---|---|---|
-| `$PH_HOME` | `~/.ph` | sessions, harness state, profiles, credentials, AGENTS.md, `daemon.yaml` |
+| `$PH_HOME` | `~/.ph` | sessions, harness state, profiles, AGENTS.md, `daemon.yaml` |
 | `$PH_CACHE` | `$XDG_CACHE_HOME/ph` | the runtime venv, bootstrap markers |
 | `$PH_RUNTIME` | `$XDG_RUNTIME_DIR/ph` | `daemon.sock`, `processes.jsonl` |
 
-`$PH_RUNTIME` being wiped on reboot is **correct, not a limitation**: PIDs do
-not survive a reboot, and a journal that did would be actively dangerous once
-they are reused.
+A reboot wipes `$PH_RUNTIME`. That is **correct, not a limitation**. PIDs do
+not survive a reboot, and a journal that survived would be dangerous as soon as
+the PIDs are reused.
 
-Its resolution order is three tiers, and only the last needs defending:
+`$PH_RUNTIME` resolves through three tiers. Only the last tier needs a defense:
 
-1. `$XDG_RUNTIME_DIR/ph` — the OS already guarantees mode 0700, the right
-   owner, tmpfs, and removal at session end. No check needed.
-2. a per-user `$TMPDIR/ph` (macOS `/var/folders/…`) — already per-user and
-   0700. Ownership assertion only.
-3. `/tmp/ph-$UID` — a predictable path in a **world-writable** directory, so
-   the classic symlink-hijack shape. Verified to be a real directory, owned by
-   this uid, mode 0700, and not a symlink; pH refuses to start rather than
-   adopt one that is not (F9).
+1. `$XDG_RUNTIME_DIR/ph`. The OS already guarantees mode 0700, the right
+   owner, tmpfs, and removal at session end. No check is needed.
+2. A per-user `$TMPDIR/ph` (macOS `/var/folders/…`). It is already per-user
+   and 0700. pH asserts ownership only.
+3. `/tmp/ph-$UID`. This is a predictable path in a **world-writable**
+   directory, which is the classic shape of a symlink hijack. pH verifies that
+   it is a real directory, owned by this uid, with mode 0700, and not a
+   symlink. If it is not, pH refuses to start and does not adopt it (F9).
 
-Resolution is pure and always verifies what already exists; `PathRoots.ensure()`
-is the one place directories are created, with the mode each tier requires.
+Resolution is pure and always verifies what already exists.
+`PathRoots.ensure()` creates directories, with the mode that each tier
+requires. `PathRoots.ensure_runtime()` is the part of it that creates
+`$PH_RUNTIME` alone.
 
 @module ph.paths
 """
@@ -87,19 +90,22 @@ class PathRoots:
     runtime: Path
     runtime_tier: RuntimeTier
     runtime_source: str = ""
-    """The environment variable the runtime tier came from, `""` for tier 3.
+    """The environment variable that the runtime tier came from, `""` for tier 3.
 
-    Carried beside the tier because it is decided at the same instant and by the same
-    `if`: `_resolve_runtime` picks a tier *because* it read a particular variable, and
-    a consumer that wants to print which one has no other way to ask. A
-    `{tier: variable}` table anywhere else is a second copy of this decision that can
-    drift, and can `KeyError` on a tier added here and not there.
+    This field is carried beside the tier because the same `if` decides both at
+    the same instant. `_resolve_runtime` picks a tier *because* it read a
+    particular variable. A consumer that wants to print which variable has no
+    other way to ask. A `{tier: variable}` table anywhere else is a second copy
+    of this decision. The copy can drift, and it can raise `KeyError` on a tier
+    that is added here and not there.
     """
 
     sessions: Path | None = None
-    """`daemon.yaml`'s `paths.sessions`, resolved; `None` is `$PH_HOME/sessions`."""
+    """The `paths.sessions` setting of `daemon.yaml`, resolved. `None` means
+    `$PH_HOME/sessions`."""
     profiles: Path | None = None
-    """`daemon.yaml`'s `paths.profiles`, resolved; `None` is `$PH_HOME/profiles`."""
+    """The `paths.profiles` setting of `daemon.yaml`, resolved. `None` means
+    `$PH_HOME/profiles`."""
 
     def sessions_dir(self) -> Path:
         return self.sessions or self.home / "sessions"
@@ -111,48 +117,54 @@ class PathRoots:
         return self.profiles or self.home / "profiles"
 
     def profile_overlay(self, name: str) -> Path:
-        """The person's named profile `name`: `$PH_HOME/profiles/<name>.yaml`."""
+        """The user's named profile `name`: `$PH_HOME/profiles/<name>.yaml`."""
         return self.profiles_dir() / f"{name}.yaml"
 
     def profile_dropins(self, name: str) -> Path:
         """Where `/sandbox` wrote rows over `name` before S4: `$PH_HOME/profiles/<name>.d/`.
 
-        Read until `phern profiles fold` folds them into the named profile; nothing
-        writes one now — a session's change is an override in its own log.
+        pH reads this directory until `phern profiles fold` folds it into the
+        named profile. Nothing writes one now: a change that a session makes is
+        an override in the log of that session.
         """
         return self.profiles_dir() / f"{name}.d"
 
     def daemon_socket(self) -> Path:
         """Where the supervisor listens (P5-01).
 
-        Under `$PH_RUNTIME` because that is the tier chosen for exactly this: a
-        per-boot, per-user, `0o700` directory that a cloud sync will not carry
-        to another machine and a reboot clears. A socket in `$PH_HOME` would be
-        synced, and a socket carried between machines is one whose peer is a
-        process that never existed here.
+        The socket is under `$PH_RUNTIME` because that tier was chosen for
+        exactly this purpose. It is a per-boot, per-user, `0o700` directory. A
+        cloud sync does not carry it to another machine, and a reboot clears
+        it. A socket in `$PH_HOME` would be synced. The peer of a socket that
+        was carried between machines is a process that never existed on this
+        machine.
 
-        On Windows the same path names a named pipe rather than a filesystem
-        socket; `resolve_roots` already picks a runtime tier that can hold one.
+        On Windows the same path names a named pipe and not a filesystem
+        socket. `resolve_roots` already picks a runtime tier that can hold one.
         """
         return self.runtime / "daemon.sock"
 
     def daemon_log(self) -> Path:
-        """Where `phern daemon` writes its log. A daemon that a UI spawned has no
-        terminal: `launch._detach` points its stderr at a file (`daemon_stderr`),
-        which keeps only what comes before this log is open. Under `$PH_HOME`,
-        with the sessions it reports on, rather than under the runtime directory a
-        logout reaps."""
+        """Where `phern daemon` writes its log.
+
+        A daemon that a UI spawned has no terminal. `launch._detach` points its
+        stderr at a file (`daemon_stderr`), and that file keeps only what comes
+        before this log is open. The log is under `$PH_HOME`, with the sessions
+        that it reports on. It is not under the runtime directory, which a
+        logout reaps.
+        """
         return self.home / "logs" / "daemon.log"
 
     def daemon_stderr(self) -> Path:
-        """Where a daemon a UI spawned writes its stderr (`launch._detach`).
+        """Where a daemon that a UI spawned writes its stderr (`launch._detach`).
 
-        Beside `daemon_log`, and for the gap in it: the log is opened by the daemon
-        once its profile has composed, so a refusal *before* that — a row whose
-        plugin will not import, an option it does not take, a traceback on the
-        way in — reached no file at all. This one is the launcher's, truncated at
-        each spawn and read back into the launcher's own refusal when the process
-        ends before it listens.
+        This file is beside `daemon_log` and covers a gap in it. The daemon
+        opens the log only after its profile has composed. A refusal *before*
+        that point therefore reached no file at all. Examples: a row whose
+        plugin does not import, an option that it does not take, a traceback
+        during startup. This file belongs to the launcher. The launcher
+        truncates it at each spawn. When the process ends before it listens,
+        the launcher reads the file back into its own refusal.
         """
         return self.home / "logs" / "daemon.stderr"
 
@@ -163,11 +175,13 @@ class PathRoots:
         return self.ensure_runtime()
 
     def ensure_runtime(self) -> PathRoots:
-        """`$PH_RUNTIME` alone, created if missing with the mode its tier requires —
-        for a writer under it that must not make it itself (`ph.orphans`)."""
+        """Create `$PH_RUNTIME` alone if it is missing, with the mode that its tier
+        requires. This is for a writer under it that must not create the
+        directory itself (`ph.orphans`)."""
         if self.runtime_tier == "tmp-uid":
-            # Tier 3 is only ever created by us, never adopted: `resolve_roots`
-            # refused anything pre-existing that failed the check.
+            # pH creates the tier-3 directory itself and never adopts one that
+            # failed the check: `resolve_roots` refused any existing directory
+            # that failed it.
             if not self.runtime.exists():
                 self.runtime.mkdir(mode=0o700)
         else:
@@ -216,9 +230,10 @@ def _default_cache() -> Path:
 def _cache_source() -> str:
     """Which variable `_default_cache` will read, for the windows runtime tier.
 
-    Beside the function whose branches it names, so the two cannot disagree —
-    which they did while this lived in another module as a `{tier: variable}`
-    table that said `LOCALAPPDATA` for all three branches.
+    This function is beside the function whose branches it names, so that the
+    two cannot disagree. They did disagree while this lived in another module
+    as a `{tier: variable}` table. That table said `LOCALAPPDATA` for all three
+    branches.
     """
     if sys.platform == "win32" and os.environ.get("LOCALAPPDATA"):
         return "LOCALAPPDATA"
@@ -256,24 +271,24 @@ def _is_per_user_tmpdir(path: Path) -> bool:
 def _resolve_runtime() -> tuple[Path, RuntimeTier, str]:
     """Pick the runtime root, the tier, and the variable that named it.
 
-    Verifies what already exists; creates nothing. The third element is
-    `PathRoots.runtime_source` — returned from here rather than reconstructed by
-    a consumer, because this is the one place that knows which variable was read
-    and it knows it at the moment it reads it.
+    This verifies what already exists and creates nothing. The third element is
+    `PathRoots.runtime_source`. It is returned from here and not reconstructed
+    by a consumer, because this is the one place that knows which variable was
+    read, and it knows that at the moment it reads the variable.
     """
     override = _env_path("PH_RUNTIME")
     if override is not None:
         return override, "override", "PH_RUNTIME"
     if sys.platform == "win32":
-        # A named pipe replaces the socket path on Windows; the journal still
-        # needs a per-boot directory, and the cache root's `runtime` is the
-        # closest equivalent the platform offers. The source is whichever
-        # variable `_default_cache` actually used, which is why it is asked
-        # rather than assumed to be `LOCALAPPDATA`.
+        # On Windows a named pipe replaces the socket path. The journal still
+        # needs a per-boot directory, and `runtime` under the cache root is the
+        # closest equivalent that the platform offers. The source is whichever
+        # variable `_default_cache` actually used. That is why the code asks
+        # for it and does not assume `LOCALAPPDATA`.
         return _default_cache() / "runtime", "windows", _cache_source()
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
-        # Tier 1: the kernel and logind own this directory's properties.
+        # Tier 1: the kernel and logind own the properties of this directory.
         return Path(xdg) / "ph", "xdg-runtime", "XDG_RUNTIME_DIR"
     tmpdir = os.environ.get("TMPDIR")
     if tmpdir and _is_per_user_tmpdir(Path(tmpdir)):
@@ -281,8 +296,8 @@ def _resolve_runtime() -> tuple[Path, RuntimeTier, str]:
         if path.exists():
             _check_private_dir(path, require_mode=False)
         return path, "tmpdir", "TMPDIR"
-    # Tier 3: a predictable name inside a world-writable directory. Every
-    # property tiers 1 and 2 get for free has to be verified here.
+    # Tier 3: a predictable name inside a world-writable directory. Tiers 1 and
+    # 2 get every property for free. Here each property has to be verified.
     uid = os.getuid() if hasattr(os, "getuid") else 0
     path = Path("/tmp") / f"ph-{uid}"
     if path.exists():
@@ -291,34 +306,46 @@ def _resolve_runtime() -> tuple[Path, RuntimeTier, str]:
 
 
 def canonical(path: Path) -> Path:
-    """`path` with every symlink resolved — the one spelling the kernel will match.
+    """`path` with every symlink resolved: the one spelling that the kernel matches.
 
-    **Every directory that participates in a boundary goes through this, once,
-    where it is minted** — the three `$PH_*` roots, `default_home_path` (from which
-    every provider's root descends), the workspace seam's `base` and `scratch`, and
-    `sandbox-allow`'s directories. The kernel does not see a path the way it was
-    typed: Seatbelt matches `subpath` rules against the resolved path, and on macOS
-    `/var`, `/tmp` and `/etc` are symlinks into `/private` — so a workspace under
-    `$TMPDIR` named as `/var/folders/…` was refused its own writes by a profile that
-    named it that way (measured 2026-09-07). The fix belongs here rather than in the
-    backend that noticed, because the same set of roots is what `permissions-fs`
-    prompts about and what `bwrap` binds: `writable_roots` is documented as "the one
-    definition" of that set, and a backend re-spelling it privately would have made
-    the *enforced* boundary `/private/var/…` while the *prompt* boundary stayed
-    `/var/…` — E6's own failure. Canonical at the source, every consumer agrees.
+    **Every directory that takes part in a boundary goes through this function
+    one time, where its path is first produced.** Those directories are:
 
-    Roots that bound nothing are deliberately outside this: `uploads`, the session
-    stores and `temporary_directory` mint directories nobody compares against a
-    workspace, and canonicalizing them would be ceremony rather than an invariant.
-    The *candidate* side of a comparison is not canonical either — `FsService.resolve`
-    passes an absolute path through as authored — so a caller comparing against these
-    roots resolves the candidate itself where the answer would otherwise differ; see
-    `permissions_fs.FsPermissions._outside_workspace`, which does it only once the
-    cheap compare has already said "outside".
+    - the three `$PH_*` roots
+    - `default_home_path`, from which the root of every provider descends
+    - the `base` and `scratch` of the workspace seam
+    - the directories of `sandbox-allow`
 
-    `realpath`, not `Path.resolve(strict=True)`: a tail that does not exist yet
-    (a scratch about to be created) resolves through what does exist and keeps
-    the rest, which is what a path about to be `mkdir`ed needs.
+    The kernel does not see a path the way it was typed. Seatbelt matches
+    `subpath` rules against the resolved path, and on macOS `/var`, `/tmp` and
+    `/etc` are symlinks into `/private`. So a workspace under `$TMPDIR` that
+    was named as `/var/folders/…` was refused its own writes by a profile that
+    named it that way (measured 2026-09-07).
+
+    The fix belongs here and not in the backend that noticed the problem. The
+    same set of roots is what `permissions-fs` prompts about and what `bwrap`
+    binds. `writable_roots` is documented as "the one definition" of that set.
+    If a backend spelled the set again in private, the *enforced* boundary
+    would be `/private/var/…` while the *prompt* boundary stayed `/var/…`. That
+    is the failure of E6. When the roots are canonical at the source, every
+    consumer agrees.
+
+    Roots that bound nothing are deliberately outside this rule. `uploads`,
+    the session stores and `temporary_directory` produce directories that
+    nobody compares against a workspace. Canonicalizing them would be ceremony
+    and not an invariant.
+
+    The *candidate* side of a comparison is not canonical either:
+    `FsService.resolve` passes an absolute path through as authored. A caller
+    that compares against these roots therefore resolves the candidate itself
+    where the answer would otherwise differ. See
+    `permissions_fs.FsPermissions._outside_workspace`, which resolves only
+    after the cheap comparison has already said "outside".
+
+    This uses `realpath` and not `Path.resolve(strict=True)`. A tail that does
+    not exist yet (a scratch directory that is about to be created) resolves
+    through the part that does exist and keeps the rest. A path that is about
+    to be `mkdir`ed needs that.
     """
     return Path(os.path.realpath(path))
 
@@ -326,16 +353,18 @@ def canonical(path: Path) -> Path:
 def resolve_roots(*, create: bool = False) -> PathRoots:
     """Resolve all three roots, optionally creating them.
 
-    Canonical (`canonical`) so that everything minted under them — scratch,
-    worktrees, the daemon and egress sockets — carries one spelling.
+    The roots are canonical (`canonical`), so that everything produced under
+    them carries one spelling: scratch directories, worktrees, the daemon and
+    egress sockets.
 
     `$PH_HOME/daemon.yaml` may move the sessions and profiles directories
-    (`ph.host`); it is read once per process, so every caller here agrees.
+    (`ph.host`). It is read one time per process, so every caller here agrees.
 
-    :raises RuntimeDirError: when the tier-3 `/tmp` fallback fails its check —
-        pH refuses to start rather than adopt a directory it cannot vouch for.
-    :raises LoaderError: when `daemon.yaml` is malformed — refused whole, for the
-        reason `load_host_config` gives.
+    :raises RuntimeDirError: when an existing `$TMPDIR/ph` (tier 2) or
+        `/tmp/ph-$UID` (tier 3) fails its check. pH refuses to start and does
+        not adopt a directory that it cannot vouch for.
+    :raises LoaderError: when `daemon.yaml` is malformed. The whole file is
+        refused, for the reason that `load_host_config` gives.
     """
     runtime, tier, source = _resolve_runtime()
     home = canonical(_env_path("PH_HOME") or _default_home())
@@ -353,15 +382,17 @@ def resolve_roots(*, create: bool = False) -> PathRoots:
 
 
 def _under_home(home: Path, configured: str | None) -> Path | None:
-    """A `daemon.yaml` path, `~`-expanded, relative ones under `home`, canonical."""
+    """A path from `daemon.yaml`, made canonical. `~` is expanded, and a relative
+    path is taken under `home`."""
     return canonical(home / Path(configured).expanduser()) if configured else None
 
 
 def default_home_path(configured: str | None, name: str) -> Path:
-    """A row's `path` setting, else `$PH_HOME/<name>` — the idiom every seam shares.
+    """The `path` setting of a row, or else `$PH_HOME/<name>`. Every seam shares this idiom.
 
-    Canonical either way (`canonical`): a configured path is a person's spelling,
-    and the roots a seam mints under it must match what the kernel will enforce.
+    The result is canonical in both cases (`canonical`). A configured path is
+    spelled the way the user typed it, and the roots that a seam produces under
+    it must match what the kernel enforces.
     """
     if configured:
         return canonical(Path(configured).expanduser())
@@ -369,14 +400,16 @@ def default_home_path(configured: str | None, name: str) -> Path:
 
 
 def default_cache_path(configured: str | None, fallback: str) -> Path:
-    """A row's `path` setting, else `$PH_CACHE/<fallback>` — `default_home_path`'s twin.
+    """The `path` setting of a row, or else `$PH_CACHE/<fallback>`. The twin of
+    `default_home_path`.
 
-    Canonical either way, and that is the whole reason this exists rather than
-    being written per row: the two indexing rows arrived a week apart, one
-    applied `canonical` to the operator's spelling and the other did not, so a
-    configured path reached through a symlink gave one of them two spellings for
-    one index — every other reader resolving to a different one, and `phern doctor`
-    printing the unresolved one. `canonical`'s own docstring is the argument.
+    The result is canonical in both cases. That is the reason this function
+    exists and is not written again in each row. The two indexing rows arrived a
+    week apart. One applied `canonical` to the spelling of the operator and the
+    other did not. A configured path that was reached through a symlink then
+    gave one of the rows two spellings for one index: every other reader
+    resolved to a different spelling, and `phern doctor` printed the unresolved
+    one. The docstring of `canonical` gives the argument.
     """
     if configured:
         return canonical(Path(configured).expanduser())
@@ -384,9 +417,10 @@ def default_cache_path(configured: str | None, fallback: str) -> Path:
 
 
 def file_stamp(path: Path) -> tuple[int, int, int] | None:
-    """A file's `(inode, mtime, size)`, or `None` when it is absent: whether it
-    changed, asked without reading it. The inode catches a file `write_atomic`
-    replaced; the mtime and size catch one appended to in place."""
+    """The `(inode, mtime, size)` of a file, or `None` when the file is absent.
+    It tells a caller whether the file changed, without reading the file. The
+    inode catches a file that `write_atomic` replaced. The mtime and the size
+    catch a file that was appended to in place."""
     try:
         found = path.stat()
     except OSError:
@@ -397,15 +431,16 @@ def file_stamp(path: Path) -> tuple[int, int, int] | None:
 def is_under(candidate: Path, root: Path) -> bool:
     """Whether `candidate` is `root` or inside it, both taken as given.
 
-    A separator-aware prefix compare, not `Path.relative_to`, which allocates a
-    `Path` per root segment and runs at every gated write. `normcase` because
-    `relative_to` folds case on Windows and a naive compare would not, which is the
-    one behavior worth keeping from it.
+    This is a separator-aware prefix comparison and not `Path.relative_to`.
+    `relative_to` allocates a `Path` for each segment of the root, and this
+    function runs at every gated write. It applies `normcase` because
+    `relative_to` folds case on Windows and a naive comparison would not. That
+    is the one behavior of `relative_to` that is worth keeping.
 
-    **Neither path is resolved.** A caller needing symlink-safety must `resolve()`
-    *before* asking: resolving inside would answer a different question than a
-    security check means to ask, and would silently pass a path whose parent is a
-    link out of the tree.
+    **Neither path is resolved.** A caller that needs symlink safety must
+    `resolve()` *before* it asks. Resolving inside this function would answer a
+    different question from the one that a security check means to ask. It
+    would also silently pass a path whose parent is a link out of the tree.
     """
     base = os.path.normcase(root.as_posix()).rstrip("/")
     target = os.path.normcase(candidate.as_posix())
@@ -413,11 +448,11 @@ def is_under(candidate: Path, root: Path) -> bool:
 
 
 def free_sibling(path: Path, suffix: str) -> Path:
-    """A name beside `path` not yet taken: `<name><suffix>`, then `-2`, `-3` and on.
+    """A name beside `path` that is not yet taken: `<name><suffix>`, then `-2`, `-3`, and so on.
 
-    For a file or directory kept aside rather than replaced — a folded drop-in
-    directory (`phern profiles fold`), a log a repair cut (`truncate_damaged`) — so a
-    second one never lands on the first.
+    For a file or directory that is kept aside and not replaced, so that a
+    second one never lands on the first. Examples: a folded drop-in directory
+    (`phern profiles fold`), a log that a repair cut (`truncate_damaged`).
     """
     candidate = path.with_name(f"{path.name}{suffix}")
     count = 2
@@ -432,13 +467,14 @@ _MOUNT_ESCAPE = re.compile(r"\\([0-7]{3})")
 
 
 def filesystem_of(path: Path) -> str:
-    """The filesystem type holding `path`, by the mount table, or `unknown`.
+    """The type of the filesystem that holds `path`, from the mount table, or `unknown`.
 
-    Linux keeps the table at `/proc/self/mountinfo`, one mount per line, its mount
-    point the fifth field and its type the first after a lone `-`; the mount is the
-    longest mount point that `path` is under. The path need not exist yet: resolved
-    through what does (`canonical`), a directory still to be made lives on whatever
-    holds its nearest existing ancestor.
+    Linux keeps the table at `/proc/self/mountinfo`, with one mount on each
+    line. The mount point is the fifth field, and the type is the first field
+    after a lone `-`. The mount of `path` is the longest mount point that `path`
+    is under. The path need not exist yet. It is resolved through the part that
+    does exist (`canonical`), so a directory that is still to be made is on the
+    filesystem that holds its nearest existing ancestor.
     """
     if not sys.platform.startswith("linux"):
         return "unknown"
@@ -462,21 +498,20 @@ def filesystem_of(path: Path) -> str:
 def write_text_under(path: Path, text: str, *, append: bool = False) -> None:
     """Write (or append) text, creating the parent directory first.
 
-    **The append path is what this is for now** (O2). `append=False` truncates
-    in place, which for a whole document another process reads without
-    coordination is a window where the file is neither the old one nor the new
-    one; the JSON and YAML writers that took it — the trust roots, the TUI
-    settings, the theme profile and the sandbox profile drop-in — are on
-    `write_atomic` below, and
-    `tests/test_atomic_documents.py` is the gate that keeps a sixth from
-    arriving. Truncating remains the right call for a file only this process
-    reads, which is why the parameter stays.
+    **This function is now for the append path** (O2). `append=False` truncates
+    in place. For a whole document that another process reads without
+    coordination, that leaves a window in which the file is neither the old one
+    nor the new one. The JSON and YAML writers that used it moved to
+    `write_atomic` below: the trust roots, the TUI settings, the theme profile
+    and the sandbox profile drop-in. `tests/test_atomic_documents.py` is the
+    gate that keeps a sixth from arriving. Truncating is still correct for a
+    file that only this process reads, which is why the parameter stays.
 
-    Every production caller left is an append, so the gate reads as a rule
-    about a parameter nobody sets. That is the shape a narrower signature would
-    make unnecessary — see the gate's own docstring for why it is a gate.
+    Every production caller that is left appends, so the gate reads as a rule
+    about a parameter that nobody sets. A narrower signature would make the
+    gate unnecessary. The docstring of the gate says why it is a gate.
 
-    Blocking; call it through `anyio.to_thread.run_sync` from async code.
+    Blocking. Call it through `anyio.to_thread.run_sync` from async code.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a" if append else "w", encoding="utf-8") as handle:
@@ -495,71 +530,80 @@ def write_atomic(
     preserve: bool = False,
     private: bool = False,
 ) -> None:
-    """Write `payload` to `path` so a reader sees all of it or none of it (L7), and so
-    what a reader saw survives a power loss (S6).
+    """Write `payload` to `path` so that a reader sees all of it or none of it (L7),
+    and so that what a reader saw survives a power loss (S6).
 
-    **Temp-and-rename, because a torn file is worse than a missing one here.**
-    Every caller of this writes something another reader takes whole without
-    coordination: a content-addressed blob whose name promises its sha256, a JSON
-    index read on a daemon tick, a handle cache, a person's own file an agent
-    edited. `write_bytes` truncates and then writes, so an interrupted write leaves
-    a prefix under the final name — and for the content-addressed writers that
-    prefix is *permanent*, since the digest says the file is already correct and
-    nothing ever rewrites it.
+    **Temp-and-rename, because a torn file is worse than a missing file here.**
+    Every caller writes something that another reader takes whole without
+    coordination: a content-addressed blob whose name promises its sha256, a
+    JSON index that is read on a daemon tick, a handle cache, a file of the
+    user that an agent edited. `write_bytes` truncates and then writes, so an
+    interrupted write leaves a prefix under the final name. For the
+    content-addressed writers that prefix is *permanent*: the digest says that
+    the file is already correct, and nothing ever rewrites it.
 
     **And durable: the file is `fsync`ed before the rename, and its directory
     after.** A rename alone is atomic against a reader but not against the
-    machine: it can reach disk ahead of the bytes it names, and the blobs written
-    here are the ones a session log points at — a spilled result, an attachment,
-    a kernel variable — whose log *is* `fsync`ed at the next barrier. So a log
-    could survive a power cut naming a file that came back empty. Every durable
-    caller runs off the event loop or on a person's own save, where the syncs are
-    not felt. `durable=False` is for a file nothing outlives a reboot for, or
-    nothing reads back — `$PH_RUNTIME`'s orphan journal, a harness projection —
-    which keeps the atomicity and skips both syncs.
+    machine. The rename can reach disk before the bytes that it names. The
+    blobs written here are the ones that a session log points at (a spilled
+    result, an attachment, a kernel variable), and that log *is* `fsync`ed at
+    the next barrier. So a log could survive a power cut and name a file that
+    came back empty. Every durable caller runs off the event loop or on the
+    user's own save, where the syncs are not felt. `durable=False` is for a
+    file that does not need to outlive a reboot, or that nothing reads back:
+    the orphan journal in `$PH_RUNTIME`, a harness projection. It keeps the
+    atomicity and skips both syncs.
 
-    Six sites had derived temp-and-rename independently, in five spellings of the
-    temp name — two of them a fixed string, which any two concurrent writers
-    collide on — and only one of the six removed the temp when the write failed.
-    The seventh, the spill store's (`SpillStore.try_save_all`), had not derived it at all.
+    Six sites had derived temp-and-rename independently, with five spellings of
+    the temp name. Two of the spellings were a fixed string, on which any two
+    concurrent writers collide. Only one of the six sites removed the temp file
+    when the write failed. The seventh site, the spill store
+    (`SpillStore.try_save_all`), had not derived it at all.
 
     **A random suffix, not the pid**, because the colliding writers can be
-    inside one process: `ph_rlm.harness.service` writes a projection per
-    session and its own docstring names "a daemon two sessions project at
-    once". `replace` is atomic within a filesystem, and the temp is a sibling
-    so it always is one. The temp goes with the failure because a sweep that
-    reads identity off a name — `phern attachments gc` takes everything before
-    the first `.` — would otherwise count an abandoned `<digest>.png.<hex>.tmp`
-    as the blob it is not.
+    inside one process. `ph_rlm.harness.service` writes a projection for each
+    session, and its docstring says that under the daemon two sessions project
+    at the same time. `replace` is atomic within a filesystem, and the temp
+    file is a sibling, so it is always on the same filesystem. The temp file is
+    removed on a failure because a sweep can read identity from a name.
+    `phern attachments gc` takes everything before the first `.`, so it would
+    otherwise count an abandoned `<digest>.png.<hex>.tmp` as the blob, which
+    it is not.
 
-    `skip_if_present` is the content-addressed callers' half, and only theirs:
-    where the name *is* the sha256 of the bytes, a file already at that name
-    already holds them, so rewriting it is one more chance to truncate
-    something a live reader holds, for no gain. **Unless it is the wrong size**:
-    a file torn before this synced — by a build that did not, or a disk that lied —
-    is not the blob its name promises, and skipping it would keep it that way. It
-    is not safe anywhere the name does not promise the contents. **A skipped write
+    `skip_if_present` is for the content-addressed callers, and only for them.
+    Where the name *is* the sha256 of the bytes, a file that is already at that
+    name already holds them. Rewriting it is one more chance to truncate
+    something that a live reader holds, for no gain. **Unless it is the wrong
+    size**: a file that was torn before this function synced (by a build that
+    did not sync, or a disk that lied) is not the blob that its name promises,
+    and skipping it would keep it that way. `skip_if_present` is not safe
+    anywhere that the name does not promise the contents. **A skipped write
     still dates the file now** (its mtime): to anything that ages the file, the
-    bytes were just written again. Left alone, an old unreferenced blob attached
-    once more kept its old age, and `phern attachments gc` could take it before the
-    message naming it reached disk.
+    bytes were just written again. Without that, an old unreferenced blob that
+    was attached again kept its old age, and `phern attachments gc` could take
+    it before the message that names it reached disk.
 
-    `preserve` is for replacing a file that is somebody's (`FsService`'s `write` and
-    `edit`, S5): a link is written *through*, by replacing the file it names rather
-    than the link, and the file's permission bits survive, so an executable script
-    stays one. A hard link does not — its other names keep the old bytes, as they do
-    after any editor that saves by rename. Off by default, because a runtime or blob
-    writer must not follow a link somebody planted at its path.
+    `preserve` is for replacing a file that belongs to somebody (`write` and
+    `edit` of `FsService`, S5). A link is written *through*: the file that the
+    link names is replaced, and not the link. The permission bits of the file
+    survive, so an executable script stays executable. A hard link does not
+    survive: its other names keep the old bytes, as they do after any editor
+    that saves by rename. `preserve` is off by default, because a runtime
+    writer or a blob writer must not follow a link that somebody planted at its
+    path.
 
-    `private` makes the file its owner's alone, 0600, from the moment it exists: the
-    temp is created with that mode, so there is no instant the bytes are readable by
-    another account (ph-clm's context file, which is a whole conversation).
+    `private` makes the file belong to its owner alone, 0600, from the moment
+    it exists. The temp file is created with that mode, so there is no instant
+    at which another account can read the bytes (the context file of ph-clm,
+    which is a whole conversation).
 
-    Parents are created at the default mode, and **durably when the file is**
-    (`make_directories`, S20): a blob synced inside a directory whose own name was
-    never synced is lost with it. A path under a directory whose mode matters —
-    `$PH_RUNTIME` at 0700 — is ensured by its owner first; `PathRoots.ensure()` is
-    still the one place that happens.
+    Parents are created at the default mode, and **durably when the file is
+    durable** (`make_directories`, S20): a blob that is synced inside a
+    directory whose own name was never synced is lost with the directory. A
+    path under a directory whose mode matters (`$PH_RUNTIME` at 0700) is
+    ensured by its owner first. `PathRoots.ensure_runtime()`, which
+    `PathRoots.ensure()` calls, is still the one place that creates that
+    directory.
     """
     written = _write_file(
         path,
@@ -574,31 +618,35 @@ def write_atomic(
 
 
 _WRITERS = 8
-"""At most this many files of one batch are written at once (`write_atomic_all`), the
-calling thread's among them."""
+"""At most this many files of one batch are written at the same time
+(`write_atomic_all`). The file that the calling thread writes is one of them."""
 
 
 def write_atomic_all(
     items: Iterable[tuple[Path, bytes]], *, skip_if_present: bool = False
 ) -> list[OSError | None]:
-    """`write_atomic`, durable, for several files — **each directory synced once**.
+    """`write_atomic`, durable, for several files, with **each directory synced one time**.
 
-    For a producer that names several files in one batch of records: a kernel cell's
-    variables, all under one owner (`SpillStore.try_save_all`). Each file is synced
-    as `write_atomic` syncs it, and the directories they went into are synced after
-    the last of them, once each rather than once per file. None of the renames is
-    durable until this returns, so nothing may name a file before it does.
+    For a producer that names several files in one batch of records: the
+    variables of a kernel cell, all under one owner (`SpillStore.try_save_all`).
+    Each file is synced as `write_atomic` syncs it. The directories that the
+    files went into are synced after the last file, one time each and not one
+    time for each file. No rename is durable until this function returns, so
+    nothing may name a file before it returns.
 
-    **Several files are written at once** (at most `_WRITERS`), so their syncs share
-    the disk's commits rather than queueing for one each — two to four times faster
-    for 5 to 20 files, measured (R7, `plans/Persistence_Followups_Todo.md`). The
-    calling thread writes the first itself, and a pool made for the call the rest; a
-    single file is the calling thread's alone. Writers making one new directory
-    together are safe, since `make_directories` takes one already made.
+    **Several files are written at the same time** (at most `_WRITERS`), so
+    their syncs share the commits of the disk and do not each wait for a commit
+    of their own. Measured, this is two to four times faster for 5 to 20 files
+    (R7, `plans/Persistence_Followups_Todo.md`). The calling thread writes the
+    first file itself, and a pool that is made for the call writes the rest. A
+    single file is written by the calling thread alone. Writers that make one
+    new directory together are safe, because `make_directories` accepts a
+    directory that is already made.
 
-    A file that could not be written answers its error in its place, and the rest are
-    still written; every other answers `None`. One `skip_if_present` left alone
-    dirtied no directory, and costs no sync.
+    A file that could not be written puts its error at its position in the
+    result, and the other files are still written. Every other position holds
+    `None`. A file that `skip_if_present` left alone made no directory dirty
+    and costs no sync.
     """
     batch = list(items)
 
@@ -617,8 +665,8 @@ def write_atomic_all(
             rest = pool.map(write, batch[1:])
             written = [write(batch[0]), *rest]
         finally:
-            # Every result is in hand by here, so the threads only have to exit:
-            # waiting for them was most of what the pool cost a small batch.
+            # Every result is in hand at this point, so the threads only have to
+            # exit. Waiting for them was most of what the pool cost a small batch.
             pool.shutdown(wait=False)
     for directory in dict.fromkeys(one.parent for one in written if isinstance(one, Path)):
         sync_directory(directory)
@@ -634,9 +682,9 @@ def _write_file(
     preserve: bool = False,
     private: bool = False,
 ) -> Path | None:
-    """`write_atomic` up to its directory's sync, which is the caller's: the path it
-    wrote, through a link for `preserve`, or `None` when `skip_if_present` left the
-    file be."""
+    """`write_atomic` without the sync of the directory, which the caller does.
+    Returns the path that was written, which is the target of a link under
+    `preserve`. Returns `None` when `skip_if_present` left the file alone."""
     data = payload.encode("utf-8") if isinstance(payload, str) else payload
     mode: int | None = None
     if preserve:
@@ -670,9 +718,9 @@ def _write_file(
 
 
 def replace_durably(source: Path, target: Path) -> None:
-    """`os.replace`, with the rename itself made durable: `target`'s directory is
-    synced after it. For a file already durable under another name whose new name
-    is what a reader points at."""
+    """`os.replace`, with the rename itself made durable: the directory of `target`
+    is synced after it. For a file that is already durable under another name,
+    when its new name is what a reader points at."""
     os.replace(source, target)
     sync_directory(target.parent)
 
@@ -685,10 +733,12 @@ def write_all(fd: int, payload: bytes) -> None:
 
 
 def sync_directory(directory: Path) -> None:
-    """Make the entries in `directory` durable — a name just created or renamed into it.
+    """Make the entries in `directory` durable: a name that was just created in it
+    or renamed into it.
 
-    Best effort: a filesystem that refuses a directory handle (some networked ones
-    do) has already given the file its own durability, and that is all it can give.
+    Best effort. Some networked filesystems refuse a directory handle. Such a
+    filesystem has already given the file its own durability, and that is all
+    that it can give.
     """
     with suppress(OSError):
         handle = os.open(directory, os.O_RDONLY)
@@ -699,14 +749,15 @@ def sync_directory(directory: Path) -> None:
 
 
 def make_directories(directory: Path) -> None:
-    """`directory` and every ancestor it lacks, **each new name durable in its parent**
-    (S20).
+    """Create `directory` and every ancestor that is missing, with **each new name
+    durable in its parent** (S20).
 
-    `mkdir(parents=True)` leaves a new directory's name in its parent's cache only, so
-    a power cut can take the directory back with every file synced inside it: a log
-    flushed as durable, gone with its family directory. Each directory made here has
-    its parent synced, from the top down. Blocking, and it pays only for directories
-    it makes.
+    `mkdir(parents=True)` leaves the name of a new directory only in the cache
+    of its parent. A power cut can then take the directory back, with every
+    file that was synced inside it: a log that was flushed as durable is gone
+    with its family directory. Each directory that this function makes has its
+    parent synced, from the top down. Blocking. It pays only for the
+    directories that it makes.
     """
     missing: list[Path] = []
     current = directory
@@ -720,8 +771,9 @@ def make_directories(directory: Path) -> None:
 
 
 def _holds(path: Path, size: int) -> bool:
-    """Whether `path` is a regular file of exactly `size` bytes — for a
-    content-addressed name, whether it already holds the bytes it names."""
+    """Whether `path` is a regular file of exactly `size` bytes. For a
+    content-addressed name, this says whether the file already holds the bytes
+    that it names."""
     try:
         found = path.stat()
     except OSError:

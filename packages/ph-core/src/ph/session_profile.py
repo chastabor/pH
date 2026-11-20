@@ -1,54 +1,61 @@
-"""A session's base profile, recorded in its log (session profiles, S3).
+"""The base profile of a session, recorded in its log (session profiles, S3).
 
-The environment a session started in, in full: every environment row of the named
-profile it was started on, each through its plugin's model, so the defaults it
-never wrote are in it too (decision 8). Kept in the log itself (decision 17) as
-one `profile/base` record, written through this module's own door and on disk
-before the agent's first step, so the log alone can say what the session ran in
-and rebuild it.
+The base is the full environment that a session started in. It holds every
+environment row of the named profile that the session started on. Each row goes
+through the model of its plugin, so the defaults that the profile never wrote
+are in the base too (decision 8). The base is kept in the log itself
+(decision 17) as one `profile/base` record. This module writes the record, and
+the record is on disk before the first step of the agent. The log alone can
+therefore say what the session ran in, and can rebuild it.
 
 ```text
 profile/base {name, rows, sources, phVersion}
 ```
 
-* `name` — the named profile, `""` for a `--profile` path.
-* `rows` — the resolved environment rows (`Profile.resolved({"environment"})`).
-* `sources` — the person's own layers it composed from, each as written: what a
-  comparison reads to say whether a changed setting was the person's edit or pH's.
-* `phVersion` — the pH that resolved it (decision 14).
+* `name`: the named profile, or `""` for a `--profile` path.
+* `rows`: the resolved environment rows (`Profile.resolved({"environment"})`).
+* `sources`: the layers of the user that the base composed from, each as it was
+  written. A comparison reads them to say whether a changed setting was an edit
+  by the user or a change in pH.
+* `phVersion`: the pH version that resolved the base (decision 14).
 
-**The named profile as it composes, not what the session runs with.** A
-command-line start option (`ProfileDocument.override`) is what the session
-deviates from its base by, and is logged as a `profile/override` beside the ones a
-command or a verb makes (S4) — so the log's environment is always the base
-composed with its overrides, in order. `opened` is what opening a root does with
-both; S5 mounts each root from them.
+**The base is the named profile as it composes, not what the session runs
+with.** A command-line start option (`ProfileDocument.override`) is a deviation
+of the session from its base. It is logged as a `profile/override`, beside the
+overrides that a command or a verb makes (S4). The environment of the log is
+therefore always the base composed with its overrides, in order. `opened` does
+what opening a root does with both. S5 mounts each root from them.
 
-**A named profile that moved since** (S6) is found only when a session starts:
-the named profile as it composes now against the version the session starts on
-(`profile_change`), each setting attributed. What a person decides about it is
-recorded beside the base:
+**A named profile that changed since** (S6) is found only when a session
+starts. `profile_change` compares the named profile as it composes now with the
+version that the session starts on, and attributes each setting. The decision
+of the user about it is recorded beside the base, with the other records of
+this module:
 
 ```text
-profile/adopted {name, rows, sources, phVersion,   a version accepted; the next start
-                 clear?}                          makes it the base
-profile/declined {…}                               a version a person said no to
-profile/withdrawn {…, reason}                      an adopted version a start could
-                                                  not mount, taken back
+profile/adopted {name, rows, sources, phVersion,   a version accepted. The next start
+                 clear?}                           makes it the base
+profile/declined {…}                               a version that the user declined
+profile/withdrawn {…, reason}                      an adopted version that a start could
+                                                   not mount, taken back
 profile/override-cleared {row, command}            an override that stops applying
+profile/refused {seqs, reason}                     records that the log could not hold,
+                                                   taken back
 profile/saved {name, path, entries}                the environment saved as a named
-                                                  profile (S7)
+                                                   profile (S7)
 ```
 
-`switch_base` is the one way a base changes after the first: the new base and the
-clears it implies, in one batch. An override applies from where it is logged across
-a base switch — swapping base profiles keeps the overrides (decision 5) — until a
-clear for its row; `fold_environment` is that rule, for a live log and a stored one.
+`switch_base` is the only way that a base changes after the first one. It writes
+the new base and the clears that the new base implies, in one batch. An override
+applies from the point where it is logged. It continues to apply across a base
+switch, because a swap of base profiles keeps the overrides (decision 5), until
+a clear names its row. `fold_environment` implements that rule, for a live log
+and for a stored log.
 
-**A setting is recorded as the value it runs with**, `${env:...}` interpolated,
-because that is what an audit asks. A row's config names a credential — the key
-is `ctx.credentials`'s, by name — and never holds one, so a resolved row carries
-no secret to log.
+**A setting is recorded as the value that it runs with**, with `${env:...}`
+interpolated, because an audit asks for that value. The config of a row names a
+credential and never holds one. `ctx.credentials` holds the key, by name. A
+resolved row therefore carries no secret to log.
 
 @module ph.session_profile
 """
@@ -128,17 +135,18 @@ __all__ = [
 _LOG = log_writer(__name__)
 
 BASE = "profile/base"
-"""The record a session's base profile is kept in. Required, not ignorable: a
-reader that skipped it would rebuild a session in an environment it never ran in."""
+"""The record that holds the base profile of a session. It is required, not
+ignorable: a reader that skipped it would rebuild a session in an environment
+that the session never ran in."""
 
 ChangedBy: TypeAlias = Literal["person", "pH"]
-"""Who a changed setting is owed to: the person's own file, or pH (its shipped
-profiles or a plugin's defaults) — decision 14's distinction."""
+"""Who caused a changed setting: the user (their own file) or pH (its shipped
+profiles or the defaults of a plugin). This is the distinction of decision 14."""
 
 
 @dataclass(frozen=True, slots=True)
 class ProfileSource:
-    """One of the person's layers a base composed from, as it was written."""
+    """One layer of the user that a base composed from, as it was written."""
 
     layer: str
     entries: tuple[JsonValue, ...]
@@ -150,7 +158,7 @@ class ProfileSource:
 
 @dataclass(frozen=True, slots=True)
 class ProfileBase:
-    """A session's base, as `profile/base` records it."""
+    """The base of a session, as `profile/base` records it."""
 
     name: str
     rows: tuple[JsonObject, ...]
@@ -169,7 +177,7 @@ class ProfileBase:
 
     @classmethod
     def of(cls, data: Mapping[str, JsonValue]) -> ProfileBase:
-        """The base a `profile/base` record carries, thawed out of the log."""
+        """The base that a `profile/base` record carries, thawed from the log."""
         return cls(
             name=as_str(data.get("name")),
             rows=tuple(as_obj(thaw_json(row)) for row in as_seq(data.get("rows"))),
@@ -184,12 +192,12 @@ class ProfileBase:
         )
 
     def said_about(self, row_id: str) -> list[JsonValue]:
-        """What the person's layers said about one row, in order."""
+        """What the layers of the user said about one row, in order."""
         return [entry for source in self.sources for entry in source.about(row_id)]
 
 
 def base_of(profile: Profile) -> ProfileBase:
-    """`profile` as a session's base: its environment, resolved, without start options."""
+    """`profile` as the base of a session: its environment, resolved, without start options."""
     documents = [document for document in profile.documents if not document.override]
     named = Profile.from_documents(documents, name=profile.name)
     return ProfileBase(
@@ -205,25 +213,31 @@ def base_of(profile: Profile) -> ProfileBase:
 
 
 def saved_base(session: Session) -> ProfileBase | None:
-    """The base this session last recorded and did not refuse, or `None` for one that
-    has none — through the fold, so a base the log could not hold is not its base."""
+    """The base that this session last recorded and did not refuse, or `None` for a
+    session that has none. The fold supplies it, so a base that the log could not
+    hold is not the base of the session."""
     return logged_environment(session).base
 
 
 async def record_base(ctx: Context, session: Session) -> ProfileBase | None:
-    """Record `session`'s base from the profile `ctx` mounted, once, durably.
+    """Record the base of `session` from the profile that `ctx` mounted, one time
+    and durably.
 
-    Not for a sub-agent's log (`SessionHeader.is_subagent`): a child runs on its root's mount, so it
-    is answered by the root's base. A fork or a segment continues its root's log with
-    the base in the prefix, so it has one already, unless it was cut from a log from
-    before this record — and then it gets its own, being a session of its own. Once:
-    a session resumed with a base keeps it (S6 decides what a changed named
-    profile means for it), and one from before this record gets its first now.
-    Written, then the session written, before this returns — so the agent's first
-    step comes after the log can say what it ran in.
+    The function records no base in the log of a sub-agent
+    (`SessionHeader.is_subagent`). A child runs on the mount of its root, so the
+    base of the root answers for it. A fork or a segment continues the log of
+    its root, with the base in the prefix, so it already has a base. The
+    exception is a fork or a segment that was cut from a log older than this
+    record. It gets its own base, because it is a session of its own.
 
-    :raises OverrideNotRecorded: when the base did not reach disk, so the start that
-        asked is refused rather than run on a base its log may never hold.
+    One time: a session that is resumed with a base keeps it (S6 decides what a
+    changed named profile means for it). A session from before this record gets
+    its first base now. The record is appended and the session is written before
+    this function returns, so the first step of the agent comes after the log
+    can say what the session ran in.
+
+    :raises OverrideNotRecorded: when the base did not reach disk. The start that
+        asked is refused, and does not run on a base that its log may never hold.
     """
     mount = ctx.get(MOUNT)
     if mount is None or session.header.is_subagent:
@@ -243,19 +257,20 @@ def rebuilt(
     *,
     then: Sequence[ProfileDocument] = (),
 ) -> Profile:
-    """The profile the log says a session runs in: its base, then its overrides in log
-    order, over `host`'s rows of every other kind — and `then`, this start's own
-    options, last (S5).
+    """The profile that the log says a session runs in (S5).
 
-    The environment is the log's alone — not whatever the named file says now — and
-    the host's deployment and presentation rows are this daemon's, which a session's
-    base never held (decision 23). Each override is a profile entry, so rebuilding is
-    composing and nothing else.
+    The profile is the base, then the overrides in log order, over the rows of
+    `host` of every other kind. `then`, the options of this start, comes last.
 
-    **A row `then` declares that is already held is not declared again**
-    (`new_declarations`): a start option is given at every start, and the first
-    logged it. Held is everything before `then` — the host's rows too, which
-    `host` was composed with `then` over.
+    The environment comes from the log alone, and not from what the named file
+    says now. The deployment and presentation rows of the host belong to this
+    daemon, and the base of a session never held them (decision 23). Each
+    override is a profile entry, so rebuilding is composing and nothing else.
+
+    **A row that `then` declares and that is already held is not declared
+    again** (`new_declarations`). A start option is given at every start, and
+    the first start logged it. "Held" means everything before `then`. The rows
+    of the host are held too, and `host` was composed with `then` over them.
     """
     kept = [row.to_entry() for row in host.rows_of({"deployment", "presentation"})]
     before = [ProfileDocument("host", list(kept)), *_documents(base, overrides)]
@@ -264,9 +279,9 @@ def rebuilt(
 
 
 def _beyond(held: Collection[str], start: Sequence[ProfileDocument]) -> list[ProfileDocument]:
-    """`start`'s documents less each row they declare that `held` names
-    (`new_declarations`), an emptied document left out. Each has composed once
-    already, in the profile it came from."""
+    """The documents of `start`, without each row that they declare and `held`
+    names (`new_declarations`). An emptied document is left out. Each document
+    has already composed one time, in the profile that it came from."""
     documents: list[ProfileDocument] = []
     for document in start:
         entries = [
@@ -280,13 +295,14 @@ def _beyond(held: Collection[str], start: Sequence[ProfileDocument]) -> list[Pro
 
 
 def _documents(base: ProfileBase, overrides: Sequence[Override]) -> list[ProfileDocument]:
-    """The log's environment as documents: the base, then each override in order."""
+    """The environment of the log as documents: the base, then each override in order."""
     return [ProfileDocument(BASE, [dict(row) for row in base.rows]), *override_documents(overrides)]
 
 
 def override_documents(overrides: Sequence[Override]) -> list[ProfileDocument]:
-    """Each override as the layer it is — environment rows, named by what asked — for
-    composing it over a base, or over the person's own layers (`/profile save`)."""
+    """Each override as the layer that it is: environment rows, named by what asked
+    for them. The layers compose over a base, or over the layers of the user
+    (`/profile save`)."""
     return [
         ProfileDocument(f"{OVERRIDE}: {one.command}", [dict(one.entry)], sets="environment")
         for one in overrides
@@ -294,16 +310,18 @@ def override_documents(overrides: Sequence[Override]) -> list[ProfileDocument]:
 
 
 def _overridden(overrides: Sequence[Override]) -> list[str]:
-    """Every row the overrides address, once each, in the order they first do."""
+    """Every row that the overrides address, one time each, in the order of first mention."""
     return list(dict.fromkeys(row for one in overrides for row in entry_ids(one.entry)))
 
 
 def resolved_environment(env: LoggedEnvironment) -> list[dict[str, JsonValue]]:
-    """`environment(env)`, every row as it runs (`resolve_row`) — what `--full` prints.
+    """`environment(env)`, with every row as it runs (`resolve_row`). `--full`
+    prints this.
 
-    Only the rows an override addresses are resolved again: every other row is the
-    base's as recorded, which was resolved when it was, so a listing asked of each of
-    a long log's records costs what its overrides touch and not the whole profile.
+    Only the rows that an override addresses are resolved again. Every other row
+    is the row of the base as recorded, which was resolved when it was recorded.
+    A listing that is requested at each record of a long log therefore costs
+    what its overrides touch, and not the whole profile.
     """
     if env.base is None:
         return []
@@ -316,16 +334,17 @@ def resolved_environment(env: LoggedEnvironment) -> list[dict[str, JsonValue]]:
 
 
 def environment(env: LoggedEnvironment) -> list[Row]:
-    """The environment rows `env` says a session runs in: its base, then its
-    overrides, composed — `[]` for a session with no base."""
+    """The environment rows that `env` says a session runs in: its base, then its
+    overrides, composed. `[]` for a session with no base."""
     return [] if env.base is None else _environment(env.base, env.overrides)
 
 
 # ---------------------------------------------------------------- overrides --
 
 OVERRIDE = "profile/override"
-"""One deviation from the base, in the profile grammar (S4). Required: a reader that
-skipped it would rebuild a session without an allowance it ran with."""
+"""One deviation from the base, in the profile grammar (S4). It is required: a
+reader that skipped it would rebuild a session without an allowance that the
+session ran with."""
 
 OverrideSource: TypeAlias = Literal["cli", "command", "verb"]
 """Where a deviation came from: a start option, a slash command, or a protocol verb."""
@@ -337,17 +356,21 @@ class OverrideNotRecorded(RuntimeError):
     """A change was not applied, because the record of it could not be written."""
 
     code = "OVERRIDE_NOT_RECORDED"
-    """Named, so a daemon's reply carries it (`ph_app.protocol.respond`)."""
+    """The failure has a named code, so that the reply of a daemon carries it
+    (`ph_app.protocol.respond`)."""
 
 
 async def _written(
     ctx: Context, session: Session, refused: str, records: Sequence[SessionEvent]
 ) -> bool:
-    """Whether `records`, just appended, reached disk — **the one door every change
-    here is written through**. When they did not, a `REFUSED` naming them follows, so
-    the next flush that succeeds writes the refusal with them and the fold passes
-    over them: a change the log could not hold is never in force. A write cut off
-    part-way is refused too, since the change it guards is not made."""
+    """Whether `records`, just appended, reached disk. **Every change in this
+    module is written through this one function.**
+
+    When the records did not reach disk, a `REFUSED` record that names them
+    follows. The next flush that succeeds then writes the refusal with them, and
+    the fold skips them. A change that the log could not hold is never in force.
+    A write that was cut off part-way is refused too, because the change that it
+    guards is not made."""
     try:
         if await session_written(ctx, session):
             return True
@@ -366,9 +389,10 @@ def _refuse(session: Session, refused: str, records: Sequence[SessionEvent]) -> 
 async def _recorded(
     ctx: Context, session: Session, refused: str, records: Sequence[SessionEvent]
 ) -> None:
-    """`_written`, or `OverrideNotRecorded` saying what was not done. **A change the log
-    does not hold is not made**: a door that changes the environment writes first and
-    follows only once this returns."""
+    """`_written`, or an `OverrideNotRecorded` that says what was not done.
+
+    **A change that the log does not hold is not made.** A function that changes
+    the environment writes first, and continues only after this returns."""
     if not await _written(ctx, session, refused, records):
         raise OverrideNotRecorded(
             f"{refused}: the session log could not be written, and a change the log "
@@ -378,13 +402,15 @@ async def _recorded(
 
 @dataclass(frozen=True, slots=True)
 class Override:
-    """One `profile/override`: an entry over the session's environment, and who asked."""
+    """One `profile/override`: an entry over the environment of the session, and who asked."""
 
     row: str
-    """The rows it addresses (`entry_ids`), for a reader of the log — the entry is the fact."""
+    """The rows that the entry addresses (`entry_ids`), for a reader of the log.
+    The entry is the authoritative value."""
     entry: JsonObject
-    """A profile entry — `{id, config}` for a live change, any patch for a start
-    option — so that the log's environment is the base composed with these."""
+    """A profile entry: `{id, config}` for a live change, or any patch for a start
+    option. The environment of the log is therefore the base composed with these
+    entries."""
     source: OverrideSource
     command: str
     """What asked, as it was typed: `/sandbox allow host pypi.org`, `--model fast`."""
@@ -421,17 +447,19 @@ async def override(
     source: OverrideSource,
     command: str,
 ) -> bool:
-    """Change one row's config on this mount — the one door, so the log always says so.
+    """Change the config of one row on this mount. Every such change goes through
+    this function, so the log always records it.
 
-    `False`, recording nothing, when the row already runs with that setting (decision
-    3): compared through the row's model, so `{}` and the defaults it stands for are
-    one setting. Otherwise the override is appended and the session written **before**
-    the row is reconfigured, and a record that could not be written refuses the
-    change — a session that ran with a host allowed and a log that never says so is
-    the failure this order exists to rule out.
+    The function returns `False` and records nothing when the row already runs
+    with that setting (decision 3). It compares through the model of the row, so
+    `{}` and the defaults that it stands for are one setting. Otherwise the
+    override is appended and the session is written **before** the row is
+    reconfigured. A record that could not be written refuses the change. This
+    order exists to prevent one failure: a session that ran with a host allowed,
+    and a log that never says so.
 
-    :raises OverrideNotRecorded: when the record did not reach disk; nothing changed.
-    :raises LoaderError: for a row this mount cannot reconfigure live.
+    :raises OverrideNotRecorded: when the record did not reach disk. Nothing changed.
+    :raises LoaderError: for a row that this mount cannot reconfigure live.
     """
     mount = ctx.require(MOUNT)
     row = next((one for one in mount.profile.rows if one.id == row_id), None)
@@ -453,34 +481,40 @@ async def override(
 
 
 async def opened(ctx: Context, session: Session) -> None:
-    """What opening a root does to its environment — the one call `open_session` makes.
+    """What opening a root does to its environment. `open_session` makes this one call.
 
-    0. **A version it adopted** (S6), made its base — `switch_base`, overrides kept,
-       or cleared when the adoption said `clear`.
-    1. **Its base** (S3), recorded if it has none, before anything runs in it.
-    2. **This start's options** (S4): each `--patch` (`ProfileDocument.override`) that
-       differs from the base and the overrides already logged is logged as one,
-       source `cli` — and one given again at the next start records nothing, since it
-       is already the session's (decision 3): a row it declares that the log holds
-       is not declared again (`rebuilt`). **Refused when the log cannot hold
-       them** (`OverrideNotRecorded`), for `override`'s rule: a change the log does
-       not hold is not made, and the start runs on nothing it did not record.
-    3. **The mount brought to what the log says**: each row an override names is set,
-       once, to the value the log's composition gives it — the last word, a start
-       option included, since it was logged last.
+    0. **A version that the session adopted** (S6) becomes its base
+       (`switch_base`). The overrides are kept, or cleared when the adoption
+       said `clear`.
+    1. **Its base** (S3) is recorded if it has none, before anything runs in it.
+    2. **The options of this start** (S4). Each `--patch`
+       (`ProfileDocument.override`) that differs from the base and from the
+       overrides already logged is logged as an override, with source `cli`. An
+       option that is given again at the next start records nothing, because it
+       already belongs to the session (decision 3): a row that it declares and
+       that the log holds is not declared again (`rebuilt`). **The start is
+       refused when the log cannot hold the options** (`OverrideNotRecorded`),
+       by the rule of `override`: a change that the log does not hold is not
+       made, and the start runs on nothing that it did not record.
+    3. **The mount is brought to what the log says.** Each row that an override
+       names is set, one time, to the value that the composition of the log
+       gives it. The last entry logged decides the value. That includes a start
+       option, because it was logged last.
 
-    Step 3 is a no-op for a root mounted from its own log, which every host does when
-    it can read the log before mounting (S5, `ph_app.profiles.session_profile`). It is
-    the fallback for one that cannot — a store that is not a file — whose root mounts
-    the profile it was asked for and is brought to its log here. Only a config can be
-    set on a live mount, so there an override that disables or adds a row waits for
-    the next start that can read the log. Rows no override names are not touched.
+    Step 3 does nothing for a root that is mounted from its own log. Every host
+    mounts that way when it can read the log before it mounts (S5,
+    `ph_app.profiles.session_profile`). Step 3 is the fallback for a host that
+    cannot, because its store is not a file. The root of such a host mounts the
+    profile that was requested, and this function brings it to its log. Only a
+    config can be set on a live mount. On that mount, an override that disables
+    or adds a row therefore waits for the next start that can read the log. Rows
+    that no override names are not touched.
     """
     mount = ctx.get(MOUNT)
     if mount is None or session.header.is_subagent:
         return
-    # 0. A version accepted since this session last ran becomes its base now (S6),
-    # so a base record always marks when a base took effect.
+    # 0. A version that was accepted since this session last ran becomes its base
+    # now (S6), so a base record always marks when a base took effect.
     env = logged_environment(session)
     if env.adopted is not None:
         await switch_base(
@@ -517,8 +551,8 @@ async def opened(ctx: Context, session: Session) -> None:
             command=f"--patch {_flow(entry)}",
         )
         after = _environment(base, [*logged, change])
-        # By entry, not by `Row`: a row a start option patched to what it already
-        # was differs only in which layer last said so.
+        # Compare by entry, not by `Row`: a row that a start option patched to
+        # the value it already had differs only in which layer last set it.
         if [row.to_entry() for row in after] == [row.to_entry() for row in current]:
             continue
         records.append(_LOG.append(session, OVERRIDE, change.to_wire()))
@@ -530,9 +564,10 @@ async def opened(ctx: Context, session: Session) -> None:
 
 
 async def _converge(mount: Mount, current: Sequence[Row], rows: Collection[str]) -> list[str]:
-    """Bring each of `rows` on the live mount to its setting in `current`. Returns the
-    rows it could not: only a config can be set on a live mount, so a row added,
-    removed, or turned on or off there waits for the next start that can read the log.
+    """Bring each of `rows` on the live mount to its setting in `current`. Returns
+    the rows that it could not bring there. Only a config can be set on a live
+    mount, so a row that was added, removed, or turned on or off there waits for
+    the next start that can read the log.
     """
     target = {row.id: row for row in current}
     mounted = {row.id: row for row in mount.profile.rows}
@@ -561,15 +596,17 @@ async def _converge(mount: Mount, current: Sequence[Row], rows: Collection[str])
 async def clear_overrides(
     ctx: Context, session: Session, rows: Sequence[str] | None, *, command: str
 ) -> tuple[list[str], list[str]]:
-    """Stop the overrides of `rows` — every one when `None` — from applying (S7).
+    """Stop the overrides of `rows` from applying, or every override when `rows` is
+    `None` (S7).
 
-    One `profile/override-cleared` per row, in one batch, written **before** the
-    mount follows, as an override is: a clear the log does not hold is not made.
-    Returns `(cleared, left)`: the rows cleared, and those of them the live mount
-    could not follow — an override that disabled or added a row — which take effect
-    at the next start.
+    The function writes one `profile/override-cleared` per row, in one batch,
+    **before** the mount follows, as for an override. A clear that the log does
+    not hold is not made. It returns `(cleared, left)`: the rows that were
+    cleared, and those of them that the live mount could not follow. Such a row
+    had an override that disabled or added a row, and its clear takes effect at
+    the next start.
 
-    :raises OverrideNotRecorded: when the records did not reach disk; nothing changed.
+    :raises OverrideNotRecorded: when the records did not reach disk. Nothing changed.
     """
     env = logged_environment(session)
     named = _overridden(env.overrides)
@@ -585,16 +622,18 @@ async def clear_overrides(
 
 
 def _settled(row: Row, config: object) -> JsonValue:
-    """One row's config through its model — what "the same setting" is compared as.
+    """The config of one row through its model. "The same setting" is compared in
+    this form.
 
-    `object` because that is how `ForkScope` holds a fork's config; it is the
-    interpolated JSON the row was mounted with, which is what the cast says.
+    The parameter is `object` because `ForkScope` holds the config of a fork as
+    that type. The value is the interpolated JSON that the row was mounted with,
+    and the cast states that.
     """
     return resolve_row(replace(row, config=cast(JsonValue, config))).get("config")
 
 
 def _environment(base: ProfileBase, logged: Sequence[Override]) -> list[Row]:
-    """The environment rows the base and `logged` compose to, in order."""
+    """The environment rows that the base and `logged` compose to, in order."""
     return compose_rows(_documents(base, logged))
 
 
@@ -605,12 +644,12 @@ def _flow(value: JsonValue) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Difference:
-    """One setting that differs between two bases, and who it is owed to."""
+    """One setting that differs between two bases, and who caused the difference."""
 
     row: str
     setting: str
-    """A dotted path within the row — `config.network.hosts`, `disabled` — or `""`
-    when the whole row is added or gone."""
+    """A dotted path within the row, such as `config.network.hosts` or `disabled`.
+    `""` when the whole row is added or gone."""
     before: JsonValue
     after: JsonValue
     by: ChangedBy
@@ -619,9 +658,9 @@ class Difference:
 def differences(saved: ProfileBase, now: ProfileBase) -> list[Difference]:
     """Every setting that differs between `saved` and `now`, each attributed (decision 13).
 
-    To the person when their own layers say something different about that row;
-    to pH otherwise — a shipped profile or a plugin default moved under a file
-    nobody edited.
+    A difference is attributed to the user when their own layers say something
+    different about that row. Otherwise it is attributed to pH: a shipped profile
+    or a plugin default changed under a file that nobody edited.
     """
     before = {as_str(row.get("id")): row for row in saved.rows}
     after = {as_str(row.get("id")): row for row in now.rows}
@@ -653,57 +692,63 @@ def _changed(
 # ------------------------------------------------- a named profile that moved --
 
 ADOPTED = "profile/adopted"
-"""A version of the session's named profile, accepted ahead of the start that applies
-it (S6): by `phern profiles adopt`, a "yes" when a start asked, or `/profile use`,
-which may carry `clear: true` (`--clear`). The next start makes it the base, with
-`switch_base`. Ignorable: a reader that skipped it would
-start the session on the base it already has, which is what it ran in until then."""
+"""A version of the named profile of the session, accepted ahead of the start that
+applies it (S6). Three things accept one: `phern profiles adopt`, a "yes" when a
+start asked, and `/profile use`, which may carry `clear: true` (`--clear`). The
+next start makes it the base, with `switch_base`. It is ignorable: a reader that
+skipped it would start the session on the base that it already has, which is what
+the session ran in until then."""
 
 DECLINED = "profile/declined"
-"""A version a person said no to when a start asked (S6), so the same version is not
-asked about again. Ignorable: a reader that skipped it asks once more."""
+"""A version that the user declined when a start asked (S6), so that no start asks
+about the same version again. It is ignorable: a reader that skipped it asks one
+more time."""
 
 WITHDRAWN = "profile/withdrawn"
-"""An adopted version taken back, and why: the start that applied it could not mount
-it (`withdraw_adoption`). The session stays on its base, and the version reads as
-declined, so no start offers it again — a later version of the profile is asked about
-as any is. Required: a reader that skipped it would apply the adoption at its next
-start, and fail on it again."""
+"""An adopted version that was taken back, and the reason: the start that applied
+it could not mount it (`withdraw_adoption`). The session stays on its base. The
+version reads as declined, so no start offers it again. A later version of the
+profile is asked about like any other. It is required: a reader that skipped it
+would apply the adoption at its next start, and fail on it again."""
 
 CLEARED = "profile/override-cleared"
-"""An override that stops applying, by the row it addressed. Required: a reader that
-skipped it would rebuild a session with an override it no longer runs with."""
+"""An override that stops applying, by the row that it addressed. It is required:
+a reader that skipped it would rebuild a session with an override that the
+session no longer runs with."""
 
 REFUSED = "profile/refused"
-"""Records a door here appended and then refused, because the log could not hold
-them (`_recorded`): their seqs, and why. Required: a reader that skipped it would
-start the session on a change the person was told was refused."""
+"""Records that a function in this module appended and then refused, because the
+log could not hold them (`_written`): their seqs, and the reason. It is required:
+a reader that skipped it would start the session on a change that the user was
+told was refused."""
 
 
 @dataclass(frozen=True, slots=True)
 class Declined:
-    """A version said no to since the base — by a person when a start asked
-    (`profile/declined`), or by a start that could not mount it (`profile/withdrawn`)."""
+    """A version that was declined since the base. Either the user declined it when
+    a start asked (`profile/declined`), or a start could not mount it
+    (`profile/withdrawn`)."""
 
     version: ProfileBase
     reason: str = ""
-    """What stopped the start that took it back; `""` when a person said no."""
+    """What stopped the start that took the version back. `""` when the user declined it."""
 
 
 @dataclass(frozen=True, slots=True)
 class LoggedEnvironment:
-    """What a session's log says about its environment — the one reading of its
-    `profile/*` records, for a live session and for a stored one read off disk."""
+    """What the log of a session says about its environment. This is the one
+    reading of its `profile/*` records, for a live session and for a stored one
+    that is read from disk."""
 
     base: ProfileBase | None = None
     overrides: tuple[Override, ...] = ()
     adopted: ProfileBase | None = None
     """A version accepted since the base, which the next start makes the base."""
     declined: Declined | None = None
-    """The version last said no to since the base, and by what."""
+    """The version that was last declined since the base, and what declined it."""
     adopted_clears: bool = False
-    """Whether the overrides go with the switch to `adopted` (`/profile use --clear`,
-    decision 11) rather than applying over it."""
+    """Whether the overrides are cleared with the switch to `adopted`
+    (`/profile use --clear`, decision 11), and do not apply over it."""
 
     @property
     def starts_on(self) -> ProfileBase | None:
@@ -713,16 +758,21 @@ class LoggedEnvironment:
 
 @dataclass(slots=True)
 class EnvironmentFold:
-    """`fold_environment`, one record at a time — for a reader that wants the
-    environment at each record of a log (the trajectory view, S8) without folding
-    the prefix again at every one.
+    """`fold_environment`, one record at a time. It serves a reader that wants the
+    environment at each record of a log (the trajectory view, S8) and must not
+    fold the prefix again at every record.
 
-    A base replaces the base and settles what was adopted or declined against the
-    one before it; a withdrawal takes back what was adopted and declines it. An
-    override applies from where it is logged, **across a base
-    switch** (decision 5), until a `profile/override-cleared` names a row it
-    addresses. A refusal takes back the records it names, as if never logged.
-    Other types are passed over, so a caller may hand in a whole log.
+    The rules:
+
+    - A base replaces the base. It also clears what was adopted or declined
+      against the base before it.
+    - A withdrawal takes back what was adopted, and declines it.
+    - An override applies from the point where it is logged, **across a base
+      switch** (decision 5), until a `profile/override-cleared` names a row that
+      it addresses.
+    - A refusal takes back the records that it names, as if they were never
+      logged.
+    - Other types are skipped, so a caller may pass a whole log.
     """
 
     base: ProfileBase | None = None
@@ -731,8 +781,8 @@ class EnvironmentFold:
     adopted_clears: bool = False
     changes: list[Override] = field(default_factory=list)
     _taken: list[tuple[int, str, Mapping[str, JsonValue]]] = field(default_factory=list)
-    """Every record folded so far, so a refusal can fold them again without the ones
-    it names. A session's environment records are few."""
+    """Every record folded so far, so that a refusal can fold them again without
+    the records that it names. A session has few environment records."""
 
     def step(self, seq: int, kind: str, data: Mapping[str, JsonValue]) -> None:
         if kind == REFUSED:
@@ -761,8 +811,8 @@ class EnvironmentFold:
         elif kind == DECLINED:
             self.declined = Declined(ProfileBase.of(data))
         elif kind == WITHDRAWN:
-            # A decline with a reason: the adoption goes, and the version it named
-            # is not offered again.
+            # A withdrawal is a decline with a reason: the adoption is removed,
+            # and the version that it named is not offered again.
             self.adopted, self.adopted_clears = None, False
             self.declined = Declined(ProfileBase.of(data), as_str(data.get("reason")))
 
@@ -776,8 +826,8 @@ class EnvironmentFold:
 def fold_environment(
     records: Iterable[tuple[int, str, Mapping[str, JsonValue]]],
 ) -> LoggedEnvironment:
-    """`(seq, type, data)` records, in log order, folded into what they say
-    (`EnvironmentFold`). The seq is what a refusal names."""
+    """Fold `(seq, type, data)` records, in log order, into what they say
+    (`EnvironmentFold`). A refusal names records by their seq."""
     fold = EnvironmentFold()
     for seq, kind, data in records:
         fold.step(seq, kind, data)
@@ -799,17 +849,19 @@ async def switch_base(
     command: str,
     clear_all: bool = False,
 ) -> list[str]:
-    """Make `version` the session's base, keeping its overrides. Returns the rows cleared.
+    """Make `version` the base of the session and keep its overrides. Returns the
+    rows cleared.
 
-    One batch (item 2): `profile/base`, and a `profile/override-cleared` for each row
-    whose overrides `version` already says — decision 3's own rule, since a setting
-    the base has is no deviation from it — or for every overridden row, `clear_all`,
-    when the person chose to start the new base clean (decision 11). So a crash
-    leaves the old base with its overrides or the new one with its own, never a
-    mixture.
+    The function writes one batch (item 2): a `profile/base`, and a
+    `profile/override-cleared` for each row whose overrides `version` already
+    says. That is the rule of decision 3, because a setting that the base has is
+    no deviation from it. With `clear_all`, it clears every overridden row
+    instead, for a user who chose to start the new base clean (decision 11). A
+    crash therefore leaves the old base with its overrides or the new base with
+    its own, never a mixture.
 
-    :raises OverrideNotRecorded: when the batch did not reach disk, for `override`'s
-        rule: the mount is not brought to a base the log does not hold.
+    :raises OverrideNotRecorded: when the batch did not reach disk, by the rule of
+        `override`: the mount is not brought to a base that the log does not hold.
     """
     kept = logged_environment(session).overrides
     cleared = _overridden(kept) if clear_all else _said_by(version, kept)
@@ -823,9 +875,10 @@ async def switch_base(
 
 
 def _said_by(base: ProfileBase, kept: Sequence[Override]) -> list[str]:
-    """The rows whose overrides change nothing over `base`: composed with and without
-    them, every row through its model — so an override written sparse and a base
-    that states every default are compared as the settings they are."""
+    """The rows whose overrides change nothing over `base`. The environment is
+    composed with and without them, with every row through its model. An override
+    that was written sparse and a base that states every default are therefore
+    compared as the settings that they are."""
 
     def composed(changes: Sequence[Override]) -> list[dict[str, JsonValue]]:
         return [resolve_row(row) for row in _environment(base, changes)]
@@ -841,11 +894,13 @@ def _said_by(base: ProfileBase, kept: Sequence[Override]) -> list[str]:
 async def record_adopted(
     ctx: Context, session: Session, version: ProfileBase, *, clear: bool = False
 ) -> bool:
-    """Accept `version` for this session's next start. Whether it reached disk.
+    """Accept `version` for the next start of this session. Returns whether the
+    record reached disk.
 
-    `clear` says the session's overrides go with the switch rather than applying
-    over the new base — `/profile use --clear` (decision 11); the start that applies
-    the version clears them in the same batch as the base (`switch_base`)."""
+    `clear` says that the overrides of the session are cleared with the switch,
+    and do not apply over the new base: `/profile use --clear` (decision 11). The
+    start that applies the version clears them in the same batch as the base
+    (`switch_base`)."""
     payload = dict(version.to_wire())
     if clear:
         payload["clear"] = True
@@ -854,37 +909,41 @@ async def record_adopted(
 
 
 async def withdraw_adoption(ctx: Context, session: Session, *, reason: str) -> None:
-    """Take back a version adopted for this session's next start, when that start
-    could not mount it, saying why (`reason`). Nothing when none is pending.
+    """Take back a version that was adopted for the next start of this session,
+    when that start could not mount it, and record why (`reason`). Does nothing
+    when no version is pending.
 
-    **A record of its own** (`profile/withdrawn`), which the fold reads as a decline:
-    the session starts on the base it has, overrides and all — nothing of it was
-    cleared, since clearing is the start's own step and that start never opened —
-    and the version is not offered again, while the reason stays in the log for
-    whoever attaches, or audits, next. Without it, a version that will not mount is
-    applied again at every start, and the session never opens again.
+    **The withdrawal is a record of its own** (`profile/withdrawn`), which the
+    fold reads as a decline. The session starts on the base that it has, with its
+    overrides. Nothing of the session was cleared, because clearing is a step of
+    the start itself and that start never opened. The version is not offered
+    again, and the reason stays in the log for whoever next attaches or audits.
+    Without this record, a version that does not mount is applied again at every
+    start, and the session never opens again.
     """
     adopted = logged_environment(session).adopted
     if adopted is None:
         return
     record = _LOG.append(session, WITHDRAWN, {**adopted.to_wire(), "reason": reason})
-    # Through the one door every change here takes: a withdrawal the log could
-    # not hold would steer this start from memory and the next from disk, where
-    # the version is still pending and will not mount again. `OverrideNotRecorded`
-    # names the write instead, as `adopt_version` does for the adoption.
+    # The record goes through the one function that writes every change in this
+    # module. A withdrawal that the log could not hold would steer this start
+    # from memory and the next start from disk, where the version is still
+    # pending and will again fail to mount. `OverrideNotRecorded` names the
+    # write instead, as `adopt_version` does for the adoption.
     await _recorded(ctx, session, f"{adopted.name} was not withdrawn", [record])
 
 
 SAVED = "profile/saved"
-"""The session's environment written out as a named profile (S7, decision 5): the
-name, the file, and the entries written. Ignorable: it changes nothing this session
-runs with — a base switch to the saved profile is its own record."""
+"""The environment of the session, written out as a named profile (S7,
+decision 5): the name, the file, and the entries written. It is ignorable: it
+changes nothing that this session runs with. A base switch to the saved profile
+is its own record."""
 
 
 async def record_saved(
     ctx: Context, session: Session, *, name: str, path: str, entries: Sequence[JsonObject]
 ) -> bool:
-    """Say that this session's environment was saved as the named profile `name`."""
+    """Record that the environment of this session was saved as the named profile `name`."""
     _LOG.append(
         session, SAVED, {"name": name, "path": path, "entries": [dict(one) for one in entries]}
     )
@@ -892,10 +951,11 @@ async def record_saved(
 
 
 async def record_declined(ctx: Context, session: Session, version: ProfileBase) -> bool:
-    """Say no to `version`, so a later start does not ask about it again.
+    """Decline `version`, so that a later start does not ask about it again.
 
-    Its own write rather than one helper for both answers: every write names its
-    type where it is made, which is what `test_log_writers` reads the table from."""
+    This is its own write, and not one helper for both answers. Every write names
+    its type at the place where it is made, and `test_log_writers` reads the
+    table from those places."""
     record = _LOG.append(session, DECLINED, version.to_wire())
     return await _written(ctx, session, f"{version.name} was not declined", [record])
 
@@ -908,28 +968,30 @@ class ProfileChange:
     now: ProfileBase
     differences: tuple[Difference, ...]
     shadowed: tuple[Override, ...]
-    """The session's overrides of a row that changed. An override is a whole row's
-    setting (the loader's rule), so it still applies over the new version, and the
-    new version's change to that row does not."""
+    """The overrides of the session that address a row that changed. An override
+    is the setting of a whole row (the rule of the loader), so it still applies
+    over the new version, and the change of the new version to that row does
+    not."""
     declined: bool
-    """Whether a person already said no to this version, or a start took it back."""
+    """Whether the user already declined this version, or a start took it back."""
     withdrawn: str = ""
-    """Why a start took this version back (`Declined.reason`) — `""` when a person
+    """Why a start took this version back (`Declined.reason`). `""` when the user
     declined it, or nobody did."""
 
     @property
     def yours(self) -> int:
-        """How many of the settings are the person's own edit, rather than pH's."""
+        """How many of the settings are an edit by the user, and not a change in pH."""
         return sum(one.by == "person" for one in self.differences)
 
     @property
     def worth_asking(self) -> bool:
-        """Worth a person's decision: their own edit, not already declined (decision 14)."""
+        """Whether the change needs a decision by the user: it holds an edit of
+        their own, and it is not already declined (decision 14)."""
         return self.yours > 0 and not self.declined
 
     @property
     def ph_moved(self) -> str:
-        """pH's part, by version: `pH 0.4.0 → 0.5.0`, or `pH` within one version."""
+        """The part of pH, by version: `pH 0.4.0 → 0.5.0`, or `pH` within one version."""
         was, now = self.was.ph_version, self.now.ph_version
         return f"pH {was} → {now}" if was != now else "pH"
 
@@ -937,7 +999,8 @@ class ProfileChange:
 def profile_change(env: LoggedEnvironment, now: ProfileBase) -> ProfileChange | None:
     """How `now`, the named profile as it composes, differs from what `env` starts on.
 
-    `None` when nothing does — a session with no base, or one on the version as it is.
+    `None` when nothing differs: a session with no base, or a session that is
+    already on this version.
     """
     was = env.starts_on
     if was is None:
@@ -985,15 +1048,15 @@ def record_summary(kind: str, data: Mapping[str, JsonValue]) -> str:
 
 
 def withdrawn_note(name: str, reason: str) -> str:
-    """The sentence for a version a start took back (`profile/withdrawn`): the one
-    wording for the command that asked for it, a terminal attaching to the session,
-    and a one-shot start on it."""
+    """The sentence for a version that a start took back (`profile/withdrawn`). The
+    command that asked for it, a terminal that attaches to the session, and a
+    one-shot start on it all use this one wording."""
     return f"{name} did not start ({reason}), so this session runs on the version it had."
 
 
 def environment_listing(env: LoggedEnvironment) -> list[str]:
-    """What `/profile show` says (S7): the base, each override and what asked for it,
-    and each setting the session runs with that its base does not say."""
+    """What `/profile show` prints (S7): the base, each override and what asked for
+    it, and each setting that the session runs with and its base does not say."""
     base = env.base
     if base is None:
         return ["This session has no recorded base: it records one when it next starts."]
@@ -1016,11 +1079,12 @@ def environment_listing(env: LoggedEnvironment) -> list[str]:
 
 
 def listing(change: ProfileChange) -> list[str]:
-    """The change as a person reads it before deciding (decision 13).
+    """The change as the user reads it before a decision (decision 13).
 
-    Each setting with its old and new value — for a list, what was added and
-    removed — and whose it is: the person's file, or pH's. Then the session's own
-    overrides that still apply over a changed row.
+    The listing gives each setting with its old and new value. For a list, it
+    gives what was added and removed. It also says whose change it is: the file
+    of the user, or pH. Then it gives the overrides of the session that still
+    apply over a changed row.
     """
     name = change.now.name or "this profile"
     lines = [f"{name} has changed since this session started:"]
@@ -1050,8 +1114,8 @@ def _moved(difference: Difference) -> str:
 
 
 def _shown(value: JsonValue) -> str:
-    """One value in the listing: a scalar as itself, a container as flow YAML — the
-    spelling of the `--patch` and commands beside it."""
+    """One value in the listing: a scalar as itself, and a container as flow YAML,
+    which is the spelling of the `--patch` and the commands beside it."""
     if value is None:
         return "unset"
     if isinstance(value, str):

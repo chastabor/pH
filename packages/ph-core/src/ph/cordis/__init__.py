@@ -1,10 +1,12 @@
-"""`ph.cordis` — the plugin meta-framework subset pH is built on (D1).
+"""`ph.cordis`: the subset of the plugin meta-framework that pH is built on (D1).
 
-Everything in pH is a plugin; there is no privileged core to patch (invariant
-I1). This package supplies the three things that makes possible: a context that
-holds services, an event bus with four dispatch modes fixed by declaration, and
-scopes whose disposal unwinds every registration and every acquired artifact
-(invariant I2).
+Everything in pH is a plugin, and there is no privileged core to patch
+(invariant I1). This package supplies the three things that make that possible:
+
+* A context that holds services.
+* An event bus with four dispatch modes, fixed by declaration.
+* Scopes whose disposal unwinds every registration and every acquired artifact
+  (invariant I2).
 """
 
 from __future__ import annotations

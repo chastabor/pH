@@ -1338,7 +1338,9 @@ def config(
                 # A required option has no default. Printing one would invent a
                 # value that a profile must actually supply.
                 "[bold]required[/bold]" if field["required"] else (field["default"] or ""),
-                _in_profile(field["name"], set_here, first=first),
+                # The option that holds a nested option prints the whole value
+                # that the profile set, so the nested line repeats nothing.
+                "" if field["parent"] else _in_profile(field["name"], set_here, first=first),
                 field["doc"],
             )
     console.print(table)

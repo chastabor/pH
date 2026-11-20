@@ -1,7 +1,7 @@
 # ph-headless: base plus a scripted adapter, for one-shot and test runs.
 #
-# The fake adapter's routes and replies are the row's config, so a scenario
-# test scripts a conversation without touching code.
+# The routes and the replies of the fake adapter are the config of the row, so
+# a scenario test scripts a conversation without a change to code.
 - insert:
     - id: llm-fake
       name: llm-fake
@@ -9,7 +9,7 @@
         providers: [fake]
         replies: []
 
-# The scripted adapter's one route, as the default a root runs on.
+# The one route of the scripted adapter, as the default that a root runs on.
 - id: models
   config:
     default: main

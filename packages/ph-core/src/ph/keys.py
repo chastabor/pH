@@ -1,32 +1,35 @@
-"""Every service `ph-core` provides, as a typed key.
+"""Every service that `ph-core` provides, as a typed key.
 
-One key per `ctx.provide(...)` in this package — `test_keys` holds the two lists
-against each other — so a row names what it needs (`inject=[LLM, SESSIONS]`),
-provides what it has (`ctx.provide(FS, service)`) and reads what it was given
-(`ctx.require(TOOLS)`) through a symbol the checker follows, instead of a string
-it cannot.
+There is one key for each `ctx.provide(...)` in this package, and `test_keys`
+compares the two lists. A row names what it needs (`inject=[LLM, SESSIONS]`),
+provides what it has (`ctx.provide(FS, service)`), and reads what it was given
+(`ctx.require(TOOLS)`). Each of these uses a symbol that the checker follows,
+and not a string that the checker cannot follow.
 
-**Why one module.** The obvious home for a key is beside the service it names,
-and it is the wrong one for the reason `ph.seams._registry` gives about
-ownership: a *name* is the registry's vocabulary, not the service's property.
-`ctx.provide("fs", …)` is a fact about cordis's namespace that `FsService` never
-mentions — so the concern decides the home, and `ph.seams._names` completes it:
-shared names live in one module precisely so two copies cannot disagree, which
-`test_keys` then makes enforceable in both directions.
+**Why one module.** The obvious home for a key is beside the service that it
+names. That home is wrong, for the reason that `ph.seams._registry` gives about
+ownership: a *name* is the vocabulary of the registry, not a property of the
+service. `ctx.provide("fs", …)` is a fact about the namespace of cordis, and
+`FsService` never mentions it. The concern therefore decides the home.
+`ph.seams._names` completes the argument: shared names live in one module so
+that two copies cannot disagree. `test_keys` then enforces that in both
+directions.
 
-The import graph agrees rather than deciding it. Keys beside their services
-measures at **124 new runtime edges**, eighteen of them seam→seam
-(`workspace → fs`, `subprocess → shell`) that today's layering never needed.
-Here the service types are imported under `TYPE_CHECKING` only: the annotation
-is a string mypy reads and the value is a `ServiceKey("name")`, so this module
-adds no edge a consumer did not already have. It is not edge-*free* — `MOUNT` and
-`PROJECT_ROOT` are re-exported from `.cordis.loader`, which `ph.cordis` already
-imports, so the measured cost is zero. Those two are the exception in spelling
-only: both are cordis's own, declared beside the `Profile.mount` that provides
-them, and listed here so a reader has one list.
+The import graph agrees with this choice, but it did not decide the choice. Keys
+beside their services measure at **124 new runtime edges**. Eighteen of them are
+seam→seam (`workspace → fs`, `subprocess → shell`), which the layering of today
+never needed. Here the service types are imported under `TYPE_CHECKING` only.
+The annotation is a string that mypy reads, and the value is a
+`ServiceKey("name")`, so this module adds no edge that a consumer did not
+already have. The module is not edge-*free*: `MOUNT` and `PROJECT_ROOT` are
+re-exported from `.cordis.loader`. `ph.cordis` already imports that module, so
+the measured cost is zero. Those two keys are the exception in spelling only.
+Both belong to cordis, are declared beside the `Profile.mount` that provides
+them, and are listed here so that a reader has one list.
 
-The downstream packages declare their own the same way: `ph_rlm.keys` for the
-five the RLM bundle provides, and beside the service where a package has one.
+The downstream packages declare their own keys in the same way: `ph_rlm.keys`
+for the five that the RLM bundle provides, and beside the service where a
+package has one.
 
 @module ph.keys
 """
