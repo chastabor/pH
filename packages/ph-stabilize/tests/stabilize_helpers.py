@@ -1,12 +1,13 @@
-"""Shared scaffolding for the `stabilize` bundle's tests.
+"""Shared scaffolding for the tests of the `stabilize` bundle.
 
-A module of its own rather than `conftest.py`, mirroring `ph-app`'s
-`tui_helpers`. This package has **no** conftest, and deliberately: `sys.modules`
-holds one slot named `conftest`, so adding a second one that pytest loads after
-ph-rlm's took the slot from it and every `from conftest import ...` in that
-suite failed to collect. Its one piece of shared setup is a plain function rather than a
-fixture, so a test calls it by name instead of importing a decorated symbol it
-then shadows with a parameter of the same name.
+This is a module of its own and not a `conftest.py`, like the `tui_helpers` of
+`phern`. This package deliberately has **no** conftest. `sys.modules` holds one
+slot named `conftest`. When a second conftest was added here, pytest loaded it
+after the conftest that ph-rlm had at the time, and it took the slot. Every
+`from conftest import ...` in that suite then failed to collect. The shared
+setup here is plain functions and not fixtures. A test calls a function by name,
+and does not import a decorated symbol that it then shadows with a parameter of
+the same name.
 """
 
 from __future__ import annotations
@@ -42,15 +43,16 @@ __all__ = [
 ]
 
 PROFILE = [BASE, HEADLESS, BUNDLE]
-"""Base, the fake adapter, and this bundle — what a profile layering it gets."""
+"""Base, the fake adapter, and this bundle: what a profile that layers the bundle
+gets."""
 
 
 def blob(size: int, *, lines: int = 40) -> str:
     """Exactly `size` characters over about `lines` lines.
 
-    Exact, because the boundary tests turn on one character either side of a
-    threshold, and a generator that overshot would be testing a number nobody
-    chose. The line breaks are what give `content_preview` a middle to omit.
+    The size is exact because the boundary tests depend on one character on
+    either side of a threshold. A generator that overshot would test a number
+    that nobody chose. The line breaks give `content_preview` a middle to omit.
     """
     chunk = max(1, size // lines)
     return "\n".join("x" * chunk for _ in range(lines)).ljust(size, "y")[:size]
@@ -59,30 +61,34 @@ def blob(size: int, *, lines: int = 40) -> str:
 def break_spill(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every spill write fail, for the fail-open gates.
 
-    `write_atomic_all` is where the store writes — every `try_save*` reaches it — so
-    this is where a full disk is felt, one error per blob, and it is deliberately the
-    call every producer makes *before* it has appended anything. That ordering is
-    what leaves the fallback available at all: see `SpillStore.try_save`.
+    The store writes through `write_atomic_all`, and every `try_save*` reaches
+    it. A full disk therefore fails there, with one error for each blob. It is
+    deliberately the call that every producer makes *before* it has appended
+    anything. That ordering is what keeps the fallback available. See
+    `SpillStore.try_save`.
     """
     monkeypatch.setattr(spill, "write_atomic_all", full_disk_batch)
 
 
 def events_of(session: Session, event_type: str) -> list[Any]:
-    """Every event of one type. Written out in three test modules before this."""
+    """Every event of one type. Three test modules each wrote this out before it
+    was shared."""
     return [event for event in session.events if event.type == event_type]
 
 
 async def run_tool_calls(ctx: Context, session: Session, *calls: Any, step: int = 1) -> Any:  # noqa: ANN401
     """Commit the assistant message that asked, then run the batch for real.
 
-    The commit is load-bearing and is why this is shared: the loop appends the
-    assistant message *before* dispatching any of its calls, and rows read it
-    back — `tool-todo`'s parallel rule counts `write_todos` in it. A test that
-    skipped it would exercise a path the harness never takes, and two copies of
-    that invariant are one that gets fixed when the loop's ordering changes.
+    The commit is necessary, and it is the reason why this helper is shared.
+    The loop appends the assistant message *before* it dispatches any of the
+    calls in it, and rows read the message back. For example, the parallel rule
+    of `tool-todo` counts the `write_todos` calls in it. A test that skipped the
+    commit would exercise a path that the harness never takes. With two copies
+    of that invariant, only one would be fixed when the ordering of the loop
+    changes.
 
-    Returns the `BatchOutcome`, whose `concluded` is how the loop learns a turn
-    is over.
+    Returns the `BatchOutcome`. Its `concluded` field tells the loop that a
+    turn is over.
     """
     from ph.cancel import CancelToken
     from ph.session import SurfaceIntent
@@ -112,12 +118,12 @@ def bash_call(call_id: str, command: str = "true") -> ToolCallBlock:
 
 
 def todo_call(call_id: str, todos: list[dict[str, Any]]) -> ToolCallBlock:
-    """One `write_todos` call, beside `bash_call` and for the same reason.
+    """One `write_todos` call. It is beside `bash_call` for the same reason.
 
-    Written out identically in two test modules before this. The tool takes the
-    ENTIRE list in one argument, so a change to how that argument is shaped has
-    to reach both suites at once — and two copies is how one of them keeps
-    passing against a call the harness no longer makes.
+    Two test modules each wrote this out identically before it was shared. The
+    tool takes the ENTIRE list in one argument, so a change to the shape of that
+    argument must reach both suites at the same time. With two copies, one of
+    them would keep passing against a call that the harness no longer makes.
     """
     from ph_stabilize.todo import TOOL_NAME
 
@@ -125,25 +131,31 @@ def todo_call(call_id: str, todos: list[dict[str, Any]]) -> ToolCallBlock:
 
 
 def answer_approvals(ctx: Context, answer: Any) -> list[Any]:  # noqa: ANN401
-    """Register the answerer a front end would, and return what it was asked.
+    """Register the answerer that a front end would register, and return what it
+    was asked.
 
     `answer` may be a value or a zero-argument callable, so a test that changes
-    its mind mid-run does not need a second helper.
+    its answer during a run does not need a second helper.
 
-    The returned list fills as prompts arrive. Half the questions a permission
-    test asks are about *how many* prompts and *what they said* — "prompts zero
-    times", "prompts once", "the prompt names the boundary" — and without this
-    they were being answered three ways: an ad-hoc answerer, a
-    `lambda: asked.append(...) or "allowed-once"` smuggled through the callable
-    escape hatch, and reading `approval/asked` back out of the log.
+    The returned list fills as prompts arrive. Half the questions that a
+    permission test asks are about *how many* prompts there were and *what they
+    said*: "prompts zero times", "prompts once", "the prompt names the
+    boundary". Without this helper, tests answered those questions in three
+    ways:
+
+    - An ad-hoc answerer.
+    - A `lambda: asked.append(...) or "allowed-once"` passed in as the callable
+      `answer`.
+    - A read of `approval/asked` back out of the log.
     """
     asked: list[Any] = []
 
     async def respond(request: object, _next: object = None) -> Any:  # noqa: ANN401
         asked.append(request)
         chosen = answer() if callable(answer) else answer
-        # An awaitable answer is one that waits — for an event a test sets once
-        # it has looked at the log mid-flight, say.
+        # An awaitable answer is an answer that waits. For example, it waits
+        # for an event that a test sets after it has looked at the log during
+        # the run.
         return await chosen if inspect.isawaitable(chosen) else chosen
 
     ctx.require(APPROVAL).register_answerer(respond)
@@ -156,11 +168,12 @@ async def scoped_agent(
     *,
     session_id: str = "s1",
 ) -> tuple[Any, Any]:
-    """`(agent, workspace)` — an agent holding a workspace of its own.
+    """`(agent, workspace)`: an agent that holds a workspace of its own.
 
-    A stub tier rather than real git: what a permission rule asks is "is this
-    path inside the workspace the seam handed out", which is true of every tier
-    that hands out a fresh root. `test_workspace_git.py` owns the checkout.
+    This uses a stub tier and not real git. A permission rule asks "is this
+    path inside the workspace the seam handed out", and that holds for every
+    tier that hands out a fresh root. `test_workspace_git.py` tests the
+    checkout.
     """
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -175,12 +188,12 @@ async def scoped_agent(
 
 
 def result_block(session: Session, call_id: str) -> Any:  # noqa: ANN401
-    """The `ToolResultBlock` one call produced, or `None`.
+    """The `ToolResultBlock` that one call produced, or `None`.
 
-    Split out of `result_text` so a test asserting `is_error` reaches it through
-    `derive_event_message` too, rather than indexing
-    `event.data["message"]["content"][0]` by hand — the second route to a shape
-    is the one that keeps passing after the shape moves.
+    This was split out of `result_text`, so that a test that asserts `is_error`
+    also reaches the block through `derive_event_message`. The alternative is to
+    index `event.data["message"]["content"][0]` by hand, and a second route to a
+    shape keeps passing after the shape moves.
     """
     for event in events_of(session, "tool/result"):
         message = derive_event_message(event)

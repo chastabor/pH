@@ -1,31 +1,34 @@
-"""`input-offload` — a pasted blob relocated, not lost (P4-02, G3).
+"""`input-offload`: a pasted blob is relocated, not lost (P4-02, G3).
 
-The sibling of `tool-result-offload`, for the other direction: someone pastes a
-2 MB log into the prompt.
+This row is the sibling of `tool-result-offload`, for the other direction: a
+user pastes a 2 MB log into the prompt.
 
-**One statement, two readers.** The original `user/message` is logged as the person
-sent it. A second `user/message` carrying the preview is appended with
-`surface_op: replace` citing it. From then on:
+**One statement, two readers.** The original `user/message` is logged as the
+user sent it. A second `user/message` that carries the preview is appended with
+`surface_op: replace`, and it cites the original. From then on:
 
-* `derive_messages()` — what the model reads — yields the preview;
-* `transcript()` — what the person reads — yields the original, in full.
+* `derive_messages()`, which is what the model reads, yields the preview.
+* `transcript()`, which is what the user reads, yields the original in full.
 
-Nothing is written twice and nothing is deleted, which is what makes the
-substitution reversible reading rather than an edit (I4). Rewriting the message
-*before* it is logged was the alternative, and is refused: the log would then
-attribute harness-authored text to the human, which is a false statement in an
-append-only record rather than merely a lossy one.
+Nothing is written twice and nothing is deleted. The substitution is therefore a
+reading that can be reversed, and not an edit (I4). The alternative was to
+rewrite the message *before* it is logged, and that is refused. The log would
+then attribute text that the harness wrote to the human. In an append-only
+record, that is a false statement and not only a lossy one.
 
 **Where it runs, and why there.** `agent/request` is the only seam between the
-driver appending `user/message` and `_build_request` calling `derive_messages()`.
-A listener here appends the replacement and returns the config untouched; the loop
-then derives, sees the replacement, and sends the preview. There is no second copy
-of the substitution to keep in step — the loop's own re-derivation applies it.
+point where the driver appends `user/message` and the point where
+`_build_request` calls `derive_messages()`. A listener here appends the
+replacement and returns the config unchanged. The loop then derives the
+messages, sees the replacement, and sends the preview. There is no second copy
+of the substitution to keep in step, because the re-derivation of the loop
+itself applies it.
 
-**Only the newest human message, and only once.** `_pending` walks back from the
-newest `user/message` past the harness's own messages to the person's, and
-`is_replacement_surface_event` makes the pass idempotent: the replacement is
-itself a `user/message`, so the next request meets it first and stops.
+**Only the newest human message, and only one time.** `_pending` walks back from
+the newest `user/message`, past the messages of the harness itself, to the
+message of the user. `is_replacement_surface_event` makes the pass idempotent:
+the replacement is itself a `user/message`, so the next request meets it first
+and stops.
 
 @module ph_stabilize.input_offload
 """
@@ -73,9 +76,9 @@ __all__ = [
 HUMAN_TOKEN_LIMIT_BEFORE_EVICT = 50_000
 """`human_message_token_limit_before_evict`, so the char threshold is 200 000.
 
-Two and a half times the tool-result limit, and deliberately: a person does not
-reach this by typing. It is the paste of a build log or a dumped table, which is
-the case the row exists for."""
+This is two and a half times the tool-result limit, deliberately. A user does
+not reach it by typing. A user reaches it with the paste of a build log or a
+dumped table, and that is the case that the row exists for."""
 
 UPSTREAM_TOO_LARGE_HUMAN_MSG = """Message content too large and was saved to the filesystem at: {file_path}
 
@@ -87,14 +90,14 @@ Here is a preview showing the head and tail of the content:
 """  # noqa: E501
 """Verbatim from `deepagents/middleware/filesystem.py`, and never sent.
 
-Its sibling in `offload` says why it is kept unsent: tracking the port is only
-worth something if an upstream change produces a visible diff."""
+Its sibling in `offload` says why it is kept unsent: tracking the port is worth
+something only if an upstream change produces a visible diff."""
 
 TOO_LARGE_HUMAN_MSG = UPSTREAM_TOO_LARGE_HUMAN_MSG.replace(UPSTREAM_READER, "{reader}")
-"""Upstream's wording with the tool name left to the deployment.
+"""The wording of upstream, with the tool name left to the deployment.
 
-The same localization the tool-result side does; `spill_wording` argues why both
-rows have to say the same thing."""
+This is the same localization that the tool-result side does. `spill_wording`
+explains why both rows must say the same thing."""
 
 
 class Config(WireModel):
@@ -104,21 +107,23 @@ class Config(WireModel):
 
 
 def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | None:
-    """The newest human message that should be offloaded, and its text.
+    """The newest human message that must be offloaded, and its text.
 
-    `None` when there is nothing to do — no message, one already replaced, or
-    one that fits. Read from the log rather than from the derived list because
-    the substitution needs the *event*: a derived `Message` carries no seq, and
-    the seq is what a surface replace cites.
+    The answer is `None` when there is nothing to do: no message, a message that
+    is already replaced, or a message that fits. The function reads the log and
+    not the derived list, because the substitution needs the *event*. A derived
+    `Message` carries no seq, and the seq is what a surface replace cites.
 
-    **The newest *human* message, not the newest `user/message`** (C12). A step
-    whose context changed appends the harness's snapshot *after* the person's
-    words in the same batch, so the newest was the snapshot: a large one was
-    offloaded — the harness's own context, which the loop then re-sent, since
-    the model no longer saw it — while the paste before it went through whole.
-    So this walks back over plugin messages to the person's, within the current
-    step: every batch is asked in its own step, so nothing earlier is owed. A
-    replacement met on the way means this step's paste is already handled.
+    **The newest *human* message, not the newest `user/message`** (C12). When
+    the context of a step changed, the step appends the snapshot of the harness
+    *after* the words of the user, in the same batch. The newest message was
+    then the snapshot. A large snapshot was offloaded, although it is the
+    context of the harness itself. The model no longer saw it, so the loop sent
+    it again. The paste before it went through whole. The function therefore
+    walks back over plugin messages to the message of the user, within the
+    current step. Every batch is examined in its own step, so nothing earlier is
+    owed. A replacement met on the way means that the paste of this step is
+    already handled.
     """
     start = session.latest("step/start")
     for event in reversed(session.events_from(start.seq + 1 if start is not None else 0)):
@@ -129,8 +134,8 @@ def _pending(session: Session, config: Config) -> tuple[SessionEvent, str] | Non
         message = derive_event_message(event)
         if message is None or not isinstance(message.source, UserSource):
             continue
-        # Text blocks only. An image is not what exhausts a context window, and
-        # it is the half of a message that reading a file cannot give back.
+        # Text blocks only. An image does not exhaust a context window, and an
+        # image is the part of a message that reading a file cannot give back.
         text = text_of(message.content)
         return (event, text) if over_token_limit(text, config.token_limit) else None
     return None
@@ -153,16 +158,16 @@ async def apply(ctx: Context, config: Config) -> None:
         ref = await store.try_save_text(
             owner=session.id,
             source="pasted message",
-            # Named by the seq it replaces rather than upstream's uuid: the
-            # store already dedupes by content digest, so a random name buys
-            # nothing a traceable one does not.
+            # The name is the seq that the file replaces, not the uuid that
+            # upstream uses. The store already dedupes by content digest, so a
+            # random name gives nothing that a traceable name does not.
             suggested_name=f"{HISTORY_PREFIX}/{event.seq}.md",
             content=text,
         )
         if ref is None:
             # Fail open, like the tool-result side: an offload that cannot store
-            # the content must not be the reason the model loses it. The seam
-            # logs why.
+            # the content must not be the reason that the model loses it. The
+            # seam logs the reason.
             return await next_(proposal)
         preview = spill_wording(
             ctx,
@@ -171,10 +176,11 @@ async def apply(ctx: Context, config: Config) -> None:
             file_path=ref.locator,
             content_sample=content_preview(text),
         )
-        # **The accounting and the replacement it describes, in one batch**
-        # (S14), and both after the blob is on disk (`SpillStore.try_save`). Apart, a
-        # flush between them landed the record with no replacement, and a resumed
-        # session never offloaded the paste again.
+        # **The accounting and the replacement that it describes go in one
+        # batch** (S14), and both come after the blob is on disk
+        # (`SpillStore.try_save_text`). When they were separate, a flush between them
+        # landed the record with no replacement, and a resumed session never
+        # offloaded the paste again.
         record = RevisionRecord(
             _LOG,
             "offload/input-spilled",
@@ -182,10 +188,10 @@ async def apply(ctx: Context, config: Config) -> None:
             RevisionSize("bytes", ref.bytes, len(preview.encode("utf-8"))),
         )
         _append_preview(session, event, ref, preview, record)
-        # The config is returned untouched. `_build_request` calls
-        # `derive_messages()` *after* this waterfall, so the loop picks the
-        # replacement up on its own — which is what keeps one statement of the
-        # substitution rather than two that have to agree.
+        # The config is returned unchanged. `_build_request` calls
+        # `derive_messages()` *after* this waterfall, so the loop picks up the
+        # replacement by itself. The substitution is therefore stated one time,
+        # and not in two places that must agree.
         return await next_(proposal)
 
     ctx.on("agent/request", offload)
@@ -194,17 +200,18 @@ async def apply(ctx: Context, config: Config) -> None:
 def _append_preview(
     session: Session, event: SessionEvent, ref: SpillRef, preview: str, record: RevisionRecord
 ) -> None:
-    """The notice that stands in for a spilled paste, on the surface where it was, and
-    the record of the spill after it."""
+    """Put the notice that stands in for a spilled paste on the surface, in the
+    place of the paste, and put the record of the spill after it."""
     substitute(
         session,
         (event.seq,),
         create_user_message(
             content=[{"type": "text", "text": preview}],
-            # A plugin's notice, not the person's words. Attributing the preview
-            # to `user` would be the same lie one layer down from the one this
-            # design rejected — and `PluginSource` is the repo's idiom for
-            # injected context, so the transcript already renders it as such.
+            # This is the notice of a plugin, not the words of the user. To
+            # attribute the preview to `user` would be the same false statement
+            # as the one that this design rejected, one layer down.
+            # `PluginSource` is the idiom of the repo for injected context, so
+            # the transcript already renders the notice as such.
             source=PluginSource(
                 plugin="input-offload",
                 form="notice",

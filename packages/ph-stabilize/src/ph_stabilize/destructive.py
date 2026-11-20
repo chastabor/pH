@@ -1,37 +1,40 @@
-"""What a call would do that cannot be taken back — parsed, not pattern-matched.
+"""What a call would do that cannot be undone: parsed, not pattern-matched.
 
-**Why this is not a regex.** The shipped classifier was twelve regexes run over
-the call's arguments rendered as JSON, and it had the defect that shape invites:
-`dumps` escapes a real newline to the two characters `\\` and `n`, so every
-pattern anchored with `\\b` — twelve of the thirteen — stopped matching the
-moment its payload was on a second line. `rm -rf`, `DROP TABLE`, `shutil.rmtree`
-and `curl | sh` were all ungated inside a multi-line cell, which is *every*
-`run_code` cell, the surface the row exists for. Nothing failed; the gate simply
-did not fire.
+**Why this is not a regex.** The shipped classifier was twelve regexes that ran
+over the arguments of the call rendered as JSON. It had the defect that this
+shape invites. `dumps` escapes a real newline to the two characters `\\` and
+`n`, so every pattern anchored with `\\b` (eleven of the twelve) stopped
+matching when its payload was on a second line. `rm -rf`, `DROP TABLE`,
+`shutil.rmtree` and `curl | sh` were all ungated inside a multi-line cell. That
+is *every* `run_code` cell, the surface that the row exists for. Nothing failed.
+The gate did not fire.
 
-That is a symptom, and the cause is that a regex cannot decide this question. A
-command line is a grammar — quoting, operators, redirects, nesting — and a
-pattern language that cannot count parentheses cannot be made to see it. Every
-fix is another escape hatch: `rm -rf` and `rm -fr` and `rm  -r`, then `"rm"` in
-quotes, then `$(echo rm) -rf`. So the text is **parsed** into commands,
-arguments, pipes and redirects, and the judgement is made against that structure.
+That is a symptom. The cause is that a regex cannot decide this question. A
+command line is a grammar, with quoting, operators, redirects and nesting. A
+pattern language that cannot count parentheses cannot be made to see a grammar.
+Every fix leaves another way past the pattern: `rm -rf` and `rm -fr` and
+`rm  -r`, then `"rm"` in quotes, then `$(echo rm) -rf`. The text is therefore
+**parsed** into commands, arguments, pipes and redirects, and the judgment is
+made against that structure.
 
-Three dialects, each with a parser and a table:
+There are three dialects, each with a parser and a table:
 
-* **shell** — `shlex` splits it (POSIX quoting is the part worth not writing),
-  then pipelines and redirects are read off the operator tokens. Case-sensitive,
-  because the shell is: `RM` is not `rm`.
-* **sql** — comments and string literals are removed, statements split on `;`,
-  and the leading keyword decides. Case-insensitive, because SQL is.
-* **python** — `ast`, so `shutil.rmtree` is a call to that function rather than
-  a substring, and `subprocess.run("rm -rf /")` hands its argument back to the
-  shell reader.
+* **shell**: `shlex` splits the text, because POSIX quoting is the part that is
+  not worth writing again. Pipelines and redirects are then read from the
+  operator tokens. The match is case-sensitive, because the shell is: `RM` is
+  not `rm`.
+* **sql**: comments and string literals are removed, statements are split on
+  `;`, and the leading keyword decides. The match is case-insensitive, because
+  SQL is.
+* **python**: `ast` parses the text, so `shutil.rmtree` is a call to that
+  function and not a substring. `subprocess.run("rm -rf /")` passes its argument
+  back to the shell reader.
 
-**The tables are a starting point and are meant to grow.** Neither list claims to
-be complete — no list of this kind ever is — and the honest posture is that this
-gates what it knows and says what it found. A dialect nobody has written a parser
-for contributes nothing rather than guessing, and adding one is a table plus a
-reader.
+**The tables are a starting point and are meant to grow.** None of the lists
+claims to be complete, because no list of this kind is ever complete. The
+correct position is that this module gates what it knows and reports what it
+found. A dialect for which nobody has written a parser contributes nothing, and
+the module does not guess. To add a dialect, add a table and a reader.
 
 @module ph_stabilize.destructive
 """
@@ -69,12 +72,12 @@ Dialect: TypeAlias = Literal["shell", "sql", "python"]
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """One thing a parser found, in the words a person is shown.
+    """One thing that a parser found, in the words that a person is shown.
 
-    `text` is the fragment reconstructed from the parse rather than the raw
-    input, so what an operator reads back is what the classifier actually
-    understood — a prompt quoting the whole 4 KB cell teaches nothing, and one
-    quoting the regex that matched teaches less.
+    `text` is the fragment rebuilt from the parse and not the raw input. An
+    operator therefore reads back what the classifier really understood. A
+    prompt that quotes the whole 4 KB cell teaches nothing, and a prompt that
+    quotes the regex that matched teaches less.
     """
 
     dialect: Dialect
@@ -93,16 +96,16 @@ _ESCAPES = (("\\r\\n", "\n"), ("\\n", "\n"), ("\\r", "\n"), ("\\t", " "))
 def decode(text: str) -> str:
     """Turn escaped whitespace back into whitespace before anything reads it.
 
-    Two different producers put `\\n` in a string as two characters: a model
-    writing a shell command inside a JSON blob it composed by hand, and any
-    caller that re-encoded a payload on the way here. Both make a line boundary
-    invisible to a reader that expects one, which is precisely how the old
-    classifier lost `\\b`.
+    Two different producers put `\\n` in a string as two characters. One is a
+    model that writes a shell command inside a JSON blob that it composed by
+    hand. The other is any caller that encoded a payload again on the way here.
+    Both hide a line boundary from a reader that expects one, and that is
+    exactly how the old classifier lost `\\b`.
 
-    Deliberately unconditional and slightly greedy: decoding a `\\n` that was
-    *meant* literally can only add a boundary where the parsers look for one, so
-    the error direction is more findings rather than fewer. For an approval gate
-    that is the side to be wrong on.
+    The decoding is unconditional and slightly greedy, on purpose. To decode a
+    `\\n` that was *meant* literally can only add a boundary where the parsers
+    look for one, so the error direction is more findings and not fewer. For an
+    approval gate, that is the correct side to be wrong on.
     """
     for escaped, real in _ESCAPES:
         text = text.replace(escaped, real)
@@ -110,12 +113,13 @@ def decode(text: str) -> str:
 
 
 def strings_in(value: JsonValue, *, depth: int = 0) -> Iterator[str]:
-    """Every string leaf of a call's arguments, decoded.
+    """Every string leaf of the arguments of a call, decoded.
 
-    The arguments are walked rather than serialized. Rendering them to JSON and
-    scanning the result is what escaped the newlines out of existence, and it
-    also meant every reader had to see through the envelope's own punctuation.
-    A `MappingProxyType` is a `Mapping`, so the frozen tree walks like any other.
+    The arguments are walked and not serialized. The old classifier rendered
+    them to JSON and scanned the result. That escaped the newlines so that no
+    reader saw them, and every reader also had to see through the punctuation of
+    the JSON envelope. A `MappingProxyType` is a `Mapping`, so the frozen tree
+    walks like any other.
     """
     if depth > 8:
         return
@@ -136,8 +140,9 @@ def strings_in(value: JsonValue, *, depth: int = 0) -> Iterator[str]:
 class ShellRule:
     """When one command name is destructive, and how to say so.
 
-    `always` is the command whose whole job is removal; the rest need a flag or a
-    subcommand, because `git push` is ordinary and `git push --force` is not.
+    `always` marks a command whose whole job is removal. The other rules need a
+    flag or a subcommand, because `git push` is ordinary and `git push --force`
+    is not.
     """
 
     reason: str
@@ -199,24 +204,25 @@ SHELL_RULES: dict[str, tuple[ShellRule, ...]] = {
 }
 """Command name → when it is destructive. Case-sensitive, because the shell is.
 
-A starting point rather than a claim of completeness: what is here is what the
-port plan's own list named plus the neighbors that share its shape. A command
-missing from this table is not gated by the preset, which is what a deployment's
-own `when:` patterns and its `interrupt_on` entries are for.
+The table is a starting point and does not claim to be complete. It holds what
+the list in the port plan named, plus the neighbors that have the same shape.
+The preset does not gate a command that is missing from this table. The `when:`
+patterns and the `interrupt_on` entries of a deployment are for that case.
 
 **`rm` gates on `-r` only, which is narrower than what it replaces.** The regex
-this supersedes wanted `-r` *or* `-f`, and a first draft here gated `rm` with no
-flag at all. Both are too wide for the same reason: an agent removing a build
-artifact or a temp file is doing routine work, and a gate that prompts on routine
-work is one a person learns to approve without reading — which the `hitl` module
-calls worse than no gate. What is left is the case a person actually wants to see
-before it happens, a **tree** going away.
+that this supersedes wanted `-r` *or* `-f`, and a first draft here gated `rm`
+with no flag at all. Both are too wide, for the same reason. An agent that
+removes a build artifact or a temp file is doing routine work. A gate that
+prompts on routine work is a gate that a person learns to approve without
+reading, and the `hitl` module calls that worse than no gate. What remains is
+the case that a person really wants to see before it happens: a **tree** is
+removed.
 
-The cost is stated rather than hidden: `rm -f one-file` and a bare `rm one-file`
-are now ungated, so a single irreversible deletion passes without a prompt. That
-is the deliberate trade — recursion is the multiplier, and this list is tuned for
-what is worth interrupting a person over rather than for everything that cannot
-be undone. A deployment that wants the wider net writes `rm` into `interrupt_on`
+The cost is stated and not hidden. `rm -f one-file` and a bare `rm one-file` are
+now ungated, so a single irreversible deletion passes without a prompt. That is
+the deliberate trade. Recursion is the multiplier, and this list is tuned for
+what is worth an interruption of a person, and not for everything that cannot be
+undone. A deployment that wants the wider net writes `rm` into `interrupt_on`
 with its own rule, or adds a pattern to `when:`.
 """
 
@@ -234,19 +240,19 @@ def _tokenize(line: str) -> list[str]:
     try:
         return list(lexer)
     except ValueError:
-        # Unbalanced quoting. A shell would refuse it too, but refusing to look
-        # is how a gate is evaded by appending a quote, so fall back to a plain
-        # split: the words are still there, only the grouping is lost.
+        # Unbalanced quoting. A shell would refuse it too. But if the gate
+        # refused to look, an appended quote would evade it. So fall back to a
+        # plain split: the words are still there, and only the grouping is lost.
         return line.split()
 
 
 def _has_flag(argv: Sequence[str], flag: str) -> bool:
-    """Whether `argv` carries `flag`, allowing for the spellings a shell allows.
+    """Whether `argv` carries `flag`, in any of the forms that a shell allows.
 
     `--force` matches `--force` and `--force=x`. A single-character `-i` matches
-    `-i`, `-i.bak` (an argument stuck to the flag) and `-ri` (a bundle), because
-    all three are the same flag to the command reading them — and a classifier
-    that only saw the first is one `sed -ri` defeats.
+    `-i`, `-i.bak` (an argument attached to the flag) and `-ri` (a bundle). All
+    three are the same flag to the command that reads them, and `sed -ri`
+    defeats a classifier that sees only the first.
     """
     for token in argv:
         if token == flag or token.startswith(f"{flag}="):
@@ -280,14 +286,15 @@ _WRAPPERS = frozenset(
 )
 """Commands whose *argument* is the command that matters (D3).
 
-The gate read `argv[0]` and nothing else, so one word in front of anything was a
-bypass: `sudo rm -rf /` was not an `rm` rule to it, and neither was `env`,
-`nohup`, `nice`, `exec` or a leading `FOO=1`. This is the human-in-the-loop
-gate, so a one-word prefix defeating it is the whole of the hole.
+The gate read `argv[0]` and nothing else, so one word in front of any command
+was a bypass. `sudo rm -rf /` was not an `rm` rule to it, and neither was a
+command behind `env`, `nohup`, `nice`, `exec` or a leading `FOO=1`. This is the
+human-in-the-loop gate, and one word in front of a command defeated it. That is
+the complete hole.
 
-`timeout` and `nice` take an argument of their own before the command, which is
-why unwrapping skips non-flag tokens for those two rather than stopping at the
-first word it does not recognize."""
+`timeout` and `nice` take an argument of their own before the command. For that
+reason unwrapping scans past the tokens that it does not recognize, after any
+wrapper, and does not stop at the first one."""
 
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -295,19 +302,19 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 def _basename(token: str) -> str:
     """A command as its bare name: `/usr/bin/rm` is `rm`.
 
-    Named because it is the question six places here ask, and a bare
-    `.rsplit("/", 1)[-1]` reads as string surgery rather than as the question.
+    It has a name because six places here ask this question. A bare
+    `.rsplit("/", 1)[-1]` reads as string manipulation and not as the question.
     """
     return token.rsplit("/", 1)[-1]
 
 
 def _rules_for(name: str) -> tuple[ShellRule, ...] | None:
-    """The rules a command name breaks, if any — `mkfs.ext4` is `mkfs`.
+    """The rules that a command name breaks, if any. `mkfs.ext4` is `mkfs`.
 
-    One lookup, because the two callers had already come apart: `_interesting`
-    treated *any* dotted head as a possible command while `_command_findings`
-    only unfolded `mkfs.`, so `sudo git.foo` unwrapped to a command the rules
-    then had nothing to say about.
+    There is one lookup because the two callers had already diverged.
+    `_interesting` treated *any* dotted head as a possible command, while
+    `_command_findings` unfolded only `mkfs.`. `sudo git.foo` therefore
+    unwrapped to a command about which the rules had nothing to say.
     """
     return SHELL_RULES.get("mkfs" if name.startswith("mkfs.") else name)
 
@@ -319,18 +326,19 @@ def _interesting(token: str) -> bool:
 
 
 def _unwrapped(argv: list[str]) -> list[str]:
-    """The command a wrapper is wrapping — `sudo -u x env FOO=1 rm -rf` → `rm -rf`.
+    """The command that a wrapper wraps: `sudo -u x env FOO=1 rm -rf` → `rm -rf`.
 
-    **Found by scanning for a command the tables know**, rather than by counting
-    a wrapper's flags and the values they take. That counting needs a table of
-    which flags carry an argument, per wrapper — `sudo -u nobody`, `nice -n 5`,
-    `timeout -s KILL` — and a table like that is wrong the day a wrapper grows an
-    option. Scanning cannot be wrong in the dangerous direction: an argument that
-    happens to spell a command name reports something a person then reads, while
-    a flag table that missed one reports nothing at all.
+    **It is found by a scan for a command that the tables know**, and not by a
+    count of the flags of a wrapper and the values that they take. That count
+    needs a table, for each wrapper, of the flags that carry an argument:
+    `sudo -u nobody`, `nice -n 5`, `timeout -s KILL`. Such a table is wrong on
+    the day that a wrapper gains an option. A scan cannot be wrong in the
+    dangerous direction. An argument that happens to spell a command name
+    reports something that a person then reads, while a flag table that missed
+    one reports nothing at all.
 
-    `[]` when nothing recognizable follows, which is the honest answer — there is
-    no rule here to break.
+    The result is `[]` when nothing recognizable follows. That is the correct
+    answer, because there is no rule here to break.
     """
     while argv:
         if _ASSIGNMENT.match(argv[0]):
@@ -347,12 +355,13 @@ def _unwrapped(argv: list[str]) -> list[str]:
 
 
 def _nested(argv: list[str]) -> Iterator[list[str]]:
-    """Commands carried *inside* this one's arguments (D3).
+    """Commands carried *inside* the arguments of this command (D3).
 
-    Two shapes, both of which the gate read as one opaque word: `sh -c "rm -rf
-    x"`, where the command is a quoted string, and `xargs rm -rf`, where it is
-    the rest of the argv. Neither is exotic — they are how a model writes a
-    command that needs a shell, and how it writes one that needs a list.
+    There are two shapes, and the gate read both as one opaque word. In
+    `sh -c "rm -rf x"` the command is a quoted string. In `xargs rm -rf` the
+    command is the rest of the argv. Neither is exotic. The first is how a model
+    writes a command that needs a shell, and the second is how it writes one
+    that needs a list.
     """
     head = _basename(argv[0])
     if head in _SHELLS:
@@ -363,9 +372,9 @@ def _nested(argv: list[str]) -> Iterator[list[str]]:
     if head == "xargs":
         rest = argv[1:]
         while rest and rest[0].startswith("-"):
-            # `xargs -0 -n1 rm -rf` — its own flags, then the command whole.
-            # Filtering every dashed token instead would hand `rm` on its own to
-            # the rules, and `rm` without `-rf` breaks none of them.
+            # `xargs -0 -n1 rm -rf`: the flags of `xargs` itself, then the whole
+            # command. To filter every dashed token instead would pass `rm`
+            # alone to the rules, and `rm` without `-rf` breaks none of them.
             rest = rest[1:]
         if rest:
             yield rest
@@ -374,18 +383,19 @@ def _nested(argv: list[str]) -> Iterator[list[str]]:
 def _simple_commands(text: str) -> Iterator[list[str]]:
     """Each simple command in the text, split on newlines and shell operators.
 
-    A pipeline's members, ungrouped. `|` is one of `_OPERATORS`, so this is
-    exactly `_pipelines` flattened — written that way rather than as a second
-    scanner, because two loops that must agree about how a line tokenizes are
-    two places to edit when `;;` is added or a bare `&` changes meaning.
+    These are the members of each pipeline, ungrouped. `|` is one of
+    `_OPERATORS`, so this is exactly `_pipelines` flattened. It is written that
+    way and not as a second scanner. Two loops that must agree about how a line
+    tokenizes are two places to edit when `;;` is added or a bare `&` changes
+    meaning.
     """
     for group in _pipelines(text):
         yield from group
 
 
 def _shell_findings(text: str) -> list[Finding]:
-    # Tokenized once: the groups answer both questions — what each command does,
-    # and what one feeds into.
+    # Tokenized one time. The groups answer both questions: what each command
+    # does, and what one command feeds into.
     groups = list(_pipelines(text))
     found: list[Finding] = []
     for group in groups:
@@ -396,25 +406,25 @@ def _shell_findings(text: str) -> list[Finding]:
 
 
 def _command_findings(argv: list[str]) -> Iterator[Finding]:
-    """Every rule this one command breaks — the command, not its wrapper (D3).
+    """Every rule that this one command breaks: the command, not its wrapper (D3).
 
-    **Unwrapping decides which *name* to look up, never whether the argv is
-    read.** It decided both for a while, and that opened a hole worse than the
-    one it closed: `_unwrapped` answers `[]` when nothing after the wrapper is in
-    a table, so `sudo cat x.iso > /dev/sda` returned before the redirect reader
-    ran and reported nothing, while the bare `cat x.iso > /dev/sda` reported. A
-    gate that catches the plain spelling and not the `sudo` one is the worst
-    shape it can have — `sudo` is what a model writes when it expects
+    **Unwrapping decides which *name* to look up, and never whether the argv is
+    read.** For a while it decided both, and that opened a hole worse than the
+    one it closed. `_unwrapped` answers `[]` when nothing after the wrapper is
+    in a table, so `sudo cat x.iso > /dev/sda` returned before the redirect
+    reader ran and reported nothing, while the bare `cat x.iso > /dev/sda`
+    reported. A gate that catches the plain form and not the `sudo` form has the
+    worst shape possible, because `sudo` is what a model writes when it expects
     resistance.
     """
     inner = _unwrapped(argv)
     for nested in _nested(inner or argv):
-        # Reported as itself: a person approving `sh -c "rm -rf /"` is being
-        # asked about the `rm`, and naming the `sh` would hide it.
+        # Reported as itself. A person who approves `sh -c "rm -rf /"` is asked
+        # about the `rm`, and to name the `sh` would hide it.
         yield from _command_findings(nested)
     if inner:
-        # Built once: the rule loop reads the first of them as a subcommand, and
-        # the refspec reader reads the rest of them as refspecs.
+        # Built one time. The rule loop reads the first of them as a subcommand,
+        # and the refspec reader reads the rest of them as refspecs.
         positional = [token for token in inner[1:] if not token.startswith("-")]
         yield from _refspec_findings(inner, positional)
         rules = _rules_for(_basename(inner[0]))
@@ -430,8 +440,8 @@ def _command_findings(argv: list[str]) -> Iterator[Finding]:
                 yield Finding("shell", " ".join(argv[:3]), rule.reason)
                 break
     # The shape readers run over the *original* argv, whatever the name lookup
-    # made of it: a redirect belongs to the command line rather than to the
-    # command, and `sudo` does not consume it.
+    # made of it. A redirect belongs to the command line and not to the command,
+    # and `sudo` does not consume it.
     for index, token in enumerate(argv):
         if token in _REDIRECTS and index + 1 < len(argv):
             target = argv[index + 1]
@@ -440,14 +450,14 @@ def _command_findings(argv: list[str]) -> Iterator[Finding]:
 
 
 def _refspec_findings(argv: list[str], positional: list[str]) -> Iterator[Finding]:
-    """The two destructive pushes that are spelled as *arguments* (D14).
+    """The two destructive pushes that are written as *arguments* (D14).
 
-    `git push origin :branch` deletes the remote branch — pushing nothing to it
-    — and `git push origin +main` forces. Neither carries a flag, so the rule
-    table cannot see them: it matches subcommands and flags, which is the right
-    shape for almost everything and the wrong one for a refspec. Read here for
-    the same reason the raw-device redirect below is: the danger is in the
-    argument's shape.
+    `git push origin :branch` deletes the remote branch, because it pushes
+    nothing to it. `git push origin +main` forces. Neither carries a flag, so
+    the rule table cannot see them. The table matches subcommands and flags,
+    which is the correct shape for almost everything and the wrong shape for a
+    refspec. They are read here for the same reason as the raw-device redirect
+    in `_command_findings`: the danger is in the shape of the argument.
     """
     if _basename(argv[0]) != "git" or not positional or positional[0] != "push":
         return
@@ -456,18 +466,19 @@ def _refspec_findings(argv: list[str], positional: list[str]) -> Iterator[Findin
             yield Finding("shell", f"git push {token}", "deletes a published branch or tag")
         elif token.startswith("+") and len(token) > 1:
             # **The `+` is the force, not the colon** (D14). `+main` is the
-            # short form of `+main:main`, and the first version asked for a
-            # colon — so the spelling this docstring names was the one spelling
-            # that passed. A remote name cannot start with `+`, so nothing else
-            # a push takes positionally is caught by it.
+            # short form of `+main:main`. The first version asked for a colon,
+            # so the form that this docstring names was the one form that
+            # passed. A remote name cannot start with `+`, so this catches
+            # nothing else that a push takes positionally.
             yield Finding("shell", f"git push {token}", "rewrites published history")
 
 
 def _pipelines(text: str) -> Iterator[list[list[str]]]:
-    """Each `|`-connected run of commands, as a group of its own.
+    """Each run of commands connected by `|`, as a group of its own.
 
-    `_simple_commands` splits on every operator, `|` included, which is right for
-    asking what each command does and wrong for asking what one *feeds into*.
+    `_simple_commands` splits on every operator, `|` included. That is correct
+    for the question of what each command does, and wrong for the question of
+    what one command *feeds into*.
     """
     for line in text.splitlines():
         if not line.strip():
@@ -494,20 +505,21 @@ def _pipelines(text: str) -> Iterator[list[list[str]]]:
 
 
 def _pipeline_findings(groups: Sequence[Sequence[list[str]]]) -> Iterator[Finding]:
-    """A network fetch piped into a shell — the shape no single command shows.
+    """A network fetch piped into a shell: the shape that no single command shows.
 
-    **Per pipeline, not per text** (D14). The test was "does this text contain a
-    `|`, a fetcher anywhere, and a shell anywhere" — so a script that downloaded
-    a file on one line, counted something with `wc` on another and ran an
-    unrelated `bash` on a third was reported as piping the network into a shell.
-    A false finding on the human-in-the-loop gate is not free: it is what teaches
-    a person to approve without reading.
+    **For each pipeline, not for each text** (D14). The test was "does this text
+    contain a `|`, a fetcher anywhere, and a shell anywhere". A script that
+    downloaded a file on one line, counted something with `wc` on another line
+    and ran an unrelated `bash` on a third was therefore reported as piping the
+    network into a shell. A false finding on the human-in-the-loop gate has a
+    cost: it teaches a person to approve without reading.
     """
     for group in groups:
         if len(group) < 2:
             continue
-        # Unwrapped, for `_unwrapped`'s reason: `curl x | sudo bash` is the shape
-        # this exists to catch, and reading `sudo` as the command name missed it.
+        # Unwrapped, for the same reason as in `_unwrapped`: `curl x | sudo bash`
+        # is the shape that this exists to catch, and a reader that took `sudo`
+        # as the command name missed it.
         names = [_basename(inner[0]) for argv in group if (inner := _unwrapped(argv))]
         if any(name in _FETCHERS for name in names) and any(name in _SHELLS for name in names):
             yield Finding("shell", " | ".join(names), "runs code fetched from the network")
@@ -524,30 +536,32 @@ SQL_STATEMENTS: dict[str, str] = {
     "GRANT": "changes access control",
     "REVOKE": "changes access control",
 }
-"""Leading statement keyword → what it does. Matched case-insensitively, because
-the parser has already decided this is SQL and SQL keywords are not case-bound."""
+"""Leading statement keyword → what it does. The match is case-insensitive. The
+parser has already decided that this is SQL, and SQL keywords have no fixed
+case."""
 
 _SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
 _SQL_LITERAL = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
 _SQL_LEAD = re.compile(r"^\s*([A-Za-z]+)(?=\s|$)")
-r"""The leading keyword — a **whole word**, not an alphabetic prefix (D2).
+r"""The leading keyword: a **whole word**, not an alphabetic prefix (D2).
 
-`^\s*([A-Za-z]+)` took the letters off the front of anything, so `create_app()`
-led with `CREATE` and `select_all()` with `SELECT`: both were read as SQL, and
-the Python that followed them — `shutil.rmtree(x)`, `os.remove(x)` — was never
-looked at by any reader that knows what those do. The same prefix read made
+`^\s*([A-Za-z]+)` took the letters from the front of anything, so `create_app()`
+led with `CREATE` and `select_all()` with `SELECT`. Both were read as SQL, and
+the Python that followed them (`shutil.rmtree(x)`, `os.remove(x)`) was never
+seen by a reader that knows what those calls do. The same prefix read made
 `update_config()` produce a confident SQL finding about a function call.
 
 A keyword is a word, so the match ends at whitespace or at the end of the
-statement; `create_app` is neither."""
+statement. The letters of `create_app` end at neither."""
 _SQL_KEYWORDS = frozenset(SQL_STATEMENTS) | {"SELECT", "INSERT", "CREATE", "WITH", "REPLACE"}
 
 
 def _sql_statements(text: str) -> Iterator[tuple[str, str]]:
-    """`(keyword, statement)` for each statement, comments and literals removed.
+    """`(keyword, statement)` for each statement, with comments and literals removed.
 
-    Literals go before the split so a `;` or a `WHERE` inside a quoted string
-    cannot end a statement or make an unqualified `DELETE` look qualified.
+    Literals are removed before the split. A `;` or a `WHERE` inside a quoted
+    string then cannot end a statement or make an unqualified `DELETE` look
+    qualified.
     """
     stripped = _SQL_LITERAL.sub("''", _SQL_COMMENT.sub(" ", text))
     for statement in stripped.split(";"):
@@ -588,11 +602,11 @@ PYTHON_METHODS: dict[str, str] = {
 }
 """Method name → what it does, matched on *any* receiver.
 
-Separate from the dotted table because the receiver is usually unknowable:
-`Path("/etc/hosts").unlink()` builds its path in the call, and a table that had
-to name the receiver would have to enumerate every way of spelling one. The cost
-is a false positive on some other object's `unlink`, which for an approval gate
-is the affordable direction."""
+This table is separate from the dotted table because the receiver usually cannot
+be known. `Path("/etc/hosts").unlink()` builds its path in the call, and a table
+that had to name the receiver would have to list every way to write one. The
+cost is a false positive on the `unlink` of some other object. For an approval
+gate, that is the affordable direction."""
 
 _SHELL_ESCAPES = frozenset(
     {
@@ -621,19 +635,20 @@ def _dotted(node: ast.AST) -> str:
 
 
 def _imported(nodes: Sequence[ast.AST]) -> tuple[dict[str, str], dict[str, str]]:
-    """What the names in this cell actually refer to (D4).
+    """What the names in this cell really refer to (D4).
 
-    Two maps: local module name → real module (`import os as o`), and local
-    function name → dotted path (`from os import remove`). Both are how a cell
-    ordinarily writes an import, and the gate matched the *written* name — so
-    `o.remove(x)` and a bare `remove(x)` were unknown to it while `os.remove(x)`
-    was caught, which is a rule anybody can step around by accident.
+    There are two maps: local module name → real module (`import os as o`), and
+    local function name → dotted path (`from os import remove`). Both are
+    ordinary ways for a cell to write an import. The gate matched the *written*
+    name, so `o.remove(x)` and a bare `remove(x)` were unknown to it while
+    `os.remove(x)` was caught. Anybody can step around such a rule by accident.
 
-    Takes the already-walked nodes rather than the tree. This runs inside the
-    `tools/pre-execute` gate, on the event loop and on every string a call
-    carries — a `write` hands it the whole file content as one leaf — and its
-    own `ast.walk` was a second full traversal of what the caller was about to
-    walk anyway: a third of the reader's cost on a 14 KB cell, for nothing.
+    The function takes the nodes that are already walked, and not the tree. It
+    runs inside the `tools/pre-execute` gate, on the event loop, and on every
+    string that a call carries. A `write` passes the whole file content to it as
+    one leaf. Its own `ast.walk` was a second full traversal of what the caller
+    was about to walk anyway. That was a third of the cost of the reader on a
+    14 KB cell, for no benefit.
     """
     modules: dict[str, str] = {}
     names: dict[str, str] = {}
@@ -659,9 +674,9 @@ def _python_findings(text: str) -> list[Finding]:
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        # A cell that will not parse will not run either, so there is nothing to
-        # gate — but say nothing rather than falling through to another reader,
-        # which would tokenize Python as shell and invent findings.
+        # A cell that does not parse does not run either, so there is nothing to
+        # gate. Report nothing, and do not fall through to another reader. That
+        # reader would tokenize Python as shell and invent findings.
         return []
     nodes = list(ast.walk(tree))
     modules, names = _imported(nodes)
@@ -680,7 +695,7 @@ def _python_findings(text: str) -> list[Finding]:
 
 
 def _escaped_shell(node: ast.Call) -> Iterator[Finding]:
-    """A Python call that hands a command to a shell — read the command as shell."""
+    """A Python call that passes a command to a shell. Read the command as shell."""
     if not node.args:
         return
     first = node.args[0]
@@ -688,10 +703,9 @@ def _escaped_shell(node: ast.Call) -> Iterator[Finding]:
         yield from _shell_findings(first.value)
     elif isinstance(first, ast.JoinedStr):
         # An f-string: the literal parts are the command, and the interpolations
-        # are its arguments. `subprocess.run(f"rm -rf {d}", shell=True)` is how a
-        # cell writes a parameterized command, and reading only `ast.Constant`
-        # meant the most ordinary spelling of a shell escape was the one that
-        # went ungated.
+        # are its arguments. `subprocess.run(f"rm -rf {d}", shell=True)` is how
+        # a cell writes a parameterized command. A reader of `ast.Constant` only
+        # left the most ordinary form of a shell escape ungated.
         literal = "".join(
             part.value
             for part in first.values
@@ -730,12 +744,13 @@ _PYTHON_MARKERS = (
 def dialect_of(text: str) -> Dialect:
     """Which parser reads this string.
 
-    Ordered by how *specific* the evidence is, because the readers disagree about
-    ambiguous input: `rm -rf /tmp` is, unhelpfully, a valid Python expression
-    (`rm - rf / tmp`). So Python is claimed only when the tree contains something
-    a shell command could not produce — an import, a call, an assignment — and
-    SQL only when a statement keyword leads. Everything else is shell, which is
-    the dialect a bare command line is in.
+    The order follows how *specific* the evidence is, because the readers
+    disagree about ambiguous input. `rm -rf /tmp` is, unhelpfully, a valid
+    Python expression (`rm - rf / tmp`). Python is therefore claimed only when
+    the tree contains something that a shell command could not produce: an
+    import, a call, an assignment. SQL is claimed only when a statement keyword
+    leads. Everything else is shell, which is the dialect of a bare command
+    line.
     """
     for keyword, _statement in _sql_statements(text):
         if keyword in _SQL_KEYWORDS:
@@ -754,11 +769,11 @@ _READERS = {"shell": _shell_findings, "sql": _sql_findings, "python": _python_fi
 
 
 def findings(value: JsonValue) -> list[Finding]:
-    """Everything destructive in one call's arguments, deduplicated in order.
+    """Everything destructive in the arguments of one call, deduplicated in order.
 
-    Each string leaf is dispatched to the reader for its own dialect, so a cell
-    that shells out is read as Python *and* its command as shell, and a tool
-    carrying both a query and a path is read as each.
+    Each string leaf goes to the reader for its own dialect. A cell that shells
+    out is therefore read as Python *and* its command is read as shell, and a
+    tool that carries both a query and a path is read as each.
     """
     found: list[Finding] = []
     seen: set[tuple[str, str]] = set()

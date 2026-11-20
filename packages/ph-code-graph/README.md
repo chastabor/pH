@@ -377,7 +377,7 @@ bundle and the bundle of `ph-text-index`:
 phern --profile rlm-indexed --provider llama --model <model> --mode tui
 ```
 
-This package registers a `ph.bundles` entry point. That lets `ph-app` compose
+This package registers a `ph.bundles` entry point. That lets `phern` compose
 the profile without depending on this distribution. It also means that an
 install without this distribution sees no `rlm-indexed`, and does not see one
 that fails at mount.

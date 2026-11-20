@@ -1,26 +1,28 @@
-"""P4-05 — `hitl`: a human between the model and what it cannot take back (G6).
+"""`hitl` (P4-05): a human between the model and what it cannot take back (G6).
 
-The row's gate names two things: the four decision flows, and *a destructive
-cell prompts in `MANUAL`*. The second is the one worth reading, because it is
-where the shape of the design shows: a cell is not a tool name, so one `python`
-call may delete a tree or force-push, and asking about the *transport* would
-either prompt on every cell or on none. The rule matches the call's arguments.
+The gate of the row names two things: the four decision flows, and *a
+destructive cell prompts in `MANUAL`*. The second one shows the shape of the
+design. A cell is not a tool name, so one `python` call may delete a tree or
+force-push. A question about the *transport* would prompt on every cell or on
+none. The rule therefore matches the arguments of the call.
 
-Everything after the ask is the seam's and was already true — `approval/asked`
-then `approval/decided`, fail-closed on a missing answerer, re-ask on resume.
-What P4-05 adds is that two of the four answers carry data, and the tests for
-those live here because the pipeline is where they take effect.
+Everything after the ask belongs to the seam and was already true:
+`approval/asked` then `approval/decided`, fail-closed when no answerer is
+present, and an ask that a crash left open settled as `interrupted` on resume.
+P4-05 adds that two of the four answers carry data. The tests for those two
+answers are here, because the pipeline is where they take effect.
 
 ## What the retyped copy of `DESTRUCTIVE_PATTERNS` got wrong
 
-`DESTRUCTIVE_PATTERNS` was exported, documented and tested, and reachable only
-from Python — so the first profile that wanted it retyped a subset, which had
-already diverged **on its first day**: it widened `git push` from force-only to
-**every** push, against a shipped test that pins `git push origin main` as
-ordinary, and dropped the `wget`, `dd`, `mkfs`, `chmod -R` and SQL entries.
+`DESTRUCTIVE_PATTERNS` was exported, documented and tested, and it was reachable
+only from Python. The first profile that wanted it therefore retyped a subset.
+The subset had already diverged **on its first day**. It widened `git push` from
+force-only to **every** push, against a shipped test that holds
+`git push origin main` to be ordinary. It also dropped the `wget`, `dd`, `mkfs`,
+`chmod -R` and SQL entries.
 
-A security judgement with two homes is one that disagrees with itself, which is
-why `PATTERN_SETS` gives a profile a name to write instead.
+A security judgement with two homes disagrees with itself. That is why a profile
+now writes a name, `preset: destructive`, and not a copy of the patterns.
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ pytestmark = pytest.mark.anyio
 
 
 def _gated(mode: str = "auto", **rules: object) -> dict[str, Any]:
-    """The row with one rule per named tool, spelled the way a profile spells it."""
+    """The row with one rule for each named tool, written as a profile writes it."""
     return row("hitl", mode=mode, interruptOn=rules)
 
 
@@ -59,11 +61,11 @@ def _gated(mode: str = "auto", **rules: object) -> dict[str, Any]:
 
 
 def test_the_classifier_catches_what_cannot_be_undone() -> None:
-    """A small set of hard-to-undo things, not a general audit.
+    """A small set of things that are hard to undo, not a general audit.
 
-    A rule that fires on everything is one a person learns to approve without
-    reading, which is worse than no rule — so the negatives matter as much as
-    the positives here.
+    A person learns to approve a rule that fires on everything without reading
+    it, and that is worse than no rule. The negative cases therefore matter as
+    much as the positive cases here.
     """
     for destructive in (
         "rm -rf /tmp/build",
@@ -84,25 +86,27 @@ def test_the_classifier_catches_what_cannot_be_undone() -> None:
     ):
         assert not findings({"command": ordinary}), ordinary
 
-    # `rm` gates on `-r` only — narrower than the regex this replaced, which
-    # wanted `-r` or `-f`. Recursion is the multiplier; a single deletion is
-    # routine work, and prompting on it is how a gate gets rubber-stamped.
+    # `rm` gates on `-r` only. That is narrower than the regex that this
+    # replaced, which wanted `-r` or `-f`. Recursion is the multiplier. A single
+    # deletion is routine work, and a gate that prompts on it gets approved
+    # without being read.
     assert not findings({"command": "rm build/artifact.o"})
     assert not findings({"command": "rm -f build/artifact.o"})
     assert findings({"command": "rm -rf build/"})
 
 
 def test_a_payload_on_a_second_line_is_still_seen() -> None:
-    """**The defect the parser replaces a regex set for.**
+    """**The defect that the parser replaced a regex set to fix.**
 
     The classifier scanned the arguments rendered as JSON, where `dumps` escapes
-    a real newline to the two characters `\\` and `n`. Every shipped pattern was
-    anchored with `\\b`, and `\\b` cannot match between `n` and the letter after
-    it — so twelve of thirteen patterns stopped firing the moment their payload
-    was on a second line. That is *every* multi-line cell, which is every cell.
+    a real newline to the two characters `\\` and `n`. Eleven of the twelve
+    shipped patterns were anchored with `\\b`, and `\\b` cannot match between `n`
+    and the letter after it. Those eleven therefore stopped firing as soon as their
+    payload was on a second line. That is *every* multi-line cell, which is
+    every cell.
 
-    Both spellings are checked: a real newline, and the escaped form a producer
-    may hand over already encoded.
+    Both spellings are checked: a real newline, and the escaped form that a
+    producer may hand over already encoded.
     """
     for payload in ("cd /tmp\nrm -rf build", "cd /tmp\\nrm -rf build"):
         found = findings({"command": payload})
@@ -111,13 +115,14 @@ def test_a_payload_on_a_second_line_is_still_seen() -> None:
 
 
 async def test_a_multi_line_cell_is_gated_through_the_real_pipeline(mount: MountProfile) -> None:
-    """**The motivating case, end to end rather than at the classifier.**
+    """**The motivating case, end to end and not only at the classifier.**
 
-    Every cell a model writes is multi-line, and every one of them was ungated:
-    the arguments were scanned as rendered JSON, so the newline became `\\` + `n`
-    and the `\\b` every pattern opened with could not match the command after it.
-    Driven through `tools/pre-execute` and the approval seam, because the
-    classifier being right and the gate never calling it are different failures.
+    Every cell that a model writes is multi-line, and every one of them was
+    ungated. The arguments were scanned as rendered JSON, so the newline became
+    `\\` + `n`, and the `\\b` at the start of every pattern could not match the
+    command after it. The test drives `tools/pre-execute` and the approval seam,
+    because a wrong classifier and a gate that never calls the classifier are
+    different failures.
     """
     ctx = await mount(_gated(bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
@@ -131,12 +136,13 @@ async def test_a_multi_line_cell_is_gated_through_the_real_pipeline(mount: Mount
 
 
 def test_each_string_is_read_in_its_own_dialect() -> None:
-    """`bash` carries a command, `run_code` a program, a query is SQL.
+    """`bash` carries a command, `run_code` carries a program, and a query is SQL.
 
-    A rule that had to name the key would be a rule per tool, and the call that
-    matters most — a cell — is the one whose dangerous content has no fixed
-    field. So every string leaf is dispatched to the reader for *its* language,
-    and a cell that shells out is read as Python and its command as shell.
+    A rule that had to name the key would be one rule for each tool. The call
+    that matters most, a cell, is the one whose dangerous content has no fixed
+    field. Every string leaf is therefore dispatched to the reader for *its*
+    language. A cell that shells out is read as Python, and its command is read
+    as shell.
     """
     assert findings({"program": "import shutil\nshutil.rmtree('/x')"})
     assert findings({"content": "rm -rf ~", "path": "a.sh"})
@@ -145,10 +151,10 @@ def test_each_string_is_read_in_its_own_dialect() -> None:
 
 
 def test_the_parser_sees_structure_a_pattern_cannot() -> None:
-    """Why this is parsed rather than matched, in the cases that show it.
+    """Why the arguments are parsed and not matched, in the cases that show it.
 
-    Flag order and bundling are the shell's business, not a pattern's; a quoted
-    `WHERE` is a string and not a clause; and `ladd` is not `dd`.
+    Flag order and bundling belong to the shell, not to a pattern. A quoted
+    `WHERE` is a string and not a clause. `ladd` is not `dd`.
     """
     assert findings({"command": "rm -fr /data"}), "flag order is the shell's, not a pattern's"
     assert findings({"command": "sed -ri 's/a/b/' f.txt"}), "a bundled short flag is the flag"
@@ -166,8 +172,8 @@ def test_the_parser_sees_structure_a_pattern_cannot() -> None:
 
 
 async def test_a_destructive_call_is_asked_about(mount: MountProfile) -> None:
-    """The row's gate. The verdict rides the ask, so the person is told what the
-    harness is worried about and an auditor can tune against it."""
+    """The gate of the row. The verdict is part of the ask, so the user is told
+    what concerns the harness, and an auditor can tune against it."""
     ctx = await mount(_gated(bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("destructive")
@@ -180,8 +186,8 @@ async def test_a_destructive_call_is_asked_about(mount: MountProfile) -> None:
 
 
 async def test_auto_lets_the_routine_case_through(mount: MountProfile) -> None:
-    """`auto` trusts the condition — which is the whole reason a condition
-    exists. Nothing matched, so nothing is asked."""
+    """`auto` trusts the condition, which is the reason that a condition exists.
+    Nothing matched, so nothing is asked."""
     ctx = await mount(_gated(bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("routine")
@@ -192,8 +198,8 @@ async def test_auto_lets_the_routine_case_through(mount: MountProfile) -> None:
 
 
 async def test_manual_asks_even_when_nothing_matched(mount: MountProfile) -> None:
-    """Which is what `manual` means: the condition selects, the posture decides
-    whether selection is enough."""
+    """This is what `manual` means: the condition selects, and the posture
+    decides whether selection is enough."""
     ctx = await mount(_gated("manual", bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("manual")
@@ -204,7 +210,7 @@ async def test_manual_asks_even_when_nothing_matched(mount: MountProfile) -> Non
 
 
 async def test_yolo_asks_about_nothing(mount: MountProfile) -> None:
-    """A thing a person turns on deliberately, for a session they are watching."""
+    """A user turns this on deliberately, for a session that they are watching."""
     ctx = await mount(_gated("yolo", bash={"preset": "destructive"}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("yolo")
@@ -215,8 +221,8 @@ async def test_yolo_asks_about_nothing(mount: MountProfile) -> None:
 
 
 async def test_the_mode_is_read_from_the_log_so_a_resume_keeps_it(mount: MountProfile) -> None:
-    """A toggle that lived in a field would be one a restart silently undid, and
-    the posture is the last thing a person wants quietly reset."""
+    """A restart would silently undo a toggle that was held in a field. The
+    posture is the last thing that a user wants to be reset without notice."""
     ctx = await mount(_gated("manual", bash={}), profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("toggled")
@@ -228,8 +234,8 @@ async def test_the_mode_is_read_from_the_log_so_a_resume_keeps_it(mount: MountPr
 
 
 async def test_an_ordinary_call_is_not_gated_by_default(mount: MountProfile) -> None:
-    """`bash` declares, so under `manual` this would ask; under the shipped `auto`
-    the destructive patterns are what separate `rm -rf` from `echo`."""
+    """`bash` declares, so under `manual` this call would be asked about. Under
+    the shipped `auto`, the `destructive` preset separates `rm -rf` from `echo`."""
     ctx = await mount(profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("ungated")
@@ -240,9 +246,9 @@ async def test_an_ordinary_call_is_not_gated_by_default(mount: MountProfile) -> 
 
 
 async def test_a_declared_tool_is_gated_with_no_config_naming_it(mount: MountProfile) -> None:
-    """**P6-16's gate.** The previous version of this test asserted the opposite —
-    that `rm -rf /tmp/x` was *not* asked about with no config — which was true and
-    was the defect."""
+    """**The gate of P6-16.** The previous version of this test asserted the
+    opposite: that `rm -rf /tmp/x` was *not* asked about with no config. That
+    was true, and it was the defect."""
     ctx = await mount(profile=PROFILE)
     answer_approvals(ctx, "rejected")
     session = ctx.require(SESSIONS).create("declared")
@@ -285,10 +291,11 @@ async def test_a_deployments_patterns_for_declared_tools_survive_a_rename(
     """**Why the declared rule is config and not a constant.**
 
     `rlm-stable` adds `sudo`/`publish`/`subprocess` patterns *per tool* under
-    `bash` and `run_code`. Written there, a renamed tool keeps the shipped preset
-    and silently loses the deployment's additions — a partial fail-open that a
-    rename test on the preset alone presents as success. Written once on
-    `declared`, they apply to whatever declares, under any name.
+    `bash` and `run_code`. Because they are written there, a renamed tool keeps
+    the shipped preset and silently loses the additions of the deployment. That
+    is a partial fail-open, and a rename test on the preset alone reports it as
+    success. When the patterns are written one time on `declared`, they apply to
+    every tool that declares, under any name.
     """
     ctx = await mount(
         row("hitl", declared={"preset": "destructive", "when": [r"\bsudo\b"]}),
@@ -331,10 +338,11 @@ async def test_reject_stops_it_and_says_who(mount: MountProfile) -> None:
 
 
 async def test_a_call_parked_on_a_human_leaves_no_record_of_an_act(mount: MountProfile) -> None:
-    """The real gate, through the real seam: the ask is in the log, the act is not.
+    """The real gate, through the real seam: the ask is in the log, and the act
+    is not.
 
-    While a person looks at the modal, the log holds `approval/asked` — which
-    *is* the pending state — and nothing else.
+    While a user looks at the modal, the log holds `approval/asked`, which *is*
+    the pending state, and nothing else.
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("parked")
@@ -364,13 +372,13 @@ async def test_a_call_parked_on_a_human_leaves_no_record_of_an_act(mount: MountP
 
 
 async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: MountProfile) -> None:
-    """The correction path: three records, each attributed to whoever made it.
+    """The correction path: three records, each attributed to its author.
 
-    The *assistant message* holds what the model asked for; `approval/decided`
-    carries the human's substitution; and `tool/call`, written after the gate
-    (P7-15), records what actually **ran** — the record named "call" says what
-    was called. Nothing is attributed to the wrong author: the model's own words
-    are still in the log, in the message it sent.
+    The *assistant message* holds what the model asked for. `approval/decided`
+    carries the substitution that the human made. `tool/call`, which is written
+    after the gate (P7-15), records what actually **ran**: the record named
+    "call" says what was called. Nothing is attributed to the wrong author. The
+    words of the model are still in the log, in the message that it sent.
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, Edited(arguments={"command": "echo corrected"}))
@@ -390,10 +398,11 @@ async def test_edit_runs_the_humans_arguments_and_logs_all_three(mount: MountPro
 
 
 async def test_respond_skips_the_body_and_answers_in_its_place(mount: MountProfile) -> None:
-    """A *successful* result, because the model asked a question and got one.
+    """A *successful* result, because the model asked a question and got an
+    answer.
 
-    A denial it would have to interpret is the wrong shape for "you don't need
-    to run that, here is the answer".
+    A denial that the model would have to interpret is the wrong shape for "you
+    don't need to run that, here is the answer".
     """
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     answer_approvals(ctx, Responded(message="the port is 8080, no need to look"))
@@ -413,8 +422,8 @@ async def test_respond_skips_the_body_and_answers_in_its_place(mount: MountProfi
 
 
 async def test_no_answerer_still_denies(mount: MountProfile) -> None:
-    """B3, unchanged by the two new answers: absence is not consent, and a
-    missing channel reads differently from a human saying no."""
+    """B3, which the two new answers do not change: absence is not consent, and
+    a missing channel reads differently from a human who says no."""
     ctx = await mount(_gated(bash={}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("unanswered")
 

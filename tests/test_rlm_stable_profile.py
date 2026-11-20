@@ -7,7 +7,7 @@ it is the first place their rows meet: `rlm`'s Code Mode transport beside
 under both. A row that only ever ran beside its own siblings gets its first
 integration here.
 
-**A repo-level scenario, not a package test.** It composes `ph-app`'s profile
+**A repo-level scenario, not a package test.** It composes `phern`'s profile
 over `ph-rlm` and `ph-stabilize`, and no one of those three depends on the other
 two — the entry-point indirection exists to keep that boundary honest. Living in
 one package's suite would make a stabilize regression report as an rlm failure,

@@ -1,113 +1,121 @@
-# ph-stabilize: Deep Agents' stabilization features as plugins, over `ph-base`.
+# ph-stabilize: the stabilization features of Deep Agents as plugins, over
+# `ph-base`.
 #
-# Every row here attaches to a waterfall that already exists — D12, the whole
+# Every row here attaches to a waterfall that already exists. That is D12, the
 # integration thesis: todo planning is a tool plus a prompt section, offloading
-# is `tools/post-execute`, summarization is `agent/pre-step`. None of them is a
-# parameter on the loop, and none of them needs the loop to know it is there.
+# is `tools/post-execute`, and summarization is `agent/pre-step`. None of them
+# is a parameter on the loop, and none of them needs the loop to know that it is
+# there.
 #
-# Layered by a profile rather than by `ph-base`, because a deployment that wants
-# the plain harness should get the plain harness — and `ph-base` composed on its
-# own still is one.
+# A profile layers this bundle, and `ph-base` does not. A deployment that wants
+# the plain harness must get the plain harness, and `ph-base` composed alone is
+# still the plain harness.
 #
-# **Every profile `ph-app` offers layers this bundle**, `base` included, and as
-# an *optional* bundle: an install without this distribution composes the same
-# profiles and simply never compacts. The reason is one row rather than all
-# nine — a session that grows until the provider refuses it is a defect in any
-# posture, not a feature of an unattended one — and the rest come along because
-# a bundle is the unit a profile can name. They are inert by design, with one
-# exception worth knowing: `permissions-fs` below ships a live rule.
+# **Every profile that `phern` offers layers this bundle**, `base` included.
+# Each profile layers it as an *optional* bundle: an install without this
+# distribution composes the same profiles and never compacts. The reason is one
+# row and not all nine. A session that grows until the provider refuses it is a
+# defect in any posture, and not a feature of an unattended posture. The other
+# rows come with it because a bundle is the unit that a profile can name. They
+# are inert by design, with three exceptions: `permissions-fs` below ships a
+# live rule, `hitl` below asks about a destructive command, and the breaker of
+# `limits` below trips after five consecutive failures of one tool.
 
 # --- planning ---------------------------------------------------------------
-# `write_todos` + the `todo/write` event + the prompt section (G1). `disabled`
-# in its own bundle — the `rlm-context-loader` idiom — because layering this
-# bundle for offload or compaction must not, by itself, hand the model a tool:
-# upstream dropped `TodoListMiddleware` from its default stack and re-adds it
-# per model, so a profile flips this row on purpose (`rlm-stable` does, P4-15).
+# `write_todos`, the `todo/write` event, and the prompt section (G1). The row is
+# `disabled` in its own bundle, which is the `rlm-context-loader` idiom. A
+# profile that layers this bundle for offload or compaction must not, by that
+# alone, give the model a tool. Upstream dropped `TodoListMiddleware` from its
+# default stack and adds it again per model. A profile therefore turns this row
+# on deliberately (`rlm-stable` does, P4-15).
 - id: tool-todo
   name: tool-todo
   disabled: true
 
-# A skill that declares `steps:` becomes work the model must finish, and a
-# listener on `agent/turn-stopping` objects while any of it is startable (P7-18).
-# `disabled` for `tool-todo`'s reason and one more: this row can keep a turn
-# going, which is a posture a deployment chooses rather than inherits. It needs
-# `tool-todo` beside it and nothing checks for it: the list it seeds is that
-# row's, and without `write_todos` the model is nudged about steps it cannot
-# mark done. So a profile that turns this on turns on both. No shipped profile
-# turns this one on (`rlm-stable` turns on `tool-todo` alone).
+# A skill that declares `steps:` becomes work that the model must finish. A
+# listener on `agent/turn-stopping` objects while any of that work can start
+# (P7-18). The row is `disabled` for the same reason as `tool-todo`, and for one
+# more: this row can keep a turn going, and that is a posture that a deployment
+# chooses and does not inherit. The row needs `tool-todo` beside it, and nothing
+# checks for that. The list that it seeds belongs to `tool-todo`. Without
+# `write_todos`, the model is nudged about steps that it cannot mark done. A
+# profile that turns this row on therefore turns on both rows. No shipped
+# profile turns this row on (`rlm-stable` turns on `tool-todo` alone).
 - id: skill-steps
   name: skill-steps
   disabled: true
 
 # --- context offloading -----------------------------------------------------
-# One oversized tool result can end a session's usefulness on its own, and the
-# model rarely needs all of it (G2/C5). Enabled: unlike planning, this changes
-# nothing until a result actually exceeds 80 000 characters, so a profile that
-# layered this bundle for any reason wants it — there is no posture in which
-# losing the context window to one `find /` is the preferred outcome.
+# One oversized tool result can end the usefulness of a session, and the model
+# rarely needs all of it (G2/C5). The row is enabled. Unlike planning, it
+# changes nothing until a result exceeds 80 000 characters, so a profile that
+# layered this bundle for any reason wants it. In no posture is it the preferred
+# outcome to lose the context window to one `find /`.
 - id: tool-result-offload
   name: tool-result-offload
 
-# The other direction: a pasted build log or dumped table (G3). Same reasoning
-# as above for being on — and the same shape, except that the substitution is a
-# surface `replace`, so the log keeps what the person actually sent while the
-# model reads a preview.
+# The other direction: a pasted build log or a dumped table (G3). The row is on
+# for the same reason as the row above, and it has the same shape. The one
+# difference is that the substitution is a surface `replace`, so the log keeps
+# what the user sent and the model reads a preview.
 - id: input-offload
   name: input-offload
 
 # --- compaction -------------------------------------------------------------
-# When the conversation itself is the thing that no longer fits (G4). Enabled,
-# for the same reason the offload rows are: this changes nothing until a session
-# actually reaches 85% of its window, and there is no posture in which losing
-# the turn to an overflow is preferable to summarizing what has already been
-# answered. The engine is the `ctx.compaction` provider; the seam ships in
-# `ph-base` with no backend, so a profile that layers nothing here simply never
-# compacts.
+# For when the conversation itself no longer fits (G4). The row is enabled, for
+# the same reason as the offload rows: it changes nothing until a session
+# reaches 85% of its window. In no posture is it better to lose the turn to an
+# overflow than to summarize what was already answered. The engine is the
+# `ctx.compaction` provider. The seam ships in `ph-base` with no backend, so a
+# profile that layers nothing here never compacts.
 - id: compaction-summarize
   name: compaction-summarize
 
-# The human verb, split from the policy exactly as dsh splits them: a deployment
-# may want automatic compaction without handing anyone a command, or the command
-# with a different engine behind it.
+# The command that a human gives for the same thing. It is split from the policy
+# exactly as dsh splits the two. A deployment may want automatic compaction
+# without a command for anyone, or the command with a different engine behind
+# it.
 - id: command-compact
   name: command-compact
 
 # --- limits -----------------------------------------------------------------
-# Hard boundaries on a loop that has stopped making progress (G5). Mounted with
-# every ceiling unset, so layering the bundle changes nothing until a profile
-# names a number — a limit nobody chose is a limit that fires on someone's
-# longest legitimate turn. The breaker is the exception and is on by default:
-# five identical failures in a row is not a long task, it is a stuck one.
+# Hard boundaries on a loop that has stopped making progress (G5). The row is
+# mounted with every ceiling unset, so layering the bundle changes nothing until
+# a profile names a number. A limit that nobody chose fires on the longest
+# legitimate turn of some user. The breaker is the exception and is on by
+# default: five identical failures in a row are not a long task but a stuck one.
 - id: limits
   name: limits
 
 # --- human in the loop ------------------------------------------------------
 # A person between the model and what it cannot take back (G6). `interruptOn`
-# is empty by default, so layering the bundle names no tool. What it does ask
-# about is the row's `declared` rule, the `destructive` preset: a tool that
+# is empty by default, so layering the bundle names no tool. The row does ask
+# under its `declared` rule, which is the `destructive` preset. A tool that
 # declares `is_irreversible` (`bash`, a code cell) asks when the classifier
-# finds a destructive command in the call, and runs unasked otherwise. A harness
-# that asks on first run teaches its user to approve without reading, which is
-# worse than not asking. A profile names the tools and the patterns it cares
-# about — `rlm-stable` does, at P4-15.
+# finds a destructive command in the call, and runs without an ask otherwise. A
+# harness that asks on the first run teaches its user to approve without
+# reading, and that is worse than not asking. A profile names the tools and the
+# patterns that it cares about. `rlm-stable` does, at P4-15.
 - id: hitl
   name: hitl
 
-# Path rules over filesystem access (G7). Attached to `ctx.fs`'s intent
-# waterfalls rather than to the fs tools, so a second editing tool or a Code
-# Mode binding is covered by the same rules; `rules` is empty by default, for
-# `hitl`'s reason — layering a bundle must not start refusing file access. The
-# row says out loud what it does not reach when no sandbox is mounted (E9).
+# Path rules over filesystem access (G7). The rules attach to the intent
+# waterfalls of `ctx.fs` and not to the fs tools, so the same rules cover a
+# second editing tool or a Code Mode binding. The `rules` default of the row is
+# empty, for the same reason as `hitl`: layering a bundle must not start to
+# refuse file access. This bundle sets one rule, below. When no sandbox is
+# mounted, the row states what it does not reach (E9).
 - id: permissions-fs
   name: permissions-fs
   config:
     rules:
-      # The default write scope (E6, §12 Q9b), and the *last* rule on purpose:
-      # first-match-wins means every explicit rule an operator writes above it
-      # decides first, so this is a default rather than an override. A write
-      # inside the agent's own workspace or its scratch matches nothing and is
-      # allowed; one leaving them asks, once. Inert until a containment tier is
-      # in force — with no acquired workspace there is nothing to be outside of.
+      # The default write scope (E6, §12 Q9b). It is deliberately the *last*
+      # rule. With first-match-wins, every explicit rule that an operator writes
+      # above it decides first, so this rule is a default and not an override. A
+      # write inside the workspace of the agent or its scratch directory matches
+      # nothing and is allowed. A write that leaves them asks, one time. The
+      # rule is inert until a containment tier is in force: with no acquired
+      # workspace, there is nothing to be outside of.
       - operations: [write]
         paths: ["**"]
         scope: outside-workspace

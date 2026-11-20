@@ -1,16 +1,19 @@
-"""P4-04 — `limits`: hard boundaries on a loop that stopped making progress (G5).
+"""`limits` (P4-04): hard boundaries on a loop that stopped making progress (G5).
 
-The row's gate, one test each: *end / continue / error; the breaker trips.*
+The gate of the row, with one test for each part: *end / continue / error; the
+breaker trips.*
 
-Two things are worth reading past the behaviors. The counts are a **fold over
-the log**, so the first tests here are about a resumed session getting the same
-answer as a live one — a limit that lived in a field would be a limit a restart
-forgets, and nothing about the shipped behavior would look different until
-someone resumed a session that had already spent its budget.
+Two things are worth reading beyond the behaviors.
 
-The other is that every ceiling is **unset by default**. Layering this bundle
-must not start refusing a long legitimate turn, so the tests that exercise a
-limit say the number out loud, and one test holds the default.
+The counts are a **fold over the log**. The first tests here therefore check
+that a resumed session gets the same answer as a live one. A restart would
+forget a limit that was held in a field. Nothing about the shipped behavior
+would look different until someone resumed a session that had already spent its
+budget.
+
+Every ceiling is **unset by default**. Layering this bundle must not start to
+refuse a long legitimate turn. The tests that exercise a limit therefore state
+the number, and one test holds the default.
 """
 
 from __future__ import annotations
@@ -58,7 +61,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def _pre_step(ctx: Context, agent: AgentDriver, *, turn: int, step: int) -> Any:  # noqa: ANN401
-    """The decision `agent/pre-step` reaches, with the loop's own `inner`."""
+    """The decision that `agent/pre-step` reaches, with the `inner` of the loop itself."""
     from ph.agent.types import PreStepDecision, PreStepRequest
 
     async def inner(request: PreStepRequest) -> PreStepDecision:
@@ -72,11 +75,11 @@ async def _pre_step(ctx: Context, agent: AgentDriver, *, turn: int, step: int) -
 
 
 def _failing_read(call_id: str) -> ToolCallBlock:
-    """A call that genuinely *errors*, which a non-zero shell exit does not.
+    """A call that really *errors*, which a non-zero shell exit does not.
 
-    `bash` returning `exit 3` is a successful tool call reporting a failed
-    command — `is_error` is about the tool raising, and the breaker counts the
-    former. Reading a path that is not there raises.
+    When `bash` returns `exit 3`, that is a successful tool call that reports a
+    failed command. `is_error` says that the tool raised, and that is what the
+    breaker counts. A read of a path that does not exist raises.
     """
     return ToolCallBlock(id=call_id, name="read", arguments=json.dumps({"path": "no/such/file"}))
 
@@ -84,10 +87,10 @@ def _failing_read(call_id: str) -> ToolCallBlock:
 def _settled_event(session: Session, call_id: str) -> Any:  # noqa: ANN401
     """The `tool/result` event for one call, found by its id.
 
-    By `toolCallId` rather than by searching the serialized message for the id:
-    `new_message_id()` is random, so a substring test matches whenever the id it
-    generated happens to contain the call's — which is a test that fails roughly
-    one run in four and blames the code.
+    The search is by `toolCallId`. It does not look for the id in the serialized
+    message. `new_message_id()` is random, so a substring test matches whenever
+    the generated id happens to contain the id of the call. Such a test fails
+    about one run in four and blames the code.
     """
     for event in events_of(session, "tool/result"):
         content = as_seq(as_obj(event.data.get("message")).get("content"))
@@ -99,9 +102,9 @@ def _settled_event(session: Session, call_id: str) -> Any:  # noqa: ANN401
 def _denied(session: Session, call_id: str, reason: str) -> bool:
     """Whether this call was refused with `reason`.
 
-    Containment, not equality: the pipeline renders a `Deny` as `Error: <reason>`
-    (B5), so the ported sentence is what the model reads *inside* a normalized
-    error rather than the whole of it.
+    The check is containment, not equality. The pipeline renders a `Deny` as
+    `Error: <reason>` (B5), so the ported sentence is what the model reads
+    *inside* a normalized error and is not the whole error.
     """
     return reason in result_text(session, call_id)
 
@@ -110,11 +113,11 @@ def _denied(session: Session, call_id: str, reason: str) -> bool:
 
 
 def test_the_counts_are_a_fold_a_resume_reproduces() -> None:
-    """The property the whole design rests on.
+    """The property that the whole design depends on.
 
-    A counter in memory answers the same question until the process restarts;
-    this is folded from the log, so a session reopened from disk has spent
-    exactly what it spent.
+    A counter in memory answers the same question until the process restarts.
+    These counts are folded from the log, so a session that is reopened from
+    disk has spent exactly what it spent.
     """
     session = Session("counted")
     log_event(session, "turn/start", {"turn": 1})
@@ -149,11 +152,11 @@ def test_a_failure_run_is_counted_per_tool_and_reset_by_a_success() -> None:
 
 
 def test_the_counts_obey_the_fold_laws() -> None:
-    """`counts_of` is `_extend` from empty, so the law holds by construction — and
-    this is where that is asked rather than assumed, over every prefix of a log
-    that exercises each counted type and the reset a `turn/start` performs.
-    (Children are not in it: they are counted in their own logs, when a spawn is
-    judged — the tests at the end.)"""
+    """`counts_of` is `_extend` from empty, so the law holds by construction.
+    This test checks that and does not assume it. It checks every prefix of a
+    log that exercises each counted type and the reset that a `turn/start`
+    performs. (Children are not in this fold. They are counted in their own
+    logs when a spawn is judged. See the tests at the end.)"""
     session = Session("lawful")
     for turn in (1, 2):
         log_event(session, "turn/start", {"turn": turn})
@@ -179,12 +182,12 @@ def test_the_counts_obey_the_fold_laws() -> None:
 
 
 def test_a_retried_call_is_a_model_call() -> None:
-    """P1 — `step/start` is written once per step, before the retry loop.
+    """P1: `step/start` is written one time per step, before the retry loop.
 
-    So a step retried twice was one model call to this fold. The loop records
-    each retry it accepts as `step/retry`, whichever row asked, and a call is
-    either kind. Sabotage: drop `step/retry` from `_COUNTED` and the calls are
-    the steps.
+    A step that was retried twice was therefore one model call to this fold.
+    The loop records each retry that it accepts as `step/retry`, whichever row
+    asked for it, and a call is either kind. Sabotage: drop `step/retry` from
+    `_COUNTED` and the calls are the steps.
     """
     session = Session("retried")
     log_event(session, "turn/start", {"turn": 1})
@@ -202,7 +205,7 @@ def test_a_retried_call_is_a_model_call() -> None:
 
 
 async def test_the_step_gate_counts_the_retries_already_made(mount: MountProfile) -> None:
-    """P1 — a step that was retried spent the calls a next step would want."""
+    """P1: a step that was retried spent the calls that a next step would need."""
     ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("capped")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -219,13 +222,14 @@ async def test_the_step_gate_counts_the_retries_already_made(mount: MountProfile
 async def test_a_retry_past_the_ceiling_is_refused_whoever_asks(
     mount: MountProfile, retrier: str
 ) -> None:
-    """P1 — the ceiling is asked where a retry is decided.
+    """P1: the ceiling is checked where a retry is decided.
 
-    `agent/pre-step` fires once per step, so a ceiling asked only there could
-    not stop a retry at all: a model failing transiently was called up to
-    `maxAttempts` times per step against a `turnLimit` of 2. Held at
-    `agent/request-error`, wrapping every row that would grant one — including
-    `llm-retry`, which answers without calling on.
+    `agent/pre-step` fires one time per step, so a ceiling that was checked only
+    there could not stop a retry at all. A model that failed transiently was
+    called up to `maxAttempts` times per step against a `turnLimit` of 2. The
+    ceiling is now held at `agent/request-error`, where it wraps every row that
+    would grant a retry. That includes `llm-retry`, which answers without
+    calling `next_`.
 
     Sabotage: drop the `agent/request-error` registration and both cases make
     five calls; register it without `prepend` and the `llm-retry` case does.
@@ -241,8 +245,8 @@ async def test_a_retry_past_the_ceiling_is_refused_whoever_asks(
         async def stream(self, options: GenerateOptions) -> AsyncIterator[Any]:
             nonlocal calls
             calls += 1
-            # `SERVER_ERROR` is `llm-retry`'s to retry; `TRANSIENT` is not, so
-            # the stand-in below is the row that asks.
+            # `llm-retry` retries `SERVER_ERROR`. It does not retry `TRANSIENT`,
+            # so for that code the stand-in below is the row that asks.
             code = "SERVER_ERROR" if retrier == "llm-retry" else "TRANSIENT"
             yield Finish(
                 reason=FinishReason(kind="error", failure=LlmFailure(message="no", code=code))
@@ -271,17 +275,18 @@ async def test_a_retry_past_the_ceiling_is_refused_whoever_asks(
 
 
 async def test_the_model_call_limit_ends_the_turn_and_says_why(mount: MountProfile) -> None:
-    """`exit: end` — the step is rejected and the log carries the reason.
+    """`exit: end`: the step is rejected, and the log carries the reason.
 
-    Asked of `agent/pre-step` over a session that has already spent its budget,
-    which is where the decision is made and how it is made: from the log. Driving
-    a multi-step turn through the fake adapter would need a scripted tool loop to
-    reach the same state the two `step/start` events below say plainly.
+    The test asks `agent/pre-step` about a session that has already spent its
+    budget. That is where the decision is made and how it is made: from the log.
+    To drive a multi-step turn through the fake adapter, the test would need a
+    scripted tool loop to reach the state that the two `step/start` events below
+    state directly.
 
-    Deviating from upstream in one visible way: it injects an artificial
-    `AIMessage` so a reader sees the agent announce its own limit. pH records
-    `limits/exceeded` instead, because inventing model speech is the thing this
-    codebase refuses everywhere else — the person still sees it, as a notice.
+    pH deviates from upstream in one visible way. Upstream injects an artificial
+    `AIMessage`, so that a reader sees the agent announce its own limit. pH
+    records `limits/exceeded` instead, because this codebase refuses to invent
+    model speech everywhere else. The user still sees the breach, as a notice.
     """
     ctx = await mount(row("limits", modelCalls={"turnLimit": 2}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("capped")
@@ -321,11 +326,13 @@ async def _fail_once_at_the_ceiling(mount: MountProfile, code: str, **retry: obj
 async def test_a_failure_nobody_would_retry_is_not_blamed_on_the_ceiling(
     mount: MountProfile,
 ) -> None:
-    """P1 review — the ceiling refuses the retry the chain granted, nothing else.
+    """P1 review: the ceiling refuses the retry that the chain granted, and
+    nothing else.
 
-    Asked before the rest of the chain, it recorded "not retried: model call
-    limits" for an authentication failure no row was ever going to retry.
-    Sabotage: check the ceiling before `next_` and this finds one record.
+    When the ceiling was checked before the rest of the chain, it recorded "not
+    retried: model call limits" for an authentication failure that no row was
+    ever going to retry. Sabotage: check the ceiling before `next_` and this
+    finds one record.
     """
     session = await _fail_once_at_the_ceiling(mount, "AUTHENTICATION")
 
@@ -334,14 +341,15 @@ async def test_a_failure_nobody_would_retry_is_not_blamed_on_the_ceiling(
 
 
 async def test_a_refused_retry_costs_no_backoff(mount: MountProfile) -> None:
-    """P1 review — the backoff is the loop's to sleep, after the waterfall settles.
+    """P1 review: the loop sleeps the backoff, after the waterfall settles.
 
-    `llm-retry` slept inside the waterfall and then granted, so a ceiling that
-    refused afterwards had already paid the wait. Here the wait would be ten
-    seconds. Sabotage: sleep in `llm-retry` again and the deadline trips.
+    `llm-retry` used to sleep inside the waterfall and then grant, so a ceiling
+    that refused afterwards had already paid the wait. Here the wait would be
+    ten seconds. Sabotage: sleep in `llm-retry` again and the deadline trips.
 
-    Nor is it recorded as a retry: `llm-retry` recorded `llm/retry` as it granted,
-    so the log showed one that never ran. Sabotage: append it in the listener again.
+    The refused retry is also not recorded as a retry. `llm-retry` used to
+    record `llm/retry` as it granted, so the log showed a retry that never ran.
+    Sabotage: append it in the listener again.
     """
     with anyio.fail_after(2):
         session = await _fail_once_at_the_ceiling(
@@ -354,8 +362,8 @@ async def test_a_refused_retry_costs_no_backoff(mount: MountProfile) -> None:
 
 
 async def test_the_session_limit_outlives_the_turn(mount: MountProfile) -> None:
-    """Upstream's *thread* limit under pH's name: it does not reset at a turn
-    boundary, which is the whole difference between the two."""
+    """The *thread* limit of upstream, under the pH name. It does not reset at a
+    turn boundary, and that is the whole difference between the two limits."""
     ctx = await mount(row("limits", modelCalls={"sessionLimit": 3}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("session-capped")
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -370,14 +378,15 @@ async def test_the_session_limit_outlives_the_turn(mount: MountProfile) -> None:
 
 
 async def test_error_raises_instead_of_ending(mount: MountProfile) -> None:
-    """`exit: error`. The turn does not end quietly — a deployment that would
-    rather crash than truncate gets to say so.
+    """`exit: error`. The turn does not end quietly. A deployment that prefers a
+    crash to a truncated turn can say so.
 
-    **And it records the breach before it raises** (N2). D7 made this move on
-    the tool-call limit and left its sibling behind: a raise out of
-    `agent/pre-step` unwinds the turn, and an unwound turn appends nothing — so
-    the posture that shouts loudest at the deployment was the one that left
-    nothing for `phern doctor`, a reviewer or a resumed session to fold.
+    **It also records the breach before it raises** (N2). D7 made this change on
+    the tool-call limit and left the model-call limit behind. A raise out of
+    `agent/pre-step` unwinds the turn, and an unwound turn appends nothing. The
+    posture that reports most loudly to the deployment was therefore the one
+    that left nothing for `phern doctor`, a reviewer or a resumed session to
+    fold.
 
     Sabotage: put the raise back above `_record` and the event is gone.
     """
@@ -387,8 +396,9 @@ async def test_error_raises_instead_of_ending(mount: MountProfile) -> None:
     engine = ctx.get("limits")
 
     await agent.prompt("go")
-    # The driver contains a failed turn rather than propagating, so the raise is
-    # asked of the listener directly — where a deployment's own handler sees it.
+    # The driver contains a failed turn and does not propagate it. The test
+    # therefore asks the listener directly for the raise, which is where the
+    # handler of a deployment sees it.
     with pytest.raises(ModelCallLimitExceeded):
         await _pre_step(ctx, agent, turn=2, step=1)
     assert engine is None, "the row provides no service; it is listeners only"
@@ -414,16 +424,16 @@ async def test_no_limit_is_the_default(mount: MountProfile) -> None:
 
 
 async def test_continue_denies_the_call_and_keeps_the_turn(mount: MountProfile) -> None:
-    """`exit: continue`, the default. The model is told, in upstream's own
-    words, not to call that tool again — and the turn goes on.
+    """`exit: continue`, the default. The model is told, in the words of
+    upstream, not to call that tool again, and the turn goes on.
 
-    **Recorded all the same** (N2). This wrote nothing, on the reading that a
-    breach which does not end the turn is not worth a record — which had it
-    backwards: `continue` is the shipped default, so it is the posture a
-    deployment is most likely to be running when a budget first bites, and the
-    turn carrying on is exactly what makes the denial easy to miss. `posture` is
-    what tells the three readings apart now, where the event name alone used to
-    mean two of them and omit the third.
+    **The breach is recorded all the same** (N2). This posture used to write
+    nothing, on the reasoning that a breach which does not end the turn is not
+    worth a record. That reasoning was backwards. `continue` is the shipped
+    default, so it is the posture that a deployment is most likely to run when
+    a budget first applies, and a turn that goes on makes the denial easy to
+    miss. `posture` now tells the three readings apart. The event name alone
+    used to mean two of them and omit the third.
 
     Sabotage: drop the `_record` from the `continue` branch and the log is silent.
     """
@@ -445,18 +455,18 @@ async def test_error_records_the_breach_and_ends_the_turn_like_its_sibling(
 ) -> None:
     """`exit: error` spends the budget, says so, and stops (D7).
 
-    Two things were wrong and they were the same mistake. It left no durable
-    record — only `end` wrote `limits/exceeded`, so the posture that surfaces a
-    breach most loudly to the *model* said nothing to `phern doctor`, a reviewer
-    or a resumed session. And it did not end the turn, although the model-call
-    setting of the same name does, because it raised out of `tools/pre-execute`
-    where the pipeline turns any exception from a policy row into a failed
-    result. The ceiling inherited a posture meant to stop a *broken row* from
-    taking down the call it was asked about.
+    Two things were wrong, and they were the same mistake. First, it left no
+    durable record. Only `end` wrote `limits/exceeded`, so the posture that
+    reports a breach most loudly to the *model* said nothing to `phern doctor`,
+    a reviewer or a resumed session. Second, it did not end the turn, although
+    the model-call setting of the same name does. It raised out of
+    `tools/pre-execute`, where the pipeline turns any exception from a policy
+    row into a failed result. The ceiling inherited a posture that was meant to
+    stop a *broken row* from taking down the call that it was asked about.
 
-    Now it returns `Deny(concludes_turn=True, failure_kind="failed")`: the turn
-    ends as `end` ends it, and the model reads a spent budget rather than policy
-    refusing, which is the whole of what this word adds over `end`.
+    Now it returns `Deny(concludes_turn=True, failure_kind="failed")`. The turn
+    ends as `end` ends it, and the model reads a spent budget and not a policy
+    refusal. That reading is everything that this word adds over `end`.
 
     Sabotage: drop `concludes_turn=True` and the second turn runs a third call.
     """
@@ -497,19 +507,21 @@ async def test_a_per_tool_budget_is_checked_beside_the_aggregate(mount: MountPro
 async def test_end_denies_the_breach_and_the_batch_skips_what_is_behind_it(
     mount: MountProfile,
 ) -> None:
-    """`exit: end`, and where pH's mechanics stopped showing through (C13).
+    """`exit: end`, and the point where the mechanics of pH stopped showing
+    through (C13).
 
-    Upstream jumps to the graph's end and synthesizes results for the calls it
-    skipped. pH could not, and this test used to say so: the batch kept opening
-    the next group after a result concluded the turn, so a later call was
-    *dispatched* and had to be refused by the row, wearing upstream's
-    sibling sentence. Now the batch stops, which is the same thing upstream
-    does — so a later call is skipped rather than denied, and reads as the turn
-    having ended rather than as anything about itself.
+    Upstream jumps to the end of the graph and synthesizes results for the calls
+    that it skipped. pH could not, and this test used to say so. The batch kept
+    opening the next group after a result concluded the turn. A later call was
+    therefore *dispatched*, and the row had to refuse it with the sibling
+    sentence of upstream. Now the batch stops, which is what upstream does. A
+    later call is skipped and not denied, and its result says that the turn
+    ended and says nothing about the call itself.
 
-    `bash` is exclusive, so these three are three groups rather than one batch.
-    `SIBLING_STOPPED` is still the answer for a genuine in-flight sibling, which
-    is a *parallel* group gated concurrently — the case below.
+    `bash` is exclusive, so these three calls are three groups and not one
+    batch. `SIBLING_STOPPED` is still the answer for a real sibling in flight,
+    which is a *parallel* group that is gated concurrently. The next test covers
+    that case.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("ending")
@@ -527,15 +539,16 @@ async def test_end_denies_the_breach_and_the_batch_skips_what_is_behind_it(
 async def test_a_sibling_already_in_flight_gets_upstreams_own_sentence(
     mount: MountProfile,
 ) -> None:
-    """The half the batch cannot skip, and why `_is_first_over` is still needed (C13).
+    """The half that the batch cannot skip, and why `_is_first_over` is still
+    needed (C13).
 
     A *parallel* group is gated call by call while the whole pool is already in
-    flight, so there is no "what comes after it" for the batch to stop — the
-    siblings are here now. They did nothing wrong, and upstream's sentence is
-    what the model should read rather than a denial phrased as being about them.
+    flight. There is no "what comes after it" for the batch to stop: the
+    siblings are here now. They did nothing wrong, so the model should read the
+    sentence of upstream and not a denial that is phrased as being about them.
 
-    Told apart by arithmetic rather than a latch: the breaching call is the one
-    that found the count *at* the ceiling, and a follower finds it past.
+    Arithmetic tells them apart, not a latch: the breaching call is the one that
+    found the count *at* the ceiling, and a follower finds it past the ceiling.
 
     Sabotage: drop `_is_first_over` and the third call reads as the breach.
     """
@@ -553,14 +566,16 @@ async def test_a_sibling_already_in_flight_gets_upstreams_own_sentence(
 
 
 async def test_an_end_breach_concludes_the_batch(mount: MountProfile) -> None:
-    """The other half of `end`: the turn stops — through the loop's own flag.
+    """The other half of `end`: the turn stops, through the flag of the loop
+    itself.
 
-    `Deny.concludes_turn` is the same mechanism a *successful* result uses to end
-    a turn (`ToolRunContext.conclude_turn`), reached from the denial side, so the
-    loop closes the turn at the batch boundary it already has. The first shape of
-    this row latched a `limits/exceeded` event and re-read it at the next
-    pre-step, which made an **ignorable** event into control state — a build that
-    skipped it, as the vocabulary says one may, would not have ended the turn.
+    `Deny.concludes_turn` is the same mechanism that a *successful* result uses
+    to end a turn (`ToolRunContext.conclude_turn`), reached from the denial
+    side. The loop therefore closes the turn at the batch boundary that it
+    already has. The first shape of this row latched a `limits/exceeded` event
+    and read it again at the next pre-step. That made an **ignorable** event
+    into control state. A build that skipped the event, as the vocabulary says
+    a build may, would not have ended the turn.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("closing")
@@ -581,13 +596,13 @@ async def test_continue_leaves_the_turn_running(mount: MountProfile) -> None:
 
 
 async def test_a_later_turn_is_not_ended_by_an_earlier_breach(mount: MountProfile) -> None:
-    """Nothing carries the breach forward, which is the point.
+    """Nothing carries the breach forward, and that is the purpose.
 
-    The first shape re-read a logged breach at every step and had to scope it to
-    a turn by comparing seqs — without which one `end` rejected every step for
-    the rest of the session and the agent never spoke again. Ending through the
-    batch outcome makes that whole class of question disappear: a new turn's
-    counts are reset by `turn/start` and there is no latch to expire.
+    The first shape read a logged breach again at every step and had to scope
+    it to a turn by comparing seqs. Without that scope, one `end` rejected every
+    step for the rest of the session, and the agent never spoke again. Ending
+    through the batch outcome removes that whole class of question. The counts
+    of a new turn are reset by `turn/start`, and there is no latch to expire.
     """
     ctx = await mount(row("limits", toolCalls={"turnLimit": 1, "exit": "end"}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("later")
@@ -617,8 +632,8 @@ async def test_the_breaker_trips_after_repeated_failure(mount: MountProfile) -> 
 
 
 async def test_a_success_resets_the_breaker(mount: MountProfile) -> None:
-    """Consecutive, not cumulative — a tool that works intermittently is not
-    the failure this catches."""
+    """Consecutive, not cumulative. A tool that works intermittently is not the
+    failure that this catches."""
     ctx = await mount(row("limits", breaker={"consecutiveFailures": 2}), profile=PROFILE)
     session = ctx.require(SESSIONS).create("recovering")
 
@@ -632,8 +647,9 @@ async def test_a_success_resets_the_breaker(mount: MountProfile) -> None:
 
 
 def test_the_event_types_are_ignorable() -> None:
-    """Accounting a reader may skip: the turn it bounded is in the log either way.
-    (That they are *known* is `test_log_writers.py`'s, for every package.)"""
+    """Accounting that a reader may skip: the turn that it bounded is in the log
+    either way. (`test_log_writers.py` checks that the types are *known*, for
+    every package.)"""
     for event_type in ("limits/exceeded", "limits/breaker-tripped"):
         assert event_type in IGNORABLE_SESSION_EVENT_TYPES
 
@@ -648,11 +664,12 @@ def test_the_denial_text_is_upstreams() -> None:
 
 
 def _limits_reading(ctx: Context, session: Session) -> Any:  # noqa: ANN401
-    """This row's reading, by id.
+    """The reading of this row, by id.
 
-    By id and not "the only one", which is what these asserted before
-    `StatusReading` had one: every profile now mounts rows that contribute a
-    posture and a sandbox mode, so "the single reading" stopped being this one.
+    The lookup is by id and not "the only one". These tests asserted "the only
+    one" before `StatusReading` had an id. Every profile now mounts rows that
+    contribute a posture and a sandbox mode, so "the single reading" is no
+    longer this one.
     """
     return next(
         (one for one in ctx.require(TUI_STATUS).readings(session) if one.id == "limits"), None
@@ -660,11 +677,12 @@ def _limits_reading(ctx: Context, session: Session) -> Any:  # noqa: ANN401
 
 
 async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None:
-    """A live reading, not just the notice that lands when the budget is spent.
+    """A live reading, not only the notice that arrives when the budget is spent.
 
-    Upstream announces a limit on the step it stops you — the one moment the
-    information can no longer change anything. The gauge beside it makes the
-    same argument about context, and this is that argument for a budget.
+    Upstream announces a limit on the step where it stops you, which is the one
+    moment when the information can no longer change anything. The gauge beside
+    it makes the same argument about context, and this reading makes that
+    argument for a budget.
     """
     ctx = await mount(
         row("limits", modelCalls={"turnLimit": 10}, toolCalls={"turnLimit": 4}), profile=PROFILE
@@ -679,7 +697,7 @@ async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None
 
     reading = _limits_reading(ctx, session)
 
-    # 3/4 tools is tighter than 1/10 steps, and that is the one worth the line.
+    # 3/4 tools is tighter than 1/10 model calls, so it is the one that is shown.
     assert reading.text == "tools 3/4"
     assert reading.level == "normal", "0.75 is short of the gauge's own 0.85"
 
@@ -691,7 +709,7 @@ async def test_the_footer_shows_the_tightest_budget(mount: MountProfile) -> None
 
 
 async def test_the_footer_says_nothing_when_no_budget_is_set(mount: MountProfile) -> None:
-    """The shipped default. A row that always occupies the line teaches a person
+    """The shipped default. A row that always occupies the line teaches a user
     to stop reading it."""
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("ungauged")
@@ -703,15 +721,14 @@ async def test_the_footer_says_nothing_when_no_budget_is_set(mount: MountProfile
 
 
 async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: MountProfile) -> None:
-    """C1 made every dispatch a governed evaluation; the fold now counts it.
+    """C1 made every dispatch a governed evaluation, and the fold now counts it.
 
-    A `tools.glob(...)` from inside a cell logs `tool/code-dispatch-start`, not
-    `tool/call`, so per-tool budgets and the breaker were checked on each
-    dispatch against a count that never moved. Payloads through the real wire
-    type, so a renamed field fails here rather than silently uncounting.
+    A `tools.glob(...)` call from inside a cell logs `tool/code-dispatch-start`,
+    not `tool/call`. Per-tool budgets and the breaker were therefore checked on
+    each dispatch against a count that never moved. The payloads go through the
+    real wire type, so a renamed field fails here and does not silently stop
+    the count.
     """
-    from ph_stabilize.limits import counts_of
-
     ctx = await mount(row("limits"), profile=PROFILE)
     session = ctx.require(SESSIONS).create("cell")
     ref = {"root_call_id": "r1", "parent_call_id": "p1", "name": "glob"}
@@ -732,9 +749,10 @@ async def test_a_code_mode_dispatch_counts_as_a_tool_call(mount: MountProfile) -
 
 
 async def _parent(ctx: Context, session_id: str = "parent") -> tuple[Any, Any, Any]:
-    """A parent agent and a stub provider. The stub opens each child a log that
-    names its parent, as a real provider does, and the seam writes the child's
-    admission into it — so a spawn here leaves what a real one leaves."""
+    """A parent agent and a stub provider. The stub opens a log for each child
+    that names its parent, as a real provider does, and the seam writes the
+    admission of the child into that log. A spawn here therefore leaves what a
+    real spawn leaves."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
     provider = StubSubagentProvider(root=ctx)
@@ -745,11 +763,11 @@ async def _parent(ctx: Context, session_id: str = "parent") -> tuple[Any, Any, A
 async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(
     mount: MountProfile,
 ) -> None:
-    """P4-04's last piece: a cap on children, as a guard on `ctx.subagents`.
+    """The last piece of P4-04: a cap on children, as a guard on `ctx.subagents`.
 
-    Refused *before* the provider is asked, so nothing is created — the contract
-    `SubagentSpawnError` states — and recorded as `limits/exceeded` like the
-    other two ceilings.
+    The spawn is refused *before* the provider is asked, so nothing is created.
+    That is the contract that `SubagentSpawnError` states. The refusal is
+    recorded as `limits/exceeded`, like the other two ceilings.
     """
     ctx = await mount(row("limits", children={"turnLimit": 1}), profile=PROFILE)
     session, parent, provider = await _parent(ctx)
@@ -775,30 +793,32 @@ async def test_the_children_budget_refuses_the_spawn_that_would_cross_it(
 async def test_the_child_ceiling_has_the_postures_its_siblings_have(
     mount: MountProfile, exit_: str, code: str, kind: str, ends: bool
 ) -> None:
-    """D15 — the last ceiling still running the posture D7 replaced.
+    """D15: the last ceiling that still ran the posture that D7 replaced.
 
     `SubagentSpawnError` was a bare `Exception`, so a refusal carried no code
-    and no `failure_kind`, and both tool bodies flattened it into a
-    `ValueError`/`ToolCallError` besides — three facts dropped at the one
-    boundary that had them. It reached the model as a generic failure with the
-    turn carrying on, and every later spawn took the same refusal.
+    and no `failure_kind`. Both tool bodies also flattened it into a
+    `ValueError`/`ToolCallError`. Three facts were dropped at the one boundary
+    that had them. The refusal reached the model as a generic failure, the turn
+    continued, and every later spawn got the same refusal.
 
-    `ChildLimits` defended having one posture with "a child that is not created
-    cannot be continued past or raised about", which is equally true of a tool
-    call that is not executed — so it never distinguished the two. It now
-    carries the same `exit` its siblings do, and a refusal says which reading it
-    is on the way out.
+    `ChildLimits` defended its one posture with "a child that is not created
+    cannot be continued past or raised about". That is equally true of a tool
+    call that is not executed, so it never distinguished the two. `ChildLimits`
+    now carries the same `exit` as the other ceilings, and a refusal says which
+    reading it is on the way out.
 
-    `continue` is the default and is the old behaviour, so a deployment that
+    `continue` is the default and is the old behavior, so a deployment that
     chose nothing keeps what it had.
 
-    The code is *derived* from the reading rather than chosen beside it, exactly
-    as `registry._gate` derives it for the tool ceiling — so each code carries
-    one reading. `SPAWN_REFUSED` stays what it always meant: a misconfiguration
-    a caller can fix and retry, which is the other test below.
+    The code is *derived* from the reading and not chosen beside it, exactly as
+    `registry._gate` derives it for the tool ceiling. Each code therefore
+    carries one reading. `SPAWN_REFUSED` still means what it always meant: a
+    misconfiguration that a caller can fix and retry.
+    `test_an_ordinary_refusal_still_reads_as_one_the_model_may_retry` in
+    `packages/ph-core/tests/test_subagent_task.py` covers that case.
 
-    Sabotage: drop `concludes_turn` from `SpawnRefusal` and `end`/`error` stop
-    ending the turn.
+    Sabotage: drop `concludes_turn` from the `Deny` that `refuse_child` returns
+    and `end`/`error` stop ending the turn.
     """
     ctx = await mount(row("limits", children={"turnLimit": 1, "exit": exit_}), profile=PROFILE)
     session, parent, _provider = await _parent(ctx)
@@ -816,13 +836,15 @@ async def test_the_child_ceiling_has_the_postures_its_siblings_have(
 
 
 async def test_the_turn_cap_counts_children_admitted_this_turn(mount: MountProfile) -> None:
-    """Phase 11 — a child's admission is in its own log, so that is where it is counted.
+    """Phase 11: the admission of a child is in the log of the child, so it is
+    counted there.
 
-    The caps counted `subagent/admitted` in the parent's log, and a parent's log no
-    longer holds one: the seam writes it into the child's, stamped with
-    `parentTurn`, the seq of the parent's latest `turn/start`. Counted where it
-    used to be, every cap read zero and nothing was ever refused. A child from an
-    earlier turn is off this turn's count and still on the session's.
+    The caps used to count `subagent/admitted` in the log of the parent, and the
+    log of a parent no longer holds one. The seam writes the admission into the
+    log of the child, stamped with `parentTurn`, the seq of the latest
+    `turn/start` of the parent. With the count in the old place, every cap read
+    zero and nothing was ever refused. A child from an earlier turn is off the
+    count of this turn and still on the count of the session.
 
     Sabotage: count the parent's log for `subagent/admitted` again and the second
     spawn of turn one is made; count every child as this turn's and the first
@@ -858,8 +880,9 @@ async def test_the_turn_cap_counts_children_admitted_this_turn(mount: MountProfi
 
 
 async def test_two_spawns_at_once_cannot_both_pass_the_cap(mount: MountProfile) -> None:
-    """The cap counts a spawn on its way (`SubagentService.child_counts`): while the
-    first of two spawns from one step is being built, the second is refused.
+    """The cap counts a spawn that is in progress (`SubagentService.child_counts`).
+    While the first of two spawns from one step is being built, the second is
+    refused.
 
     Sabotage: count only the admitted children in `refuse_child` and the second spawn
     is made.
@@ -882,11 +905,12 @@ async def test_two_spawns_at_once_cannot_both_pass_the_cap(mount: MountProfile) 
 
 
 async def test_a_deleted_child_still_counts(mount: MountProfile) -> None:
-    """Deleting a child frees none of the budget: the spawn was asked for and made.
+    """A delete of a child frees none of the budget: the spawn was requested and
+    made.
 
-    The tombstone is in the child's own log now, beside its admission, and the
-    count is of admissions — as it was when the parent's log held them and a
-    delete never took one off.
+    The tombstone is now in the log of the child itself, beside its admission.
+    The count is a count of admissions. It was the same when the log of the
+    parent held the admissions, and a delete never removed one.
 
     Sabotage: leave deleted children out of `SubagentService.child_counts` and the second spawn
     is made.
@@ -904,13 +928,14 @@ async def test_a_deleted_child_still_counts(mount: MountProfile) -> None:
 
 
 async def test_a_fork_starts_with_no_children(mount: MountProfile) -> None:
-    """Decision 4 — a fork is a new root, so none of this budget is spent yet.
+    """Decision 4: a fork is a new root, so none of this budget is spent yet.
 
-    The count was folded from the parent's log from seq 0, and a fork's log begins
-    with its source's prefix, so a fork inherited its source's children and was
-    refused spawns it never made. Its children are the ones whose logs name it as
-    their parent, and it has none — in its seeded turn too, whose `turn/start`
-    carries the same seq as the source's.
+    The count was folded from the log of the parent from seq 0. The log of a
+    fork begins with the prefix of its source, so a fork inherited the children
+    of its source and was refused spawns that it never made. The children of a
+    fork are the children whose logs name it as their parent, and it has none.
+    That is also true in its seeded turn, whose `turn/start` carries the same
+    seq as the `turn/start` of the source.
 
     Sabotage: count the children of the log the fork was cut from
     (`header.parent_session`) and the fork's spawn is refused; count the parent's
@@ -934,7 +959,7 @@ async def test_a_fork_starts_with_no_children(mount: MountProfile) -> None:
 
 
 async def test_no_children_budget_registers_no_guard(mount: MountProfile) -> None:
-    """Unset by default, like every other ceiling here — and the guard is not
-    even registered, so a spawn pays nothing for a cap nobody chose."""
+    """Unset by default, like every other ceiling here. The guard is not even
+    registered, so a spawn pays nothing for a cap that nobody chose."""
     ctx = await mount(row("limits"), profile=PROFILE)
     assert ctx.require(SUBAGENTS)._guards == []

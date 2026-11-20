@@ -1,22 +1,22 @@
-"""`command-compact` — `/compact`, over the backend-independent seam (P4-03).
+"""`command-compact`: `/compact`, over the backend-independent seam (P4-03).
 
-A row of its own, exactly as dsh splits `command-compact` from
-`compaction-basic`: the human verb and the summarization policy are different
-decisions, and a deployment that wants automatic compaction without a slash
-command — or a slash command with a different engine behind it — should not have
-to fork either. This row injects `commands` and `compaction` and knows nothing
-about summaries.
+This is a row of its own, exactly as dsh splits `command-compact` from
+`compaction-basic`. The human verb and the summarization policy are different
+decisions. A deployment that wants automatic compaction without a slash command,
+or a slash command with a different engine behind it, should not have to fork
+either row. This row injects `commands` and `compaction` and knows nothing about
+summaries.
 
-**A command is not a turn.** `/compact` is something the *person* asked the
-harness to do, so it dispatches directly, records `command/run` and
-`command/done`, and never opens a `turn/*`. The one thing it does open is a
-surface replacement, which is why it insists the agent is idle first — a
-compaction that landed mid-turn would move the surface underneath a request the
+**A command is not a turn.** `/compact` is something that the *user* asked the
+harness to do. It therefore dispatches directly, records `command/run` and
+`command/done`, and never opens a `turn/*`. The one thing that it does open is a
+surface replacement, which is why it requires the agent to be idle first. A
+compaction that landed mid-turn would move the surface under a request that the
 loop had already derived.
 
 **Every failure is a sentence, not a traceback.** `CompactionError.code` is a
-closed set precisely so a front end can phrase each one; the mapping lives here
-because this is the only place that has a person to say it to.
+closed set so that a front end can phrase each code. The mapping is here because
+this is the only place that has a user to tell.
 
 @module ph_stabilize.compact_command
 """
@@ -42,9 +42,9 @@ FAILURE_TEXT: dict[str, str] = {
     ),
     "unavailable": "This profile has no compaction engine, so there is nothing to compact with.",
 }
-"""One line per `CompactionError.code`. dsh's `expectedFailure`, narrowed to the
-codes pH's seam actually defines — a phrase for a code nothing raises is a
-promise nobody can check."""
+"""One line for each `CompactionError.code`. This is the `expectedFailure` of
+dsh, narrowed to the codes that the seam of pH actually defines. A phrase for a
+code that nothing raises is a promise that nobody can check."""
 
 
 @plugin("command-compact", affects="environment", inject=[COMMANDS, COMPACTION])
@@ -56,18 +56,19 @@ async def apply(ctx: Context, config: None) -> None:
         if agent is None:
             return "refusing: /compact needs an agent whose session to compact"
         try:
-            # Anything typed after the verb is the person saying what they are
-            # about to work on. dsh refuses arguments here and deepagents'
-            # compact tool takes none — but the moment someone compacts on
-            # purpose is usually the moment they are changing subject, and they
-            # know something about what comes next that the summarizer cannot
-            # read off the conversation. The engine decides what to do with it;
-            # this row only passes it on and lets the log record it.
+            # Anything typed after the verb is the user's statement of what they
+            # are about to work on. dsh refuses arguments here, and the compact
+            # tool of deepagents takes none. But the moment when someone
+            # compacts on purpose is usually the moment when they change
+            # subject, and they know something about what comes next that the
+            # summarizer cannot read from the conversation. The engine decides
+            # what to do with the text. This row only passes it on and lets the
+            # log record it.
             result = await ctx.require(COMPACTION).compact_now(agent, instructions=argument.strip())
         except CompactionError as error:
-            # `.get` rather than a lookup: a future code without a phrase should
-            # still say something true, and the exception's own message is the
-            # truest thing available.
+            # `.get` and not a lookup: a future code without a phrase should
+            # still say something true, and the message of the exception itself
+            # is the most accurate text available.
             return FAILURE_TEXT.get(error.code, str(error))
         if result is None:
             return "no compactable history yet"

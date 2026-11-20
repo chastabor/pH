@@ -1,39 +1,43 @@
-"""P4-06 — `permissions-fs`: path rules over filesystem access (G7, E9).
+"""P4-06: `permissions-fs`, path rules over filesystem access (G7, E9).
 
-The row's two gates are first-match-wins and recursive-delete-fails-closed, and
-they are tested for opposite reasons. First-match is tested because *order* is
-the whole configuration language: a narrow `allow` above a broad `deny` is how
-an exception is written, and a rule set evaluated by specificity — or by
-"strictest wins" — would silently mean something else. Recursive delete is
-tested because the honest answer is a refusal: the rules describe paths that do
-not exist yet, so a subtree cannot be checked one path at a time.
+The row has two gates: first-match-wins and recursive-delete-fails-closed. They
+are tested for opposite reasons. First-match is tested because *order* is the
+whole configuration language. An exception is written as a narrow `allow` above
+a broad `deny`. A rule set evaluated by specificity, or by "strictest wins",
+would silently mean something else. Recursive delete is tested because the
+correct answer is a refusal. The rules describe paths that do not exist yet, so
+a subtree cannot be checked one path at a time.
 
-Everything reaches the disk through `ctx.fs`, never through a tool name, so the
-tests drive `ctx.fs` directly wherever the tool layer would only be re-testing
-the pipeline.
+Everything reaches the disk through `ctx.fs`, never through a tool name. The
+tests therefore drive `ctx.fs` directly wherever the tool layer would only test
+the pipeline again.
 
-**Be honest about how much that placement buys today.** `tool-fs` is currently
-the *only* caller of `FsService.read`/`write`/`edit` in the tree, so the coverage
-this shape earns is mostly future. A Code Mode binding is the namespaced face of a
-governed tool and does route through here. `memory-agents-md` and `ph-rlm`'s
-harness service both read with `Path.read_text` and are **not** covered. An MCP
-server is a remote client and can never reach `ctx.fs` at all — an earlier version
-of this docstring claimed the rules covered its writer, which was never true. The
-placement is still right, because it is where the next writer lands for free, but
-the argument for it is "one gate rather than one per tool" and not a list of
-things already behind it.
+**How much that placement gives today.** `tool-fs` is the *only* caller of
+`FsService.write` and `FsService.edit` in the tree. `FsService.read` has two
+more callers: the engines of `ph-code-graph` and `ph-text-index`. So most of the
+coverage that this placement earns is in the future. A Code Mode binding is the
+namespaced face of a governed tool and does route through here.
+`memory-agents-md` reads with `Path.open`, and the harness service of `ph-rlm`
+reads with `Path.read_text`. They are **not** covered. An MCP server is a remote
+client and can never reach `ctx.fs` at all. An earlier version of this docstring
+claimed that the rules covered its writer, and that was never true. The
+placement is still right, because the next writer is covered there at no cost.
+But the argument for it is "one gate, and not one gate per tool". The argument
+is not a list of things that are already behind the gate.
 
-**Why `_refuses_under` takes `require_head`.** `_could_match_under` answers
-`True` for a pattern with no literal head, because for a *delete* "could match
-anywhere" must round to refusal. For a *walk* the same rounding refuses
-everywhere: `deny read **/.env` — the idiomatic spelling — has an empty head, so
-every directory "could" hold a match. Measured on this repository before the
-guard: **11 489 results down to 6.**
+**Why a walk does not ask `_refuses_under` the question of a delete.**
+`_could_match_under` answers `True` for a pattern that starts with `**`, because
+for a *delete* "could match anywhere" must round to refusal. For a *walk* the
+same rounding refuses everywhere. `deny read **/.env` is the idiomatic
+spelling, and with it every directory "could" hold a match. Measured on this
+repository before the guard: **11 489 results down to 6.** The guard was first a
+`require_head` flag on `_refuses_under`. The walk now asks `covers_whole`
+instead (D11).
 
 ## Why `_prefix_of` is cached
 
-`_spellings` runs per gated read *and per file a walk visits*, and P4-06 measured
-`Path.relative_to` at **26 µs there — 92% of the check**.
+`_spellings` runs per gated read *and per file that a walk visits*. P4-06
+measured `Path.relative_to` at **26 µs there, which was 92% of the check**.
 """
 
 from __future__ import annotations
@@ -82,7 +86,7 @@ pytestmark = pytest.mark.anyio
 
 
 def _policy(*rules: Rule, root: str = "/w") -> FsPermissions:
-    """The decision half on its own, for the questions no tool can ask yet."""
+    """The decision half alone, for the questions that no tool can ask yet."""
 
     def roots(agent: AgentDriver | None = None) -> Path:
         return getattr(agent, "root", None) or Path(root)
@@ -96,12 +100,12 @@ DEFAULT_WRITE_SCOPE: dict[str, Any] = {
     "scope": "outside-workspace",
     "mode": "interrupt",
 }
-"""E6's rule, spelled here as the bundle spells it.
+"""The rule of E6, written here as the bundle writes it.
 
-Restated rather than read from `bundle.yaml` because a row patch replaces a
-row's config *wholesale* — so a test that adds a rule of its own drops the
-bundle's, and composing the two by hand is what makes the ordering the tests are
-about visible in the test.
+The rule is restated and not read from `bundle.yaml`, because a row patch
+replaces the config of a row *wholesale*. A test that adds a rule of its own
+therefore drops the rule of the bundle. Composing the two by hand makes the
+ordering that the tests are about visible in the test.
 """
 
 
@@ -110,11 +114,11 @@ async def _scoped(
     tmp_path: Path,
     *rules: dict[str, Any],
 ) -> Any:  # noqa: ANN401
-    """The bundle's default write scope, with any explicit rules *above* it.
+    """The default write scope of the bundle, with any explicit rules *above* it.
 
-    Above, because first-match-wins is the whole precedence mechanism: an
-    operator's rule decides before the default is reached, and a test that
-    appended instead would be testing the opposite arrangement.
+    Above, because first-match-wins is the whole precedence mechanism. A rule of
+    the operator decides before the default is reached. A test that appended
+    the explicit rules would test the opposite arrangement.
     """
     (tmp_path / "project").mkdir(exist_ok=True)
     return await _mounted(mount, tmp_path, *rules, DEFAULT_WRITE_SCOPE)
@@ -125,7 +129,7 @@ async def _mounted(
     tmp_path: Path,
     *rules: dict[str, Any],
 ) -> Any:  # noqa: ANN401
-    """The row with its ACL spelled the way a profile spells it, over a temp root."""
+    """The row with its ACL written as a profile writes it, over a temporary root."""
     return await mount(
         row("permissions-fs", rules=list(rules)), row("fs", root=str(tmp_path)), profile=PROFILE
     )
@@ -137,10 +141,10 @@ async def _mounted(
 def test_the_first_matching_rule_decides_and_nothing_after_it_is_read() -> None:
     """Order is the configuration language.
 
-    A narrow `allow` above a broad `deny` is how every path ACL anyone has used
-    expresses an exception. Evaluated by specificity, or by "strictest wins",
-    the same two lines would mean the opposite — so the test pins the direction
-    rather than the outcome of one pair.
+    Every path ACL that anyone has used expresses an exception as a narrow
+    `allow` above a broad `deny`. Evaluated by specificity, or by "strictest
+    wins", the same two lines would mean the opposite. So the test checks the
+    direction, and not the outcome of one pair.
     """
     policy = _policy(
         Rule(paths=("secrets/public.txt",), mode="allow"),
@@ -151,8 +155,8 @@ def test_the_first_matching_rule_decides_and_nothing_after_it_is_read() -> None:
     assert allowed is not None and allowed.mode == "allow"
     assert denied is not None and denied.mode == "deny"
 
-    # The same two rules the other way up: the broad deny now wins both, which
-    # is the point — reordering is how an operator changes the answer.
+    # The same two rules in the opposite order. The broad deny now wins both.
+    # That is the point: an operator changes the answer by reordering.
     reversed_policy = _policy(
         Rule(paths=("secrets/**",), mode="deny"),
         Rule(paths=("secrets/public.txt",), mode="allow"),
@@ -162,15 +166,15 @@ def test_the_first_matching_rule_decides_and_nothing_after_it_is_read() -> None:
 
 
 def test_no_rule_matches_means_allow() -> None:
-    """The default, and it has to be this one: a permission row whose empty
-    config refused everything would be a row nobody could layer."""
+    """The default, and it must be this one. A permission row whose empty config
+    refused everything would be a row that nobody could layer."""
     assert _policy(Rule(paths=("secrets/**",))).decide("read", Path("/w/src/main.py")) is None
     assert _policy().decide("write", Path("/w/anything")) is None
 
 
 def test_a_rule_only_answers_for_the_operations_it_names() -> None:
-    """`read` and `write` are separate questions, and a read-only tree is the
-    case that motivates saying so."""
+    """`read` and `write` are separate questions. A read-only tree is the case
+    that makes this worth stating."""
     policy = _policy(Rule(operations=("write",), paths=("vendor/**",), mode="deny"))
     assert policy.decide("read", Path("/w/vendor/lib.py")) is None
     denied = policy.decide("write", Path("/w/vendor/lib.py"))
@@ -180,9 +184,9 @@ def test_a_rule_only_answers_for_the_operations_it_names() -> None:
 def test_a_path_matches_by_either_spelling() -> None:
     """Relative to the workspace, or absolute.
 
-    A rule written `.env` should catch the file in the workspace, and one
-    written `/etc/**` should catch a file that has no relative spelling at all —
-    an operator should not have to know which form the seam resolved to.
+    A rule written `.env` must catch the file in the workspace. A rule written
+    `/etc/**` must catch a file that has no relative spelling at all. An
+    operator should not have to know which form the seam resolved to.
     """
     policy = _policy(Rule(paths=(".env",), mode="deny"), Rule(paths=("/etc/**",), mode="deny"))
     assert policy.decide("read", Path("/w/.env")) is not None
@@ -191,24 +195,24 @@ def test_a_path_matches_by_either_spelling() -> None:
 
 
 def test_a_dot_dot_spelling_cannot_slip_past_a_deny() -> None:
-    """A rule matches a path string, so the string has to be the real one (D6).
+    """A rule matches a path string, so the string must be the real one (D6).
 
-    Nothing collapsed `..`, so `deny read secrets/**` was bypassed by
-    `public/../secrets/key`: the relative spelling offered to the matcher was the
-    one with the `..` still in it, and `secrets/**` does not match
-    `public/../secrets/key`. The file read is the same file either way — only the
-    name it was asked for differed, which is the whole of the bypass.
+    Nothing collapsed `..`, so `public/../secrets/key` bypassed
+    `deny read secrets/**`. The relative spelling offered to the matcher still
+    had the `..` in it, and `secrets/**` does not match `public/../secrets/key`.
+    The file that is read is the same file in both cases. Only the name that was
+    asked for differed, and that is the whole bypass.
 
-    Both spellings are checked, because both are offered: the absolute one a
-    rule like `/etc/**` uses, and the workspace-relative one a rule like
-    `secrets/**` does.
+    Both spellings are checked, because both are offered: the absolute spelling
+    that a rule like `/etc/**` uses, and the workspace-relative spelling that a
+    rule like `secrets/**` uses.
     """
     policy = _policy(Rule(operations=("read",), paths=("secrets/**",), mode="deny"))
 
     assert policy.decide("read", Path("/w/secrets/key")) is not None, "the plain spelling"
     assert policy.decide("read", Path("/w/public/../secrets/key")) is not None
     assert policy.decide("read", Path("/w/./secrets/key")) is not None
-    # And a path that genuinely is elsewhere still is.
+    # A path that really is elsewhere is still elsewhere.
     assert policy.decide("read", Path("/w/public/key")) is None
 
 
@@ -216,33 +220,51 @@ def test_a_dot_dot_spelling_cannot_slip_past_a_deny() -> None:
 
 
 def test_a_recursive_delete_is_refused_when_a_rule_could_match_inside_it() -> None:
-    """G7's gate, and the reason it is a refusal rather than a walk.
+    """The gate of G7, and the reason that it is a refusal and not a walk.
 
-    The rules describe paths, including paths that do not exist yet; the tree is
-    enumerated by the operating system at delete time. So "is anything in here
-    protected?" cannot be answered by checking the directory's own path, and
-    checking each child would still race the ones created after the check.
+    The rules describe paths, including paths that do not exist yet. The
+    operating system enumerates the tree at delete time. So a check of the path
+    of the directory itself cannot answer "is anything in here protected?". A
+    check of each child would still race the children created after the check.
     """
     policy = _policy(Rule(operations=("write",), paths=("build/keep/**",), mode="deny"))
     assert policy.deletion_reason(Path("/w/build"), recursive=True) is not None
     # Not recursive: one path, one question, and this one is not protected.
     assert policy.deletion_reason(Path("/w/build"), recursive=False) is None
-    # A sibling tree the rule cannot reach into stays deletable, or the fence
-    # would refuse every delete anyone ever attempted.
+    # A sibling tree that the rule cannot reach into stays deletable. Otherwise
+    # the fence would refuse every delete that anyone attempted.
     assert policy.deletion_reason(Path("/w/dist"), recursive=True) is None
 
 
+def test_a_dot_dot_spelling_cannot_slip_past_a_recursive_refusal() -> None:
+    """The recursive check normalizes the path, as `decide` and `objection` do (D6).
+
+    A `Path` keeps a `..` segment. The recursive branch of `deletion_reason`
+    built its spellings from the path as given. `/w/x/../build` then matched no
+    rule that names `build`, and the delete that `/w/build` refuses was allowed.
+
+    Sabotage: pass `path.as_posix()` to `_spellings` in `deletion_reason` again,
+    and the first assertion fails.
+    """
+    policy = _policy(Rule(operations=("write",), paths=("build/keep/**",), mode="deny"))
+
+    assert policy.deletion_reason(Path("/w/x/../build"), recursive=True) is not None
+    assert policy.deletion_reason(Path("/w/dist/../build"), recursive=True) is not None
+    # A path that really is elsewhere is still deletable.
+    assert policy.deletion_reason(Path("/w/build/../dist"), recursive=True) is None
+
+
 def test_a_leading_wildcard_refuses_every_recursive_delete() -> None:
-    """`**/*.env` could match anything, so it does: a pattern with no literal
-    head tells you nothing about where it will hit, and the only safe reading of
-    "I cannot tell" on a delete is no."""
+    """`**/*.env` could match anything, so every recursive delete is refused. A
+    pattern that starts with `**` says nothing about where it will match, and the
+    only safe reading of "I cannot tell" on a delete is no."""
     policy = _policy(Rule(operations=("write",), paths=("**/*.env",), mode="deny"))
     assert policy.deletion_reason(Path("/w/anywhere"), recursive=True) is not None
 
 
 def test_containment_is_on_separators_not_on_string_prefixes() -> None:
-    """`/w/xyz` is not inside `/w/x`. A prefix test would have refused deletes of
-    every directory whose name merely started the same way."""
+    """`/w/xyz` is not inside `/w/x`. A prefix test would have refused the delete
+    of every directory whose name merely started the same way."""
     policy = _policy(Rule(operations=("write",), paths=("/w/x/**",), mode="deny"))
     assert policy.deletion_reason(Path("/w/xyz"), recursive=True) is None
     assert policy.deletion_reason(Path("/w/x"), recursive=True) is not None
@@ -250,8 +272,8 @@ def test_containment_is_on_separators_not_on_string_prefixes() -> None:
 
 def test_an_allow_rule_never_causes_a_recursive_refusal() -> None:
     """The fail-closed check looks for rules that would *object*. An `allow`
-    inside the tree is agreement, and treating it as a possible objection would
-    make writing an exception the way to forbid a delete."""
+    inside the tree is agreement. If it counted as a possible objection, writing
+    an exception would be the way to forbid a delete."""
     policy = _policy(Rule(operations=("write",), paths=("build/**",), mode="allow"))
     assert policy.deletion_reason(Path("/w/build"), recursive=True) is None
 
@@ -260,9 +282,9 @@ def test_an_allow_rule_never_causes_a_recursive_refusal() -> None:
 
 
 async def test_a_denied_read_never_opens_the_file(mount: MountProfile, tmp_path: Path) -> None:
-    """Gated on `fs/read-intent`, so the refusal happens before the open — a
-    check that ran after would be a report, which is the failure this seam
-    exists to avoid."""
+    """The gate is on `fs/read-intent`, so the refusal happens before the open. A
+    check that ran after the open would be a report, which is the failure that
+    this seam exists to avoid."""
     (tmp_path / "secret.env").write_text("TOKEN=hunter2", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 
@@ -276,8 +298,8 @@ async def test_a_denied_write_and_edit_are_both_refused(
 ) -> None:
     """One `write` rule covers create, overwrite and in-place edit.
 
-    Splitting them would mean "you may not write here" left `edit` open, which
-    is not what anyone means when they write that line.
+    If they were split, "you may not write here" would leave `edit` open. Nobody
+    means that when they write that line.
     """
     (tmp_path / "vendor").mkdir()
     (tmp_path / "vendor" / "lib.py").write_text("x = 1\n", encoding="utf-8")
@@ -289,8 +311,8 @@ async def test_a_denied_write_and_edit_are_both_refused(
         await ctx.require(FS).write("vendor/lib.py", "x = 2\n", scope=DEPLOYMENT)
     with pytest.raises(FsDenied):
         await ctx.require(FS).edit("vendor/lib.py", "x = 1", "x = 2", scope=DEPLOYMENT)
-    # And nothing changed on disk, which is the only assertion that proves the
-    # gate ran before the write rather than after it.
+    # Nothing changed on disk. This is the only assertion that proves that the
+    # gate ran before the write and not after it.
     assert (tmp_path / "vendor" / "lib.py").read_text(encoding="utf-8") == "x = 1\n"
     # The read the rule did not mention is still allowed.
     assert "x = 1" in (await ctx.require(FS).read("vendor/lib.py", scope=DEPLOYMENT)).text
@@ -299,10 +321,10 @@ async def test_a_denied_write_and_edit_are_both_refused(
 async def test_a_concealed_path_is_absent_from_glob_and_grep(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Enumeration is filtered, not asked about — and filtered during the walk.
+    """Enumeration is filtered, not asked about, and it is filtered during the walk.
 
-    `grep` reads every file it visits, so post-filtering its matches would
-    return nothing while having read the whole protected file. The assertion
+    `grep` reads every file that it visits. A filter over its matches would
+    return nothing but would have read the whole protected file. The assertion
     that matters is that the *contents* never appear.
     """
     (tmp_path / "app.py").write_text("TOKEN = 1\n", encoding="utf-8")
@@ -321,13 +343,13 @@ async def test_a_concealed_path_is_absent_from_glob_and_grep(
 async def test_a_denied_tree_is_never_entered(mount: MountProfile, tmp_path: Path) -> None:
     """P6-19. `deny secrets/**` refuses the directory, not each file in it.
 
-    The glob is the reason this needed a second question rather than reusing
-    `conceals`: `**` names what is *under* `secrets`, so `secrets` itself does
-    not match its own rule — a concealment check on the directory says "nothing
-    to hide", the walk descends, and the rule is then enforced once per file in a
-    tree it should never have entered. `_could_match_under` is the judgement
-    `deletion_reason` already made for exactly this shape, and this row gave it
-    its second consumer.
+    The glob is the reason that this needed a second question and could not
+    reuse the check for a file. `**` names what is *under* `secrets`, so `secrets` itself
+    does not match its own rule. A concealment check on the directory says
+    "nothing to hide" and the walk descends. The rule is then enforced one time
+    per file, in a tree that the walk should never have entered.
+    `_refuses_under` is the judgment that `deletion_reason` already made for
+    exactly this shape, and the walk screen is its second consumer.
     """
     (tmp_path / "secrets").mkdir()
     for index in range(4):
@@ -347,13 +369,12 @@ async def test_a_denied_tree_is_never_entered(mount: MountProfile, tmp_path: Pat
 async def test_a_tree_an_allow_rule_names_is_still_entered(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Pruning rounds towards refusal, but only for rules that refuse.
+    """A walk prunes for a rule that refuses, and never for an `allow`.
 
-    `_could_match_under` reasons from a pattern's literal head and cannot see
-    which files exist, so it necessarily over-refuses — the same direction it
-    over-refuses for a recursive delete, and for the same reason. What it must
-    not do is over-refuse on an `allow`, which would make a rule written to
-    *permit* something hide it instead.
+    `covers_whole` judges from the pattern alone and cannot see which files
+    exist. `docs/**` covers the whole of `docs`, so the pruning check must skip
+    an `allow` rule. Otherwise a rule that was written to *permit* something
+    would hide it.
     """
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "readme.md").write_text("hello\n")
@@ -366,13 +387,12 @@ async def test_a_tree_an_allow_rule_names_is_still_entered(
 async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The over-refusal pruning could have introduced, and the guard against it.
+    """The over-refusal that pruning could have introduced, and the guard against it.
 
-    `_could_match_under` reasons from a pattern's literal head, so a rule written
-    `paths: ["**"]` has an *empty* head and "could match" under every directory
-    in the tree. Scoped `outside-workspace` that is precisely the rule written to
-    exempt the workspace — so without `decide`'s own scope guard, one such rule
-    prunes the entire walk and the agent can enumerate nothing at all.
+    A rule written `paths: ["**"]` covers every directory in the tree. Scoped
+    `outside-workspace`, it is precisely the rule that is written to exempt the
+    workspace. Without the scope guard that `decide` also has, one such rule
+    prunes the whole walk and the agent can enumerate nothing at all.
     """
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("TOKEN = 1\n")
@@ -392,10 +412,11 @@ async def test_a_workspace_scoped_read_rule_does_not_prune_the_workspace(
 
 
 async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_path: Path) -> None:
-    """`interrupt` is an approval, through the same seam `hitl` uses.
+    """`interrupt` is an approval, through the same seam that `hitl` uses.
 
-    One approval channel, so a deployment configures its answerer once — and a
-    refusal reads as a refusal rather than as a path that quietly did nothing.
+    There is one approval channel, so a deployment configures its answerer one
+    time. A refusal reads as a refusal, and not as a path that quietly did
+    nothing.
     """
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
@@ -408,8 +429,9 @@ async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_pa
     answers[0] = "rejected"
     with pytest.raises(FsDenied) as refused:
         await ctx.require(FS).read("notes.md", agent=agent, scope=DEPLOYMENT)
-    # The seam's own sentence, so a model can tell a human's "no" from a missing
-    # channel — only one of the two is worth re-planning around.
+    # The sentence of the seam itself, so that a model can tell the "no" of a
+    # human from a missing channel. Only one of the two is worth re-planning
+    # around.
     assert "the user rejected" in str(refused.value)
     assert events_of(session, "approval/decided")
 
@@ -417,9 +439,10 @@ async def test_interrupt_asks_and_the_answer_decides(mount: MountProfile, tmp_pa
 async def test_a_canceled_call_is_not_asked_about(mount: MountProfile, tmp_path: Path) -> None:
     """A prompt is a question to a person, so an abandoned turn does not ask one.
 
-    No `cancel=` argument: the seam defaults to the agent's own token, so this
-    pins the claim rather than the plumbing. All three operations, because a
-    canceled read costs a wasted question and a canceled write costs a file.
+    The test passes no `cancel=` argument. The seam defaults to the token of the
+    agent itself, so this checks the claim and not the plumbing. All three
+    operations are tested, because a canceled read costs a wasted question and a
+    canceled write costs a file.
     """
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
@@ -440,8 +463,8 @@ async def test_a_canceled_call_is_not_asked_about(mount: MountProfile, tmp_path:
 
 
 async def test_interrupt_without_an_answerer_denies(mount: MountProfile, tmp_path: Path) -> None:
-    """Fail closed, the same way every other path through `ctx.approval` does:
-    a missing channel is a misconfigured deployment, not consent."""
+    """Fail closed, in the same way as every other path through `ctx.approval`. A
+    missing channel is a misconfigured deployment, not consent."""
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
     agent = StubAgent(ctx, ctx.require(SESSIONS).create("unanswered"))
@@ -457,11 +480,11 @@ async def test_an_agentless_interrupt_denies_rather_than_prompting(
     """No agent means no session, and a prompt raised outside a session is worse
     than useless.
 
-    `ApprovalService.request` derives the session from the agent, so an agentless
-    ask would put a question in front of a human with **nothing written to the
-    log** — and would walk straight past the `approval_policy: "never"`
-    short-circuit a deployment set on purpose. Both existing consumers of the
-    seam refuse for exactly this reason; the first draft of this row did not.
+    `ApprovalService.request` derives the session from the agent. An ask with no
+    agent would put a question in front of a human with **nothing written to the
+    log**. It would also skip the `approval_policy: "never"` short-circuit that
+    a deployment set on purpose. Both existing consumers of the seam refuse for
+    exactly this reason. The first draft of this row did not.
     """
     (tmp_path / "notes.md").write_text("hello\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["notes.md"], "mode": "interrupt"})
@@ -495,9 +518,9 @@ async def test_a_rule_may_carry_its_own_words_for_the_prompt(
 
 
 async def test_nothing_is_restricted_by_default(mount: MountProfile, tmp_path: Path) -> None:
-    """Layering the bundle must not start refusing file access — `hitl`'s rule,
-    for the same reason: a harness that refuses on first run is one whose rules
-    nobody chose."""
+    """Layering the bundle must not start to refuse file access. This is the rule
+    of `hitl`, for the same reason: a harness that refuses on first run has rules
+    that nobody chose."""
     (tmp_path / "secret.env").write_text("TOKEN=1\n", encoding="utf-8")
     ctx = await mount(row("fs", root=str(tmp_path)), profile=PROFILE)
 
@@ -508,17 +531,18 @@ async def test_nothing_is_restricted_by_default(mount: MountProfile, tmp_path: P
 async def test_a_tool_call_is_covered_without_the_row_naming_the_tool(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The reason the rules hang off the seam rather than off `tools/pre-execute`.
+    """The reason that the rules are attached to the seam and not to
+    `tools/pre-execute`.
 
-    `read` is never mentioned in this module. It is covered because it goes
-    through `ctx.fs`, which is also what covers a Code Mode binding, a second
-    editing tool, and an MCP server's file writer — where a name-keyed rule
-    would have silently covered none of them, the failure `compaction`'s
-    truncation pass and `offload` both argue against in their own docstrings.
+    `read` is never mentioned in this module. The tool is covered because it
+    goes through `ctx.fs`. A Code Mode binding and a second editing tool are
+    covered in the same way. A rule keyed by tool name would have silently
+    covered none of them. That is the failure that the truncation pass of
+    `compaction` and `offload` both argue against in their own docstrings.
 
-    And it arrives as a **denial**, not a failure: `FsDenied` carries
+    The result also arrives as a **denial**, not a failure. `FsDenied` carries
     `failure_kind`, so a Code Mode program cannot read a policy veto as a tool
-    that merely broke and try something else.
+    that merely broke and then try something else.
     """
     (tmp_path / "secret.env").write_text("TOKEN=hunter2\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
@@ -537,13 +561,13 @@ async def test_a_tool_call_is_covered_without_the_row_naming_the_tool(
 
 
 async def test_an_empty_rule_set_attaches_nothing(mount: MountProfile, tmp_path: Path) -> None:
-    """The row mounted with no rules is the row doing nothing at all.
+    """The row mounted with no rules does nothing at all.
 
-    Not "allowing everything through a predicate that says yes": `hide` is
-    consulted once per file a walk visits, so a `grep` over a repository would
-    pay a Python call per candidate to answer a question nobody asked. The
-    service is still published, because "no rules" is an answer `phern doctor`
-    wants to be able to give.
+    It does not "allow everything through a predicate that says yes". A screen
+    is consulted for each file that a walk visits, so a `grep` over a repository
+    would pay a Python call per candidate to answer a question that nobody
+    asked. The service is still published, because "no rules" is an answer that
+    `phern doctor` must be able to give.
     """
     (tmp_path / "secret.env").write_text("TOKEN=1\n", encoding="utf-8")
     ctx = await _mounted(mount, tmp_path)
@@ -559,21 +583,21 @@ async def test_an_empty_rule_set_attaches_nothing(mount: MountProfile, tmp_path:
 async def test_the_reach_message_toggles_with_a_sandbox(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """E9, and the reason `reach` reads the seam rather than a mount-time bool.
+    """E9, and the reason that `reach` reads the seam and not a mount-time bool.
 
-    These rules bound access *through* `ctx.fs`; a code cell calling `open()`
-    directly never fires an intent. Saying so is only worth anything if the
-    sentence changes when the situation does — a disclaimer that is always there
-    is one people stop reading, and one computed at mount would be the wrong
-    sentence for a profile that layers its backend afterwards.
+    These rules bound access *through* `ctx.fs`. A code cell that calls `open()`
+    directly never fires an intent. Saying so is only useful if the sentence
+    changes when the situation changes. People stop reading a disclaimer that is
+    always there. A sentence computed at mount would be the wrong sentence for a
+    profile that layers its backend afterwards.
     """
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
     assert ctx.require(FS_PERMISSIONS).reach == UNBOUNDED_REACH
     assert "not covered" in ctx.require(FS_PERMISSIONS).reach
 
-    # P6-04's backend does not exist yet, so the stand-in is what the seam
-    # actually reads: a provider in the slot. The claim under test is the
-    # toggle, not what any particular backend enforces.
+    # The test does not mount the P6-04 backend (`sandbox-local`). The stand-in is
+    # what the seam reads: a provider in the slot. The claim under test is the
+    # toggle, and not what any particular backend enforces.
     ctx.require(SANDBOX).register_provider(StubSandboxProvider())
     assert ctx.require(FS_PERMISSIONS).reach == BOUNDED_REACH
     assert "not covered" not in ctx.require(FS_PERMISSIONS).reach
@@ -582,10 +606,10 @@ async def test_the_reach_message_toggles_with_a_sandbox(
 async def test_the_reading_reaches_doctor_even_with_no_rules(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """P4-12. The empty case is the one worth printing: a deployment that wrote
-    no rules has a *wider* reach than one that wrote a deny list, and a report
-    that only appeared once someone configured something would tell people what
-    they cannot do and never that nothing was stopping them.
+    """P4-12. The empty case is the one worth printing. A deployment that wrote no
+    rules has a *wider* reach than one that wrote a deny list. A report that
+    appeared only after someone configured something would tell people what they
+    cannot do, and never that nothing stopped them.
     """
     ctx = await _mounted(mount, tmp_path)
 
@@ -596,8 +620,8 @@ async def test_the_reading_reaches_doctor_even_with_no_rules(
 
 
 async def test_the_reading_names_each_rule(mount: MountProfile, tmp_path: Path) -> None:
-    """A person reading `phern doctor` is asking "what is refused here", and a
-    count answers a different question than the one they asked."""
+    """A person who reads `phern doctor` asks "what is refused here". A count
+    answers a different question."""
     ctx = await _mounted(mount, tmp_path, {"paths": ["*.env"], "mode": "deny"})
 
     rows = report_section(ctx, "File permissions")
@@ -607,8 +631,8 @@ async def test_the_reading_names_each_rule(mount: MountProfile, tmp_path: Path) 
 
 
 def test_a_policy_with_no_sandbox_seam_reports_unconfined() -> None:
-    """Fail closed, and also simply true: nothing is holding the line for the
-    paths these rules cannot see."""
+    """Fail closed, and also simply true: nothing bounds the paths that these
+    rules cannot see."""
     assert _policy().reach == UNBOUNDED_REACH
     assert not _policy().confined
 
@@ -616,13 +640,13 @@ def test_a_policy_with_no_sandbox_seam_reports_unconfined() -> None:
 async def test_an_anchored_rule_still_applies_inside_a_worktree(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The hole D21 opened, and the reason the root is asked per agent.
+    """The hole that D21 opened, and the reason that the root is asked per agent.
 
-    A rule written `secrets/**` is anchored to *the workspace*. With the root
-    captured at mount, an agent at the `worktree` tier writes in a directory
-    outside that prefix, so `_spellings` offered only the absolute path and the
-    rule silently stopped applying — in the one place a rule is most needed,
-    with nothing failing to say so.
+    A rule written `secrets/**` is anchored to *the workspace*. When the root was
+    captured at mount, an agent at the `worktree` tier wrote in a directory
+    outside that prefix. `_spellings` then offered only the absolute path, and
+    the rule silently stopped applying. That happened in the one place where a
+    rule is most needed, and nothing failed to show it.
     """
     ctx = await _mounted(mount, tmp_path, {"operations": ["write"], "paths": ["secrets/**"]})
     session = ctx.require(SESSIONS).create("s1")
@@ -645,10 +669,10 @@ async def test_an_anchored_rule_still_applies_inside_a_worktree(
 
 
 def test_two_agents_are_judged_against_their_own_roots(tmp_path: Path) -> None:
-    """The same rule, two agents, two answers — which is the point.
+    """The same rule, two agents, two answers. That is the point.
 
-    `secrets/**` names a different directory in each agent's tree, and a policy
-    that resolved one root for everybody would answer for the wrong one.
+    `secrets/**` names a different directory in the tree of each agent. A policy
+    that resolved one root for every agent would answer for the wrong one.
     """
 
     policy = _policy(Rule(operations=("write",), paths=("secrets/**",)), root="/w")
@@ -663,10 +687,10 @@ def test_two_agents_are_judged_against_their_own_roots(tmp_path: Path) -> None:
 
 
 async def test_writing_inside_the_workspace_never_asks(mount: MountProfile, tmp_path: Path) -> None:
-    """E6's first half, and the whole reason the row exists.
+    """The first half of E6, and the purpose of the default write scope.
 
-    Not one prompt, for any number of writes: the agent owns this checkout, so
-    asking about its own tree is asking about nothing.
+    There is not one prompt, for any number of writes. The agent owns this
+    checkout, so a question about its own tree is a question about nothing.
     """
     ctx = await _scoped(mount, tmp_path)
     agent, workspace = await scoped_agent(ctx, tmp_path)
@@ -684,20 +708,23 @@ async def test_writing_inside_the_workspace_never_asks(mount: MountProfile, tmp_
 async def test_a_write_named_through_a_symlink_into_the_workspace_never_asks(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**Both sides of the boundary are one spelling, and only one of them is
-    canonical by construction.**
+    """**Both sides of the boundary must be in one spelling, and only one of them
+    is canonical by construction.**
 
-    Workspace roots are canonicalized where they are minted (`ph.paths.canonical`),
-    because the kernel matches the path it resolves. The *candidate* is not:
-    `FsService.resolve` passes an absolute path through as the model authored it,
-    deliberately. So a path naming this agent's own tree through a link — which is
-    what `$TMPDIR` produces on macOS, where `/var` is `/private/var` — reaches the
-    gate spelled differently from the root it is inside, and a plain prefix compare
-    would interrupt a person about a write the sandbox permits. That is E6's
-    disagreement, in the fail-safe direction rather than the fail-open one.
+    Workspace roots are canonicalized where they are minted
+    (`ph.paths.canonical`), because the kernel matches the path that it
+    resolves. The *candidate* is not canonical: `FsService.resolve` passes an
+    absolute path through as the model wrote it, deliberately. A path can name
+    the tree of this agent through a link. `$TMPDIR` produces such a path on
+    macOS, where `/var` is `/private/var`. That path reaches the gate with a
+    different spelling from the root that it is inside, and a plain prefix
+    compare would interrupt a person about a write that the sandbox permits.
+    That is the disagreement of E6, in the fail-safe direction and not the
+    fail-open one.
 
-    The resolution happens only *after* the cheap compare has said "outside", so
-    the ordinary write pays no syscall for it and this one is answered correctly.
+    The resolution happens only *after* the cheap compare has said "outside".
+    The ordinary write therefore pays no syscall for it, and this write is
+    answered correctly.
     """
     ctx = await _scoped(mount, tmp_path)
     agent, workspace = await scoped_agent(ctx, tmp_path)
@@ -712,9 +739,10 @@ async def test_a_write_named_through_a_symlink_into_the_workspace_never_asks(
 
 
 async def test_writing_to_scratch_never_asks(mount: MountProfile, tmp_path: Path) -> None:
-    """Scratch is outside the worktree *by design* (E5) and is the one place a
-    read-only or ephemeral agent is told it may write — so a scope covering only
-    `root` would prompt on exactly the writes the design invites."""
+    """Scratch is outside the worktree *by design* (E5). It is also the one place
+    where a read-only or ephemeral agent is told that it may write. A scope that
+    covered only `root` would prompt on exactly the writes that the design
+    invites."""
     ctx = await _scoped(mount, tmp_path)
     agent, workspace = await scoped_agent(ctx, tmp_path)
     asked = answer_approvals(ctx, "rejected")
@@ -728,8 +756,8 @@ async def test_writing_to_scratch_never_asks(mount: MountProfile, tmp_path: Path
 
 
 async def test_one_write_outside_asks_once(mount: MountProfile, tmp_path: Path) -> None:
-    """E6's second half. The rare prompt is the meaningful one, and it carries
-    the boundary being left rather than only the path."""
+    """The second half of E6. The rare prompt is the meaningful one, and it names
+    the boundary that the write leaves and not only the path."""
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     ctx = await _scoped(mount, tmp_path)
@@ -760,8 +788,8 @@ async def test_a_refused_write_outside_does_not_happen(mount: MountProfile, tmp_
 
 
 async def test_no_answerer_denies_rather_than_allowing(mount: MountProfile, tmp_path: Path) -> None:
-    """Fail-closed, the reading every asking row in this package shares: an
-    approval nobody can answer is not an approval."""
+    """Fail closed, as every asking row in this package does: an approval that
+    nobody can answer is not an approval."""
     outside = tmp_path / "elsewhere"
     outside.mkdir()
     ctx = await _scoped(mount, tmp_path)
@@ -778,10 +806,11 @@ async def test_no_answerer_denies_rather_than_allowing(mount: MountProfile, tmp_
 async def test_an_agent_with_no_workspace_is_unaffected(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """No workspace, no scope to be outside of.
+    """No workspace, so no scope to be outside of.
 
-    A profile that layers this row without the lifecycle gets today's behavior
-    rather than a boundary drawn around a directory nobody chose.
+    A profile that layers the rule without a containment tier keeps the
+    behavior that it has today. It does not get a boundary drawn around a
+    directory that nobody chose.
     """
     ctx = await _scoped(mount, tmp_path)
     session = ctx.require(SESSIONS).create("s1")
@@ -795,12 +824,12 @@ async def test_an_agent_with_no_workspace_is_unaffected(
 
 
 async def test_an_explicit_deny_beats_the_default(mount: MountProfile, tmp_path: Path) -> None:
-    """The layering *is* the precedence.
+    """The order of the rules *is* the precedence.
 
-    Waterfall listeners run outermost-first in registration order, so
-    `permissions-fs` layered before this row refuses first and this row is never
-    reached. That is what makes "default write scope" a default rather than an
-    override of the operator's own rules.
+    The explicit rule is above the default write scope in the one list, and the
+    first match wins. So the explicit `deny` refuses first and the default is
+    never reached. That is what makes "default write scope" a default and not an
+    override of the rules of the operator.
     """
     ctx = await _scoped(mount, tmp_path, {"operations": ["write"], "paths": ["secrets/**"]})
     agent, workspace = await scoped_agent(ctx, tmp_path)
@@ -820,15 +849,16 @@ async def test_an_explicit_deny_beats_the_default(mount: MountProfile, tmp_path:
 async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The idiomatic deny, and the walk it must not shut down.
+    """The idiomatic deny, and the walk that it must not shut down.
 
-    `_could_match_under` answers `True` for a pattern with no literal head,
-    because for a recursive *delete* "could match anywhere" has to round to
-    refusal. Applied to a walk that same rounding refuses everywhere: `deny
-    **/.env` — the way anyone would write it — made every directory a
-    candidate for pruning, and `glob("**/*")` over this repository went from
-    11 489 results to 6. The file the rule names is still concealed on the way
-    past; what a leading wildcard cannot justify is refusing to look.
+    `_could_match_under` answers `True` for a pattern that starts with `**`,
+    because for a recursive *delete* "could match anywhere" must round to
+    refusal. Applied to a walk, the same rounding refuses everywhere.
+    `deny **/.env` is the way that anyone would write the rule. It made every
+    directory a candidate for pruning, and `glob("**/*")` over this repository
+    went from 11 489 results to 6. The file that the rule names is still
+    concealed as the walk passes it. A leading wildcard cannot justify a refusal
+    to look.
     """
     for relative in ("src/a.py", "docs/b.md", "src/.env", "top.txt"):
         target = tmp_path / relative
@@ -836,16 +866,16 @@ async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
         target.write_text("x\n")
     ctx = await _mounted(mount, tmp_path, {"paths": ["**/.env"], "mode": "deny"})
 
-    # Files only — `_walk` never yields a directory — so this is every file in
-    # the tree except the one the rule names.
+    # Files only, because `_walk` never yields a directory. So this is every
+    # file in the tree except the one that the rule names.
     found = sorted(
         path[len(str(tmp_path)) + 1 :]
         for path in await ctx.require(FS).glob("**/*", scope=DEPLOYMENT)
     )
     assert found == ["docs/b.md", "src/a.py", "top.txt"]
 
-    # And the delete side keeps the harder rounding, which is the reason the two
-    # callers of `_refuses_under` differ rather than an oversight.
+    # The delete side keeps the harder rounding. That is the reason that the two
+    # callers of `_refuses_under` differ. It is not an oversight.
     policy = _policy(Rule(paths=("**/.env",), mode="deny"), root=str(tmp_path))
     assert policy.deletion_reason(tmp_path / "src", recursive=True) is not None
 
@@ -853,10 +883,11 @@ async def test_a_leading_wildcard_hides_the_file_without_refusing_the_tree(
 async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """P6-38, E6: the prompt boundary is the enforced one. A write into a directory
-    `sandbox-allow` binds writable must not be asked about as if it left the
-    workspace — the backend would permit it, and a prompt describing a boundary
-    that is not there is the drift the shared set exists to prevent."""
+    """P6-38, E6: the prompt boundary is the enforced boundary. A write into a
+    directory that `sandbox-allow` binds writable must not be asked about as if
+    it left the workspace. The backend would permit it, and a prompt that
+    describes a boundary that is not there is the drift that the shared set
+    exists to prevent."""
     cache = tmp_path / "shared-cache"
     cache.mkdir()
     ctx = await mount(
@@ -889,9 +920,10 @@ async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
         permissions.objection("write", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
     )
 
-    # And per agent (S7b, item 3): one narrowed out of the directory is asked about it,
-    # since its sandbox no longer binds it. Sabotage: ask `allowed_paths_of` without
-    # the agent, and the narrowed agent writes there unasked.
+    # And per agent (S7b, item 3): an agent narrowed out of the directory is asked
+    # about it, because its sandbox no longer binds it. Sabotage: ask
+    # `allowed_paths_of` without the agent, and the narrowed agent writes there
+    # unasked.
     ctx.require(SANDBOX).restrict_paths((), scope=agent.ctx)
     assert permissions.objection("write", cache / "wheel.whl", agent=agent) is not None
 
@@ -899,33 +931,35 @@ async def test_a_directory_the_sandbox_allows_is_not_outside_the_workspace(
 async def test_a_spilled_result_is_readable_but_not_writable(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The reach the retrieval hint depends on, stated rather than incidental.
+    """The reach that the retrieval hint depends on, stated and not incidental.
 
     `tool-result-offload` replaces an oversized result with a preview and the
-    path it was written to under `$PH_HOME/spill`. That path is outside the
-    agent's workspace, and it works today only because the shipped rule set
-    restricts *writes* and nothing else — so a deployment adding
-    `deny read outside-workspace` hands the model a path and then refuses it when
-    it follows it, silently, in every session. The harness telling the model
-    something is on disk and then denying it is the failure the spill seam's own
-    docstring opens by ruling out.
+    path that it was written to under `$PH_HOME/spill`. That path is outside the
+    workspace of the agent. With the shipped rule set, a read of it works only
+    because that rule set restricts *writes* and nothing else. Without the
+    exemption, a deployment that adds `deny read outside-workspace` would hand
+    the model a path and then refuse the path when the model follows it,
+    silently, in every session. The harness telling the model that something is
+    on disk and then denying it is the failure that the docstring of the spill
+    seam rules out in its first lines.
 
-    Reads only, which is the half worth pinning twice: nothing invites an agent
-    to write into the harness's store, and one that could would be able to forge
-    a blob under a locator the log already names.
+    Reads only, and that half is worth a second check. Nothing invites an agent
+    to write into the store of the harness. An agent that could write there
+    could forge a blob under a locator that the log already names.
 
-    And this agent's own session only. The locator is `root/<owner>/…` with the
-    session id as owner, so exempting the store *root* would have let any agent
-    read every other session's spilled results — wider than the claim, which is
-    only that a path this session was handed can be followed. The locator here is
-    asked of the store rather than spelled by hand, because a test that writes
-    the layout out is a test that passes when the layout moves.
+    And only the session of this agent. The locator is `root/<owner>/…` with the
+    session id as owner. An exemption for the store *root* would have let any
+    agent read the spilled results of every other session. That is wider than
+    the claim, which is only that a path handed to this session can be followed.
+    The test asks the store for the locator and does not write it by hand,
+    because a test that writes the layout out still passes when the layout
+    moves.
 
-    **The producer has to be mounted**, which is the point of folding the
-    claims rather than assuming the layout: a deployment that spills nothing
-    hands the model no paths, and exempting one would be granting a reach
-    nothing asked for. `tool-result-offload` is what registers the claim, so it
-    is in the profile here exactly as it is in a real one.
+    **The producer must be mounted.** That is the purpose of folding the claims
+    and not assuming the layout. A deployment that spills nothing hands the
+    model no paths, and an exemption for one would grant a reach that nothing
+    asked for. `tool-result-offload` registers the claim, so it is in the
+    profile here exactly as it is in a real profile.
     """
     ctx = await mount(
         {
@@ -960,29 +994,30 @@ async def test_a_spilled_result_is_readable_but_not_writable(
 
     assert permissions.objection("read", spilled, agent=agent) is None
     assert permissions.objection("write", spilled, agent=agent) is not None
-    # Another session's blob is not this agent's to follow — the exemption is the
-    # paths it was handed, not the store.
+    # The blob of another session is not for this agent to follow. The exemption
+    # is the paths that the agent was handed, and not the store.
     other = store.plan(
         owner="s-someone-else", suggested_name="large_tool_results/call-7", content=b"x"
     ).locator
     assert permissions.objection("read", other, agent=agent) is not None
-    # And the rule still bites everywhere else, so this is an exemption rather
-    # than the scope being switched off.
+    # The rule still applies everywhere else, so this is an exemption. The scope
+    # is not switched off.
     assert permissions.objection("read", tmp_path.parent / "elsewhere.txt", agent=agent) is not None
 
 
 async def test_every_row_that_hands_the_model_a_path_is_exempt(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Not just the two offloads — the set is what the rows declare.
+    """Not only the two offloads: the set is what the rows declare.
 
-    `compaction-summarize` spills the pre-compaction history and its replacement
-    tells the model it "has been saved to {file_path} should you need to refer
-    back to it". Under the first cut — an unconditional `root/<session id>` —
-    that read was exempt by accident of the layout. Folding the claims made the
-    set honest and, until this, one row short: it shipped alongside the offloads
-    so nothing noticed, and a profile that kept compaction without them would
-    have pointed the model at a file it was then refused.
+    `compaction-summarize` spills the pre-compaction history, and its
+    replacement tells the model it "has been saved to {file_path} should you
+    need to refer back to it". Under the first cut, an unconditional
+    `root/<session id>`, that read was exempt by an accident of the layout.
+    Folding the claims made the set correct and, until this, one row short.
+    Compaction shipped alongside the offloads, so nothing noticed. A profile
+    that kept compaction without the offloads would have pointed the model at a
+    file and then refused the read.
 
     Sabotage: drop `hands_paths=True` from the compaction claim.
     """
@@ -1020,33 +1055,34 @@ async def test_every_row_that_hands_the_model_a_path_is_exempt(
 
 
 def test_a_wildcard_that_is_not_a_star_still_makes_a_head() -> None:
-    """D11 — `fs.literal_head` and `_WILDCARD` say why the alphabet is shared.
+    """D11: `fs.literal_head` and `_WILDCARD` say why the alphabet is shared.
 
-    `sec?ets/**` and `[sf]ecrets/**` are ordinary globs `matches_glob` honors,
-    and a head split on `*` alone read them as literal directory names no tree
-    contains — so the rule concealed each file it named while refusing nothing
-    and pruning nothing.
+    `sec?ets/**` and `[sf]ecrets/**` are ordinary globs that `matches_glob`
+    honors. A head that was split on `*` alone read them as literal directory
+    names that no tree contains. So the rule concealed each file that it named,
+    but it refused nothing and pruned nothing.
     """
     for pattern in ("sec?ets/**", "[sf]ecrets/**"):
         policy = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
         assert policy.deletion_reason(Path("/w"), recursive=True) is not None, pattern
 
-    # And the refusal is still bounded — this is not "refuse everything", which
-    # is the other way to pass. Both spellings now show it: since the walk
-    # matches segment by segment, a leading `[sf]` constrains the first segment
-    # exactly as `sec?` does, rather than reading as "could match anywhere".
+    # The refusal is still bounded. This is not "refuse everything", which is
+    # the other way to pass. Both spellings now show it. The check matches
+    # segment by segment, so a leading `[sf]` constrains the first segment
+    # exactly as `sec?` does, and does not read as "could match anywhere".
     for pattern in ("sec?ets/**", "[sf]ecrets/**"):
         bounded = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
         assert bounded.deletion_reason(Path("/w/elsewhere"), recursive=True) is None, pattern
 
 
 class _Agent(StubAgent):
-    """A real `AgentHandle` carrying a workspace root.
+    """A real `AgentHandle` that carries a workspace root.
 
-    `roots` is the only thing that looks at the agent here and it reads `.root`;
-    `objection` and `screen` still declare `AgentHandle`, which a bare
-    three-field class never satisfied — so this subclasses the stub the type
-    checker already accepts rather than casting something that is not one.
+    `roots` is the only thing here that looks at the agent, and it reads
+    `.root`. `objection` and `screen` still declare `AgentHandle`, which a bare
+    three-field class never satisfied. So this class subclasses the stub that
+    the type checker already accepts, and does not cast something that is not
+    an `AgentHandle`.
     """
 
     def __init__(self, root: Path) -> None:
@@ -1055,7 +1091,7 @@ class _Agent(StubAgent):
 
 
 def _walk(policy: FsPermissions, path: str) -> str:
-    """What the walk screen does with a directory — `screen` for `is_dir=True`."""
+    """What the walk screen does with a directory: `screen` for `is_dir=True`."""
     return policy.screen(path, path.rsplit("/", 1)[-1], _Agent(Path("/w")), True)
 
 
@@ -1063,20 +1099,21 @@ def _walk(policy: FsPermissions, path: str) -> str:
     "pattern", ["secrets/**", "sec?ets/**", "sec*ets/**", "[sf]ecrets/**", "?ecrets/**"]
 )
 def test_every_spelling_of_a_directory_rule_guards_that_directory(pattern: str) -> None:
-    """D11 — a glob was read as a path, and the answer came out inverted.
+    """D11: a glob was read as a path, and the answer came out inverted.
 
-    `_could_match_under` compared the pattern's *literal head* — everything
-    before the first wildcard — as a path. That is exact only when the head
-    stops at a separator. `sec?ets/**` has the head `sec`, which is an ancestor
-    of nothing the rule covers and exactly equal to a directory it can never
-    touch. So the rule **allowed** `rm -rf secrets` and walked into it, while
-    **refusing** `rm -rf sec` and pruning that — the one direction a permission
-    gate must never fail in, and its mirror, at once.
+    `_could_match_under` compared the *literal head* of the pattern (everything
+    before the first wildcard) as a path. That is exact only when the head stops
+    at a separator. `sec?ets/**` has the head `sec`, which is an ancestor of
+    nothing that the rule covers and exactly equal to a directory that the rule
+    can never touch. So the rule **allowed** `rm -rf secrets` and walked into
+    it, while it **refused** `rm -rf sec` and pruned that. That is the one
+    direction in which a permission gate must never fail, and its mirror, at
+    the same time.
 
     Every spelling below means "the secrets directory", so every one must
     behave as the plain `secrets/**` does: guard `secrets`, and leave alone the
-    directories it cannot name. Matching segment by segment in the glob's own
-    dialect is what makes them agree.
+    directories that it cannot name. They agree because the match is segment by
+    segment, in the dialect of the glob itself.
 
     Sabotage: compare `literal_head(pattern)` as a path again and the `?` and
     `*` rows allow deleting `secrets` while refusing `sec`.
@@ -1096,19 +1133,19 @@ def test_every_spelling_of_a_directory_rule_guards_that_directory(pattern: str) 
 
 
 def test_a_walk_prunes_what_a_rule_covers_wholesale_and_nothing_else() -> None:
-    """D11 — the walk and the delete ask different questions.
+    """D11: the walk and the delete ask different questions.
 
-    A delete asks whether the rule could name *anything* it removes, and must
-    refuse on "could". A walk asks whether the rule names *everything* in a
-    directory, because only then is skipping it lossless; a rule covering part
-    of a directory is enforced file by file as the walk passes.
+    A delete asks whether the rule could name *anything* that it removes, and
+    must refuse on "could". A walk asks whether the rule names *everything* in a
+    directory, because only then is skipping the directory lossless. A rule that
+    covers part of a directory is enforced file by file as the walk passes.
 
-    One function used to answer both, with a flag bending it for the walk, and
-    no setting of the flag was right for every rule below. It over-hid: `deny
-    read src/*.pem` pruned all of `src`, and every allowed file in it vanished
-    from glob and grep. It also missed: `deny read **/node_modules/**` pruned no
-    `node_modules` at all. And `**/.env` must never prune the tree, or the
-    idiomatic spelling of the commonest rule hides the whole workspace.
+    One function used to answer both, with a flag that adjusted it for the walk.
+    No setting of the flag was right for every rule below. It hid too much:
+    `deny read src/*.pem` pruned all of `src`, and every allowed file in it
+    vanished from glob and grep. It also missed: `deny read **/node_modules/**`
+    pruned no `node_modules` at all. And `**/.env` must never prune the tree, or
+    the idiomatic spelling of the most common rule hides the whole workspace.
 
     Sabotage: have `screen` ask the delete's question and `src` is pruned.
     """
@@ -1126,22 +1163,23 @@ def test_a_walk_prunes_what_a_rule_covers_wholesale_and_nothing_else() -> None:
         policy = _policy(Rule(operations=("read",), paths=(pattern,), mode="deny"))
         assert _walk(policy, directory) == expected, (pattern, directory)
 
-    # And the delete still refuses every one of them, because each could name
-    # something the delete would remove.
+    # The delete still refuses every one of them, because each could name
+    # something that the delete would remove.
     for pattern, directory, _ in cases:
         policy = _policy(Rule(operations=("write",), paths=(pattern,), mode="deny"))
         assert policy.deletion_reason(Path(directory), recursive=True) is not None, pattern
 
 
 def test_a_double_star_inside_a_segment_still_refuses_a_delete() -> None:
-    """D11 review — the permissive regression the first version introduced.
+    """D11 review: the permissive regression that the first version introduced.
 
-    `matches_glob` compiles `**` to cross separators *wherever it appears*: `data**/key`
-    matches `data/v1/x/key`. The first segment walk recognized `**` only as a whole
-    segment, so it matched `data**` against `data` as a one-segment glob, ran out of
-    pattern, and **allowed** deleting `data/v1` — which the literal-head code it
-    replaced had refused. A second copy of the dialect, wrong in the one
-    direction a delete gate must never be.
+    `matches_glob` compiles `**` to cross separators *wherever it appears*:
+    `data**/key` matches `data/v1/x/key`. The first segment walk recognized `**`
+    only as a whole segment. It matched `data**` against `data` as a one-segment
+    glob, ran out of pattern, and **allowed** a delete of `data/v1`. The
+    literal-head code that it replaced had refused that delete. It was a second
+    copy of the dialect, wrong in the one direction in which a delete gate must
+    never be wrong.
 
     Sabotage: treat `**` as special only when it is a whole segment, and the
     first two cases are allowed.
@@ -1159,19 +1197,20 @@ def test_a_double_star_inside_a_segment_still_refuses_a_delete() -> None:
 
 
 def test_a_rule_does_not_refuse_what_it_provably_cannot_name() -> None:
-    """The two places D11 *loosened* a refusal, stated so nobody finds them later.
+    """The two places where D11 *loosened* a refusal, stated so that nobody finds
+    them later.
 
     Over-refusing is the safe failure for a delete, so a change in that
     direction is the one worth writing down. Each case below was refused by the
     literal-head approximation and is not refused now, because the pattern
-    cannot match anything the delete would remove:
+    cannot match anything that the delete would remove:
 
-    * `secrets` — no `**` — names the directory entry itself. Deleting
-      `secrets/old` does not delete `secrets`, so there is nothing to refuse;
-      the old code refused it because `secrets/old` is a path descendant of the
-      head, which is true and beside the point.
+    * `secrets`, with no `**`, names the directory entry itself. A delete of
+      `secrets/old` does not delete `secrets`, so there is nothing to refuse.
+      The old code refused it because `secrets/old` is a path descendant of the
+      head. That is true and not relevant.
     * `*/secret/**` needs its *second* segment to be `secret`. Nothing under
-      `a/other` has one, and the old code refused it only because a headless
+      `a/other` has one. The old code refused it only because a headless
       pattern rounded to "could match anywhere".
 
     Sabotage: treat a pattern that runs out above the directory as a match and
@@ -1186,19 +1225,19 @@ def test_a_rule_does_not_refuse_what_it_provably_cannot_name() -> None:
 
 
 def test_a_recursive_delete_of_the_workspace_root_sees_relative_rules() -> None:
-    """D11 — the root is the one path with no relative spelling.
+    """D11: the root is the one path with no relative spelling.
 
-    `_spellings` strips a prefix that carries a trailing slash, so the root
-    itself never matched it and came back with its absolute name alone. A
-    relative rule then could not see that deleting the root deletes everything
-    the rule names: `rm -rf <workspace>` was refused by `deny write /w/secrets/**`
-    and allowed by `deny write secrets/**`, which is the same rule written the
-    way people write them.
+    `_spellings` strips a prefix that has a trailing slash. The root itself
+    never matched that prefix and came back with its absolute name alone. A
+    relative rule then could not see that a delete of the root deletes
+    everything that the rule names. `rm -rf <workspace>` was refused by
+    `deny write /w/secrets/**` and allowed by `deny write secrets/**`, which is
+    the same rule written the way that people write rules.
     """
     relative = _policy(Rule(operations=("write",), paths=("secrets/**",), mode="deny"))
 
     assert relative.deletion_reason(Path("/w"), recursive=True) is not None
-    # The absolute spelling of the same rule always worked; both now agree.
+    # The absolute spelling of the same rule always worked. Both now agree.
     absolute = _policy(Rule(operations=("write",), paths=("/w/secrets/**",), mode="deny"))
     assert absolute.deletion_reason(Path("/w"), recursive=True) is not None
     # And a tree the rule cannot reach is still deletable.
@@ -1206,14 +1245,16 @@ def test_a_recursive_delete_of_the_workspace_root_sees_relative_rules() -> None:
 
 
 def test_a_rule_whose_glob_cannot_compile_is_refused_rather_than_inert() -> None:
-    """N6 — the literal fallback is right for a model's `glob` and wrong for an ACL.
+    """N6: the literal fallback is right for the `glob` of a model and wrong for
+    an ACL.
 
-    `matches_glob` answers a pattern it cannot compile by matching it literally,
-    because a `glob` argument is a string the model typed and a policy check must
-    not raise out from under the call it is checking. For a `deny` rule the same
-    answer is the one failure direction an ACL must never have: `[z-a]/**` is a
-    bad character range, so the rule stopped covering `secrets/**` and started
-    covering the seven literal characters nobody will name a file.
+    `matches_glob` answers a pattern that it cannot compile by matching it
+    literally. A `glob` argument is a string that the model typed, and a policy
+    check must not raise out from under the call that it checks. For a `deny`
+    rule the same answer is the one failure direction that an ACL must never
+    have. `[z-a]/**` is a bad character range, so the rule stopped covering
+    `secrets/**` and started covering the eight literal characters, which nobody
+    will use as a file name.
 
     Both populations are asserted, because the fix is that they diverge: config
     is refused, and the matcher still falls back for everyone else.

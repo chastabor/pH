@@ -27,6 +27,6 @@ __all__ = ["BUNDLE"]
 BUNDLE = Path(__file__).parent / "bundle.yaml"
 """The profile layer of this distribution, for the `ph.bundles` group.
 
-The bundle is discovered, not imported. That lets `ph-app` compose a profile that
+The bundle is discovered, not imported. That lets `phern` compose a profile that
 layers this package without depending on it.
 """

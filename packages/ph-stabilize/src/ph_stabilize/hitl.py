@@ -1,44 +1,50 @@
-"""`hitl` — a human between the model and the actions it cannot take back (P4-05, G6).
+"""`hitl`: a human between the model and the actions that it cannot take back (P4-05, G6).
 
-Deep Agents' `interrupt_on` config and its `manual | auto | yolo` posture, on
-`tools/pre-execute`: when a rule matches, the listener returns `Ask` and the
-registry routes it through `ctx.approval` (B3).
+This row ports the `interrupt_on` config of Deep Agents and its
+`manual | auto | yolo` posture. It listens on `tools/pre-execute`. When a rule
+matches, the listener returns `Ask`, and the registry routes the ask through
+`ctx.approval` (B3).
 
-**The tool's declaration is the default; a configured rule is the override**
-(P6-16). A tool declares `is_irreversible` and is gated under `Config.declared`;
-a key in `interrupt_on` replaces that for one tool by name. Upstream has only the
-name, and a name is a rendering choice — this bundle's own Code Mode transport is
-renamed in place by a presentation row — so a gate keyed on it alone goes quietly
-inert for the surface that most needs one. Everything after that already
-exists — the seam records `approval/asked` and `approval/decided`, fails closed
-on a missing answerer, and settles an ask a crash left open rather than asking it
-again: repair closes an `asked` with no `decided` as `interrupted` on resume, since
-the turn that was waiting on it is gone (`ph.seams.approval`).
+**The declaration of the tool is the default. A configured rule is the
+override** (P6-16). A tool declares `is_irreversible` and is then gated under
+`Config.declared`. A key in `interrupt_on` replaces that for one tool, by name.
+Upstream has only the name, and a name is a rendering choice. For example, pH
+renames its own Code Mode transport in place when a presentation row gives it
+another name. A gate that is keyed on the name alone then stops working, with no
+error, for the surface that most needs a gate.
 
-**Four decisions, not two.** `approve` and `reject` were already reachable;
-P4-05 adds `edit` (run it with these arguments instead) and `respond` (do not
-run it — tell the model this). Both exist because stopping a turn to say "wrong
-path" or "you don't need that, the answer is X" costs a round trip that answering
-in place does not.
+Everything after the ask already exists (`ph.seams.approval`). The seam records
+`approval/asked` and `approval/decided`. It fails closed when no answerer is
+present. It settles an ask that a crash left open and does not ask it again: on
+resume, repair closes an `asked` with no `decided` as `interrupted`, because the
+turn that waited for it is gone.
 
-**The classifier parses; it does not pattern-match.** `preset: destructive` runs
-`ph_stabilize.destructive`, which reads each string argument in its own dialect —
-shell through `shlex`, SQL as statements, Python through `ast` — and judges the
-*structure*. The regexes it replaces could not see a command line as a grammar,
-and had the failure that invites: the arguments were scanned as rendered JSON, so
-a real newline became the two characters `\\` and `n`, and every `\\b`-anchored
-pattern stopped matching anything on a second line. A `when:` list is still
-regex, as the deployment's own escape hatch, but it is matched against the
-decoded strings rather than the envelope.
+**Four decisions, not two.** `approve` and `reject` were already reachable.
+P4-05 adds `edit` (run the call with these arguments instead) and `respond` (do
+not run the call, and tell the model this). Both exist because stopping a turn
+to say "wrong path" or "you don't need that, the answer is X" costs a round
+trip, and an answer in place does not.
 
-What was found goes into the ask's `reason` in the parser's words — *`rm -rf
-build` (removes files)* — so a person is told what the harness saw and an auditor
-can tune it. A gate whose reasoning is invisible is one nobody can tune.
+**The classifier parses. It does not match patterns.** `preset: destructive`
+runs `ph_stabilize.destructive`. That module reads each string argument in its
+own dialect (shell through `shlex`, SQL as statements, Python through `ast`) and
+judges the *structure*. The regexes that it replaces could not read a command
+line as a grammar, and they had the failure that this invites. The arguments
+were scanned as rendered JSON, so a real newline became the two characters `\\`
+and `n`, and every pattern anchored with `\\b` stopped matching anything on a
+second line. A `when:` list is still regex, as the escape hatch of the
+deployment. It is matched against the decoded strings and not against the
+envelope.
 
-**`run_code` is the case that motivates the shape.** A cell is not a tool name;
-one `python` call may delete a tree, force-push, or open a socket. So the
-classifier reads the program, follows a `subprocess.run(...)` back into the shell
-reader, and asks about *that cell* rather than about the transport.
+The findings go into the `reason` of the ask, in the words of the parser, for
+example *`rm -rf build` (removes files)*. The user is then told what the harness
+saw, and an auditor can tune it. Nobody can tune a gate whose reasoning is
+invisible.
+
+**`run_code` is the case that motivates the shape.** A cell is not a tool name:
+one `python` call may delete a tree, force-push, or open a socket. The
+classifier therefore reads the program, follows a `subprocess.run(...)` back
+into the shell reader, and asks about *that cell* and not about the transport.
 
 @module ph_stabilize.hitl
 """
@@ -74,21 +80,22 @@ __all__ = [
 ]
 
 ApprovalMode = Literal["manual", "auto", "yolo"]
-"""deepagents-code's posture, and the one knob a person reaches for most.
+"""The posture of deepagents-code, and the setting that a user changes most often.
 
-`manual` asks about every configured call. `auto` asks only about the ones a
-rule matched — the shipped middle, where a `when` predicate is what separates a
-routine write from `rm -rf`. `yolo` asks about nothing, and is a thing a person
-turns on deliberately for a session they are watching.
+`manual` asks about every configured call. `auto` asks only about the calls that
+a rule matched. `auto` is the middle posture and the shipped one. In it, a
+`when` predicate separates a routine write from `rm -rf`. `yolo` asks about
+nothing. A user turns it on deliberately, for a session that they are watching.
 """
 
 DESTRUCTIVE: Final = "destructive"
 """The one shipped preset: the parsed classifier in `ph_stabilize.destructive`.
 
-A name rather than a pattern list, because what it selects is no longer a list.
-The tables it dispatches to — `SHELL_RULES`, `SQL_STATEMENTS`, `PYTHON_CALLS` —
-are public there, so a deployment reads what it gates without this module
-re-exporting a copy that could drift from it.
+It is a name and not a pattern list, because what it selects is no longer a
+list. The tables that the classifier dispatches to (`SHELL_RULES`,
+`SQL_STATEMENTS`, `PYTHON_CALLS`) are public in that module. A deployment can
+read there what it gates, and this module does not export a second copy that
+could drift from them.
 """
 
 
@@ -96,42 +103,48 @@ class Rule(WireModel):
     """When to ask about one tool."""
 
     preset: str = ""
-    """A shipped classifier to run, by name — `destructive` is the only one.
+    """A shipped classifier to run, by name. `destructive` is the only one.
 
-    Unioned with `when`, so a profile takes the parsed classifier *and* adds its
-    own site-specific patterns rather than choosing between them.
+    The result is the union with `when`. A profile can therefore take the parsed
+    classifier *and* add its own site-specific patterns, and does not have to
+    choose between them.
     """
     when: tuple[str, ...] = ()
-    """Patterns matched against the call's arguments. Empty means *always ask* —
-    the `true` form in upstream's config, spelled as the absence of a condition
-    rather than as a second type."""
+    """Patterns that are matched against the arguments of the call. When
+    `preset` is also empty, an empty value means *always ask*. This is the
+    `true` form in the config of upstream, written as the absence of a condition
+    and not as a second type."""
     allowed_decisions: tuple[ApprovalDecisionName, ...] = ()
-    """What the front end should offer; empty means all four.
+    """The decisions that the front end should offer. Empty means all four.
 
-    Spelled as the seam's own `Literal` rather than as bare strings, so a typo in
-    a profile fails at config load instead of rendering a modal with no buttons
-    and nothing to say why. Carried on the ask so a deployment can withhold
-    `edit` for a tool whose arguments must not be hand-written."""
+    The type is the `Literal` of the seam itself and not bare strings. A typo in
+    a profile then fails at config load. Without that, the typo would render a
+    modal with no buttons and no explanation. The value is carried on the ask,
+    so a deployment can withhold `edit` for a tool whose arguments must not be
+    written by hand."""
     description: str = ""
     """Extra words for the prompt, when the tool's name is not enough."""
 
     def conditional(self) -> bool:
         """Whether this rule has a condition at all.
 
-        A rule with neither a preset nor a pattern is the `true` form upstream
-        spells as a bare rule: *always ask*. Kept as the absence of a condition
-        rather than a second type, and asked here so `gate` does not have to
-        re-derive "did anything have a chance to match" from two fields.
+        A rule with neither a preset nor a pattern is the `true` form, which
+        upstream writes as a bare rule: *always ask*. It is kept as the absence
+        of a condition and not as a second type. The question is asked here so
+        that `gate` does not have to derive "did anything have a chance to
+        match" again from two fields.
         """
         return bool(self.preset or self.when)
 
     def found_in(self, arguments: JsonValue) -> list[str]:
-        """What this rule found in one call's arguments, in a person's words.
+        """What this rule found in the arguments of one call, in words that a
+        person can read.
 
-        The preset's parser first, then the deployment's own patterns. Both read
-        the *decoded string leaves* — `strings_in` — rather than the arguments
-        rendered to JSON, which is what put a literal `\\n` between a command and
-        the line before it and silently unanchored every shipped pattern.
+        The parser of the preset runs first, then the patterns of the
+        deployment. Both read the *decoded string leaves* (`strings_in`) and not
+        the arguments rendered to JSON. The rendered form put a literal `\\n`
+        between a command and the line before it, and silently removed the
+        anchor of every shipped pattern.
         """
         found = [str(one) for one in findings(arguments)] if self.preset == DESTRUCTIVE else []
         if self.when:
@@ -144,36 +157,38 @@ class Config(WireModel):
 
     mode: ApprovalMode = "auto"
     declared: Rule = Field(default_factory=lambda: Rule(preset="destructive"))
-    """What a tool earns by declaring `is_irreversible` with no rule naming it.
+    """The rule that a tool gets when it declares `is_irreversible` and no rule
+    names it.
 
-    **The curated destructive set, not "ask every time."** `bash` and a code cell
-    declare because *any* command may reach past the tree, and asking on `ls` is
-    how a gate gets rubber-stamped; under `manual` a declaration does mean every
-    call. Configurable here — not a constant — so a deployment's extra patterns
-    and description are written once at the capability and survive a tool being
-    renamed, where a per-tool entry would silently stop applying."""
+    **This is the curated destructive set, not "ask every time".** `bash` and a
+    code cell declare because *any* command may reach outside the tree. A gate
+    that asks on `ls` gets approved without being read. Under `manual`, a
+    declaration does mean every call. The rule is configurable here and is not a
+    constant. The extra patterns and the description of a deployment are then
+    written one time, at the capability, and they survive a rename of the tool.
+    A per-tool entry would silently stop applying."""
     interrupt_on: dict[str, Rule] = Field(default_factory=dict)
     """Per-tool overrides, by name. Empty means every tool gets what it declares."""
 
 
 @lru_cache(maxsize=64)
 def _compiled(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
-    """One rule's patterns, compiled once.
+    """The patterns of one rule, compiled one time.
 
-    Bounded by the number of configured rules, which is fixed for a deployment.
-    `re`'s own cache would serve, but it is a shared 512-entry LRU and this runs
-    on every gated call.
+    The cache is bounded by the number of configured rules, which is fixed for a
+    deployment. The cache of `re` itself would work, but it is a shared
+    512-entry LRU, and this function runs on every gated call.
     """
     return tuple(re.compile(one, re.IGNORECASE | re.DOTALL) for one in patterns)
 
 
 def _matches(arguments: JsonValue, patterns: tuple[str, ...]) -> list[str]:
-    """What a deployment's own patterns matched — the *text*, not the rule.
+    """What the patterns of a deployment matched: the *text*, not the rule.
 
-    Each decoded string leaf is scanned separately rather than the arguments
-    rendered to JSON: the envelope's escaping is what turned a newline into two
-    characters and stopped `\\b` matching, and scanning leaves also means a
-    pattern cannot match across a field boundary that does not exist.
+    Each decoded string leaf is scanned separately, and the arguments are not
+    rendered to JSON. The escaping of the envelope turned a newline into two
+    characters and stopped `\\b` from matching. Scanning the leaves also means
+    that a pattern cannot match across a field boundary that does not exist.
     """
     found: list[str] = []
     for pattern in _compiled(patterns):
@@ -191,14 +206,15 @@ def set_mode(session: Session, mode: ApprovalMode) -> None:
 
 
 def _mode(session: Session | None, config: Config) -> ApprovalMode:
-    """The posture in force: the last one recorded, else the row's default.
+    """The posture in force: the last one recorded, or else the default of the row.
 
-    A fold, so the toggle survives a resume and the log says when it moved. Its
-    *own* event rather than a field on the seam's `approval/policy`: that one is
-    also written by `permission-presets`, which knows nothing about a posture, so
-    riding it would have made switching preset silently reset the posture — the
-    generic hazard of a last-write-wins fold with two writers, one of which does
-    not know the field exists.
+    This is a fold, so the toggle survives a resume and the log says when the
+    posture changed. The posture has its *own* event and is not a field on the
+    `approval/policy` event of the seam. `permission-presets` also writes that
+    event and knows nothing about a posture. If the posture were a field there,
+    a change of preset would silently reset the posture. That is the general
+    hazard of a last-write-wins fold with two writers, when one writer does not
+    know that the field exists.
     """
     event = None if session is None else session.latest("approval/mode")
     recorded = None if event is None else event.data.get("mode")
@@ -210,13 +226,14 @@ async def apply(ctx: Context, config: Config) -> None:
     """Ask a human before a configured call runs."""
 
     def rule_for(execution: ToolExecution) -> Rule | None:
-        """This call's rule: a configured override, else what the tool declares.
+        """The rule for this call: a configured override, or else what the tool
+        declares.
 
-        A profile writes `run_code` because that is the *reserved* transport name,
-        but the registry renames the transport in place to whatever a presentation
-        row calls it — so a `run_code` entry is also honored for the presented
-        name, and the lookup is scope-aware because an agent-shadowed registration
-        is a different tool with the same name.
+        A profile writes `run_code` because that is the *reserved* transport
+        name. The registry renames the transport in place to the name that a
+        presentation row gives it, so a `run_code` entry is also honored for the
+        presented name. The lookup is scope-aware, because an agent-shadowed
+        registration is a different tool with the same name.
         """
         view = ctx.require(TOOLS).view(execution.scope)
         rule = config.interrupt_on.get(execution.name)
@@ -242,9 +259,10 @@ async def apply(ctx: Context, config: Config) -> None:
         conditional = rule.conditional()
         matched = rule.found_in(execution.arguments) if conditional else []
         if mode == "auto" and conditional and not matched:
-            # A rule with a condition, in the posture that trusts it: nothing
-            # matched, so this is the routine case the condition exists to let
-            # through. `manual` asks anyway, which is what `manual` means.
+            # The rule has a condition, and the posture trusts the condition.
+            # Nothing matched, so this is the routine case that the condition
+            # exists to let through. `manual` asks anyway, which is what
+            # `manual` means.
             return await next_(execution)
         return Ask(
             reason=_reason(execution, rule, matched),
@@ -255,14 +273,14 @@ async def apply(ctx: Context, config: Config) -> None:
 
 
 def _reason(execution: ToolExecution, rule: Rule, matched: list[str]) -> str:
-    """What the person is told, and what the log records with the ask.
+    """What the user is told, and what the log records with the ask.
 
-    The classifier's verdict is part of it: a prompt that says only "approve
-    this?" makes a person guess what the harness is worried about, and an
-    auditor reading `approval/asked` later has nothing to tune against. What it
-    quotes is the *matched text* rather than the pattern that matched: showing
-    someone the classifier's own regex source presents an implementation where
-    `rm -rf /tmp/x` presents their call back to them.
+    The verdict of the classifier is part of the text. A prompt that says only
+    "approve this?" makes the user guess what concerns the harness, and an
+    auditor who reads `approval/asked` later has nothing to tune against. The
+    text quotes the *matched text* and not the pattern that matched. The regex
+    source of the classifier would show the user an implementation, where
+    `rm -rf /tmp/x` shows the user their own call.
     """
     parts = [rule.description or f"{execution.name} needs approval"]
     if matched:

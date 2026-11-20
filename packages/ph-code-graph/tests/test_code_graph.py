@@ -823,7 +823,7 @@ async def test_an_unwritable_grammar_cache_refuses_with_a_sentence(
 def test_the_bundle_is_discoverable_without_importing_it() -> None:
     """The entry point is the whole coupling between a profile and this package.
 
-    `ph-app` must be able to compose a profile that layers this bundle without
+    `phern` must be able to compose a profile that layers this bundle without
     depending on this distribution. The profile therefore discovers the bundle
     through the `ph.bundles` group. With a typo in that entry point, the profile
     would fail for a user, and nothing else in the suite would notice.
@@ -866,7 +866,7 @@ def test_the_bundles_row_is_enabled() -> None:
 async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
     """The wiring that a person can type: `phern --profile rlm-indexed`.
 
-    This is asserted here and not only in `ph-app`, because this package is the
+    This is asserted here and not only in `phern`, because this package is the
     *reason* why the profile exists. `available_profiles()` checks that bundles
     resolve. An install without this distribution therefore sees no
     `rlm-indexed`, and does not see one that fails at mount.
@@ -891,7 +891,7 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
     waits on would fail here and in no other place.
 
     This is asserted from this package because the profile exists for it.
-    `ph-app` owns the `PROFILES` entry and cannot test it. Nothing in `ph-app`
+    `phern` owns the `PROFILES` entry and cannot test it. Nothing in `phern`
     depends on the two indexing distributions, which is the purpose of
     discovering them as bundles.
     """

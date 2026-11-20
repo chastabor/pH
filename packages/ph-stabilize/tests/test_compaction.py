@@ -1,20 +1,24 @@
-"""P4-03 — `compaction-summarize` and `/compact` (G4, G10, A3).
+"""P4-03: `compaction-summarize` and `/compact` (G4, G10, A3).
 
-The row's gates, one test each: *0.85 / 170k triggers; never splits a pair; log
-intact; variables survive.*
+Gates of the row, one test each:
 
-The one to read is the split, and it is A3 stated as an assertion: after a
-compaction the model reads a summary while the log still holds every message the
-conversation had. That is the same mechanism `input-offload` uses (P4-02) and the
-reason compaction here is a *reading* of an append-only log rather than an edit
-to it — a test that checked only the model's side would pass equally for a design
-that deleted the history it summarized.
+* The triggers are 0.85 and 170k.
+* A compaction never splits a pair.
+* The log is intact.
+* Variables survive.
 
-The two thresholds are asserted as **pairs**, for the reason the offload row's
-boundary is: a threshold tested only from the far side passes for any limit at or
-below the value tested. Both numbers are derived from the module's constants, so
-a policy change moves the gate with it rather than leaving it asserting the old
-one.
+The test to read first is the split. It is A3 stated as an assertion: after a
+compaction the model reads a summary, and the log still holds every message that
+the conversation had. `input-offload` uses the same mechanism (P4-02). It is the
+reason why compaction here is a *reading* of an append-only log and not an edit
+to it. A test that checked only the side of the model would pass equally for a
+design that deleted the history that it summarized.
+
+The two thresholds are asserted as **pairs**, for the same reason as the
+boundary of the offload row: a threshold that is tested only from the far side
+passes for any limit at or below the tested value. Both numbers are derived from
+the constants of the module. A policy change therefore moves the gate with it,
+and does not leave the gate asserting the old value.
 """
 
 from __future__ import annotations
@@ -90,9 +94,9 @@ SUMMARY = "## SESSION INTENT\n\nthe scripted summary"
 def _route(ctx: Context) -> None:
     """Answer a compaction call with `SUMMARY` and everything else with a reply.
 
-    Keyed on `purpose`, which is the field that says a request is *about* the
-    conversation rather than part of it — so the test distinguishes the two the
-    same way the harness does.
+    The route is keyed on `purpose`, the field that says that a request is
+    *about* the conversation and not part of it. The test therefore
+    distinguishes the two in the same way that the harness does.
     """
     adapter = ctx.require(LLM_FAKE)
     adapter.respond = lambda request: SUMMARY if request.purpose == "compaction" else "answer"
@@ -107,18 +111,18 @@ def _loop_requests(ctx: Context) -> list[GenerateOptions]:
 
 
 def _instruction(request: GenerateOptions) -> str:
-    """The trailing instruction — where the extraction prompt lives on a replay.
+    """The trailing instruction, which holds the extraction prompt on a replay.
 
     Under the replay shape the summarize prompt cannot go in `system`: anything
-    put there changes the prefix and forfeits the cache the shape exists for. So
-    a test that asks "did the model see this" asks the last message, not the
-    system prompt.
+    put there changes the prefix and loses the cache that the shape exists for.
+    A test that asks "did the model see this" therefore reads the last message,
+    not the system prompt.
     """
     return text_of(request.messages[-1].content)
 
 
 def _model_text(session: Session) -> str:
-    """What the model would be sent — the derived surface, not the raw log."""
+    """What the model would be sent: the derived surface, not the raw log."""
     return "\n".join(text_of(message.content) for message in session.derive_messages())
 
 
@@ -127,12 +131,12 @@ def _human_text(session: Session) -> str:
 
 
 def _derived_text(session: Session) -> str:
-    """Everything the model would be sent, tool results included.
+    """Everything that the model would be sent, tool results included.
 
-    `text_of` reads `TextBlock`s only, so a tool result — whose text is nested
-    inside a `ToolResultBlock` — is invisible to it. The clip tests are entirely
-    about tool-result content, and asserting against `_model_text` there passed
-    for the wrong reason: an empty string contains no locator either.
+    `text_of` reads only `TextBlock`s, so it cannot see a tool result, whose
+    text is nested inside a `ToolResultBlock`. The clip tests are entirely about
+    tool-result content. An assertion against `_model_text` there passed for the
+    wrong reason: an empty string contains no locator either.
     """
     return render_for_summary(session.derive_messages(), trimmed=False)
 
@@ -145,11 +149,12 @@ QUESTION_CHARS = 1_200
 """Big enough that the *shipped* retention actually cuts.
 
 The fake adapter reports an 8 192-token window, so keeping `KEEP_FRACTION` of it
-is a budget of 819 tokens — about 3 300 characters. A conversation of four
-one-line prompts is under that, and `/compact` on it correctly does nothing, so
-a test built from one would have asserted against a no-op. Eight turns of this
-size clear the budget several times over while staying far below the 0.85
-pressure trigger, which is what keeps these tests about the *manual* path.
+is a budget of 819 tokens, about 3 300 characters. A conversation of four
+one-line prompts is under that budget, and `/compact` on it correctly does
+nothing. A test built from such a conversation would have asserted against a
+no-op. Eight turns of this size exceed the budget several times and stay far
+below the 0.85 pressure trigger, which keeps these tests about the *manual*
+path.
 """
 
 
@@ -157,8 +162,8 @@ async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> ReactL
     """A session with `turns` question/answer pairs, long enough to compact."""
     session = ctx.require(SESSIONS).create(session_id)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
-    # The concrete driver, whose `session` is a `Session` rather than the
-    # handle's `Session | None`: every read below then narrows on its own.
+    # The concrete driver, whose `session` is a `Session` and not the
+    # `Session | None` of the handle. Every read below then narrows by itself.
     assert isinstance(agent, ReactLoopAgent)
     for index in range(turns):
         await agent.prompt(f"question {index} " + "detail " * (QUESTION_CHARS // 7))
@@ -166,9 +171,9 @@ async def _conversation(ctx: Context, session_id: str, turns: int = 8) -> ReactL
 
 
 async def _reaching_for_a_tool() -> Any:  # noqa: ANN401
-    """A reply that is one tool call and no prose — what a model under the
-    session's own system prompt, holding the session's own tools, may well do
-    when asked to summarize."""
+    """A reply that is one tool call and no prose. A model that runs under the
+    system prompt of the session, and holds the tools of the session, may well
+    answer this way when it is asked to summarize."""
     yield BlockStart(index=0, block_type="tool-call")
     yield BlockEnd(
         index=0, block=ToolCallBlock(id="t1", name="read", arguments='{"path": "notes.md"}')
@@ -190,11 +195,13 @@ async def _overflowing() -> Any:  # noqa: ANN401
 
 
 def test_the_fraction_trigger_fires_at_0_85_of_a_known_window() -> None:
-    """G4's first number, as a pair: 0.85 of the window triggers, just under does not.
+    """The first number of G4, as a pair: 0.85 of the window triggers, and just
+    under 0.85 does not.
 
-    Driven through the real baseline rather than a stubbed one — reported usage
-    on the newest `assistant/message` is what `ctx.token_meter` reads, so this
-    also pins that the trigger sees *provider* numbers once any exist (D15).
+    The test goes through the real baseline and not a stubbed one.
+    `ctx.token_meter` reads the reported usage on the newest
+    `assistant/message`, so the test also checks that the trigger sees
+    *provider* numbers when any exist (D15).
     """
     window = 1_000
     at_the_line = int(window * TRIGGER_FRACTION)
@@ -222,12 +229,14 @@ def test_the_fraction_trigger_fires_at_0_85_of_a_known_window() -> None:
 
 
 def test_without_a_window_the_trigger_is_the_fixed_token_count() -> None:
-    """G4's second number, the branch upstream takes when the model profile has
-    no `max_input_tokens`: 170 000 tokens, and 169 999 is not it.
+    """The second number of G4: the branch that upstream takes when the model
+    profile has no `max_input_tokens`. 170 000 tokens trigger, and 169 999 do
+    not.
 
-    pH reaches this branch on the first step of every session — `request/context`
-    is appended inside `_build_request`, which runs *after* `agent/pre-step` —
-    so it is not a rare fallback, it is the opening state of every conversation.
+    pH reaches this branch on the first step of every session, because
+    `request/context` is appended inside `_build_request`, which runs *after*
+    `agent/pre-step`. It is therefore not a rare fallback. It is the opening
+    state of every conversation.
     """
 
     def engine_for(total: int) -> tuple[SummarizeEngine, Session]:
@@ -247,11 +256,11 @@ def test_without_a_window_the_trigger_is_the_fixed_token_count() -> None:
 
 
 def _bare_context() -> Context:
-    """A context with just the token meter — what `_under_pressure` reads.
+    """A context with only the token meter, which is what `_under_pressure` reads.
 
-    Built by hand rather than mounted: the two threshold tests are about
-    arithmetic over a log, and standing a whole profile up to ask them would make
-    the failure of an unrelated row look like a threshold regression.
+    The context is built by hand and not mounted. The two threshold tests are
+    about arithmetic over a log. A whole profile mounted for them would make the
+    failure of an unrelated row look like a threshold regression.
     """
     from ph.seams.token_meter import TokenMeter
 
@@ -266,9 +275,10 @@ def _bare_context() -> Context:
 async def test_the_model_reads_the_summary_and_the_log_keeps_the_conversation(
     mount: MountProfile,
 ) -> None:
-    """A3 in one assertion pair, and the whole reason compaction is a surface op.
+    """A3 in one pair of assertions, and the reason why compaction is a surface op.
 
-    The model's history is replaced; the person's is not; and neither is the log.
+    The history of the model is replaced. The history of the user is not, and
+    neither is the log.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -288,10 +298,12 @@ async def test_the_model_reads_the_summary_and_the_log_keeps_the_conversation(
 async def test_the_replaced_conversation_is_written_to_conversation_history(
     mount: MountProfile,
 ) -> None:
-    """A3's other half: the originals are on disk, at the path the model was given.
+    """The other half of A3: the originals are on disk, at the path that the
+    model was given.
 
-    A relocation, not a deletion — the same promise `ctx.spill_store` makes for
-    an offloaded tool result, which is why the replacement names the file.
+    This is a relocation, not a deletion. `ctx.spill_store` makes the same
+    promise for an offloaded tool result, which is why the replacement names the
+    file.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -310,10 +322,10 @@ async def test_the_replaced_conversation_is_written_to_conversation_history(
 async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
     mount: MountProfile,
 ) -> None:
-    """Attribution, and the discriminator every reader keys on.
+    """Attribution, and the discriminator that every reader keys on.
 
-    `input-offload` also appends a plugin-authored replacement; only this one is
-    a claim that conversation has left the derivation, so only this one says
+    `input-offload` also appends a plugin-authored replacement. Only this one
+    claims that conversation has left the derivation, so only this one says
     `form: compaction`. The TUI reads exactly this field to decide whether to
     call a row "compacted".
     """
@@ -336,11 +348,12 @@ async def test_the_summary_is_the_plugins_text_and_says_it_is_a_compaction(
 
 
 async def test_the_replacement_cites_every_node_it_shadows(mount: MountProfile) -> None:
-    """What makes the substitution reversible reading rather than deletion.
+    """What makes the substitution a reversible reading and not a deletion.
 
-    `Session.append` refuses a replace that shadows a node it does not cite, so
-    this is really a test that the *plan* and the *op* agree — the range is
-    chosen by surface position and the citation is built from the same list.
+    `Session.append` refuses a replace that shadows a node that it does not
+    cite. This is therefore really a test that the *plan* and the *op* agree:
+    the range is chosen by surface position, and the citation is built from the
+    same list.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -358,22 +371,24 @@ async def test_the_replacement_cites_every_node_it_shadows(mount: MountProfile) 
     assert (size["unit"], size["before"]) == ("tokens", record.data["shadowedTokens"])
     assert 0 < as_int(size["after"]) < as_int(size["before"])
     # `list(...)` on both sides: an appended payload is deep-frozen, so the seqs
-    # come back as a tuple and an `==` against the citation would compare shapes.
+    # come back as a tuple, and an `==` against the citation would compare
+    # shapes.
     assert list(replacement.source_event_seqs or ()) == list(record.data["shadowedSeqs"])
 
 
 # --------------------------------------------------- argument truncation --
-# §7.4 item 2. The cheap half of the row: bytes the model itself sent, elided
-# from what it is shown, with the log keeping its exact words. No model call.
+# §7.4 item 2. The cheap half of the row. Bytes that the model itself sent are
+# elided from what it is shown, and the log keeps its exact words. There is no
+# model call.
 
 
 WINDOW = 1_000
-"""A small window in a hand-built session, so the *shipped* fractions bite.
+"""A small window in a hand-built session, so that the *shipped* fractions apply.
 
-The truncation and clip passes are pure functions of a session, and building
-one directly is how a test can put the surface in the exact shape each pass
-exists for — an over-budget trailing tool batch, a long-argument call in old
-history — which a scripted conversation reaches only by accident.
+The truncation and clip passes are pure functions of a session. A test that
+builds a session directly can put the surface in the exact shape that each pass
+exists for: an over-budget trailing tool batch, or a long-argument call in old
+history. A scripted conversation reaches those shapes only by accident.
 """
 
 
@@ -426,8 +441,9 @@ def _long_write_session(session_id: str, body: str) -> Session:
 
 
 def _engine(ctx: Context) -> SummarizeEngine:
-    # `CompactionSeam.engine` is `CompactionEngine | None` — absent until a row
-    # registers one. Every caller here mounts the row that does, and says so.
+    # `CompactionSeam.engine` is `CompactionEngine | None`: absent until a row
+    # registers one. Every caller here mounts the row that registers it, and
+    # the assertion below states that.
     engine = ctx.require(COMPACTION).engine
     assert isinstance(engine, SummarizeEngine), "the summarize row is not mounted"
     return engine
@@ -436,9 +452,10 @@ def _engine(ctx: Context) -> SummarizeEngine:
 async def test_the_engine_reports_its_trigger_and_none_when_it_does_not_compact(
     mount: MountProfile,
 ) -> None:
-    """What ph-clm's readouts warn ahead of: the share this engine compacts at on its
-    own, through the core seam — and nothing when automatic compaction is off, since
-    then no summary is coming to warn about."""
+    """The value that the readouts of ph-clm warn ahead of: the share at which
+    this engine compacts by itself, read through the core seam. The engine
+    reports nothing when automatic compaction is off, because then no summary is
+    coming to warn about."""
     armed = await mount(
         {"id": "compaction-summarize", "config": {"triggerFraction": 0.8}}, profile=PROFILE
     )
@@ -451,13 +468,15 @@ async def test_the_engine_reports_its_trigger_and_none_when_it_does_not_compact(
 
 
 def _truncate(ctx: Context, session: Session) -> tuple[int, ...]:
-    """The truncation pass with the baseline its caller now computes once.
+    """The truncation pass, with the baseline that its caller now computes one
+    time.
 
-    A `StubAgent` on the mount rather than the `None` this took and no caller
-    ever passed: the lookup wants a scope, and the mount is the root scope the
-    fs tools register on — so a hand-built session still asks the real registry
-    whether a tool declares its arguments disposable. The `None` was costing
-    `truncate_arguments` and `_elides_arguments` their non-optional agent.
+    The agent is a `StubAgent` on the mount, and not the `None` that this used
+    to take and that no caller ever passed. The lookup needs a scope, and the
+    mount is the root scope on which the fs tools register. A hand-built session
+    therefore still asks the real registry whether a tool declares its arguments
+    disposable. That `None` prevented `truncate_arguments` and
+    `_elides_arguments` from having a non-optional agent.
     """
     return _engine(ctx).truncate_arguments(
         StubAgent(ctx=ctx, session=session),
@@ -478,10 +497,11 @@ def _arguments_of(session: Session, name: str = "write") -> list[str]:
 
 
 async def test_only_a_tool_that_declares_it_has_arguments_elided(mount: MountProfile) -> None:
-    """`write` declares `arguments_disposable`; the registry is what says so.
+    """`write` declares `arguments_disposable`, and the registry gives that
+    answer.
 
     A deployment that renames the fs tools, or an MCP server that adds its own,
-    keeps working — which a hardcoded name list in this package could not.
+    keeps working. A hardcoded name list in this package could not do that.
     """
     ctx = await mount(profile=PROFILE)
     assert not_none(ctx.require(TOOLS).get("write", scope=DEPLOYMENT)).arguments_disposable
@@ -491,11 +511,11 @@ async def test_only_a_tool_that_declares_it_has_arguments_elided(mount: MountPro
 
 
 async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: MountProfile) -> None:
-    """The pass, and the split it preserves.
+    """The pass, and the split that it preserves.
 
-    The model stops being shown a file body it wrote and the log keeps the bytes
-    it actually sent — the same log-and-surface split compaction uses, applied
-    without spending a model call.
+    The model is no longer shown a file body that it wrote, and the log keeps
+    the bytes that it actually sent. This is the same split between log and
+    surface that compaction uses, applied without a model call.
     """
     ctx = await mount(profile=PROFILE)
     body = "x" * (MAX_ARG_LENGTH + 1)
@@ -511,8 +531,9 @@ async def test_a_long_call_argument_is_elided_from_what_the_model_sees(mount: Mo
 
 
 async def test_an_argument_at_the_limit_is_left_alone(mount: MountProfile) -> None:
-    """The boundary as a pair, for the reason every threshold here is: one
-    tested only from the far side passes for any limit at or below it."""
+    """The boundary as a pair, for the same reason as every threshold here: a
+    threshold that is tested only from the far side passes for any limit at or
+    below it."""
     ctx = await mount(profile=PROFILE)
 
     at_limit = _long_write_session("at-limit", "x" * MAX_ARG_LENGTH)
@@ -528,8 +549,8 @@ async def test_the_elision_keeps_the_call_id_so_the_pair_still_balances(
     """The rewrite must not change what the call/result pairing sees.
 
     A replacement that dropped or renamed the call would leave its result
-    orphaned, which is the same failure `safe_cutoff` exists to prevent — and it
-    would show up only later, as a compaction that could no longer find a cut.
+    orphaned. That is the same failure that `safe_cutoff` exists to prevent, and
+    it would show only later, as a compaction that could no longer find a cut.
     """
     ctx = await mount(profile=PROFILE)
     session = _long_write_session("pairing", "x" * (MAX_ARG_LENGTH + 1))
@@ -544,15 +565,15 @@ async def test_the_elision_keeps_the_call_id_so_the_pair_still_balances(
 async def test_the_replacement_carries_no_usage(mount: MountProfile) -> None:
     """The hazard that makes this rewrite different from the others.
 
-    `TokenMeter.last_usage` folds to the newest `assistant/message`
-    with a usage block, and a replacement is appended at the end of the log. One
-    that copied its original's usage would become the meter's last count — a
-    request that was never made — and the TUI footer, which reads the last usage
-    it sees, would show it.
+    `TokenMeter.last_usage` folds to the newest `assistant/message` with a usage
+    block, and a replacement is appended at the end of the log. A replacement
+    that copied the usage of its original would become the last count of the
+    meter: a request that was never made. The TUI footer, which reads the last
+    usage that it sees, would show it.
 
-    The baseline does move, and should: the elided argument left the surface, so
-    it is estimated and taken off the provider's count — which is what lets the
-    elision spare a summary this step.
+    The baseline does move, and should. The elided argument left the surface, so
+    it is estimated and taken off the count of the provider. That lets the
+    elision avoid a summary this step.
     """
     ctx = await mount(profile=PROFILE)
     meter = ctx.require(TOKEN_METER)
@@ -571,9 +592,9 @@ async def test_the_replacement_carries_no_usage(mount: MountProfile) -> None:
 
 
 async def test_a_recent_message_is_not_truncated(mount: MountProfile) -> None:
-    """Retention, which is the whole reason this is not just "shorten everything":
-    the model is still working with the tail, and an argument it is about to act
-    on is exactly the one it must be able to read."""
+    """Retention, which is the reason why this pass does not just "shorten
+    everything". The model is still working with the tail, and an argument that
+    it is about to act on is exactly the one that it must be able to read."""
     ctx = await mount(profile=PROFILE)
     session = _windowed("recent")
     _pressured(session)
@@ -588,9 +609,9 @@ async def test_a_recent_message_is_not_truncated(mount: MountProfile) -> None:
 
 
 async def test_truncating_twice_changes_nothing_the_second_time(mount: MountProfile) -> None:
-    """Idempotence falls out of the length check — an elided argument is 40-odd
-    characters — but it is asserted, because a pass that ran every step and
-    appended a replacement every step would grow the log without bound."""
+    """Idempotence follows from the length check, because an elided argument is
+    40-odd characters. It is still asserted, because a pass that ran every step
+    and appended a replacement every step would grow the log without bound."""
     ctx = await mount(profile=PROFILE)
     session = _long_write_session("twice", "x" * (MAX_ARG_LENGTH + 1))
 
@@ -605,11 +626,12 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
 ) -> None:
     """P10-14. The rewrites and `compaction/args-truncated` are one batch.
 
-    Appended one at a time, a rewrite refused partway left the ones before it in
-    the log — elided from what the model sees — with no record saying so or why.
-    Here the second rewrite renames its message, which the surface refuses at the
-    write, after the first has been stamped: nothing of the pass lands, and the
-    refusal reaches the caller rather than a half-applied pass.
+    When they were appended one at a time, a rewrite that was refused partway
+    left the earlier ones in the log, elided from what the model sees, with no
+    record of the elision or of its reason. Here the second rewrite renames its
+    message. The surface refuses that at the write, after the first rewrite has
+    been stamped. Nothing of the pass lands, and the caller gets the refusal and
+    not a half-applied pass.
     """
     ctx = await mount(profile=PROFILE)
     body = "x" * (MAX_ARG_LENGTH + 1)
@@ -662,12 +684,13 @@ async def test_a_truncation_pass_lands_whole_or_not_at_all(
 
 
 async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: MountProfile) -> None:
-    """The restriction is real, and it is asked of the *tool*.
+    """The restriction is real, and the *tool* answers it.
 
-    Upstream matches `{"write_file", "edit_file"}` — names pH does not register —
-    so this asks `ToolDefinition.arguments_disposable` instead, the way the
-    offload row asks `self_limits`. A long `run_code` cell in old history is the
-    argument a model most often re-reads, and it declares nothing, so it stays.
+    Upstream matches `{"write_file", "edit_file"}`, names that pH does not
+    register. This row asks `ToolDefinition.arguments_disposable` instead, in
+    the way that the offload row asks `self_limits`. A long `run_code` cell in
+    old history is the argument that a model most often reads again. It declares
+    nothing, so it stays.
     """
     ctx = await mount(profile=PROFILE)
     session = _windowed("other-tool")
@@ -693,9 +716,9 @@ async def test_a_tool_that_does_not_declare_it_keeps_its_arguments(mount: MountP
 
 
 def test_arguments_that_are_not_a_json_object_are_left_alone() -> None:
-    """A malformed argument string is not something to rewrite behind the model's
-    back — and re-serializing a non-object would change its shape, not just its
-    size."""
+    """A malformed argument string must not be rewritten without telling the
+    model. And to serialize a non-object again would change its shape, not only
+    its size."""
     assert truncated_arguments("not json at all", 10) is None
     assert truncated_arguments(json.dumps(["a" * 100]), 10) is None
     assert truncated_arguments(json.dumps({"short": "ok"}), 10) is None
@@ -704,8 +727,8 @@ def test_arguments_that_are_not_a_json_object_are_left_alone() -> None:
 async def test_truncation_runs_inside_the_automatic_path(mount: MountProfile) -> None:
     """The wiring: the free remedy is tried before the expensive one.
 
-    Asked through `compact_if_needed`, which is what `agent/pre-step` calls — so
-    this fails if the pass is correct but nothing invokes it.
+    The test goes through `compact_if_needed`, which is what `agent/pre-step`
+    calls. It therefore fails if the pass is correct but nothing invokes it.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -718,17 +741,18 @@ async def test_truncation_runs_inside_the_automatic_path(mount: MountProfile) ->
 
 
 # ------------------------------------------------------- the overflow clip --
-# §7.4 item 7. The case summarization is least able to help with: a trailing
-# tool-result batch larger than the retention budget leaves no balanced cut, so
-# `safe_cutoff` correctly declines and nothing else would ever shrink it.
+# §7.4 item 7. The case where summarization can help least. A trailing
+# tool-result batch that is larger than the retention budget leaves no balanced
+# cut, so `safe_cutoff` correctly declines, and nothing else would ever shrink
+# the batch.
 
 
 def _tool_batch_session(session_id: str, *sizes: int, opening: bool = True) -> Session:
-    """A session ending in a batch of tool results of the given sizes.
+    """A session that ends in a batch of tool results of the given sizes.
 
-    `opening=False` drops the leading user message, which is what makes the
-    surface genuinely uncuttable: with it, the first node is a balanced cut all
-    by itself and summarization has somewhere to go.
+    `opening=False` drops the leading user message, which makes the surface
+    really uncuttable. With the message, the first node is a balanced cut by
+    itself, and summarization has a place to cut.
     """
     session = _windowed(session_id)
     if opening:
@@ -754,8 +778,8 @@ def _tool_batch_session(session_id: str, *sizes: int, opening: bool = True) -> S
 
 
 async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: MountProfile) -> None:
-    """Each result is relocated, not dropped — the promise `ctx.spill_store`
-    makes everywhere in this bundle."""
+    """Each result is relocated, not dropped. `ctx.spill_store` makes that
+    promise everywhere in this bundle."""
     ctx = await mount(profile=PROFILE)
     session = _tool_batch_session("clip", 30_000, 30_000)
     agent = ctx.require(AGENTS).create(session, FAKE_OPTIONS)
@@ -765,7 +789,7 @@ async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: Mou
     assert len(clipped) == 2
     spilled = _events(session, "offload/spilled")
     assert len(spilled) == 2
-    # Keyed by call id, because the two results differ: an assertion that
+    # Keyed by call id, because the two results differ. An assertion that
     # compared both files to one expected body would pass for a clip that
     # spilled the same result twice.
     originals = {"c0": "0" * 30_000, "c1": "1" * 30_000}
@@ -778,13 +802,13 @@ async def test_an_oversized_trailing_batch_is_clipped_and_recoverable(mount: Mou
 
 
 async def test_a_result_the_clip_would_grow_is_not_spilled(mount: MountProfile) -> None:
-    """S14 — `_clip_one` spilled, recorded and published before it decided.
+    """S14: `_clip_one` used to spill, record and publish before it decided.
 
-    A result shorter than its pointer is left inline, and it used to be left inline
-    *after* its blob was written and an `offload/spilled` record appended — "full
-    text at X" in the transcript for text that never moved. Decided first now, so a
-    declined clip leaves nothing behind; and a clip that does happen lands its
-    accounting and its replacement in one batch.
+    A result that is shorter than its pointer is left inline. It used to be left
+    inline *after* its blob was written and an `offload/spilled` record was
+    appended: "full text at X" in the transcript, for text that never moved. The
+    decision now comes first, so a declined clip leaves nothing behind. A clip
+    that does happen lands its accounting and its replacement in one batch.
 
     Sabotage: spill before the length check again, and the short result has a record.
     """
@@ -809,9 +833,9 @@ async def test_a_result_the_clip_would_grow_is_not_spilled(mount: MountProfile) 
 
 async def test_the_clip_changes_only_the_result_content(mount: MountProfile) -> None:
     """`Session.append` refuses a `tool/result` replacement that touches anything
-    but content, so this is really a test that the payload is rebuilt from the
-    original rather than synthesized — a fresh message id would be rejected, and
-    a rejected append would take the whole overflow path down with it.
+    but content. This is therefore really a test that the payload is rebuilt
+    from the original and not synthesized. A fresh message id would be rejected,
+    and a rejected append would make the whole overflow path fail.
     """
     ctx = await mount(profile=PROFILE)
     session = _tool_batch_session("content-only", 30_000)
@@ -828,7 +852,7 @@ async def test_the_clip_changes_only_the_result_content(mount: MountProfile) -> 
 
 async def test_a_small_result_is_not_replaced_by_a_larger_pointer(mount: MountProfile) -> None:
     """The batch is what must shrink, and a member that would grow is not part
-    of shrinking it. Upstream clips every message in an over-budget batch; a
+    of shrinking it. Upstream clips every message in an over-budget batch. A
     hundred-character result swapped for a nine-hundred-character pointer is a
     clip that made the request bigger."""
     ctx = await mount(profile=PROFILE)
@@ -853,10 +877,11 @@ async def test_a_conversation_that_does_not_end_in_tool_results_is_untouched(
 
 
 async def test_results_the_step_s_batch_came_after_are_still_clipped(mount: MountProfile) -> None:
-    """A refusal comes after the step's batch, which can put a message after the
-    results: rlm's session facts, added again once a summary has shadowed them. Found
-    live, where the clip found no results at the very end and the turn ended in the
-    refusal. Results the model has answered since are not the tail, however large.
+    """A refusal comes after the batch of the step, and the batch can put a
+    message after the results: the session facts of rlm, added again after a
+    summary has shadowed them. This was found live: the clip found no results at
+    the very end, and the turn ended in the refusal. Results that the model has
+    answered since are not the tail, however large they are.
     Sabotage: look for results at the very end only, or past a reply too."""
     ctx = await mount(profile=PROFILE)
     session = _tool_batch_session("past-the-batch", 30_000)
@@ -873,13 +898,13 @@ async def test_results_the_step_s_batch_came_after_are_still_clipped(mount: Moun
 
 
 async def test_the_clip_alone_is_enough_to_retry_the_request(mount: MountProfile) -> None:
-    """Why the clip is worth having beside summarization rather than inside it.
+    """Why the clip is worth having beside summarization and not inside it.
 
-    This session has one enormous outstanding call/result pair and nothing else,
-    so *every* balanced cut is the start of the conversation and summarization
-    correctly declines. Before the clip the overflow path had no remedy at all
-    and the turn ended in the provider's refusal; now the tail shrinks and the
-    loop is asked to try again.
+    This session has one enormous outstanding call/result pair and nothing else.
+    *Every* balanced cut is therefore the start of the conversation, and
+    summarization correctly declines. Before the clip existed, the overflow path
+    had no remedy at all, and the turn ended in the refusal of the provider. Now
+    the tail shrinks and the loop is asked to try again.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -897,10 +922,11 @@ async def test_the_clip_alone_is_enough_to_retry_the_request(mount: MountProfile
 async def test_pressure_compacts_without_anyone_asking(mount: MountProfile) -> None:
     """The automatic half of G4, end to end and at the shipped threshold.
 
-    Nothing here calls the engine: a long enough conversation crosses 0.85 of
-    the fake adapter's 8 192-token window on its own, and `agent/pre-step` is
-    where that is noticed. The two threshold tests above prove the arithmetic;
-    this one proves the arithmetic is wired to something.
+    Nothing here calls the engine. A conversation that is long enough crosses
+    0.85 of the 8 192-token window of the fake adapter by itself, and
+    `agent/pre-step` is where that is noticed. The two threshold tests above
+    prove the arithmetic. This test proves that the arithmetic is wired to
+    something.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -913,8 +939,9 @@ async def test_pressure_compacts_without_anyone_asking(mount: MountProfile) -> N
     (record,) = _events(session, "compaction/summarized")
     assert record.data["trigger"] == "pressure"
     assert SUMMARY in _model_text(session)
-    # And the compaction relieved what triggered it, rather than firing on every
-    # step from here on: one record, and the baseline is back under the line.
+    # The compaction also relieved what triggered it, and does not fire on every
+    # step from here on: there is one record, and the baseline is back under the
+    # line.
     pressure = ctx.require(TOKEN_METER).baseline(session).pressure
     assert pressure is not None and pressure < TRIGGER_FRACTION
 
@@ -922,11 +949,11 @@ async def test_pressure_compacts_without_anyone_asking(mount: MountProfile) -> N
 async def test_the_automatic_triggers_can_be_turned_off_without_losing_the_command(
     mount: MountProfile,
 ) -> None:
-    """dsh's `auto` knob, and why it is separate from the row itself.
+    """The `auto` setting of dsh, and why it is separate from the row itself.
 
-    A deployment can want a human to decide when history is replaced while still
-    wanting the human to be *able* to — so `auto: false` disarms the two policy
-    hooks and leaves `/compact` working.
+    A deployment can want a human to decide when history is replaced, and still
+    want the human to be *able* to do it. `auto: false` therefore turns off
+    automatic compaction under all three triggers and leaves `/compact` working.
     """
     ctx = await mount({"id": "compaction-summarize", "config": {"auto": False}}, profile=PROFILE)
     _route(ctx)
@@ -942,21 +969,22 @@ async def test_the_automatic_triggers_can_be_turned_off_without_losing_the_comma
 
 
 # ----------------------------------------------------------- the envelope --
-# §7.4 item 5. The summarize call reuses the conversation's own system prompt
-# and tools so the request is a strict *prefix* of the one the loop just made —
-# which is what makes it nearly free on a provider that caches prefixes, and
-# what stops the summarizer reading a tail of the range it is replacing.
+# §7.4 item 5. The summarize call reuses the system prompt and tools of the
+# conversation, so that the request is a strict *prefix* of the request that the
+# loop just made. That makes the call nearly free on a provider that caches
+# prefixes, and it stops the summarizer from reading only a tail of the range
+# that it replaces.
 
 
 async def test_the_summarize_request_is_a_prefix_of_the_conversations(
     mount: MountProfile,
 ) -> None:
-    """The cache property, asserted structurally rather than hoped for.
+    """The cache property, asserted structurally and not assumed.
 
-    A cache miss looks exactly like a hit, only on the invoice — the same reason
-    `test_prefix_stability` exists — so the shape is checked instead: identical
-    system, identical tools, and a message list that the conversation's own
-    request begins with.
+    A cache miss looks exactly like a hit, except on the invoice.
+    `test_prefix_stability` exists for the same reason. The shape is therefore
+    checked: an identical system, identical tools, and a message list that the
+    request of the conversation begins with.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -974,12 +1002,12 @@ async def test_the_summarize_request_is_a_prefix_of_the_conversations(
 
 
 async def test_the_summarizer_is_shown_the_whole_range(mount: MountProfile) -> None:
-    """No tail, no rendering: the shadowed messages are sent as themselves.
+    """No tail and no rendering: the shadowed messages are sent as themselves.
 
-    Two things follow. The model reads real `tool-call`/`tool-result` blocks
-    rather than this module's text rendering of them, and nothing in the range
-    is silently withheld — a summary written from a tail cannot mention what it
-    was never shown, and could not say so either.
+    Two things follow. The model reads real `tool-call`/`tool-result` blocks and
+    not the text rendering of them by `render_for_summary`. And nothing in the
+    range is silently withheld. A summary that is written from a tail cannot
+    mention what it was never shown, and could not say so either.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -999,9 +1027,9 @@ async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: MountProfil
     """One of two deliberate departures from byte-identical.
 
     A reasoning model would otherwise spend a thinking budget on an extraction.
-    Neither this nor the `max_tokens` override is part of the token prefix, so
-    neither costs the cache hit — which is exactly why they are the two things
-    worth departing on.
+    Neither this departure nor the `max_tokens` override is part of the token
+    prefix, so neither costs the cache hit. That is exactly why these are the
+    two things worth departing on.
     """
     budget = {"thinking": {"type": "enabled", "budget_tokens": 4096}}
     route = {"provider": "fake", "model": "fake-1", "efforts": {"high": budget}}
@@ -1022,14 +1050,14 @@ async def test_the_replay_does_not_inherit_a_reasoning_budget(mount: MountProfil
 
 
 async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: MountProfile) -> None:
-    """The cost of carrying the conversation's tools, and the answer to it.
+    """The cost of carrying the tools of the conversation, and the answer to it.
 
-    The replay hands the model the session's tool schemas under the session's own
-    system prompt, so a model primed to *act* can answer with a tool call and no
-    prose. That is not a failure to report — it is a request shape that did not
-    suit, so the row asks again without tools and with the whole range. Cheap
-    first, correct second; nothing is hidden by falling back, only the cache is
-    given up.
+    The replay gives the model the tool schemas of the session under the system
+    prompt of the session, so a model that is primed to *act* can answer with a
+    tool call and no prose. That is not a failure to report. It is a request
+    shape that did not fit, so the row asks again without tools and with the
+    whole range. Cheap first, correct second. The fallback hides nothing. It
+    gives up only the cache.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1059,8 +1087,8 @@ async def test_a_reply_of_only_tool_calls_falls_back_without_them(mount: MountPr
 
 async def test_a_session_with_no_logged_request_still_compacts(mount: MountProfile) -> None:
     """There is no envelope to replay before the first request is built, and a
-    hand-built session may never have one — so the self-contained shape is the
-    floor rather than a failure path."""
+    hand-built session may never have one. The self-contained shape is therefore
+    the floor and not a failure path."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     session = _tool_batch_session("headerless", 200, 200)
@@ -1078,12 +1106,13 @@ async def test_a_session_with_no_logged_request_still_compacts(mount: MountProfi
 
 
 async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountProfile) -> None:
-    """The trigger `llm-retry` deliberately leaves alone (G4).
+    """The trigger that `llm-retry` deliberately leaves alone (G4).
 
     A provider that says `CONTEXT_WINDOW_EXCEEDED` has already answered the
-    question a pressure estimate can only guess at, and it is the one failure
-    with a remedy — so this row compacts and asks the loop to try again, and the
-    turn completes on the second attempt rather than ending in the error.
+    question that a pressure estimate can only guess at, and it is the one
+    failure with a remedy. This row therefore compacts and asks the loop to try
+    again, and the turn completes on the second attempt and does not end in the
+    error.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1094,10 +1123,10 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountP
     async def refuse_the_first_request(
         options: GenerateOptions, next_: Callable[..., Awaitable[Any]]
     ) -> Any:  # noqa: ANN401
-        # On `llm/stream`, which is the seam retry and replay already attach to,
-        # rather than by swapping the adapter's method — `FakeAdapter` has slots,
+        # On `llm/stream`, the seam that retry and replay already attach to, and
+        # not by a swap of the method of the adapter. `FakeAdapter` has slots,
         # and the waterfall is where a provider failure is *supposed* to come
-        # from, so the request travels the same path a real refusal would.
+        # from, so the request travels the same path that a real refusal would.
         if options.is_loop_request and not refused["once"]:
             refused["once"] = True
             return _overflowing()
@@ -1107,29 +1136,30 @@ async def test_a_context_overflow_compacts_and_retries_the_request(mount: MountP
     await agent.prompt("one more question")
 
     (record,) = _events(session, "compaction/summarized")
-    # Never a replay: the envelope being replayed is the request the provider
-    # just refused for being too large, and re-sending it with an instruction
-    # appended refuses again.
+    # Never a replay: the envelope that would be replayed is the request that
+    # the provider just refused for being too large, and to send it again with
+    # an instruction appended is refused again.
     assert record.data["shape"] == "direct"
     assert SUMMARY in _model_text(session)
     assert text_of(session.derive_messages()[-1].content) == "answer", "the retry did not land"
 
 
 SLOT = 2_000
-"""A window one tool result can outgrow by itself, as a 64 KB cell outgrows a local
-server's 16 384-token slot."""
+"""A window that one tool result can outgrow by itself, as a 64 KB cell outgrows
+the 16 384-token slot of a local server."""
 
 
 async def test_a_request_past_the_window_is_clipped_before_it_is_sent(
     mount: MountProfile,
 ) -> None:
-    """A step's result larger than the whole window, on a server that refuses what does
-    not fit: the clip runs at the next step's start, so nothing is refused.
+    """The result of a step is larger than the whole window, on a server that
+    refuses what does not fit. The clip runs at the request of the next step,
+    before the request is sent, so nothing is refused.
 
-    A summary leaves the latest turn whole, so the request used to go out anyway, be
-    refused, and only then be clipped: one wasted request each time, and a line in the
-    server's log a person reads as a fault. Sabotage: leave the clip to the refusal,
-    and the server refuses once.
+    A summary leaves the latest turn whole, so the request used to go out
+    anyway, be refused, and only then be clipped. That was one wasted request
+    each time, and a line in the log of the server that a person reads as a
+    fault. Sabotage: leave the clip to the refusal, and the server refuses once.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1168,11 +1198,12 @@ async def test_a_request_past_the_window_is_clipped_before_it_is_sent(
 async def test_a_conversation_still_past_the_window_is_summarized_from_its_tail(
     mount: MountProfile,
 ) -> None:
-    """Past the window with no results to clip, the request's own check summarizes, and
-    sends the summarizer the conversation's tail rather than a replay of it, which is a
-    request the provider would refuse as well; the step's pressure check leaves it to
-    that one. Sabotage: choose the shape by the trigger alone, or summarize at the
-    step's start as well."""
+    """Past the window with no results to clip, the check of the request itself
+    summarizes. It sends the summarizer the tail of the conversation and not a
+    replay of it, because the provider would refuse the replay as well. The
+    pressure check of the step leaves the conversation to that check.
+    Sabotage: choose the shape by the trigger alone, or summarize at the step's
+    start as well."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "past-the-window-history")
@@ -1196,9 +1227,9 @@ async def test_a_summarizer_that_fails_leaves_the_conversation_untouched(
 ) -> None:
     """A compaction that cannot summarize must change nothing.
 
-    The failure mode this guards is the worst one available: shadowing a range
-    with an empty or missing summary would delete the conversation from the
-    model's view and put nothing in its place.
+    This guards against the worst failure mode available: to shadow a range with
+    an empty or missing summary would delete the conversation from the view of
+    the model and put nothing in its place.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1219,11 +1250,11 @@ async def test_a_summarizer_that_fails_leaves_the_conversation_untouched(
 async def test_an_automatic_decline_is_recorded_and_not_retried_at_once(
     mount: MountProfile,
 ) -> None:
-    """Automatic compaction never raises — it records why and stands aside.
+    """Automatic compaction never raises. It records the reason and returns.
 
-    And the decline holds until the surface moves: without that, the overflow
-    path would re-attempt inside the same step loop, spending one model call per
-    attempt to reach the same answer.
+    The decline also holds until the surface moves. Without that, the overflow
+    path would attempt again inside the same step loop, and spend one model call
+    per attempt to reach the same answer.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1245,14 +1276,14 @@ async def test_an_automatic_decline_is_recorded_and_not_retried_at_once(
 
 
 async def test_a_manual_failure_is_recorded_in_the_log(mount: MountProfile) -> None:
-    """The command tells the person "the attempt is recorded in the session log",
+    """The command tells the user "the attempt is recorded in the session log",
     and until this test that sentence was false.
 
-    Only the automatic path recorded a decline; `/compact` raised through to the
-    command, which turned it into a message and left no compaction record at all
-    — the log showed a `command/done` marked `ok` whose detail happened to
-    describe a failure. dsh's own wording is true because its `compaction/end`
-    carries the error; pH's is true because of this.
+    Only the automatic path recorded a decline. `/compact` raised through to the
+    command, which turned the error into a message and left no compaction record
+    at all. The log showed a `command/done` marked `ok` whose detail happened to
+    describe a failure. The wording of dsh is true because its `compaction/end`
+    carries the error. The wording of pH is true because of this.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1270,8 +1301,8 @@ async def test_a_manual_failure_is_recorded_in_the_log(mount: MountProfile) -> N
 
 
 async def test_a_refusal_before_any_attempt_is_not_recorded(mount: MountProfile) -> None:
-    """`busy` is not a failed compaction — nothing was attempted, so there is no
-    attempt to account for. Recording one would put an event in the log for
+    """`busy` is not a failed compaction. Nothing was attempted, so there is no
+    attempt to account for. A record of one would put an event in the log for
     every mistyped command."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1286,13 +1317,13 @@ async def test_a_refusal_before_any_attempt_is_not_recorded(mount: MountProfile)
 async def test_a_stub_that_says_it_is_working_is_refused_like_a_driver(
     mount: MountProfile,
 ) -> None:
-    """The refusal reads `AgentHandle.status`, so a stand-in can state it.
+    """The refusal reads `AgentHandle.status`, so a stub can state it.
 
-    It could not before. `status` lived on `AgentDriver`, and the guard asked
-    `getattr(agent, "status", "idle")` — so every `StubAgent` answered *idle* and
-    this branch was unreachable for any test that did not stand up a whole loop.
-    The sibling above drives a real one through `_set_phase`; this is the same
-    refusal asked of the surface the seams actually hold.
+    It could not before. `status` was on `AgentDriver`, and the guard asked
+    `getattr(agent, "status", "idle")`. Every `StubAgent` therefore answered
+    *idle*, and no test could reach this branch unless it ran a whole loop. The
+    sibling above drives a real loop through `_set_phase`. This test asks for
+    the same refusal from the surface that the seams actually hold.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1309,11 +1340,11 @@ async def test_a_stub_that_says_it_is_working_is_refused_like_a_driver(
 async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A bug in this row must not end the person's turn.
+    """A bug in this row must not end the turn of the user.
 
     `agent/pre-step` propagates to `_turn`, where the driver contains the
-    failure with one debug line — so an exception here is a stabilization row
-    silently killing a conversation. The guard is `Exception`, not
+    failure with one debug line. An exception here is therefore a stabilization
+    row that silently ends a conversation. The guard is `Exception`, not
     `CompactionError`, and it records what it swallowed.
     """
     ctx = await mount(profile=PROFILE)
@@ -1335,11 +1366,11 @@ async def test_an_unexpected_failure_neither_escapes_nor_goes_unrecorded(
 async def test_cancellation_is_not_swallowed(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The one thing the guard must let through.
+    """The one thing that the guard must let through.
 
-    `Canceled` derives from `Exception`, so a guard written to contain bugs
-    would also contain a person pressing stop — and the turn would carry on as
-    though nothing had been asked of it.
+    `Canceled` derives from `Exception`, so a guard that is written to contain
+    bugs would also contain a stop request from the user. The turn would then
+    continue as though nothing had been asked of it.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1356,8 +1387,8 @@ async def test_cancellation_is_not_swallowed(
 
 
 async def test_a_short_conversation_reports_nothing_to_compact(mount: MountProfile) -> None:
-    """`None`, not an error: "your conversation is short" and "your summarizer
-    is broken" are different outcomes and the seam keeps them apart."""
+    """`None`, not an error. "Your conversation is short" and "your summarizer
+    is broken" are different outcomes, and the seam keeps them apart."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     session = ctx.require(SESSIONS).create("short")
@@ -1377,9 +1408,9 @@ async def test_a_history_that_cannot_be_written_still_compacts_and_claims_no_pat
 ) -> None:
     """A spill that failed must not leave the model reading a path that holds nothing.
 
-    Upstream keeps both wordings for exactly this, and the without-path one is
-    the load-bearing half: the summary is then all there is, and telling the
-    model otherwise would be the harness inventing a file.
+    Upstream keeps both wordings for exactly this case, and the wording without
+    a path is the necessary half. The summary is then all that exists, and to
+    tell the model otherwise would be the harness inventing a file.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1413,15 +1444,18 @@ async def test_compact_refuses_while_the_agent_is_working(mount: MountProfile) -
 
 
 async def test_compact_carries_what_the_user_is_about_to_work_on(mount: MountProfile) -> None:
-    """`/compact [instructions]`, and the reason it takes any.
+    """`/compact [instructions]`, and the reason why it takes any.
 
-    dsh refuses arguments here and deepagents' compact tool takes none. But the
-    moment someone compacts on purpose is usually the moment they are changing
-    subject, and what they are about to do is the one thing the summarizer
-    cannot read off the conversation. It reaches the prompt labeled as the
-    person's — before `<messages>`, so it is read as an instruction rather than
-    as one more message to compress — and lands on the event, because a summary
-    weighted towards one thing should say who asked for that.
+    dsh refuses arguments here, and the compact tool of deepagents takes none.
+    But the moment when someone compacts on purpose is usually the moment when
+    they change subject, and what they are about to do is the one thing that the
+    summarizer cannot read from the conversation. The text reaches the prompt
+    labeled as the text of the user. It is placed with the instruction: before
+    `<messages>` in the direct shape, and in the trailing instruction on a
+    replay, which is what this test reads. It is therefore read as an
+    instruction and not as one more message to compress. It is also recorded on
+    the event, because a summary that is weighted towards one thing should say
+    who asked for that.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1438,8 +1472,8 @@ async def test_compact_carries_what_the_user_is_about_to_work_on(mount: MountPro
 
 
 async def test_a_bare_compact_asks_the_summarizer_to_focus_on_nothing(mount: MountProfile) -> None:
-    """No argument means no focus block — an empty section would be a heading
-    the model has to decide what to do with."""
+    """No argument means no focus block. An empty section would be a heading
+    that the model must decide what to do with."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     agent = await _conversation(ctx, "no-focus")
@@ -1456,7 +1490,7 @@ async def test_compact_without_an_engine_says_so(mount: MountProfile) -> None:
     """The command over a profile that layered the seam and no backend.
 
     Silence would read as "nothing to compact", which is a different and false
-    statement — the automatic path is the one that is right to say nothing.
+    statement. The automatic path is the one that is right to say nothing.
     """
     ctx = await mount({"id": "command-compact", "name": "command-compact"})
     session = ctx.require(SESSIONS).create("engineless")
@@ -1471,12 +1505,13 @@ async def test_compact_without_an_engine_says_so(mount: MountProfile) -> None:
 
 
 async def test_a_note_tells_the_summarizer_what_survives_the_cut(mount: MountProfile) -> None:
-    """G10's mechanism, without G10's producer.
+    """The mechanism of G10, without the producer of G10.
 
-    A summary replaces *conversation*; a note is how a plugin says "this other
-    thing is still here". It rides the trailing instruction, after the range
-    being summarized, so the model reads it as part of what it was asked to do
-    rather than as one more piece of the history it is compressing.
+    A summary replaces *conversation*. A note is how a plugin says "this other
+    thing is still here". The note is appended to the trailing instruction,
+    after the range that is summarized. The model therefore reads it as part of
+    what it was asked to do, and not as one more piece of the history that it
+    compresses.
     """
     ctx = await mount(profile=PROFILE)
     _route(ctx)
@@ -1492,8 +1527,9 @@ async def test_a_note_tells_the_summarizer_what_survives_the_cut(mount: MountPro
 
 
 async def test_a_note_that_renders_nothing_costs_no_prompt(mount: MountProfile) -> None:
-    """Empty means absent, the rule `PromptContext` already uses — so a note
-    about a namespace holding nothing does not spend a paragraph saying so."""
+    """Empty means absent, the rule that `PromptContext` already uses. A note
+    about a namespace that holds nothing therefore does not spend a paragraph to
+    say so."""
     ctx = await mount(profile=PROFILE)
     _route(ctx)
     ctx.require(COMPACTION).note(CompactionNote(name="test:empty", text=lambda _s: ""))
@@ -1509,8 +1545,9 @@ async def test_a_note_that_renders_nothing_costs_no_prompt(mount: MountProfile) 
 
 
 def test_the_event_types_are_ignorable() -> None:
-    """Accounting beside the replacement it describes, which is what a reader reads.
-    (That they are *known* is `test_log_writers.py`'s, for every package.)"""
+    """Accounting beside the replacement that it describes, and the replacement
+    is what a reader reads. (That the types are *known* is checked in
+    `test_log_writers.py`, for every package.)"""
     for event_type in (
         "compaction/summarized",
         "compaction/declined",
@@ -1520,9 +1557,10 @@ def test_the_event_types_are_ignorable() -> None:
 
 
 def test_the_retention_fraction_is_smaller_than_the_trigger() -> None:
-    """dsh validates this at plugin load and refuses otherwise, for a reason
-    worth restating: retaining more than the threshold means every compaction
-    leaves the session still over it, and the next step compacts again."""
+    """dsh validates this at plugin load and refuses otherwise. The reason is
+    worth repeating: if a row retains more than the threshold, every compaction
+    leaves the session still over the threshold, and the next step compacts
+    again."""
     assert KEEP_FRACTION < TRIGGER_FRACTION
 
 
@@ -1530,18 +1568,18 @@ def test_the_retention_fraction_is_smaller_than_the_trigger() -> None:
 
 
 def _summarized(session_id: str, tail: str, *, compacted: bool = True) -> Session:
-    """A session with a tail that alone fills the retention budget.
+    """A session with a tail that fills the retention budget by itself.
 
-    `compacted` decides whether a previous summary sits above it, which is the
-    only thing the two halves of the test below differ by — written as one
-    fixture so the control cannot drift into testing a different shape.
+    `compacted` decides whether a previous summary is above the tail. That is
+    the only difference between the two halves of the test below. They share one
+    fixture so that the control cannot drift into a test of a different shape.
 
-    Built by hand rather than by running `/compact` twice, because the shape is
-    the point and it is a narrow one: the surface is a previous summary followed
-    by a live turn big enough that the retention budget asks for a cutoff of 1.
-    The replacement is written with `plugin_payload`, which is how `_land` writes
-    it — the plugin, the form and the `SurfaceReplace` are what the reader under
-    test keys on.
+    The session is built by hand and not by two runs of `/compact`, because the
+    shape is what matters and it is a narrow one: the surface is a previous
+    summary followed by a live turn that is big enough that the retention budget
+    asks for a cutoff of 1. The replacement is written with `plugin_payload`,
+    which gives it the shape that `_land` writes. The plugin, the form and the
+    `SurfaceReplace` are what the reader under test keys on.
     """
     session = _windowed(session_id)
     first = log_event(
@@ -1569,15 +1607,15 @@ def _summarized(session_id: str, tail: str, *, compacted: bool = True) -> Sessio
 
 
 async def test_a_summary_is_not_summarized_again(mount: MountProfile) -> None:
-    """D9 — `_plan` says why; this is the shape that reaches it.
+    """D9: `_plan` gives the reason, and this is the shape that reaches it.
 
-    A retained tail one pair over `keep_fraction` keeps pressure up, so the
-    pre-step trigger fires again and the only thing above the cutoff is the
-    paragraph the previous call wrote.
+    A retained tail that is one pair over `keep_fraction` keeps pressure up. The
+    pre-step trigger therefore fires again, and the only thing above the cutoff
+    is the paragraph that the previous call wrote.
 
-    The control is the same session without that paragraph: it still plans, so
-    this declines the re-compaction rather than declining whenever the budget is
-    tight.
+    The control is the same session without that paragraph. It still plans, so
+    this test shows that `_plan` declines the re-compaction, and does not
+    decline whenever the budget is tight.
     """
     ctx = await mount(profile=PROFILE)
     engine = _engine(ctx)

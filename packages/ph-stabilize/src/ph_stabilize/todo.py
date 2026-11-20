@@ -1,40 +1,54 @@
-"""`tool-todo` — planning as a cognitive anchor (P4-01, G1).
+"""`tool-todo`: planning as a cognitive anchor (P4-01, G1).
 
-Deep Agents' `TodoListMiddleware`, ported onto pH's seams rather than onto a
-middleware stack: a tool on `ctx.tools`, a tool-owned `todo/write` event, a
-prompt section, and a `tools/pre-execute` listener for the one enforcement rule.
-That decomposition is D12 — a stabilization feature attaches to waterfalls,
-never to the loop — and it is why this is a row a profile opts into rather than
-a parameter on the driver.
+This row ports `TodoListMiddleware` from Deep Agents. The port uses the seams of
+pH and not a middleware stack. It consists of:
 
-**Forked from upstream at P7-16, deliberately and in two places.** `requires`
-declares what a step waits on, which upstream's schema has no room for and its
-*prompt* works around in prose ("When blocked, create a new task describing what
-needs to be resolved") — a dependency graph written as a naming convention that
-nothing can read, order or check. And a completed entry carries `worked`, the
-number of tools the harness saw run in the window it was finished in: the one
-field in the list the model does not write, because a receipt the claimant issues
-is not a receipt. Upstream's prompt text and the parallel-call rule are still
-tracked verbatim and still gated; the schema is no longer theirs, and the
-comparison that produced both is recorded against `sources/OpenMonoAgent.ai`.
+* a tool on `ctx.tools`
+* a `todo/write` event that the tool owns
+* a prompt section
+* a `tools/pre-execute` listener for the one enforcement rule
 
-**The list lives in the log and nowhere else.** `write_todos` replaces the whole
-list and appends `todo/write {todos}`; the TUI sidebar and the prompt both fold
-that event. There is no side table, which is what makes the list survive a
-resume and a fork for free, and what makes the sidebar and the model's view one
-projection rather than two that can disagree (A11).
+That decomposition is D12: a stabilization feature attaches to waterfalls and
+never to the loop. For that reason this is a row that a profile opts into, and
+not a parameter on the driver.
 
-**One call per model turn, enforced before any of them runs.** Upstream's rule
-is that if a single assistant message contains more than one `write_todos` call
-then *every* one of them fails — the list is whole-list-replacement, so two
-calls in a turn make precedence ambiguous. pH's `tools/pre-execute` waterfall is
-per call, so the batch question is answered from the log: the assistant message
-that requested the calls is committed before any of them executes, and counting
-`write_todos` in it gives every sibling the same answer before the first body
-runs. That last part is the point — a rule that let the first call through and
-failed the second would leave a list written by a call the model was told had
-failed. The rule is the native transport's: a Code Mode cell orders its own
-calls, so the ambiguity it guards against cannot arise there (see
+**The port forked from upstream at P7-16, on purpose and in two places.**
+
+First, `requires` declares what a step waits on. The upstream schema has no
+field for that, and the upstream *prompt* works around the gap in prose ("When
+blocked, create a new task describing what needs to be resolved"). That is a
+dependency graph written as a naming convention, and nothing can read it, order
+it or check it.
+
+Second, a completed entry carries `worked`: the number of tools that the harness
+saw run in the window in which the entry was finished. It is the one field in
+the list that the model does not write, because a receipt that the claimant
+issues is not a receipt.
+
+The upstream prompt text and the parallel-call rule are still tracked verbatim
+and still gated. The schema is no longer the upstream schema. The comparison
+that produced both changes is recorded against `sources/OpenMonoAgent.ai`.
+
+**The list is stored in the log and nowhere else.** `write_todos` replaces the
+whole list and appends `todo/write {todos}`. The TUI sidebar and the prompt both
+fold that event. There is no side table. For that reason the list survives a
+resume and a fork at no extra cost, and the sidebar and the view of the model
+are one projection and not two that can disagree (A11).
+
+**One call in each model turn, enforced before any of the calls runs.** The
+upstream rule is that if a single assistant message contains more than one
+`write_todos` call, then *every* one of them fails. The tool replaces the whole
+list, so two calls in one turn make precedence ambiguous. The
+`tools/pre-execute` waterfall of pH runs for each call, so the log answers the
+question about the batch. The assistant message that requested the calls is
+committed before any of them executes. A count of the `write_todos` calls in
+that message gives every sibling the same answer before the first body runs.
+That timing is the purpose. A rule that let the first call through and failed
+the second would leave a list that was written by a call that the model was told
+had failed.
+
+The rule applies to the native transport only. A Code Mode cell orders its own
+calls, so the ambiguity that the rule guards against cannot occur there (see
 `_parallel_write_todos`).
 
 @module ph_stabilize.todo
@@ -95,63 +109,70 @@ __all__ = [
 TOOL_NAME = "write_todos"
 
 MAX_TODO_CONTENT = 500
-"""How long one entry's text may be.
+"""The maximum length of the text of one entry.
 
-**The list is the one model-written string that rides every later prompt.** It is
-a `context`, materialized fresh each turn and — after compaction has shadowed the
-turns that wrote it — the only surviving statement of the plan. So an entry is
-not a place to paste a diff into: unbounded here is unbounded in every request
-for the rest of the session, which is P7-13's lesson one layer up (a bound
-belongs where the unbounded thing is written, not at each reader).
+**The list is the one string written by the model that is included in every
+later prompt.** It is a `context`, materialized again on each turn. After
+compaction has shadowed the turns that wrote it, it is the only remaining
+statement of the plan. An entry is therefore not a place to paste a diff. Text
+that is unbounded here is unbounded in every request for the rest of the
+session. That is the lesson of P7-13 one layer up: a bound belongs where the
+unbounded thing is written, and not at each reader.
 
-Generous against what the tool is for — upstream's own examples are phrases like
-"Run the pre-flight check" — and a refusal rather than a clip, because a model
-told its text was accepted when it was truncated would go on believing the list
-says something it does not. The bound reaches the model as `maxLength` in the
-tool's own schema, so it is a stated rule rather than a surprise."""
+The bound is generous for the purpose of the tool. The upstream examples are
+phrases like "Run the pre-flight check". Text that is too long is refused and
+not clipped. A model that was told that its text was accepted, when the text was
+truncated, would continue to believe that the list says something that it does
+not say. The bound reaches the model as `maxLength` in the schema of the tool,
+so it is a stated rule and not a surprise."""
 
 SKILL = "skill"
-"""What `source` says on an entry a skill put there, rather than the model.
+"""The value of `source` on an entry that a skill added, and not the model.
 
-**Harness-issued, like `worked`, and for the same reason**: an entry the model
-could *label* as a skill's is one it could also label as its own and then delete.
-So the model's arguments carry no `source` at all — this is re-attached on every
-write from the list the log already holds, and a write that fails to carry a
-skill's step forward is refused.
+**The harness issues it, like `worked`, and for the same reason.** If the model
+could *label* an entry as the entry of a skill, it could also label that entry
+as its own and then delete it. The arguments of the model therefore carry no
+`source` at all. Each write attaches `source` again from the list that the log
+already holds, and a write that does not carry a skill step forward is refused.
 
-The rule it enables is the whole of P7-18: the model may add entries beside a
-seeded step and may mark one done, and may not drop, reorder or reword one. That
-is the difference between a procedure and a suggestion.
+This enables one rule, and that rule is all of P7-18. The model may add entries
+beside a seeded step and may mark a seeded step done. It may not drop, reorder
+or reword one. That is the difference between a procedure and a suggestion.
 
-One value, not a vocabulary: an entry the model wrote carries no `source` at
-all. There is no `"model"` constant because presence *is* the question every
-reader asks, and a second value would be a field the model could set."""
+There is one value and not a vocabulary. An entry that the model wrote carries
+no `source` at all. There is no `"model"` constant, because the question that
+every reader asks *is* whether `source` is present. A second value would be a
+field that the model could set."""
 
 MAX_REQUIRES = 20
-"""How many entries one entry may declare a dependency on.
+"""The number of entries on which one entry may declare a dependency.
 
-Bounded for `MAX_TODO_CONTENT`'s reason — the list rides every later prompt — and
-low because a step waiting on twenty others is a step that has not been broken
-down. The product is what needs bounding: 100 entries with 20 references each is already
-more plan than any of this is for."""
+It is bounded for the same reason as `MAX_TODO_CONTENT`: the list is included in
+every later prompt. It is low because a step that waits on twenty other steps
+has not been broken down. The product is the thing that needs a bound: 100
+entries with 20 references each is already more plan than this tool is for."""
 
 MAX_TODOS = 100
-"""How many entries one list may hold. See `MAX_TODO_CONTENT` for why bounded.
+"""The number of entries that one list may hold. `MAX_TODO_CONTENT` explains why
+there is a bound.
 
-Well past any real plan — upstream's guidance is to skip the tool entirely for
-work that is "a few tool calls" — and it is the count that bounds the product:
-without it, entries inside the length limit still grow the prompt without end."""
+The value is well past any real plan. The upstream guidance is to skip the tool
+entirely for work that is "a few tool calls". This count is what bounds the
+product. Without it, entries inside the length limit still grow the prompt
+without end."""
 
 GLYPHS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]"}
-"""How the list renders back to the model. Deliberately the same three-state
-vocabulary the sidebar draws, so a person and the model are reading one list."""
+"""How the list is rendered back to the model. The three states are on purpose
+the same three that the sidebar draws, so a person and the model read one list."""
 
 # --------------------------------------------------------------------------
-# Verbatim from `langchain.agents.middleware.todo` (checked against 1.3.18,
-# which satisfies the plan's pinned `langchain>=1.3.17`). Copied rather than
-# imported: ph does not depend on langchain, and these are prompt *text* — the
-# thing most likely to be silently reworded by an upgrade, and the thing whose
-# exact words the row's gate is about.
+# Verbatim from `langchain.agents.middleware.todo`, with one addition: the
+# `## Dependencies` section at the end of the tool description is pH's own and
+# describes `requires`. The text was checked against 1.3.18, which satisfies the
+# pinned `langchain>=1.3.17` of the plan. It is copied and not imported, for two
+# reasons. ph does not depend on langchain. These constants are also prompt
+# *text*: an upgrade is most likely to reword that text silently, and the gate
+# of the row is about its exact words.
 # --------------------------------------------------------------------------
 
 WRITE_TODOS_SYSTEM_PROMPT = """## `write_todos`
@@ -249,39 +270,40 @@ PARALLEL_CALL_ERROR = (
     "in parallel. Please call it only once per model invocation to update "
     "the todo list."
 )
-"""Verbatim from upstream, and the row's gate. Assembled from the same three
-fragments so a diff against `todo.py` stays readable."""
+"""Verbatim from upstream, and the gate of the row. It is assembled from the same
+three fragments as upstream, so that a diff against the upstream `todo.py` stays
+readable."""
 
 
 class PlanError(ValueError):
     """The plan contradicts itself, so nothing is written.
 
-    A refusal the *model* reads and can fix on its next turn, in the shape B5
-    normalizes — a raised error becomes an `is_error` result rather than a
-    denial, because the model did not do anything forbidden: it wrote a plan
-    that does not hold together, and the fix is a corrected plan.
+    The *model* reads this refusal and can fix the plan on its next turn. The
+    refusal has the shape that B5 normalizes: a raised error becomes an
+    `is_error` result and not a denial. The model did not do anything forbidden.
+    It wrote a plan that does not hold together, and the fix is a corrected plan.
 
-    Refused rather than repaired, and the log left alone, for the reason the
-    parallel-call rule refuses: a list written differently from the one the
-    model asked for is a list it will reason about wrongly for the rest of the
-    session."""
+    The plan is refused and not repaired, and the log is left unchanged. The
+    reason is the same as for the parallel-call rule: if the written list
+    differs from the list that the model asked for, the model reasons about it
+    wrongly for the rest of the session."""
 
 
 class TodoItem(ToolModel):
-    """One entry: what the step is, where it has got to, and what it waits on.
+    """One entry: what the step is, how far it has got, and what it waits on.
 
-    **This is where the port forks from langchain** (P7-16). Upstream's `Todo` is
-    `{content, status}`, and `requires` is not in it — but the absence is what
-    upstream's own prompt works around in prose ("When blocked, create a new task
-    describing what needs to be resolved"), which is a dependency graph written
-    as a naming convention that nothing can read, order or check. Declared, it is
-    checkable: a reference to nothing, a self-reference and a cycle are all
-    refused, and `blocked_by` answers what is actually startable.
+    **This is where the port forks from langchain** (P7-16). The upstream `Todo`
+    is `{content, status}` and has no `requires`. The upstream prompt works
+    around that absence in prose ("When blocked, create a new task describing
+    what needs to be resolved"). That is a dependency graph written as a naming
+    convention, and nothing can read it, order it or check it. A declared
+    dependency can be checked: a reference to nothing, a self-reference and a
+    cycle are all refused, and `blocked_by` answers what can really be started.
 
-    Still deliberately no `activeForm` — the reason there was never that upstream
-    lacks it but that pH renders a glyph beside the content in both the sidebar
+    There is still no `activeForm`, on purpose. The reason was never that
+    upstream lacks it. pH renders a glyph beside the content in both the sidebar
     and the prompt, so a second phrasing of one task would be a field with no
-    reader. `requires` has three.
+    reader. `requires` has three readers.
     """
 
     content: str = Field(
@@ -314,39 +336,40 @@ class WriteTodosArgs(ToolModel):
 
 
 def todos_of(session: Session | None) -> list[dict[str, Any]]:
-    """The current list: the last `todo/write` in the log, or nothing.
+    """The current list: the last `todo/write` in the log, or an empty list.
 
-    Last-write-wins over an append-only log, which is the whole storage design —
-    a fold rather than a table, so a fork inherits the list its prefix ended
-    with and a resume shows what the person left. `Session.latest` is that
-    question's own helper, incremental so a prompt assembled every step does not
-    rescan a log that is mostly `assistant/chunk`s.
+    The last write wins over an append-only log. That is the complete storage
+    design: a fold and not a table. A fork therefore inherits the list that its
+    prefix ended with, and a resume shows what the user left. `Session.latest`
+    is the helper for this question. It is incremental, so a prompt that is
+    assembled on every step does not rescan a log that is mostly
+    `assistant/chunk` events.
     """
     event = session.latest("todo/write") if session is not None else None
     if event is None:
         return []
-    # `thaw_json` because the payload is frozen — a `MappingProxyType` is not a
-    # `dict`, the bug this project has now been bitten by three times.
+    # `thaw_json` because the payload is frozen. A `MappingProxyType` is not a
+    # `dict`, and that bug has now occurred three times in this project.
     return _entries(thaw_json(event.data.get("todos")))
 
 
 def steps_of(todos: list[dict[str, Any]]) -> list[str]:
-    """The contents of entries a skill seeded, in order.
+    """The contents of the entries that a skill seeded, in order.
 
-    Order matters as much as membership: a seeded procedure reordered is a
-    different procedure, and `requires` alone would not notice a swap between two
-    steps that happen not to depend on each other.
+    Order matters as much as membership. A seeded procedure in a different order
+    is a different procedure, and `requires` alone would not detect a swap of two
+    steps that do not depend on each other.
     """
     return [_content(one) for one in todos if one.get("source") == SKILL]
 
 
 def startable(todos: list[dict[str, Any]]) -> list[str]:
-    """Entries that are not finished and are waiting on nothing unfinished.
+    """The entries that are not finished and wait on nothing unfinished.
 
-    What a `turn-stopping` listener asks: is there work this plan says can begin
-    right now? An empty answer with entries still pending means everything left
-    is blocked — a different thing from being done, and the listener stands down
-    rather than naming work the plan itself says cannot start.
+    A `turn-stopping` listener asks this: does the plan say that some work can
+    begin now? An empty answer while entries are still pending means that all
+    remaining work is blocked. That is different from done. The listener then
+    does nothing, and does not name work that the plan itself says cannot start.
     """
     waiting = blocked_by(todos)
     return [
@@ -357,19 +380,20 @@ def startable(todos: list[dict[str, Any]]) -> list[str]:
 
 
 def outstanding_steps(session: Session | None) -> set[str]:
-    """The contents of seeded entries that are not finished, read **frozen**.
+    """The contents of the seeded entries that are not finished, read **frozen**.
 
-    The question a `turn-stopping` listener asks once per turn for *every*
-    session in the deployment, including the ones that never read a skill — so it
-    is answered off the frozen payload rather than by thawing a list it is about
-    to throw away. `Session.latest` is an incremental fold (measured 0.08 µs
-    whatever the log length), so a session that never used the tool costs a dict
-    lookup and nothing else.
+    A `turn-stopping` listener asks this one time in each turn for *every*
+    session in the deployment, including the sessions that never read a skill.
+    The answer therefore comes from the frozen payload, and the function does
+    not thaw a list that it would then discard. `Session.latest` is an
+    incremental fold (measured at 0.08 µs for any log length), so a session that
+    never used the tool costs one dict lookup and nothing else.
 
-    Here rather than in `skill-steps`, because "an entry a skill put there" is
-    this module's sentence: `steps_of`, `_carried` and this are the three readers
-    of `source`, and a fourth spelling across a package boundary is how the
-    sidebar and the steer come to disagree about what is outstanding.
+    The function is here and not in `skill-steps`, because the meaning of "an
+    entry a skill put there" belongs to this module. `steps_of`, `_carried` and
+    this function are the three readers of `source`. A fourth version across a
+    package boundary would let the sidebar and the steer disagree about what is
+    outstanding.
     """
     previous = session.latest("todo/write") if session is not None else None
     return {
@@ -380,11 +404,11 @@ def outstanding_steps(session: Session | None) -> set[str]:
 
 
 def blocked_by(todos: list[dict[str, Any]]) -> dict[str, list[str]]:
-    """For each entry, the dependencies it declared that are not yet completed.
+    """For each entry, the declared dependencies that are not yet completed.
 
-    The fold `requires` exists for: "what can actually be started now" is a
-    question about the whole list, and before this it was a question only prose
-    could ask. An entry missing from the result is startable.
+    `requires` exists for this fold. "What can really be started now" is a
+    question about the whole list, and before this fold only prose could ask it.
+    An entry that is missing from the result can be started.
     """
     done = {_content(one) for one in todos if one.get("status") == "completed"}
     waiting: dict[str, list[str]] = {}
@@ -396,27 +420,27 @@ def blocked_by(todos: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 
 def _entries(value: object) -> list[dict[str, Any]]:
-    """A tool argument's `todos`, as the list of entries it claims to be.
+    """The `todos` of a tool argument, as the list of entries that it claims to be.
 
-    `list(value or ())` was the reader here, and it has the failure `as_seq`'s
-    own docstring is about: a `str` is a `Sequence`, so a `todos` field written
-    as a string became a list of its *characters* and every rule downstream read
-    one-letter entries. `as_seq` refuses the string; the shape test then drops
-    anything in the array that is not an entry, which is the same policy one
-    level down — a mis-shaped row costs a row.
+    The reader here was `list(value or ())`. It had the failure that the
+    docstring of `as_seq` describes: a `str` is a `Sequence`, so a `todos` field
+    written as a string became a list of its *characters*, and every later rule
+    read one-letter entries. `as_seq` refuses the string. The shape test then
+    drops anything in the array that is not an entry. That is the same policy
+    one level down: a row with the wrong shape costs only that row.
     """
     return [one for one in as_seq(value) if isinstance(one, dict)]
 
 
 def unevidenced(todos: list[dict[str, Any]]) -> list[str]:
-    """Completed entries the harness saw no work behind.
+    """The completed entries for which the harness saw no work.
 
-    `worked` is counted by the tool, never supplied by the model, so this is the
-    one thing in the list the model cannot assert: an entry marked done in a
-    window where the agent called no other tool is a claim with nothing behind
-    it. It does not make the entry wrong — a step can be "decide the approach" —
-    but the difference between a tick with work behind it and a bare tick is
-    exactly what a checklist the model marks itself otherwise hides (P5-16).
+    The tool counts `worked`, and the model never supplies it. This is therefore
+    the one thing in the list that the model cannot assert. An entry marked done
+    in a window where the agent called no other tool is a claim with no
+    evidence. That does not make the entry wrong, because a step can be "decide
+    the approach". But a checklist that the model marks itself otherwise hides
+    exactly this difference: a tick with work behind it, or a bare tick (P5-16).
     """
     return [
         _content(one) for one in todos if one.get("status") == "completed" and not one.get("worked")
@@ -426,12 +450,12 @@ def unevidenced(todos: list[dict[str, Any]]) -> list[str]:
 def render_todo_list(todos: list[dict[str, Any]]) -> str:
     """The list as the model sees it between turns.
 
-    Blocked entries say what they are waiting on, because the list is the model's
-    own statement and the point of declaring a dependency is to be reminded of it
-    at the moment of choosing what to do next. Nothing else is rendered — the
-    receipt `worked` carries is for a person reading the card, and repeating it
-    here would spend tokens every turn to tell the model something it cannot act
-    on.
+    A blocked entry says what it waits on. The list is the statement of the
+    model itself, and the purpose of a declared dependency is a reminder at the
+    moment when the model chooses what to do next. Nothing else is rendered. The
+    receipt in `worked` is for a person who reads the card. To repeat it here
+    would spend tokens on every turn to tell the model something that it cannot
+    act on.
     """
     waiting = blocked_by(todos)
     lines = []
@@ -447,16 +471,22 @@ def render_todo_list(todos: list[dict[str, Any]]) -> str:
 def _checked(todos: list[dict[str, Any]]) -> None:
     """Refuse a plan that contradicts itself, before anything is written.
 
-    Three ways it can, and each is a thing the model can only have meant by
-    mistake: a dependency on an entry that is not in the list, a cycle — of which
-    an entry waiting on itself is the one-node case — and an entry claiming to be
-    under way or finished while something it *said* it waits on is not.
+    A plan can contradict itself in three ways, and the model can only have
+    meant each one by mistake:
 
-    That last one is a check of the model against its own statement rather than
-    a policy imposed on it, which is what keeps this on the right side of
-    P5-16's line. `requires` is optional per entry; a model that finds the rule
-    inconvenient simply does not declare the dependency, and then nothing here
-    has an opinion.
+    * A dependency on an entry that is not in the list.
+    * A cycle. An entry that waits on itself is the one-node case.
+    * An entry that claims to be in progress or finished while something that it
+      *said* it waits on is not finished.
+
+    The last check compares the model against its own statement. It is not a
+    policy imposed on the model, and that keeps it on the right side of the line
+    in P5-16. `requires` is optional for each entry. A model that finds the rule
+    inconvenient does not declare the dependency, and then nothing here has an
+    opinion.
+
+    The function also refuses two entries with the same content, because
+    `requires` names entries by their content.
     """
     edges: dict[str, list[str]] = {}
     for todo in todos:
@@ -472,8 +502,9 @@ def _checked(todos: list[dict[str, Any]]) -> None:
             if name not in edges:
                 raise PlanError(f"{content!r} requires {name!r}, which is not in the list")
 
-    # One path, appended and popped, rather than a `walking` set beside a `trail`
-    # list: membership and the cycle's own text are the same question asked twice.
+    # One path, appended and popped, and not a `walking` set beside a `trail`
+    # list. Membership and the text of the cycle are the same question, and two
+    # structures would ask it twice.
     path: list[str] = []
     settled: set[str] = set()
 
@@ -506,19 +537,20 @@ def _checked(todos: list[dict[str, Any]]) -> None:
 def _work_since(session: Session, since: int) -> int:
     """How many tools the agent called between `since` and now, ignoring this one.
 
-    Counted off `tool/call`, which since P7-15 exists only for a call the
-    pipeline let through and was about to run — so this is work *attempted*,
-    which is the honest thing to count for "did anything happen, or was a box
-    ticked". `write_todos` is excluded or every window would score itself.
+    The count comes from `tool/call`. Since P7-15 that record exists only for a
+    call that the pipeline let through and was about to run. The count is
+    therefore work *attempted*, which is the correct thing to count for "did
+    anything happen, or was a box ticked". `write_todos` is excluded, because
+    otherwise every window would count itself.
 
-    **Both records, one per transport** — `TOOL_DISPATCH_EVENT_TYPES`, which
-    says why they are the same fact. Counting `tool/call` alone scored a Code
-    Mode cell that read nine files and edited three as *one* piece of work, so
-    the nudge for a window that did too little fired at an agent doing plenty
-    (D12).
+    **Both records are counted, one for each transport.**
+    `TOOL_DISPATCH_EVENT_TYPES` explains why they are the same fact. A count of
+    `tool/call` alone scored a Code Mode cell that read nine files and edited
+    three as *one* piece of work. The nudge for a window that did too little
+    then fired at an agent that did plenty (D12).
 
-    From the tail rather than the whole log: the previous `todo/write` is at most
-    a turn ago, and `events_from` copies what follows it.
+    The count reads the tail and not the whole log. The previous `todo/write` is
+    at most one turn back, and `events_from` copies only what follows it.
     """
     return sum(
         1
@@ -528,35 +560,37 @@ def _work_since(session: Session, since: int) -> int:
 
 
 def _content(entry: Mapping[str, Any]) -> str:
-    """One entry's `content`, which is this module's join key.
+    """The `content` of one entry, which is the join key of this module.
 
-    Every rule here keys on it — `blocked_by`'s dict, `_carried`'s `seeded` map,
-    `_witnessed`'s `was` map, `_checked`'s edge table — and it was spelled out
-    fifteen times in two spellings. One reader, for `_recorded`'s stated reason:
-    a key extracted fifteen ways is fifteen places to drift the day it is
-    normalized (`.strip()`) or renamed.
+    Every rule here keys on it: the dict of `blocked_by`, the `seeded` map of
+    `_carried`, the `was` map of `_witnessed`, and the edge table of `_checked`.
+    It was written out fifteen times in two different forms. There is now one
+    reader, for the reason that `_recorded` states: a key that is extracted in
+    fifteen places can drift in fifteen places on the day that it is normalized
+    (`.strip()`) or renamed.
     """
     return as_str(entry.get("content"))
 
 
 def _requires(entry: Mapping[str, Any]) -> list[str]:
-    """What this entry says it waits on, narrowed the same way `content` is.
+    """What this entry says it waits on, narrowed in the same way as `content`.
 
-    The names were read with a bare `str()` — so a `requires: [3]` compared a
-    fabricated `"3"` against a `done` set built with `as_str`, two narrowings of
-    one field five lines apart.
+    The names were read with a bare `str()`. A `requires: [3]` then compared an
+    invented `"3"` against a `done` set that was built with `as_str`: two
+    narrowings of one field, five lines apart.
     """
     return [as_str(name) for name in as_seq(entry.get("requires"))]
 
 
 def _recorded(previous: SessionEvent | None) -> list[Mapping[str, Any]]:
-    """The entries the last `todo/write` holds, read **frozen**.
+    """The entries that the last `todo/write` holds, read **frozen**.
 
-    The one read both rules take. `todos_of` would deep-copy the whole previous
-    list — measured 12x dearer at the caps, ~95% of it copying `requires` — and
-    between them `_carried` and `_witnessed` want four scalars per entry, so a
-    thaw would be paid twice per write to build something neither of them
-    mutates. A `MappingProxyType` answers `.get` perfectly well.
+    Both rules use this one read. `todos_of` would deep-copy the whole previous
+    list. That was measured as 12x more expensive at the caps, and about 95% of
+    the cost was the copy of `requires`. `_carried` and `_witnessed` together
+    need four scalars from each entry. A thaw would therefore be paid twice for
+    each write, to build something that neither of them mutates. A
+    `MappingProxyType` answers `.get` as well as a `dict` does.
     """
     entries = as_seq(previous.data.get("todos")) if previous else ()
     return [one for one in entries if isinstance(one, Mapping)]
@@ -565,30 +599,31 @@ def _recorded(previous: SessionEvent | None) -> list[Mapping[str, Any]]:
 def _carried(
     recorded: list[Mapping[str, Any]], todos: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Re-attach what a skill seeded, and refuse a write that lost it (P7-18).
+    """Attach again what a skill seeded, and refuse a write that lost it (P7-18).
 
-    **The model's arguments never carry `source`.** It is read from the list the
-    log already holds and put back here, so a procedure cannot be forged into
-    existence or labeled away — the same shape `worked` uses, and for the same
-    reason: a claim the claimant issues about itself is not evidence.
+    **The arguments of the model never carry `source`.** It is read from the
+    list that the log already holds and is put back here. A procedure therefore
+    cannot be forged into existence or removed by a change of label. `worked`
+    has the same shape, for the same reason: a claim that the claimant issues
+    about itself is not evidence.
 
-    Three things are refused: dropping a seeded step, reordering them, and
-    rewording one — the last reads as a drop plus an add, which is what it is.
-    Status is the one thing the model *may* change, because marking progress is
-    the whole point. `requires` on a seeded step is put back too, so the order a
-    skill declared cannot be edited out from underneath it.
+    Three things are refused: a dropped seeded step, reordered seeded steps, and
+    a reworded seeded step. A reworded step reads as a drop plus an add, and
+    that is what it is. Status is the one thing that the model *may* change,
+    because the purpose is to mark progress. The `requires` of a seeded step is
+    also put back, so the order that a skill declared cannot be edited out.
 
-    A write that has never seen a skill is untouched, which is every write in a
-    deployment that installs no procedural skills.
+    A write to a list that no skill has seeded is not changed. That is every
+    write in a deployment that installs no procedural skills.
     """
     seeded = {_content(one): one for one in recorded if one.get("source") == SKILL}
     if not seeded:
         return todos
     kept = [name for name in (_content(one) for one in todos) if name in seeded]
     if kept != list(seeded):
-        # Two refusals, because they are two mistakes and the fix differs. A
-        # reorder that named every step as "dropped" told the model all of them
-        # were wrong when only their order was.
+        # Two refusals, because these are two mistakes and the fix differs. A
+        # reorder that reported every step as "dropped" told the model that all
+        # of the steps were wrong, when only their order was wrong.
         lost = [name for name in seeded if name not in kept]
         if lost:
             raise PlanError(
@@ -615,18 +650,19 @@ def _witnessed(
     recorded: list[Mapping[str, Any]],
     todos: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Attach the receipt to entries that have just been completed.
+    """Attach the receipt to the entries that have just been completed.
 
-    **The one field in the list the model does not write.** `worked` is what the
-    harness saw happen in the window before this write; a completion with a zero
-    in it is a claim with nothing behind it, and `unevidenced` is what reads it.
-    Attaching it here rather than accepting it as an argument is the whole point:
-    a receipt the claimant issues is not a receipt.
+    **The one field in the list that the model does not write.** `worked` is
+    what the harness saw happen in the window before this write. A completion
+    with a zero in it is a claim with no evidence, and `unevidenced` reads it.
+    The purpose is to attach it here and not accept it as an argument: a receipt
+    that the claimant issues is not a receipt.
 
-    Carried forward for entries that were already complete, because a write
-    replaces the whole list and an entry's evidence is about the window it was
-    finished in, not this one. An entry moved *back* out of `completed` loses it
-    — it is no longer a claim, so there is nothing to witness.
+    The value is carried forward for entries that were already complete. A write
+    replaces the whole list, and the evidence of an entry is about the window in
+    which it was finished, not about this window. An entry that moves *back* out
+    of `completed` loses the value. It is no longer a claim, so there is nothing
+    to witness.
     """
     was = {_content(one): (one.get("status"), one.get("worked")) for one in recorded}
     worked = _work_since(session, previous.seq if previous else -1)
@@ -639,21 +675,23 @@ def _witnessed(
 
 
 def _executing_message(event: SessionEvent) -> Message | None:
-    """One `assistant/message` event as the message a batch would run from (L12).
+    """One `assistant/message` event as the message that a batch would run from (L12).
 
-    **A rewrite is not new work.** `SurfaceReplace` appends, so an in-place
-    rewrite of an *older* message — argument elision is the one that does this —
-    becomes the newest `assistant/message` in the log while the message actually
-    executing is further back. A reader asking only for the latest gets a
-    near-copy of something answered several steps ago.
+    **A rewrite is not new work.** `SurfaceReplace` appends. An in-place rewrite
+    of an *older* message therefore becomes the newest `assistant/message` in
+    the log, while the message that is really executing is further back.
+    Argument elision is the producer that does this. A reader that asks only for
+    the latest event gets a near-copy of something that was answered several
+    steps ago.
 
-    `is_in_place_rewrite` rather than `is_replacement_surface_event`, for
-    `persistence.repair`'s reason one package over: the narrow predicate is the
-    one that means "not new work". The commit refuses any other assistant
-    replacement (`surface._assert_assistant_rewrite`), so today the two agree.
+    The function uses `is_in_place_rewrite` and not
+    `is_replacement_surface_event`, for the same reason as `persistence.repair`
+    one package over: the narrow predicate is the one that means "not new work".
+    The commit refuses any other assistant replacement
+    (`surface._assert_assistant_rewrite`), so today the two predicates agree.
 
-    A module-level function because `Session.projection` keys its fold on
-    `(type, parse)` — a lambda here would build a fold per call.
+    This is a module-level function because `Session.projection` keys its fold
+    on `(type, parse)`. A lambda here would build a fold for each call.
     """
     if is_in_place_rewrite(event):
         return None
@@ -661,22 +699,25 @@ def _executing_message(event: SessionEvent) -> Message | None:
 
 
 def _parallel_write_todos(session: Session | None) -> bool:
-    """Whether the assistant message now being executed asked for two writes.
+    """Whether the assistant message that is now executing asked for more than
+    one write.
 
-    Read from the log rather than from the batch, because pH's
-    `tools/pre-execute` is per call while upstream's rule is about the *message*.
-    The assistant message is committed before any of its tool calls runs, so
-    every sibling gets this same answer before the first body executes — which
-    is what makes "every one of them fails" true rather than "all but the first".
-    `Session.projection` and `derive_event_message` own the scan and the payload
-    shape; a third reader spelling either by hand is how they drift.
+    The answer is read from the log and not from the batch, because the
+    `tools/pre-execute` waterfall of pH runs for each call, while the upstream
+    rule is about the *message*. The assistant message is committed before any
+    of its tool calls runs, so every sibling gets this same answer before the
+    first body executes. That makes "every one of them fails" true, and not "all
+    but the first". `Session.projection` and `derive_event_message` own the scan
+    and the payload shape. A third reader that wrote either one by hand would
+    let them drift apart.
 
-    Native transport only, and deliberately. The rule exists because two
-    whole-list replacements in one *message* have no defined precedence. A Code
-    Mode cell that calls `tools.write_todos` twice has one — the program's own
-    execution order (the tool declares no concurrency safety, so even gathered
-    dispatches serialize) — so there the last write wins by the program's own
-    statement, and refusing would punish a cell for being unambiguous.
+    The rule applies to the native transport only, on purpose. It exists because
+    two whole-list replacements in one *message* have no defined precedence. A
+    Code Mode cell that calls `tools.write_todos` twice has a defined
+    precedence: the execution order of the program. The tool declares no
+    concurrency safety, so even gathered dispatches run one after another. There
+    the last write wins by the statement of the program itself, and a refusal
+    would punish a cell for being unambiguous.
     """
     message = session.projection("assistant/message", _executing_message) if session else None
     if message is None:
@@ -699,20 +740,20 @@ async def apply(ctx: Context, config: None) -> None:
     async def write_todos(args: WriteTodosArgs, run: ToolRunContext) -> dict[str, Any]:
         todos = [item.model_dump(mode="json") for item in args.todos]
         session = run.session
-        # One `latest`, one frozen read: both rules below want a few scalars off
-        # the previous list, and folding it twice per write was the deep copy
-        # `_witnessed` had already been written to avoid.
+        # One `latest` and one frozen read. Both rules below need a few scalars
+        # from the previous list. Two folds for each write were the deep copy
+        # that `_witnessed` had already been written to avoid.
         previous = session.latest("todo/write") if session is not None else None
         recorded = _recorded(previous)
-        # Provenance before coherence: a write that lost a skill's step is
-        # refused for *that*, which is actionable, rather than for whatever the
-        # dependency check notices about the wreckage left behind.
+        # Provenance before coherence. A write that lost a skill step is refused
+        # for *that* reason, which the model can act on. Otherwise it would be
+        # refused for whatever the dependency check finds in what is left.
         todos = _carried(recorded, todos)
         _checked(todos)
         if session is not None:
             todos = _witnessed(session, previous, recorded, todos)
-            # Tool-owned event: the tool that changed the list is the one that
-            # records it, so "model-visible means logged" holds without the
+            # A tool-owned event: the tool that changed the list is the one that
+            # records it. "Model-visible means logged" then holds without the
             # pipeline learning what a todo is (I3).
             _LOG.append(session, "todo/write", {"todos": todos})
         return {"todos": todos}
@@ -723,25 +764,25 @@ async def apply(ctx: Context, config: None) -> None:
             WRITE_TODOS_TOOL_DESCRIPTION,
             parameters=WriteTodosArgs,
             output=ToolOutput(
-                # The output is the input, accepted — same shape, so the same
-                # model; a separate `Value` class would differ only by lacking
-                # the field description.
+                # The output is the accepted input. It has the same shape, so it
+                # uses the same model. A separate `Value` class would differ
+                # only because it lacks the field description.
                 schema=WriteTodosArgs,
-                # The receipt reaches the card through the channel built for it:
-                # `presentation_meta` is the tool's own durable payload, so the
-                # rule "a completion with no work behind it" is stated once, in
-                # the package that counts it. `present_result` is handed the
-                # arguments and a `ToolResult` — never the value — so without
-                # this the card would have to re-derive it from the log, in
-                # another package, from a field whose meaning it would then own
-                # a second copy of.
+                # The receipt reaches the card through the channel that was
+                # built for it. `presentation_meta` is the durable payload of
+                # the tool itself, so the rule "a completion with no work behind
+                # it" is stated one time, in the package that counts it.
+                # `present_result` receives the arguments and a `ToolResult`,
+                # and never the value. Without this, the card would have to
+                # derive the rule again from the log, in another package, from a
+                # field whose meaning it would then hold a second copy of.
                 presentation_meta=lambda args, value: {
                     "unevidenced": unevidenced(_entries(value.get("todos")))
                 },
-                # Upstream's own wording. The evals note a proposed neutral
-                # "Todo list updated."; the pinned release still echoes the
-                # list, and echoing it is what lets a model that batched several
-                # changes see what actually landed.
+                # The wording of upstream. The evals note a proposed neutral
+                # "Todo list updated.". The pinned release still echoes the
+                # list, and the echo lets a model that batched several changes
+                # see what was really written.
                 render=lambda args, value: text_content(f"Updated todo list to {value['todos']}"),
             ),
             execute=write_todos,
@@ -771,9 +812,9 @@ async def apply(ctx: Context, config: None) -> None:
     ctx.require(SYSTEM_PROMPT).section(
         PromptSection(
             name="write-todos",
-            # After the tool guidance the catalog itself contributes: this is
-            # advice about one tool, and it reads as a footnote to that list
-            # rather than as a competing instruction.
+            # After the tool guidance that the catalog itself contributes. This
+            # is advice about one tool, so it reads as a footnote to that list
+            # and not as a competing instruction.
             order=ORDER_TOOL_GUIDANCE + 50,
             text=WRITE_TODOS_SYSTEM_PROMPT,
         )
@@ -783,25 +824,26 @@ async def apply(ctx: Context, config: None) -> None:
         todos = todos_of(assemble.session)
         return render_todo_list(todos) if todos else ""
 
-    # A `context`, not a `section`: it changes every time the model writes, and
+    # A `context`, not a `section`. It changes every time the model writes, and
     # a changing string in the cached prefix would invalidate the prefix on
-    # every plan update (A12). Materialized after retained history, which is
-    # also where it belongs to be read — the state as of now, after the
+    # every plan update (A12). It is materialized after the retained history.
+    # That is also the correct place to read it: the state as of now, after the
     # conversation that produced it.
     ctx.require(SYSTEM_PROMPT).context(PromptContext(name="todos", text=current_list))
 
 
 def _counts(todos: list[dict[str, Any]], *, bare: int = 0) -> str:
-    """`2 done · 1 doing · 3 to do`, in the order work leaves the list.
+    """`2 done · 1 doing · 3 to do`, in the order in which work leaves the list.
 
-    Plus, when there is one, the thing a person watching a plan most wants to
-    know: an entry ticked in a window where the agent ran nothing. That is
-    `unevidenced`'s reader — the card, not the prompt, because it is a fact about
-    the model that the model has no use for and cannot act on.
+    When there is one, the line also gives what a person who watches a plan most
+    wants to know: an entry that was ticked in a window where the agent ran
+    nothing. This is the reader of `unevidenced`. It is the card and not the
+    prompt, because this is a fact about the model that the model has no use for
+    and cannot act on.
     """
-    # No shape test: the caller narrows with `_entries`, which is what that
-    # helper is for. It was `list(args.get("todos") or ())` and this guard was
-    # load-bearing then.
+    # No shape test. The caller narrows with `_entries`, which is the purpose of
+    # that helper. The caller used `list(args.get("todos") or ())` before, and a
+    # shape test here was necessary then.
     tally = Counter(as_str(todo.get("status")) for todo in todos)
     labeled = (("completed", "done"), ("in_progress", "doing"), ("pending", "to do"))
     line = " · ".join(f"{tally[status]} {label}" for status, label in labeled)

@@ -1,12 +1,12 @@
-"""P4-02 — `input-offload`: a pasted blob relocated, not lost (G3).
+"""P4-02, `input-offload`: a pasted blob is relocated, not lost (G3).
 
-The row's gate is the threshold, but the claim worth testing is the *split*:
-after an offload the model reads a preview while the log still holds what the
-person actually sent. Those are two projections of one append-only log — the
-same mechanism compaction uses — and a test that checked only the model's side
-would pass for the design this one was chosen over, where the harness rewrites
-the message before logging it and the record quietly attributes its own words
-to the human.
+The gate of the row is the threshold, but the claim that is worth a test is the
+*split*: after an offload, the model reads a preview and the log still holds
+what the user sent. Those are two projections of one append-only log, which is
+the mechanism that compaction also uses. A test that checked only the side of
+the model would pass for the design that this one was chosen over. In that
+design, the harness rewrites the message before it logs it, and the record
+attributes the words of the harness to the human with no sign of it.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ THRESHOLD = NUM_CHARS_PER_TOKEN * HUMAN_TOKEN_LIMIT_BEFORE_EVICT
 """200 000, derived from the constants so the gate moves with the policy."""
 
 TOO_LARGE = TOO_LARGE_HUMAN_MSG.partition(" and")[0]
-"""The replacement's opening words, from the constant rather than retyped."""
+"""The opening words of the replacement, taken from the constant and not retyped."""
 
 
 async def _prompt(ctx: Context, session: Session, text: str) -> AgentDriver:
@@ -51,12 +51,12 @@ async def _prompt(ctx: Context, session: Session, text: str) -> AgentDriver:
 
 
 def _model_text(session: Session) -> str:
-    """What the model was sent — the derived surface, not the raw log."""
+    """What the model was sent: the derived surface, not the raw log."""
     return "\n".join(text_of(message.content) for message in session.derive_messages())
 
 
 def _human_text(session: Session) -> str:
-    """What a person scrolling the transcript reads."""
+    """What a user reads when they scroll the transcript."""
     return "\n".join(text_of(message.content) for message in session.transcript())
 
 
@@ -64,7 +64,7 @@ def _human_text(session: Session) -> str:
 
 
 async def test_a_paste_at_the_threshold_is_left_alone(mount: MountProfile) -> None:
-    """200 000 characters is admitted — the limit is what is still allowed."""
+    """200 000 characters are admitted. The limit is the size that is still allowed."""
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("at-limit")
     original = blob(THRESHOLD)
@@ -76,7 +76,8 @@ async def test_a_paste_at_the_threshold_is_left_alone(mount: MountProfile) -> No
 
 
 async def test_one_character_over_is_offloaded(mount: MountProfile) -> None:
-    """200 001 is not. The row's gate, and the reason the comparison is `>`."""
+    """200 001 characters are not admitted. This is the gate of the row, and the
+    reason why the comparison is `>`."""
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("over-limit")
 
@@ -101,11 +102,11 @@ async def test_one_character_over_is_offloaded(mount: MountProfile) -> None:
 async def test_the_model_reads_a_preview_and_the_log_keeps_what_was_typed(
     mount: MountProfile,
 ) -> None:
-    """The whole design, in one assertion pair.
+    """The whole design, in one pair of assertions.
 
-    A substitution on the *surface*, not an edit to the log — so the record
-    never attributes the harness's preview to the person, and the person can
-    still scroll back to what they pasted.
+    The substitution is on the *surface* and is not an edit to the log. The
+    record therefore never attributes the preview of the harness to the user,
+    and the user can still scroll back to what they pasted.
     """
     ctx = await mount(profile=PROFILE)
     session = ctx.require(SESSIONS).create("split")
@@ -139,10 +140,10 @@ async def test_the_original_is_recoverable_from_the_path_the_model_was_given(
 async def test_the_preview_is_a_plugins_notice_not_the_persons_words(
     mount: MountProfile,
 ) -> None:
-    """Attribution. The replacement is the harness speaking, and says so.
+    """Attribution. The replacement is the harness speaking, and it says so.
 
-    Marking it `user` would be the same false record the rejected design made,
-    one layer down — and the trajectory view reads exactly this field to say
+    To mark it `user` would be the same false record that the rejected design
+    made, one layer down. The trajectory view reads exactly this field to say
     who produced a row.
     """
     ctx = await mount(profile=PROFILE)
@@ -165,19 +166,20 @@ async def test_the_preview_is_a_plugins_notice_not_the_persons_words(
 def test_a_replacement_is_never_offloaded_again() -> None:
     """Idempotence, asked of the predicate directly.
 
-    End-to-end could not express this, and a test that tried passed while the
-    check was deleted. After an offload the next thing appended is usually the
-    *next* human message, so `latest("user/message")` is that one and the check
-    is never consulted. It is consulted on a second **step** of the same turn —
-    a tool call, then another request — where the replacement is still the
-    newest human message. Rather than script a tool round-trip to reach that
-    state, the predicate is put in it directly, which is the only form that
-    fails when the check is removed.
+    An end-to-end test could not express this. One that tried still passed after
+    the check was deleted. After an offload, the next message appended is
+    usually the *next* human message, so the newest `user/message` is that one
+    and the check is never consulted. The check is consulted when a request is
+    built again in the same **step**, for example on a retry. The replacement is
+    then still the newest `user/message` of the step. The test does not script a
+    retry to reach that state. It puts the predicate in that state directly,
+    which is the only form that fails when the check is removed.
 
-    The threshold is lowered so the preview is itself "oversized": at the
-    shipped 200 000 a ~11 KB preview could never re-trip it, and a deployment
-    that tightens the limit is exactly who this protects — without the check
-    every step would append another replacement, without end.
+    The threshold is lowered so that the preview is itself "oversized". At the
+    shipped 200 000, a preview of about 11 KB could never exceed it again. A
+    deployment that tightens the limit is exactly the one that this protects:
+    without the check, every such request would append another replacement,
+    without end.
     """
     config = Config(token_limit=100)
     session = Session("idempotent")
@@ -201,12 +203,13 @@ def test_a_replacement_is_never_offloaded_again() -> None:
 
 
 def test_the_persons_paste_is_offloaded_not_the_harness_context_after_it() -> None:
-    """C12 — the newest *human* message, not the newest `user/message`.
+    """C12: the newest *human* message, not the newest `user/message`.
 
-    A step whose context changed appends the harness's snapshot after the
-    person's words, in one batch. Taking the newest let the paste through whole
-    and offloaded the snapshot instead — the harness's own context, which the
-    loop then re-sent every step, because the model no longer saw it.
+    When the context of a step changed, the step appends the snapshot of the
+    harness after the words of the user, in one batch. When the row took the
+    newest message, the paste went through whole and the snapshot was offloaded
+    in its place. The snapshot is the context of the harness itself. The model
+    no longer saw it, so the loop sent it again at every step.
 
     Sabotage: take `session.latest("user/message")` again and the snapshot is
     the one chosen.
@@ -245,32 +248,34 @@ async def test_a_spill_that_fails_keeps_the_message(
 
     await _prompt(ctx, session, original)
 
-    # The turn *completed*. Without this the test could not tell fail-open from
-    # the listener taking the whole request down — `agent.prompt` reports a
-    # failed turn rather than raising, so "no spill event, original still
-    # derived" is equally true of a crash. A mutation that re-raised survived
-    # this file until the assertion below was added.
+    # The turn *completed*. Without this assertion, the test could not tell
+    # fail-open from a listener that takes the whole request down.
+    # `agent.prompt` reports a failed turn and does not raise, so "no spill
+    # event, original still derived" is equally true of a crash. A mutation that
+    # re-raised survived this file until the assertion below was added.
     assert [e for e in session.events if e.type == "assistant/message"], "the turn did not run"
     assert not [e for e in session.events if e.type == "offload/input-spilled"]
     assert original in _model_text(session)
 
 
 def test_the_event_type_is_ignorable() -> None:
-    """For `offload/spilled`'s reason: the paste's replacement is what the model
-    reads. (That it is *known* is `test_log_writers.py`'s.)"""
+    """Ignorable for the same reason as `offload/spilled`: the replacement of the
+    paste is what the model reads. (`test_log_writers.py` checks that the type
+    is *known*.)"""
     assert "offload/input-spilled" in IGNORABLE_SESSION_EVENT_TYPES
 
 
 async def test_a_spilled_paste_names_the_same_tools_its_sibling_does(
     mount: MountProfile,
 ) -> None:
-    """The half the first correction missed.
+    """The half that the first correction missed.
 
-    Both blocks are upstream's and both name `read_file`, which pH does not
-    register — but only the tool-result side was corrected. A spilled paste and a
+    Both blocks come from upstream and both name `read_file`, which pH does not
+    register. Only the tool-result side was corrected. A spilled paste and a
     spilled result are the same kind of file in the same store, and the model
-    cannot tell which row wrote the path it was handed, so a sentence true of one
-    and absent from the other is worse than either.
+    cannot tell which row wrote the path that it was given. A sentence that is
+    true of one and absent from the other is therefore worse than either
+    alternative.
 
     Sabotage: append `SPILL_TOOLS_HINT` here without formatting it and the model
     reads a literal `{searchers}`; drop the localization and it reads `read_file`.
@@ -286,5 +291,5 @@ async def test_a_spilled_paste_names_the_same_tools_its_sibling_does(
     assert "read tool" in said
     assert "`grep`" in said and "`glob`" in said
     assert "{searchers}" not in said and "{reader}" not in said, "an unformatted template"
-    # The tracked literal is untouched, which is the whole reason it is separate.
+    # The tracked literal is untouched. That is the reason why it is separate.
     assert "read_file" in UPSTREAM_TOO_LARGE_HUMAN_MSG

@@ -1,7 +1,7 @@
 """ph-clm Phase 3 — `rlm-clm`: the RLM, editing its own context.
 
 **A repo-level scenario, not a package test**, for `test_rlm_stable_profile.py`'s
-reason: it composes `ph-app`'s profile over `ph-rlm` and `ph-clm`, and ph-clm depends
+reason: it composes `phern`'s profile over `ph-rlm` and `ph-clm`, and ph-clm depends
 on neither of the others.
 
 What a composition can get wrong: that both of ph-clm's rows activate beside the RLM's

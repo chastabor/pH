@@ -1,41 +1,44 @@
-"""`skill-steps` — a skill that is a procedure, and a loop that finishes it (P7-18).
+"""`skill-steps`: a skill that is a procedure, and a loop that finishes it (P7-18).
 
-A `SKILL.md` may declare `steps:`. Reading such a skill seeds them into the todo
-list as entries the model **may mark done and may not delete**, and a listener on
-`agent/turn-stopping` objects while any of them is still startable. That is the
-whole of the feature, and none of it is new machinery.
+A `SKILL.md` may declare `steps:`. When the model reads such a skill, the row
+seeds the steps into the todo list. The model **may mark these entries done and
+may not delete them**. A listener on `agent/turn-stopping` objects while any of
+them can still be started. That is the whole feature, and none of it is new
+machinery.
 
-**The loop already had the walker.** `commands/autonomous.py` says it best about
-its own row: *"the driver is not a daemon, a scheduler or a second loop, it is a
+**The loop already had the walker.** `commands/autonomous.py` describes its own
+row this way: *"the driver is not a daemon, a scheduler or a second loop, it is a
 listener on the boundary the agent loop already fires… a listener objects **by
 steering** rather than by reaching into loop state, which is why continuing costs
-no new machinery."* `/autonomous` asks whether a goal's gates pass; this asks
-whether the procedure is finished. Same boundary, same `agent.steer`, same
-`PluginSource` tag so the transcript does not attribute the harness's nudge to
-the person reading it.
+no new machinery."* `/autonomous` asks whether the gates of a goal pass. This row
+asks whether the procedure is finished. Both use the same boundary and the same
+`agent.steer`. Both tag the message with a `PluginSource`, so that the transcript
+does not attribute the nudge of the harness to the user who reads it.
 
-**What had to be added was provenance, not a walker.** `write_todos` replaces the
-*whole* list, so steps seeded into it were the model's to delete on its next
-write — and a listener enforcing against that list would have been enforcing
-against nothing. `tool-todo`'s `SKILL` source and `_carried` are the rule that
-closes it; this row is what puts entries there for it to protect.
+**The addition was provenance, not a walker.** `write_todos` replaces the *whole*
+list. Without a rule, the model could delete the seeded steps on its next write,
+and a listener that enforced against that list would enforce against nothing.
+The `SKILL` source and `_carried` in `tool-todo` are the rule that prevents this.
+This row puts the entries there for that rule to protect.
 
-**Two limits, and they are the point rather than an apology.** A *loop* step is
-not a *plan* step: `agent/turn-stopping` fires when a turn is about to end, and a
-plan step spans many, so this asserts a boundary invariant — work remains that
-can begin — and never claims to know which step is running. And it holds the
-model to *its own accepted plan*, not to reality (P5-16): marking a step done is
-still the model's word. Gates that check the world are `ctx.goals` and
-`ctx.approval`, and a procedure that needs one says so in the step's own text.
+**The row has two limits, and both are deliberate.** First, a *loop* step is not
+a *plan* step. `agent/turn-stopping` fires when a turn is about to end, and a
+plan step spans many. The row therefore asserts an invariant at a boundary: work
+remains that can begin. It never claims to know which step is running. Second,
+the row holds the model to *its own accepted plan*, not to reality (P5-16). When
+the model marks a step done, that is still only the word of the model. The gates
+that check the world are `ctx.goals` and `ctx.approval`. A procedure that needs
+one says so in the text of the step.
 
-**And one question it can now have answered before it objects** (`Decision`).
-A step that says "stop for approval" is prose, and this row used to answer the
-model obeying it with a nudge to carry on — steering it past the very gate the
-skill wrote. Where a profile names a decision model, the row asks it whether the
-turn is ending to wait for a person, and holds the nudge when it is. A decision
-model and not the session's own: it answers in a third of a second with a
-probability, where a chat model would spend a turn's worth of tokens to write a
-sentence this row would then have to parse.
+**The row can ask one question before it objects** (`Decision`). A step that says
+"stop for approval" is prose. When the model obeyed such a step, this row used to
+answer with a nudge to continue, which steered the model past the gate that the
+skill wrote. Where a profile names a decision model, the row asks that model
+whether the turn is ending to wait for a person. If it is, the row holds the
+nudge. The row asks a decision model and not the model of the session. A decision
+model answers in a third of a second with a probability. A chat model would spend
+the tokens of a whole turn to write a sentence that this row would then have to
+parse.
 
 @module ph_stabilize.skill_steps
 """
@@ -106,148 +109,168 @@ __all__ = [
 log = logging.getLogger("ph_stabilize.skill_steps")
 
 PLUGIN = "ph_stabilize.skill_steps"
-"""This row's name on the messages it steers with — the key `nudges_since`
-reads them back by, so the tag and the fold cannot drift apart."""
+"""The name of this row on the messages that it steers with. `nudges_since` finds
+those messages by the same name, so the tag and the fold cannot drift apart."""
 
 MAX_NAMED = 3
-"""How many outstanding steps the steer names before it counts the rest.
+"""How many outstanding steps the nudge names before it counts the rest.
 
-A nudge is read by a model that already has the list in its context — it is a
-pointer, not a second copy of the plan, and a twenty-line reminder every time a
-turn tries to end is how a steer becomes noise the model learns to skim."""
+The model that reads a nudge already has the list in its context. A nudge is a
+pointer, not a second copy of the plan. A twenty-line reminder each time a turn
+tries to end becomes noise that the model learns to skim."""
 
 MAX_NUDGES = 3
-"""How many times this row will steer without the plan moving, by default.
+"""The default number of times that this row steers while the plan does not change.
 
-**The ceiling the shape this row copies has and it did not.** `/autonomous` is
-the same listener on the same boundary and carries four — continuations, turns,
-tokens, wall clock — because a driver whose only exit is the model complying is
-not bounded at all. The loop has no step cap of its own (`limits` ships with
-`turn_limit` unset, deliberately), so without this a model that will not mark a
-step done is steered for as long as the session lives.
+**`/autonomous` has a ceiling, and this row at first did not.** `/autonomous` is
+the same listener on the same boundary, and it carries four ceilings:
+continuations, turns, tokens, and wall clock. It has them because a driver whose
+only exit is that the model complies is not bounded at all. The loop has no step
+cap of its own (`limits` ships with `turn_limit` unset, deliberately). Without
+this ceiling, a model that will not mark a step done is steered for as long as
+the session lives.
 
-Counted **since the list last changed**, not since the turn began, which is what
-makes it a stall detector rather than a quota: any `write_todos` — marking a step
-done, adding an entry, re-planning — resets it, so a run making progress is never
-cut off, and one going in circles stands down and lets the person see the list.
+The count runs **since the list last changed**, not since the turn began. That
+makes it a stall detector and not a quota. Any `write_todos` resets the count: a
+step marked done, an entry added, or a new plan. A run that makes progress is
+therefore never cut off. When a run makes no progress, the row stands down and
+the user sees the list.
 
-The default, not the rule (D16): a profile sets its own with `maxNudges`, and a
-skill may set one for its procedure with `max-nudges` — see `keep_going`."""
+This is the default, not the rule (D16). A profile sets its own value with
+`maxNudges`, and a skill may set one for its procedure with `max-nudges`. See
+`keep_going`."""
 
 BUDGET = "skill-steps/budget"
-"""The event recording the budget of the procedure seeded last (D16).
+"""The event that records the budget of the procedure that was seeded last (D16).
 
-A record of its own rather than a field on the seeding `todo/write`: the model's
-next `write_todos` replaces that event, so a budget stored on it would last
-exactly one plan. Nor a field on the seeded entries, which `tool-todo` echoes
-back to the model on every write — a harness number paid for in tokens forever."""
+The budget is a record of its own and not a field on the `todo/write` that seeds
+the steps. The next `write_todos` of the model replaces that event, so a budget
+stored on it would last for exactly one plan. The budget is also not a field on
+the seeded entries. `tool-todo` echoes those entries back to the model on every
+write, so a number that only the harness uses would cost tokens on every write."""
 
 
 DECIDED = "skill-steps/decided"
-"""What a decision model said of a turn that stopped with a procedure
-unfinished: how likely it is waiting on a person (`waiting`), and the line that
-was held to (`holdAt`) — the nudge was held where the first reaches the second.
-Beside the route's own `llm/decided`, which says what asking cost and not what
-was asked."""
+"""The event that records what a decision model said about a turn that stopped
+with a procedure unfinished. `waiting` is how likely it is that the turn is
+waiting on a person. `holdAt` is the threshold that applied. The nudge was held
+when `waiting` reached `holdAt`. This event is in addition to the `llm/decided`
+event of the route, which records what the request cost and not what was asked."""
 
 WAITING = "waiting"
-"""The one question this row asks, by the name its answer comes back under."""
+"""The name of the one question that this row asks. The answer comes back under
+the same name."""
 
 ASKS = (
     "Did the assistant stop to wait for the person: a question it needs answered, or an "
     "approval or confirmation it asked for, before it goes on with the procedure?"
 )
-"""The question, as the decision model reads it. A `noul` — a yes-or-no — on
-purpose: the answer is one number, and the rule over it is one line
-(`HOLD_AT`)."""
+"""The question, as the decision model reads it. It is deliberately a `noul`, which
+is a yes-or-no question. The answer is one number, and the rule that applies to
+it is one line (`HOLD_AT`)."""
 
 HOLD_AT = 0.8
-"""How likely "waiting on a person" has to be before the nudge is held, by
-default.
+"""The default likelihood of "waiting on a person" at which the nudge is held.
 
-Above an even chance on purpose. The two mistakes cost differently: a nudge
-held wrongly ends a turn with the list on show, and a person says "go on"; a
-nudge sent wrongly steers a model past an approval it had stopped for. The
-answers leave room for it. Measured against Clef on a llama.cpp, with this
-question and `decision_state`: a request to approve, a choice put to the person
-and a missing password read 0.98 to 0.99; a turn that reported and stopped read
-0.01; a sign-off — *"let me know if you want anything else"* — 0.03 to 0.07;
-and a reply unsure of its own result, with no question in it, 0.3 to 0.4. So
-the line sits above the unsure middle, which still gets its nudge."""
+The value is deliberately above an even chance, because the two mistakes cost
+differently. A nudge that is held wrongly ends a turn with the list visible, and
+a person says "go on". A nudge that is sent wrongly steers a model past an
+approval that it had stopped for. The answers leave room for a high threshold.
+These values were measured against Clef on a llama.cpp, with this question and
+`decision_state`:
+
+- A request to approve, a choice put to the user, and a missing password read
+  0.98 to 0.99.
+- A turn that reported and stopped read 0.01.
+- A sign-off (*"let me know if you want anything else"*) read 0.03 to 0.07.
+- A reply that was unsure of its own result, with no question in it, read 0.3
+  to 0.4.
+
+The threshold is therefore above the unsure middle, and an unsure reply still
+gets its nudge."""
 
 DECIDE_WITHIN_MS = 3_000
-"""How long a turn that is ending waits for the decision, by default, both tries
-together. A decision model answers in well under a second — 0.4 s against Clef —
-and every turn that would be nudged waits on it; one that takes this long is not
-going to answer, and the turn gets the nudge it would have had without it."""
+"""The default time that a turn that is ending waits for the decision, for both
+tries together. A decision model answers in well under a second (0.4 s against
+Clef), and every turn that would be nudged waits for it. A model that takes this
+long is not going to answer. The turn then gets the nudge that it would have had
+without a decision model."""
 
 REST_S = 60.0
 """How long the row stops asking a decision model that did not answer in time.
 
-A route that is down refuses in milliseconds and is asked again at the next
-turn's end, which is how one that comes back is found. A route that stalls
-costs every turn that would be nudged its whole `timeoutMs`, in every session,
-for as long as it stalls — so after one timeout the row nudges without asking
-for this long, and then tries again."""
+A route that is down refuses in milliseconds. The row asks it again at the end of
+the next turn, and that is how the row finds a route that has come back. A route
+that stalls is different. It costs every turn that would be nudged the whole
+`timeoutMs`, in every session, for as long as it stalls. After one timeout, the
+row therefore nudges without asking for this long, and then tries again."""
 
 _now = anyio.current_time
-"""The clock a rest is kept by: a name of its own so a test steps it rather than
-waiting `REST_S` out."""
+"""The clock that times a rest. It has a name of its own so that a test can step
+it and does not have to wait for `REST_S`."""
 
 DEFAULT_BATCH = 512
-"""What a decision route is taken to read in one request when nothing says
-otherwise (`LlmRuntime.decision_limit`): a llama.cpp's default physical batch.
-A llama.cpp reads a decision in one batch and refuses what does not fit it,
-whatever its context window is, so this and not the window is what the state,
-the question and the model's own framing have to fit together."""
+"""The number of tokens that a decision route is assumed to read in one request
+when `LlmRuntime.decision_limit` gives no limit. It is the default physical batch
+of a llama.cpp. A llama.cpp reads a decision in one batch and refuses a request
+that does not fit the batch, whatever its context window is. The state, the
+question, and the framing of the model must therefore fit together in the batch,
+and not in the window."""
 
 FRAMING_TOKENS = 175
-"""What of a decision's tokens is neither the steps nor the message: the model's
-own framing and the question — 170, measured against Clef for a state of one
-character."""
+"""The tokens of a decision that are neither the steps nor the message: the framing
+of the model and the question. The measured value was 170, against Clef, for a
+state of one character."""
 
 MOST_SAID = 4_000
-"""The most of the message the decision model is shown, in bytes, however much
-its route reads. The end of a message is where a question or a request to
-confirm is, and a turn that is ending waits on an answer that takes longer the
-more is read."""
+"""The most of the message that the decision model is shown, in bytes, however
+much its route reads. A question or a request to confirm is at the end of a
+message. A turn that is ending waits for the answer, and the answer takes longer
+when the model reads more."""
 
 MIN_SAID = 200
-"""The shortest tail worth asking about, in bytes. Less than this is a sentence
-fragment, and a server that cannot take it is one this row nudges without."""
+"""The shortest tail that is worth a request, in bytes. Less than this is a
+fragment of a sentence. If a server cannot take this much, the row nudges without
+asking it."""
 
 STEP_BYTES = 120
-"""How much of a step's text the decision model is shown, in bytes as the rest
-of the state is sized: enough to tell which step it is. A step may run to 500
-characters, and the state has a batch to fit."""
+"""How much of the text of a step the decision model is shown. The unit is bytes,
+as for the rest of the state. This is enough to tell which step it is. A step may
+run to 500 characters, and the state must fit a batch."""
 
 
 def said_bytes(limit: int | None, ready: list[str], blocked: int) -> int:
-    """How much of the assistant's last message — its end, in UTF-8 bytes — the
-    decision model is shown: what a route that reads `limit` tokens in one
-    decision (`DEFAULT_BATCH` where nothing says) has left once the framing and
-    the steps it is shown are counted. About 800 bytes at a llama.cpp's default
-    with one step named, which is 800 characters of English; up to `MOST_SAID`
-    where the route reads more.
+    """How much of the end of the last assistant message the decision model is
+    shown, in UTF-8 bytes.
 
-    One unit for the whole state: the route's tokens by `bytes_of`, the careful
-    estimate a caller with no tokenizer shares with text-index (prose ran 3.2
-    characters a token and code 4 against Clef), and the steps by the bytes they
-    are sent as. Bytes rather than characters, so neither a step nor a message
-    in a script three bytes a character is sent three times what fits. Text
-    denser still is refused, and answered with a shorter tail (`_fitting`)."""
+    A route reads `limit` tokens in one decision, or `DEFAULT_BATCH` when `limit`
+    is `None`. The result is what is left of that after the framing and the
+    steps that the model is shown are counted. This is about 800 bytes at the
+    default of a llama.cpp with one step named, which is 800 characters of
+    English. Where the route reads more, the result goes up to `MOST_SAID`.
+
+    The whole state uses one unit. `bytes_of` converts the tokens of the route.
+    It is the careful estimate that a caller with no tokenizer shares with
+    text-index (against Clef, prose ran 3.2 characters a token and code 4). The
+    steps count as the bytes that they are sent as. The unit is bytes and not
+    characters, so that a step or a message in a script of three bytes a
+    character is not sent at three times what fits. The server refuses text
+    that is denser still, and the row then asks again with a shorter tail
+    (`_fitting`)."""
     room = bytes_of((DEFAULT_BATCH if limit is None else limit) - FRAMING_TOKENS)
     steps = len(decision_state(ready, blocked, "", 0).encode("utf-8"))
     return max(MIN_SAID, min(MOST_SAID, room - steps))
 
 
 class Decision(WireModel):
-    """The decision model a profile gives this row to ask before it nudges.
+    """The decision model that a profile gives this row to ask before it nudges.
 
-    A route, named the way a session's is: the `provider` an adapter row
-    registered and the `model` it serves there. The adapter has to be one that
-    decides (`ph.llm.adapter.DecisionAdapter`); phern's `llm-openai-compatible`
-    is, against a llama.cpp or an Ollama serving a decision model."""
+    It is a route, named in the same way as the route of a session: the
+    `provider` that an adapter row registered and the `model` that it serves
+    there. The adapter must be one that decides
+    (`ph.llm.adapter.DecisionAdapter`). The `llm-openai-compatible` adapter of
+    phern is one, against a llama.cpp or an Ollama that serves a decision
+    model."""
 
     provider: str
     model: str = ""
@@ -265,47 +288,54 @@ class Decision(WireModel):
 
 
 class Config(WireModel):
-    """Row config: the nudge budget a profile gives every procedure (D16), and
-    the decision model it asks first, where it has one."""
+    """The row config: the nudge budget that a profile gives every procedure
+    (D16), and the decision model that the row asks first, where the profile
+    names one."""
 
     max_nudges: int = Field(default=MAX_NUDGES, ge=0)
-    """Nudges without the plan moving before the row stands down. A skill's own
-    `max-nudges` overrides it for that skill's procedure; `0` seeds steps but
-    never steers."""
+    """The number of nudges with the plan unchanged before the row stands down.
+    The `max-nudges` of a skill overrides it for the procedure of that skill.
+    `0` seeds the steps but never steers."""
     decision: Decision | None = None
-    """The decision model asked whether a turn is ending to wait for a person,
-    in which case it is let end. Without one every unfinished procedure is
-    nudged, as it is when the model cannot be asked."""
+    """The decision model that is asked whether a turn is ending to wait for a
+    person. If it is, the row lets the turn end. Without a decision model, every
+    unfinished procedure is nudged. The same happens when the model cannot be
+    asked."""
 
 
 def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, Any]] | None:
-    """`current` with `steps` appended as a skill's, or `None` with a reason logged.
+    """`current` with `steps` appended as the steps of a skill, or `None` when
+    nothing is seeded. A refusal to seed logs the reason.
 
-    **Idempotent by content**, because reading a skill twice is ordinary — a
-    model re-reads instructions it half-remembers — and a second copy of the
-    procedure would be a plan that can never be finished.
+    **The function is idempotent by content.** Reading a skill twice is
+    ordinary, because a model re-reads instructions that it half remembers. A
+    second copy of the procedure would be a plan that can never be finished.
 
-    Appended rather than merged into position: the model's own entries stay where
-    it put them, and a procedure that arrives mid-session is work added to the
-    end rather than a plan rewritten underneath somebody.
+    The steps are appended and not merged into position. The entries of the
+    model stay where the model put them. A procedure that arrives in the middle
+    of a session adds work to the end. It does not rewrite a plan that somebody
+    is following.
 
-    Sequential `requires` within the skill's own steps, and only within them —
-    two procedures read in one session are two orderings, not one queue. The
-    chain follows the order the *skill* declared rather than the order of what is
-    missing, so a re-read that finds one step already present links the rest
-    around the gap instead of over it (D13).
+    Each step requires the step before it, and only within the steps of the
+    same skill. Two procedures read in one session are two orderings, not one
+    queue. The chain follows the order that the *skill* declared, and not the
+    order of the steps that are missing. When a second read finds one step
+    already present, the step after it still requires that step. The chain does
+    not skip it (D13).
 
-    **Built through `TodoItem` and checked by `_checked`, because this is the
-    list's second writer.** `write_todos` is bounded by its own schema and its own
-    coherence rule; an entry appended straight to the log is bounded by neither,
-    and the failure is not a cosmetic one: a step longer than `MAX_TODO_CONTENT`,
-    or one that pushes the list past `MAX_TODOS`, seeds fine and then makes
-    *every* later `write_todos` fail validation — while `_carried` refuses any
-    write that drops it. The model would be locked out of its own plan with the
-    row steering it to keep going. Refusing to seed is the recoverable answer,
-    and the author gets a warning naming the skill's file.
+    **The entries are built through `TodoItem` and checked by `_checked`,
+    because this function is the second writer of the list.** `write_todos` is
+    bounded by its own schema and its own coherence rule. An entry that is
+    appended straight to the log is bounded by neither, and the failure is not
+    cosmetic. A step longer than `MAX_TODO_CONTENT`, or one that pushes the
+    list past `MAX_TODOS`, would seed without error and then make *every* later
+    `write_todos` fail validation, while `_carried` refuses any write that
+    drops the step. The model would be locked out of its own plan while the row
+    steers it to continue. A refusal to seed is the recoverable answer, and
+    the function logs a warning that gives the reason.
 
-    All or nothing for the same reason: half a procedure is a plan nobody wrote.
+    The seeding is all or nothing for the same reason: half a procedure is a
+    plan that nobody wrote.
     """
     already = set(steps_of(current))
     wanted = [step for step in steps if step not in already]
@@ -319,12 +349,13 @@ def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, An
         )
         return None
     grown = list(current)
-    # **The chain follows the skill's own order, not the gap** (D13). Built over
-    # `wanted`, a procedure whose middle step was already in the list linked the
-    # step after it to the step *before* — `[one, three]` with `three` waiting on
-    # `one` — so the ordering the skill declared was quietly replaced by one that
-    # let `three` start while `two` was still pending. The predecessor is always
-    # nameable: every step is either already present or being added now.
+    # **The chain follows the order of the skill, not the missing steps** (D13).
+    # When the chain was built over `wanted`, a procedure whose middle step was
+    # already in the list linked the step after it to the step *before* it:
+    # `[one, three]`, with `three` waiting on `one`. The ordering that the skill
+    # declared was silently replaced by one that let `three` start while `two`
+    # was still pending. The predecessor can always be named, because every step
+    # is either already present or added now.
     predecessor = {step: steps[index - 1] for index, step in enumerate(steps) if index}
     for step in wanted:
         try:
@@ -336,15 +367,16 @@ def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, An
         except ValidationError as error:
             log.warning("ph_stabilize.skill_steps: a step cannot be a todo entry: %s", error)
             return None
-        # `source` is out of band on the dict rather than a `TodoItem` field, the
-        # same shape `worked` uses: a field the model could write is a field it
-        # could label away.
+        # `source` is set on the dict and is not a `TodoItem` field, in the same
+        # way as `worked`. If the model could write the field, it could remove
+        # the label.
         grown.append({**entry, "source": SKILL})
     try:
-        # One authority for "is this list coherent", rather than a second
-        # collision check here. `_checked` already refuses two entries sharing
-        # content — which is what a step whose text the model has used would be,
-        # and which `requires` could not then name unambiguously.
+        # `_checked` is the one authority for "is this list coherent", so there
+        # is no second collision check here. `_checked` already refuses two
+        # entries that share content. A step whose text the model has already
+        # used would make such a pair, and `requires` could not then name
+        # either entry unambiguously.
         _checked(grown)
     except PlanError as refusal:
         log.warning("ph_stabilize.skill_steps: not seeding — %s", refusal)
@@ -353,9 +385,11 @@ def seeded(current: list[dict[str, Any]], steps: list[str]) -> list[dict[str, An
 
 
 def _startable(ready: list[str], blocked: int, *, room: int | None = None) -> str:
-    """The steps that can start — a few named, the rest counted — and how many
-    wait on them: the one sentence the steer and the decision model's state
-    share. `room` shortens each named step to a line of that many bytes."""
+    """The one sentence that the nudge and the state of the decision model share.
+
+    It names a few of the steps that can start, counts the others, and says how
+    many steps wait on them. `room` shortens each named step to one line of that
+    many bytes."""
     named = ", ".join(
         repr(one if room is None else elide(" ".join(one.split()), room, in_bytes=True))
         for one in ready[:MAX_NAMED]
@@ -380,12 +414,13 @@ def steer_text(outstanding: list[str], blocked: int) -> str:
 
 def decision_state(ready: list[str], blocked: int, said: str, room: int) -> str:
     """What the decision model is shown: the steps that can start, and how the
-    assistant's last message ended — its last `room` bytes, starting between
-    characters (`ph.characters.tail_bytes`).
+    last message of the assistant ended. The end is the last `room` bytes of the
+    message, and it starts between characters (`ph.characters.tail_bytes`).
 
-    The steps are here so the question has something to be about: "is it
-    waiting" is asked of a turn that left *this* undone, and a model shown only
-    the message cannot tell a question about the procedure from small talk."""
+    The steps are included so that the question has a subject. "Is it waiting"
+    is asked about a turn that left *these steps* undone. A model that is shown
+    only the message cannot tell a question about the procedure from small
+    talk."""
     tail = elide(said, room, keep="tail", in_bytes=True)
     return (
         f"An assistant is following a procedure and has not finished it: "
@@ -395,12 +430,14 @@ def decision_state(ready: list[str], blocked: int, said: str, room: int) -> str:
 
 
 def _last_said(session: Session) -> str:
-    """The text of the assistant's latest message: what it said as it stopped.
-    Empty when it said nothing, and then there is nothing to ask about.
+    """The text of the latest assistant message: what the assistant said as it
+    stopped. The text is empty when the assistant said nothing, and then there
+    is nothing to ask about.
 
-    The latest message and not `ph.seams.subagents.last_answer`, which scans
-    back to the last one with text: a turn that ended on tool calls alone would
-    then be judged by what an earlier turn said."""
+    This reads the latest message and does not use
+    `ph.seams.subagents.last_answer`, which scans back to the last message that
+    has text. With that function, a turn that ended on tool calls alone would be
+    judged by what an earlier turn said."""
     event = session.latest("assistant/message")
     message = derive_event_message(event) if event is not None else None
     return text_of(message.content).strip() if message is not None else ""
@@ -408,15 +445,15 @@ def _last_said(session: Session) -> str:
 
 def _fitting(error: LlmError, shown: int) -> int | None:
     """How many bytes of the message to show a server that refused `shown` bytes
-    of it as too long, or `None` when the refusal is not one a shorter tail
-    answers.
+    of it as too long, or `None` when a shorter tail does not answer the
+    refusal.
 
-    Aimed by the refusal's own numbers (`refused_share`): the server said how
-    many tokens it was sent and how many it reads, and the tail is cut in that
-    proportion and a quarter more, since the question and the steps are part of
-    what was counted and are not what gets shorter. What it reads is the
-    route's to keep (`LlmRuntime.decision_limit`); how dense this message ran
-    is this message's alone."""
+    The numbers in the refusal set the size (`refused_share`). The server said
+    how many tokens it was sent and how many it reads. The tail is cut in that
+    proportion and by a quarter more, because the question and the steps are
+    part of the count and do not get shorter. The number of tokens that the
+    server reads is a fact about the route, and `LlmRuntime.decision_limit`
+    keeps it. How dense this message was applies to this message only."""
     if error.code != CONTEXT_WINDOW_EXCEEDED:
         return None
     share = refused_share(error.failure.sent_tokens, error.failure.limit_tokens)
@@ -434,9 +471,11 @@ async def _decided(
     blocked: int,
     said: str,
 ) -> Decisions:
-    """The decision model's answer about this stop, asked again once with less
-    of the message when the first try was too long for the server — both tries
-    within the one `timeout_ms` a turn waits."""
+    """The answer of the decision model about this stop.
+
+    When the first try was too long for the server, the function asks one more
+    time with less of the message. Both tries share the one `timeout_ms` that a
+    turn waits."""
     deadline = anyio.current_time() + decision.timeout_ms / 1000
 
     async def ask(room: int) -> Decisions:
@@ -460,12 +499,14 @@ async def _decided(
 
 
 def latest_skill_budget(session: Session) -> int | None:
-    """The budget the latest seeded skill recorded, or `None` — a fact, not a rule.
+    """The budget that the latest seeded skill recorded, or `None`. This is a
+    fact, not a rule.
 
-    `None` both when no skill has seeded and when the latest one set no budget
-    (it records `null`). Which record governs, and what `None` falls back to, is
-    `keep_going`'s to decide (P4). Folded from the log, for `nudges_since`'s
-    reason: a budget held on the listener would be gone after a resume.
+    The result is `None` both when no skill has seeded and when the latest skill
+    set no budget (it records `null`). `keep_going` decides which record governs
+    and what `None` falls back to (P4). The value is folded from the log, for
+    the same reason as in `nudges_since`: a budget held on the listener would be
+    gone after a resume.
     """
     event = session.latest(BUDGET)
     if event is None:
@@ -475,24 +516,28 @@ def latest_skill_budget(session: Session) -> int | None:
 
 
 def nudges_since(session: Session, seq: int, *, up_to: int | None = None) -> int:
-    """How many times this row has steered after `seq` — a count, not a window.
+    """How many times this row has steered after `seq`. This is a count, not a
+    window.
 
-    Folded from the log rather than counted on the row, for P5-04's reason: a
-    counter on a listener starts at zero after a resume or a passivation, and the
-    stall it bounds is exactly the kind of run that outlives a process. The steer
-    lands in the log as a `user/message` carrying this row's `PluginSource`, so
-    the tag *is* the record — there is nothing to keep in step with it.
+    The count is folded from the log and is not kept on the row, for the reason
+    in P5-04. A counter on a listener starts at zero after a resume or a
+    passivation, and the stall that this count limits is exactly the kind of run
+    that outlives a process. The nudge is in the log as a `user/message` that
+    carries the `PluginSource` of this row. The tag *is* the record, so there is
+    nothing else to keep in step with it.
 
-    Where the count starts is the caller's rule (P4): it was "since the todo list
-    last changed", written in here, where it read as a fact about the log rather
-    than the stall detector's policy. `up_to` stops the walk once the count
-    reaches it — the only question `keep_going` asks is "is the budget spent",
-    and a run that stood down (or a skill whose budget is `0`) would otherwise
-    rescan an ever-growing tail on every turn.
+    The caller decides where the count starts (P4). The rule "since the todo
+    list last changed" used to be written in this function, where it read as a
+    fact about the log and not as the policy of the stall detector. `up_to`
+    stops the walk when the count reaches it. The only question that
+    `keep_going` asks is "is the budget spent". Without `up_to`, a run that
+    stood down (or a skill whose budget is `0`) would scan a tail that only
+    grows, again on every turn.
     """
-    # By index through `Session.at`, not `events_from`: that copies the whole
-    # tail before the first event is looked at, so `up_to` saved the filtering
-    # and not the walk — and the tail of a run that stood down only grows.
+    # The walk goes by index through `Session.at`, not through `events_from`.
+    # `events_from` copies the whole tail before the first event is looked at,
+    # so `up_to` saved the filtering and not the walk. The tail of a run that
+    # stood down only grows.
     events = (session.at(index) for index in range(seq + 1, session.seq))
     nudges = (
         event
@@ -506,30 +551,35 @@ def nudges_since(session: Session, seq: int, *, up_to: int | None = None) -> int
 
 @plugin("skill-steps", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
-    """Seed a read skill's steps, and object while they are unfinished.
+    """Seed the steps of a skill that was read, and object while they are
+    unfinished.
 
-    No `inject`: the body registers two listeners and needs no service to do
-    it. `inject` is an activation gate — a row is reported inactive on an unmet
-    key and its scope unwinds when the service goes — so naming `tools` here
-    would tie this row's life to something it never calls, and naming `llm`
-    would stop the seeding and the nudge for want of a decision model they work
-    without. `ctx.llm` is looked up when a decision is asked for, and its
-    absence is one more reason the answer could not be had.
+    The row declares no `inject`. The body registers two listeners and
+    contributes one diagnostic, and needs no service for either. `inject` is an
+    activation gate: a row is reported inactive when a key is unmet, and its
+    scope unwinds when the service goes. To name `tools` here would tie the life
+    of this row to a service that it never calls. To name `llm` would stop the
+    seeding and the nudge because a decision model is missing, and both work
+    without one. The row looks up `ctx.llm` when it asks for a decision. If
+    `ctx.llm` is absent, that is one more reason why no answer was available.
     """
 
-    # Each code the decision model could not be asked for, warned about once, so
-    # a route that is down says so once rather than at every turn's end; and
+    # `warned` holds each code for which the decision model could not be asked.
+    # Each code is warned about one time, so a route that is down is reported
+    # one time and not at the end of every turn. `resting_until` is the time
     # when a route that timed out is worth asking again (`REST_S`).
     warned: set[str] = set()
     resting_until: float | None = None
 
     async def waits_for_a_person(session: Session, ready: list[str], blocked: int) -> bool:
-        """Whether this turn is ending to wait for a person, as the profile's
-        decision model reads it. `False` wherever it cannot say — no model
-        named, nothing said, a route that would not answer — which is the nudge
-        this row always sent: a decision that cannot be had degrades to the
-        behavior before there was one, with a warning, and never holds a turn
-        up on a server that is down."""
+        """Whether this turn is ending to wait for a person, as the decision
+        model of the profile reads it.
+
+        The result is `False` wherever the model cannot say: no model is named,
+        the assistant said nothing, or the route did not answer. `False` gives
+        the nudge that this row always sent. A decision that is not available
+        degrades to the behavior before there was a decision model, with a
+        warning. It never holds up a turn because a server is down."""
         decision = config.decision
         if decision is None or (resting_until is not None and _now() < resting_until):
             return False
@@ -543,8 +593,9 @@ async def apply(ctx: Context, config: Config) -> None:
         try:
             decided = await _decided(llm, session, decision, ready, blocked, said)
         except LlmError as error:
-            # The route's own record of the failure is in the session's log
-            # (`llm/decision-failed`); this is the line an operator reads.
+            # The route records the failure in the log of the session
+            # (`llm/decision-failed`). The warning here is the line that an
+            # operator reads.
             unasked(decision, error.code, str(error))
             return False
         waiting = decided.answer(WAITING, NoulAnswer).noul
@@ -552,7 +603,7 @@ async def apply(ctx: Context, config: Config) -> None:
         return waiting >= decision.hold_at
 
     def unasked(decision: Decision, code: str, reason: str) -> None:
-        """Rest a route that timed out, and say once for each code that the
+        """Rest a route that timed out, and warn one time for each code that the
         decision model could not be asked."""
         nonlocal resting_until
         rests = code == TIMEOUT
@@ -571,8 +622,9 @@ async def apply(ctx: Context, config: Config) -> None:
         )
 
     def describe() -> list[tuple[str, str]]:
-        """`phern doctor`'s line: which decision model is asked, and whether it
-        can be. Read when asked, so an adapter row mounted after this one counts."""
+        """The line for `phern doctor`: which decision model is asked, and whether
+        it can be asked. The line is read on request, so an adapter row that is
+        mounted after this row counts."""
         decision = config.decision
         if decision is None:
             return []
@@ -585,23 +637,24 @@ async def apply(ctx: Context, config: Config) -> None:
 
     def on_skill_read(payload: Any) -> None:  # noqa: ANN401
         session = payload.get("session")
-        # The *rendered* steps off the payload, not `skill.steps`: an author may
-        # write `Run {{parameters.gate}}` in a step, and the arguments that fill
-        # it in belong to the call that read the skill — which this listener,
-        # firing after the fact, does not have.
+        # The listener takes the *rendered* steps from the payload, not
+        # `skill.steps`. An author may write `Run {{parameters.gate}}` in a
+        # step. The arguments that fill it in belong to the call that read the
+        # skill. This listener fires after that call and does not have them.
         steps = [str(one) for one in payload.get("steps") or ()]
         if not steps or session is None:
             return
         grown = seeded(todos_of(session), steps)
         if grown is None:
             return
-        # The same event the tool writes, because it means one thing — "the list
-        # is now this" — and a second type would give `todos_of` two things to
-        # fold and the sidebar two things to draw.
-        # The budget is recorded even when `null`: that is what hands a later
-        # procedure back to the profile's budget rather than the previous
-        # skill's. One batch with the list it governs (S14), so a torn tail
-        # cannot seed the steps under the last skill's budget.
+        # This is the same event that the tool writes, because it means one
+        # thing: "the list is now this". A second type would give `todos_of` two
+        # things to fold and the sidebar two things to draw.
+        # The budget is recorded even when it is `null`. That record returns a
+        # later procedure to the budget of the profile, and not to the budget of
+        # the previous skill. The budget is in one batch with the list that it
+        # governs (S14), so a torn tail cannot seed the steps under the budget
+        # of the last skill.
         with session.batch() as batch:
             _LOG.append(batch, "todo/write", {"todos": grown})
             _LOG.append(
@@ -614,26 +667,27 @@ async def apply(ctx: Context, config: Config) -> None:
         session = agent.session
         if session is None:
             return
-        # Frozen, and before anything else: this fires once per turn for every
-        # session in the deployment, and a session that never read a skill must
-        # not pay a thaw of somebody's hundred-entry list to find that out.
+        # This check reads the frozen payload, and it runs before anything
+        # else. The listener fires one time per turn for every session in the
+        # deployment. A session that never read a skill must not pay to thaw a
+        # hundred-entry list to find that out.
         outstanding = outstanding_steps(session)
         if not outstanding:
             return
-        # The stall detector's two rules, here where they are applied (P4).
-        # **The procedure seeded last governs**, because a nudge names whatever
-        # is startable and cannot be charged to one skill — and the latest read
-        # is the procedure the model was most recently asked to follow. One that
-        # set no budget hands the row back to the profile's rather than
-        # inheriting the one before it.
+        # The two rules of the stall detector are here, where they are applied
+        # (P4). **The procedure that was seeded last governs.** A nudge names
+        # whatever can be started, so it cannot be charged to one skill, and the
+        # latest read is the procedure that the model was most recently asked
+        # to follow. A procedure that set no budget returns the row to the
+        # budget of the profile and does not inherit the budget before it.
         recorded = latest_skill_budget(session)
         budget = config.max_nudges if recorded is None else recorded
-        # **Counted since the plan last changed**, so any `write_todos` — a step
-        # marked done, an entry added, a re-plan — earns fresh nudges, and only
-        # a run going in circles reaches the budget.
+        # **The count runs since the plan last changed.** Any `write_todos` (a
+        # step marked done, an entry added, a new plan) therefore resets the
+        # count, and only a run that makes no progress reaches the budget.
         plan = session.latest("todo/write")
         if nudges_since(session, plan.seq if plan else -1, up_to=budget) >= budget:
-            # Stood down rather than steering into a wall.
+            # The row stands down. More nudges would change nothing.
             log.info(
                 "ph_stabilize.skill_steps: %s with the plan unchanged; standing down",
                 count_of(budget, "nudge"),
@@ -642,18 +696,19 @@ async def apply(ctx: Context, config: Config) -> None:
         todos = todos_of(session)
         ready = [step for step in startable(todos) if step in outstanding]
         if not ready:
-            # A shape guard, and said as one rather than dressed up as a policy:
-            # `seeded` writes a *sequential* chain, so while anything is
-            # unfinished its earliest link is waiting on nothing and this branch
-            # cannot be reached by the entries this row writes. It is here
-            # because a steer naming no step is worse than no steer at all, and
-            # the list is a fold of a log that a hand-edit, a future seeding
-            # shape or a second row could put another arrangement into.
+            # This is a shape guard and not a policy. `seeded` writes a
+            # *sequential* chain, so while any step is unfinished, the earliest
+            # unfinished step waits on nothing. The entries that this row writes
+            # therefore cannot reach this branch. The guard is here because a
+            # nudge that names no step is worse than no nudge. The list is also
+            # a fold of a log, and a hand edit, a future seeding shape, or a
+            # second row could put another arrangement into that log.
             return
-        # Asked last, once everything cheaper has said a nudge is due: it is a
-        # request to a server, and a turn that would not be nudged anyway owes
-        # nobody the wait. A held nudge is not a nudge, so it spends none of the
-        # budget, and the next turn that stops is asked about afresh.
+        # The decision model is asked last, after every cheaper check has said
+        # that a nudge is due. It is a request to a server, and a turn that
+        # would not be nudged anyway must not wait for one. A held nudge is not
+        # a nudge, so it spends none of the budget. The row asks again about
+        # the next turn that stops.
         blocked = len(outstanding) - len(ready)
         if await waits_for_a_person(session, ready, blocked):
             return

@@ -94,7 +94,7 @@ and `ctx.<mode>` raises on a mismatch. `phern events --profile <name>` prints th
 producer/consumer matrix, which is why `owner` and `doc` are worth writing.
 
 Name events for the *fact*, not for who consumes them. `ctx.subagents` writes
-`subagent/admitted` into each child's own log, and `ph-app` reads it there; had it
+`subagent/admitted` into each child's own log, and `phern` reads it there; had it
 been named for the reader, the seam would depend on its consumer.
 
 ## Failing closed
