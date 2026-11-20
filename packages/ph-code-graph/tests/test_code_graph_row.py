@@ -1,22 +1,24 @@
-"""`code-graph` — the row a session mounts, whose tools run in the command.
+"""`code-graph`: the row that a session mounts, whose tools run in the command.
 
-Gates: *a session has `code_index` and `code_graph` under those names; an agent
-working in its own tree indexes that tree and no other; the session's process
-never loads the parser.*
+Gates:
 
-## What is being held equal
+* A session has `code_index` and `code_graph` under those names.
+* An agent that works in its own tree indexes that tree and no other.
+* The process of the session never loads the parser.
 
-`test_code_graph.py` proves the tools right, mounted in-process as the command
-mounts them. This file proves that reaching them through the manual changes
-nothing an agent can see — the names, the values, the rendered text, the error
-codes, the skill — and changes the two things it was meant to: whose tree is
-read, and which process pays for tree-sitter.
+## What is held equal
+
+`test_code_graph.py` proves that the tools are correct, mounted in-process as the
+command mounts them. This file proves that reaching the tools through the manual
+changes nothing that an agent can see: the names, the values, the rendered text,
+the error codes, and the skill. It also proves the two intended changes: whose
+tree is read, and which process pays for tree-sitter.
 
 ## Why the parser gate is a fresh interpreter
 
-`sys.modules` is the whole question, and this process has imported tree-sitter a
-hundred tests ago. Asked of an interpreter that has mounted only the session's
-rows, the answer means something.
+The whole question is the content of `sys.modules`, and this process imported
+tree-sitter a hundred tests ago. The answer has meaning only from an interpreter
+that has mounted only the rows of the session.
 """
 
 from __future__ import annotations
@@ -66,7 +68,8 @@ ROWS: tuple[dict[str, Any], ...] = (
 
 
 def _index(ctx: Any, agent: Any) -> Path:  # noqa: ANN401
-    """Where `agent`'s index is: the row's directory in that agent's scratch."""
+    """The location of the index of `agent`: the directory of the row in the
+    scratch directory of that agent."""
     return scratch_of(ctx, agent.session.id, agent) / "code-graph" / "graph.db"
 
 
@@ -76,8 +79,8 @@ def _index(ctx: Any, agent: Any) -> Path:  # noqa: ANN401
 async def test_a_session_has_both_tools_under_their_own_names(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** Not `ph_code_graph_code_index`: the skill, the prompts and
-    every program a model has written say `code_graph`."""
+    """**The gate.** The name is not `ph_code_graph_code_index`. The skill, the
+    prompts, and every program that a model has written say `code_graph`."""
     ctx = await mount(*ROWS)
 
     schemas = {one.name: one for one in ctx.require(TOOLS).schemas(scope=DEPLOYMENT)}
@@ -117,7 +120,7 @@ async def test_a_call_gives_the_value_the_text_and_the_code_the_tool_always_gave
     callers = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)
     assert not callers.is_error, text_of(callers.content)
     assert {one["name"] for one in callers.value["edges"]} == {"caller0", "caller1"}
-    # The tool's own rendering, written in its process — not pH's default JSON.
+    # The tool's own rendering, written in its process, and not the default JSON of pH.
     assert "calling 'shared'" in text_of(callers.content)
     assert not text_of(callers.content).lstrip().startswith("{")
 
@@ -125,11 +128,12 @@ async def test_a_call_gives_the_value_the_text_and_the_code_the_tool_always_gave
 async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The claim the package rests on for its intended caller.
+    """The claim that the package depends on for its intended caller.
 
-    Under `tools.mode: code` the model gets one callable and an SDK listing, so
-    "can the RLM use this" is exactly "are these in the listing". A tool that
-    arrives through a manual is registered like any other, so it is.
+    Under `tools.mode: code` the model gets one callable and an SDK listing. "Can
+    the RLM use this" is therefore exactly "are these in the listing". A tool
+    that arrives through a manual is registered like any other tool, so it is in
+    the listing.
     """
     ctx = await mount(
         {"id": "tools", "config": {"mode": "code"}},
@@ -152,8 +156,8 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
 
 
 async def test_the_skill_arrives_with_the_tools(mount: MountProfile, tmp_path: Path) -> None:
-    """What the RLM reads before it reaches for these tools. Registered by the row,
-    so the catalog entry exists exactly when the tools do."""
+    """What the RLM reads before it uses these tools. The row registers the
+    skill, so the catalog entry exists exactly when the tools do."""
     ctx = await mount(*ROWS)
 
     assert "code-graph" in {one.name for one in ctx.require(SKILLS).list(scope=DEPLOYMENT)}
@@ -168,8 +172,9 @@ async def test_the_skill_arrives_with_the_tools(mount: MountProfile, tmp_path: P
 async def test_without_the_utcp_row_the_row_stands_down_and_offers_nothing(
     mount: MountProfile,
 ) -> None:
-    """A catalog entry for tools nobody has is the failure this must not have. The
-    row waits on `ctx.utcp`; with nothing providing it, it never activates."""
+    """A catalog entry for tools that nobody has is the failure that this row
+    must not have. The row waits on `ctx.utcp`. With nothing that provides it,
+    the row never activates."""
     ctx = await mount({"id": "code-graph", "name": "code-graph"})
 
     assert "code-graph" in ctx.require(MOUNT).inactive()
@@ -183,12 +188,13 @@ async def test_without_the_utcp_row_the_row_stands_down_and_offers_nothing(
 async def test_an_agent_in_its_own_tree_indexes_that_tree(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** Two agents, two trees, one session's rows.
+    """**The gate.** Two agents, two trees, and the rows of one session.
 
-    The command runs in the calling agent's workspace, so the index it builds is
-    that workspace's: the child's own files, kept in the child's own scratch.
-    Registered in-process, the same tool read whichever root `ctx.fs` resolved
-    for the agent — and this is the proof the command line kept that.
+    The command runs in the workspace of the calling agent, so the index that it
+    builds belongs to that workspace: the files of the child, kept in the scratch
+    directory of the child. When the tool was registered in-process, it read
+    whichever root `ctx.fs` resolved for the agent. This test proves that the
+    command line kept that behavior.
     """
     shared_tree(tmp_path, callers=2)
     worktree = shared_tree(tmp_path.parent / f"{tmp_path.name}-worktree", callers=5)
@@ -217,18 +223,20 @@ async def test_an_agent_in_its_own_tree_indexes_that_tree(
 async def test_a_confined_agent_that_may_not_write_its_tree_still_indexes_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** Read-only bars the repository, and not what a tool builds
-    about it.
+    """**The gate.** A read-only session protects the repository, and not what a
+    tool builds about it.
 
-    The default posture is read-only, and on a host with a sandbox backend that
-    is enforced. The command keeps its index in the agent's scratch — writable
-    under every mode — and its grammars and log in the directories the manual
-    grants. So the index is built, by an agent whose own `bash` could not create a
-    file beside the code, and the tree is exactly as it was.
+    The default sandbox mode is read-only, and a host with a sandbox backend
+    enforces it. The command keeps its index in the scratch directory of the
+    agent, which is writable in every mode. It keeps its grammars and its log in
+    the directories that the manual grants. The index is therefore built by an
+    agent whose own `bash` could not create a file beside the code, and the tree
+    is exactly as it was.
 
-    A git repository, so the command asks git what changed: the path that spawns a
-    child of its own from inside the sandbox. In a directory of its own, because
-    the suite's `$PH_HOME` — and so the scratch — is `tmp_path`.
+    The tree is a git repository, so the command asks git what changed. That is
+    the path that starts a child process from inside the sandbox. The repository
+    is in its own directory, because the `$PH_HOME` of the suite, and therefore
+    the scratch directory, is `tmp_path`.
     """
     ctx = await mount({"id": "sandbox-local", "disabled": False}, *ROWS)
     if not ctx.require(SANDBOX).available:
@@ -314,8 +322,8 @@ anyio.run(main)
 
 
 async def test_the_rows_config_reaches_the_command(mount: MountProfile, tmp_path: Path) -> None:
-    """A setting in the session's profile is the setting the tool indexes with.
-    `languages: [rust]` makes a Python tree index nothing."""
+    """A setting in the profile of the session is the setting that the tool
+    indexes with. `languages: [rust]` makes a Python tree index nothing."""
     shared_tree(tmp_path)
     ctx = await mount(ROWS[0], {**ROWS[1], "config": {"languages": ["rust"]}})
 
@@ -328,8 +336,9 @@ async def test_the_rows_config_reaches_the_command(mount: MountProfile, tmp_path
 async def test_a_profile_points_the_row_at_a_package_and_the_command_indexes_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The `index` block, written under the session's row and read by the command:
-    a bare `code_index` indexes the named package, less what is excluded."""
+    """The `index` block is written under the row of the session and read by the
+    command. A bare `code_index` indexes the named package, without what is
+    excluded."""
     shared_tree(tmp_path / "ours", callers=3)
     shared_tree(tmp_path / "theirs", callers=3)
     scope = {"paths": ["ours"], "exclude": ["**/mod0.py"]}
@@ -360,9 +369,9 @@ def test_the_row_is_named_to_the_command_with_what_differs_from_its_defaults() -
 def test_the_manual_grants_what_the_command_writes_outside_the_workspace(
     tmp_path: Path,
 ) -> None:
-    """What agents share is granted — the grammar cache and the log, both under
-    `$PH_CACHE`. The index is not: it is named as state, so it goes in the calling
-    agent's own scratch and needs no grant."""
+    """What agents share is granted: the grammar cache and the log, both under
+    `$PH_CACHE`. The index is not granted. It is named as state, so it goes in
+    the scratch directory of the calling agent and needs no grant."""
     own = manual(Config())
     granted = set(own.writable)
     cache = resolve_roots().cache
@@ -376,8 +385,9 @@ def test_the_manual_grants_what_the_command_writes_outside_the_workspace(
 async def test_the_command_answers_through_the_packages_own_program(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`/code-graph status` — a person asks before an agent does, and it costs no
-    model turn. The sentence is the command's, which is the one that knows."""
+    """`/code-graph status`: a person asks before an agent does, and it costs no
+    model turn. The sentence comes from the command, which is the one that
+    knows."""
     ctx = await mount(*ROWS)
 
     said = await ctx.require(COMMANDS).dispatch("/code-graph status")
@@ -399,8 +409,9 @@ async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: P
 async def test_status_counts_the_index_of_the_agent_that_asked(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Each agent has its own index, so "is it built" has an answer per agent: the
-    command is told the asking agent's state directory, as its tools are."""
+    """Each agent has its own index, so "is it built" has an answer for each
+    agent. The command gets the state directory of the asking agent, as its tools
+    do."""
     shared_tree(tmp_path)
     ctx = await mount(*ROWS)
     builder, other = new_agent(ctx), new_agent(ctx)
@@ -422,9 +433,9 @@ async def test_status_counts_the_index_of_the_agent_that_asked(
 async def test_a_call_is_answered_by_the_run_it_started_and_nothing_stays_up(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`code_index` is run by the session in the background and waited for: a run
-    that ends within `wait_s` answers the call with its own counts, and when it
-    has ended there is no process left — every call is one command."""
+    """The session runs `code_index` in the background and waits for it. A run
+    that ends within `wait_s` answers the call with its own counts. After it
+    ends, no process is left, because every call is one command."""
     shared_tree(tmp_path)
     ctx = await mount(*ROWS)
     agent = new_agent(ctx)
@@ -442,9 +453,9 @@ async def test_a_call_is_answered_by_the_run_it_started_and_nothing_stays_up(
 async def test_a_root_agents_first_step_builds_the_graph_and_it_is_told_when_it_ends(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** No tool is called: the row's `agent/pre-step` listener starts
-    `code_index` in the background, its progress is read from the command's
-    stderr, and the agent is told with a note that waits for its next step."""
+    """**The gate.** No tool is called. The `agent/pre-step` listener of the row
+    starts `code_index` in the background. The progress is read from the stderr
+    of the command, and the agent gets a note that waits for its next step."""
     shared_tree(tmp_path, callers=4)
     ctx = await mount(*ROWS)
     agent = new_agent(ctx)
@@ -458,10 +469,10 @@ async def test_a_root_agents_first_step_builds_the_graph_and_it_is_told_when_it_
 
     [note] = agent.inbox.next_step
     said = text_of(note.content)
-    # The count is of files walked; in this suite the scratch, and so the
-    # graph's lock file, is inside the tree.
+    # The count is the number of files walked. In this suite the scratch
+    # directory, and therefore the lock file of the graph, is inside the tree.
     assert "The code graph is finished: " in said
-    # And what a caller that waited would have read: the run's own counts.
+    # This is what a caller that waited would have read: the counts of the run.
     assert "Indexed 5 files (0 already current)" in said
     assert "The graph holds" in said
     asked = await run_tool(ctx, "code_graph", {"mode": "callers", "query": "shared"}, agent=agent)

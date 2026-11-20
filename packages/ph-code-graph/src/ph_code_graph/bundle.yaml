@@ -1,21 +1,22 @@
 # ph-code-graph: `code_index` and `code_graph`, over `ph-base`.
 #
-# A bundle rather than a row a profile spells by hand, and the reason is
-# `available_profiles()`: a profile's composability is decided by whether its
-# *bundles* resolve, so a profile that layers this one is correctly hidden on an
-# install without this distribution — and the refusal names the package to
-# install. A row named directly in a profile document gets no such check: the
-# profile would be offered and then fail at mount, which is precisely what
-# `ph_app.profiles` says two predicates for one question always produces.
+# This is a bundle and not a row that a profile writes by hand. The reason is
+# `available_profiles()`. Whether a profile can be composed depends on whether
+# its *bundles* resolve. A profile that layers this bundle is therefore correctly
+# hidden on an install without this distribution, and the refusal names the
+# package to install. A row that is named directly in a profile document gets no
+# such check. The profile would be offered and would then fail at mount.
+# `ph_app.profiles` says that two predicates for one question always produce
+# exactly that result.
 #
-# One row. `ph-code-graph` exists to register two tools, and they arrive
-# together because `code_graph` without `code_index` is a query over an index
-# nothing built.
+# The bundle has one row. `ph-code-graph` exists to register two tools. They
+# arrive together, because `code_graph` without `code_index` is a query over an
+# index that nothing built.
 
-# Enabled, unlike `tool-todo` and `rlm-context-loader` in their bundles. Those
-# are off because layering their bundle for something *else* — offload,
-# compaction — must not also hand the model a tool. Nothing else is in here:
-# layering this bundle has exactly one meaning, so a row that stood down would
-# make `--profile rlm-indexed` a no-op with a comment explaining why.
+# The row is enabled, unlike `tool-todo` and `rlm-context-loader` in their
+# bundles. Those rows are off because a profile that layers their bundle for
+# something *else* (offload, compaction) must not also give the model a tool.
+# This bundle holds nothing else, so layering it has exactly one meaning. A row
+# that stood down would make `--profile rlm-indexed` do nothing.
 - id: code-graph
   name: code-graph

@@ -1,15 +1,17 @@
-"""The `code-graph` row's config, apart from both rows that read it.
+"""The config of the `code-graph` row, in a module apart from both rows that read it.
 
-Two rows take this one model. The `code-graph` row a session mounts validates it
-and hands it across to the command; the `code-graph-engine` row the command
-mounts indexes by it. In a module of its own so the session's row can import the
-model without importing the engine — and with it the extractor and the store.
+Two rows use this one model. The `code-graph` row, which a session mounts,
+validates the config and passes it to the command. The `code-graph-engine` row,
+which the command mounts, indexes by it. The model is in its own module so that
+the session row can import it without importing the engine, and with the engine
+the extractor and the store.
 
-So are the facts both processes need about where the engine keeps things: the
-row id the config travels under, the directory name its index takes in an agent's
-scratch, and the shared paths the engine writes, which the session's row grants
-to the confined command. One derivation each, so a grant cannot name a directory
-the engine never writes.
+The module also holds the facts that both processes need about where the engine
+keeps things: the row id that the config travels under, the directory name of the
+index in the scratch directory of an agent, and the shared paths that the engine
+writes. The session row grants those shared paths to the confined command. Each
+fact has one derivation, so a grant cannot name a directory that the engine never
+writes.
 
 @module ph_code_graph._config
 """
@@ -39,95 +41,102 @@ __all__ = [
 ]
 
 ROW = "code-graph"
-"""The session row's id, the id the command mounts the engine under — so one
-config serves both — and the name of the provisioning command both offer."""
+"""The id of the session row. The command mounts the engine under the same id, so
+one config serves both. It is also the name of the provisioning command that both
+offer."""
 
 STATE = "code-graph"
-"""The directory, in the calling agent's scratch, a session's index is kept in."""
+"""The directory, in the scratch directory of the calling agent, that holds the
+index of a session."""
 
 DATABASE = "graph.db"
 
 GRAMMAR_CACHE_ENV = "TREE_SITTER_LANGUAGE_PACK_CACHE_DIR"
-"""The pack's own override for where grammars are materialized. An operator who
-set it means it for the session and for every command alike."""
+"""The override of the pack itself for where grammars are materialized. An
+operator who set it means it for the session and for every command."""
 
 
 class Scope(IndexScope):
-    """`IndexScope`, and whether a session starts on it unasked."""
+    """`IndexScope`, plus whether a session starts to index it without a request."""
 
     on_mount: bool = True
-    """Start indexing this scope when a root session's agent takes its first
-    step, in the background, so the graph is being built before anything asks
-    for it. The footer says how far it has got and the agent is told when it
-    finishes.
+    """Start to index this scope in the background when the agent of a root
+    session takes its first step. The graph is then in progress before a call
+    asks for it. The footer shows the progress, and the agent is told when the
+    run finishes.
 
     `false` leaves indexing to `code_index` calls."""
 
 
 class Config(WireModel):
-    """Row config for `code-graph`."""
+    """The row config for `code-graph`."""
 
     index: Scope = Field(default_factory=Scope)
-    """What `code_index` looks at when the call does not say: which trees, which
-    files in them, which to leave out.
+    """What `code_index` looks at when the call does not say: the trees, the files
+    in them, and the files to leave out.
 
     `include` defaults to everything, because the language filter is the real
-    one: a path whose extension names no supported code language is skipped, so
-    `**/*` here means "all the code" rather than "all the files". `paths` is how
-    this row is pointed at one package of a monorepo, and `exclude` is how
-    vendored or generated code is left out without a glob that has to describe
-    the same intent negatively."""
+    filter. A path whose extension names no supported code language is skipped,
+    so `**/*` here means "all the code" and not "all the files". `paths` points
+    this row at one package of a monorepo. `exclude` leaves out vendored or
+    generated code, without a glob that must describe the same intent
+    negatively."""
     languages: list[str] = Field(default_factory=list)
-    """Restrict indexing to these languages. Empty means every language with a
-    grammar to be had; `/code-graph install` then fetches `engine.DEFAULT_LANGUAGES`.
+    """Restrict indexing to these languages. An empty list means every language
+    for which a grammar can be obtained. `/code-graph install` then fetches
+    `engine.DEFAULT_LANGUAGES`.
 
-    A monorepo with a `node_modules` of vendored JavaScript and one Python
-    package wants `[python]`, and saying so is cheaper than a glob that has to
+    A monorepo with one Python package and a `node_modules` of vendored
+    JavaScript needs `[python]`. That setting is simpler than a glob that must
     describe the same intent negatively."""
     max_bytes: int = 2 * 1024 * 1024
-    """The largest file parsed. One past it is skipped and reported, not an
-    error: a tree walk should not fail because it found a minified bundle or a
-    generated parser, and a caller who never learns what was skipped cannot tell
-    a thin graph from a broken one."""
+    """The largest file that is parsed. A larger file is skipped and reported,
+    and is not an error. A tree walk must not fail because it found a minified
+    bundle or a generated parser. A caller who never learns what was skipped
+    cannot tell a thin graph from a broken one."""
     max_files: int = 20_000
-    """How many files one `code_index` call will consider."""
+    """The number of files that one `code_index` call considers."""
     wait_s: float = 15.0
-    """How long a `code_index` call waits on a run before it answers "indexing":
-    on the run a session started for it in the background, and, in the command,
-    on another run that holds the index.
+    """How long a `code_index` call waits for a run before it answers
+    "indexing". In a session, it waits for the run that the session started for
+    it in the background. In the command, it waits for another run that holds the
+    index.
 
-    Long enough that an ordinary run — a package, a second run over a tree —
-    answers with its counts. What it bounds is the run nobody should sit through:
-    a first pass over a large tree."""
+    The value is long enough that an ordinary run (one package, or a second run
+    over a tree) answers with its counts. It limits the wait for a run that
+    nobody should wait through: a first pass over a large tree."""
 
 
 def index_base() -> Path:
-    """Where the per-workspace indexes live, for a caller that names no state
-    directory."""
+    """The directory of the per-workspace indexes, for a caller that names no
+    state directory."""
     return default_cache_path(None, "code-graph")
 
 
 def index_path(root: Path) -> Path:
-    """The database `root`'s index lives in (`ph.toolcli.state_home`).
+    """The database that holds the index of `root` (`ph.toolcli.state_home`).
 
-    **Where the caller said**: a session's `ph-utcp` names a directory of the
-    calling agent's scratch, so the index is that agent's — writable in a
-    read-only session, which the workspace is not, and the one the same agent
-    finds after a restart. A person names one with `--state`.
+    **Where the caller said.** In a session, `ph-utcp` names a directory in the
+    scratch directory of the calling agent, so the index belongs to that agent.
+    That directory is writable in a read-only session, which the workspace is
+    not, and the same agent finds it again after a restart. A person names a
+    directory with `--state`.
 
-    **Otherwise one per workspace under `$PH_CACHE`**. Under the cache root
-    because the index is rebuildable: the source is the truth and this is
-    derived (Q1)."""
+    **Otherwise, one index for each workspace under `$PH_CACHE`.** It is under
+    the cache root because the index can be rebuilt. The source is the truth,
+    and the index is derived from it (Q1)."""
     return state_home(index_base(), root) / DATABASE
 
 
 def grammar_default() -> Path:
-    """Where the engine points the pack's grammar cache, under the cache root."""
+    """The directory, under the cache root, that the engine gives the pack as its
+    grammar cache."""
     return resolve_roots().cache / "tree-sitter"
 
 
 def grammar_cache() -> Path:
-    """Where grammars are materialized in fact: the operator's override, or the
-    engine's default (`_extract.use_cache` applies the same rule)."""
+    """The directory where grammars are really materialized: the override of the
+    operator, or the default of the engine (`_extract.use_cache` applies the same
+    rule)."""
     override = os.environ.get(GRAMMAR_CACHE_ENV)
     return Path(override) if override else grammar_default()

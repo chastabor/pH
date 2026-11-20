@@ -1,61 +1,67 @@
-"""`code-graph` — a Python-native code graph, so the RLM can ask before it reads.
+"""`code-graph`: a Python-native code graph, so that the RLM can ask before it reads.
 
-Two tools. `code_index` walks a tree through `ctx.fs`, parses it with
-tree-sitter and records what each file defines and references. `code_graph`
-answers six questions over that index — and answers every one of them with
-`path:start-end`, so a hit is a pointer the agent can hand straight to `read`.
+The package has two tools. `code_index` walks a tree through `ctx.fs`, parses it
+with tree-sitter, and records what each file defines and references.
+`code_graph` answers six questions over that index. Every answer is a
+`path:start-end`, so the agent can pass a hit directly to `read`.
 
-That last part is the whole point. An agent dropped into an unfamiliar
-repository spends its first several thousand tokens reading files to discover
-which two mattered. This turns that into one call.
+That is the purpose of the package. An agent in an unfamiliar repository uses its
+first several thousand tokens to read files, only to learn which two files
+mattered. This package turns that into one call.
 
 ## Python-native, and what that decided
 
-The alternative was wrapping the Rust/Node CodeGraph, and the investigation said
-no: that project's Rust kernel is a *tree-sitter extractor behind a Node-API
-boundary* (its whole export surface is `extract_file`, `contract_info`,
-`grammar_info` and two `cfnptr` helpers), while the intelligence — 29 708 lines
-of cross-file resolution, plus graph, search and context layers — is TypeScript.
-maturin could not build a `#[napi]` crate anyway. Wrapping it would have bought
-a parser Python already has, and left the intelligence behind.
+The alternative was a wrapper around the Rust/Node CodeGraph, and the
+investigation rejected it. The Rust kernel of that project is a *tree-sitter
+extractor behind a Node-API boundary*. Its whole export surface is
+`extract_file`, `contract_info`, `grammar_info`, and two `cfnptr` helpers. The
+intelligence is TypeScript: 29 708 lines of cross-file resolution, plus graph,
+search, and context layers. maturin also cannot build a `#[napi]` crate. A
+wrapper would have given a parser that Python already has, and left the
+intelligence behind.
 
-So: `tree-sitter-language-pack` for extraction — a 3.7 MB wheel, 371
-languages fetched once into a cache — and `sqlite3` from the
-standard library for the graph, because two of the six queries here are exactly
-the two `pyturso` cannot serve (`_store` has the measurements).
+The package therefore uses `tree-sitter-language-pack` for extraction: a 3.7 MB
+wheel, with 371 languages that are fetched one time into a cache. It uses
+`sqlite3` from the standard library for the graph, because two of the six
+queries here are exactly the two that `pyturso` cannot serve (`_store` has the
+measurements).
 
 ## Name-based, and it says so
 
-A reference records the *name* it used; `callers` and `callees` join on that
-name. Two `register` methods in two classes are one name to this index. Every
-result that could be ambiguous carries `definitions`, the number of places that
-name is defined, so the model can see the ambiguity instead of being handed one
-of them — and `code_graph mode=define` is how it disambiguates.
+A reference records the *name* that it used, and `callers` and `callees` join on
+that name. Two `register` methods in two classes are one name to this index.
+Every result that could be ambiguous carries `definitions`, the number of places
+that define the name. The model can then see the ambiguity, and is not given one
+of the definitions without notice. `code_graph mode=define` lets the model tell
+the definitions apart.
 
-Resolving properly means an import graph, scope, and per-language type
-inference. That is the 29 708 lines this package declined to port. Name-based
-answers most of what an agent actually asks and reports where it cannot.
+A resolved graph needs an import graph, scope, and type inference for each
+language. Those are the 29 708 lines that this package did not port. A
+name-based graph answers most of what an agent asks, and reports where it
+cannot.
 
 ## One run at a time
 
-`code_index` is one command and finishes before it answers. A run holds the
-index's lock while it works, and a second waits its turn for `wait_s`; past that
-it answers `state: indexing` — another run is building this — instead of
-standing behind it. `code_graph` never waits: it answers from what is indexed so
-far and says the index is still being built. Called with `--progress` the
-command reports how far it has got on stderr (`ph.toolcli.reported`), which is
-how a session shows a run it started in the background. Each file is its own
-transaction, so a run that is stopped keeps every file it finished, and the next
-one finds them by their digests.
+`code_index` is one command, and it finishes before it answers. A run holds the
+lock of the index while it works. A second run waits up to `wait_s` for its
+turn. After that it answers `state: indexing`, which means that another run is
+building the index, and it does not continue to wait. `code_graph` never waits.
+It answers from what is indexed so far, and says that the index is still being
+built. With `--progress`, the command reports its progress on stderr
+(`ph.toolcli.reported`). A session uses that to show a run that it started in
+the background. Each file is its own transaction. A run that is stopped
+therefore keeps every file that it finished, and the next run finds those files
+by their digests.
 
 ## Where this row is mounted
 
-In the `ph-code-graph` command's own process, and not in a session's. A session
-mounts the `code-graph` row (`ph_code_graph.__init__`), which registers this
-package's UTCP manual; the manual's commands run `ph-code-graph`, and that
-command mounts *this* row and runs a tool through the registry (`ph.toolcli`).
-So `ctx.fs` below is the command's own — rooted at the working directory the
-calling agent's sandbox gave it — and `run.agent` is always `None`.
+This row is mounted in the process of the `ph-code-graph` command, not in the
+process of a session. A session mounts the `code-graph` row
+(`ph_code_graph.row`), which registers the UTCP manual of this package. The
+commands of the manual run `ph-code-graph`. That command mounts *this* row and
+runs a tool through the registry (`ph.toolcli`). The `ctx.fs` below therefore
+belongs to the command. It is rooted at the working directory that the sandbox
+of the calling agent gave the command, and `run.agent` is always `None`.
 
 @module ph_code_graph.engine
 """
@@ -154,77 +160,78 @@ _LOCKED = "the code index"
 
 
 def _lock_of(store: CodeGraphStore) -> Path:
-    """The lock file beside a database that orders its writers."""
+    """The lock file beside a database. It orders the writers of the database."""
     return store.path.with_name(f"{store.path.name}.lock")
 
 
 CODE_GRAPH: ServiceKey[CodeGraphSeam] = ServiceKey("code_graph")
-"""The code graph, for `/code-graph` and the tools it backs."""
+"""The code graph, for `/code-graph` and for the tools that it backs."""
 
 
 @dataclass(slots=True)
 class CodeGraphSeam:
     """The service published as `ctx.code_graph`.
 
-    Holds where the index lives, and orders its writers. The order is why
-    `code_index` declares itself not concurrency-safe: two calls indexing
-    overlapping trees would interleave their per-file transactions, and while
-    SQLite would keep each one atomic the *pair* would report counts neither of
-    them produced.
+    It holds the location of the index and orders its writers. The ordering is
+    why `code_index` declares itself not concurrency-safe. Two calls that index
+    overlapping trees would interleave their per-file transactions. SQLite would
+    keep each transaction atomic, but the *pair* would report counts that neither
+    call produced.
     """
 
     ctx: Context
     grammars: Path
-    """Where the tree-sitter grammar cache was pointed. See `_extract.use_cache`."""
+    """The directory of the tree-sitter grammar cache. See `_extract.use_cache`."""
 
     def store_for(self, root: Path) -> CodeGraphStore:
-        """This workspace's index: where the caller said, or a directory per root
-        (`_config.index_path`).
+        """The index of this workspace: where the caller said, or one directory
+        for each root (`_config.index_path`).
 
-        Never shared between two trees — a worktree at another revision holds
-        different line numbers, so one index for both would hand out pointers
-        that are quietly stale. A session's caller names a directory of the
-        agent's own scratch, which goes when the agent's scratch does; the
-        per-root directory under `$PH_CACHE` records its workspace, and one whose
-        workspace is gone is swept on a later index (`ph.workspace_caches`).
+        Two trees never share an index. A worktree at another revision has
+        different line numbers, so one index for both would give pointers that
+        are stale without any sign. In a session, the caller names a directory in
+        the scratch directory of the agent, which is removed with that scratch
+        directory. The per-root directory under `$PH_CACHE` records its
+        workspace. When that workspace is gone, a later index removes the
+        directory (`ph.workspace_caches`).
         """
         return CodeGraphStore(path=index_path(root))
 
     def indexing(self, store: CodeGraphStore) -> bool:
-        """Whether a run is building `store` right now: one holds the index's lock
-        for as long as it works, and only a run takes it."""
+        """Whether a run is building `store` now. A run holds the lock of the
+        index for as long as it works, and only a run takes that lock."""
         return file_lock_held(_lock_of(store))
 
     @asynccontextmanager
     async def writing(self, store: CodeGraphStore, *, wait_s: float) -> AsyncIterator[bool]:
         """Hold `store` for one indexing run, against every other writer of it.
-        Yields whether it is held: `False` when another run still had it after
-        `wait_s` (`ph.toolcli.run_lock`).
+        Yields whether the lock is held. The value is `False` when another run
+        still held the lock after `wait_s` (`ph.toolcli.run_lock`).
 
-        **A lock file beside the database, not a lock in this process.** The index
-        is shared by everything on one workspace — two roots in a daemon, a
-        `phern -p`, a `ph-code-graph` command — and an `anyio.Lock` here ordered
-        only the calls of one seam. Two processes each stayed atomic per file and
-        still raced on the stored version-control token, so the second could
-        record a token vouching for files the first was still writing. `flock`
-        refuses a second holder even in one process, so this one lock orders this
-        seam's own calls too.
+        **The lock is a file beside the database, not a lock in this process.**
+        Everything on one workspace shares the index: two roots in a daemon, a
+        `phern -p`, and a `ph-code-graph` command. An `anyio.Lock` here ordered
+        only the calls of one seam. Two processes each stayed atomic for each
+        file, but they still raced on the stored version-control token. The
+        second process could record a token that vouched for files that the
+        first was still writing. `flock` refuses a second holder even inside one
+        process, so this one lock also orders the calls of this seam.
 
-        Waited for rather than refused: a second indexing run is expected to queue
-        behind the first, and then finds most of the tree already current.
+        A second run waits and is not refused. It is expected to queue behind
+        the first run, and it then finds most of the tree already current.
         """
         async with run_lock(_lock_of(store), what=_LOCKED, wait_s=wait_s) as held:
             yield held
 
     def report(self) -> list[tuple[str, str]]:
-        """`phern doctor`'s section."""
+        """The section for `phern doctor`."""
         # Not a declared dependency: the row checks for it before this runs.
         import tree_sitter  # noqa: PLC0415
 
-        # No `hasattr` guard: the row declares `inject=[FS]`, so `ctx.fs` is
-        # present for as long as it is active — and a `Path.cwd()` fallback
-        # answered with an index keyed to the process directory rather than the
-        # workspace, which is worse than the traceback it avoided.
+        # There is no `hasattr` guard. The row declares `inject=[FS]`, so `ctx.fs`
+        # is present for as long as the row is active. A `Path.cwd()` fallback
+        # gave an index that was keyed to the process directory and not to the
+        # workspace, which is worse than the traceback that it avoided.
         root = self.ctx.require(FS).root_for(None)
         store = self.store_for(root)
         rows = [
@@ -279,16 +286,16 @@ class SkippedValue(ToolModel):
 
 class IndexValue(ToolModel):
     state: Literal["done", "indexing"] = "done"
-    """`indexing`: another run holds the index and was still working after this
-    call had waited `wait_s`. Nothing below was done by this call; the totals
-    are what the graph holds so far."""
+    """`indexing`: another run holds the index, and it was still working after
+    this call had waited `wait_s`. This call did nothing below. The totals are
+    what the graph holds so far."""
     indexed: int = 0
-    """Files parsed this call — changed or new only."""
+    """The files that this call parsed: changed or new files only."""
     unchanged: int = 0
-    """Files already current, by content digest."""
+    """The files that were already current, by content digest."""
     removed: int = 0
     symbols: int = 0
-    """Symbols written this call."""
+    """The symbols that this call wrote."""
     skipped: list[SkippedValue] = Field(default_factory=list)
     total_files: int
     total_symbols: int
@@ -328,13 +335,13 @@ class SymbolValue(ToolModel):
 
 class EdgeValue(SymbolValue):
     ref_line: int
-    """The line the reference is written on — what to open."""
+    """The line where the reference is written. This is the line to open."""
     ref_path: str
-    """Which file `ref_line` is in. **Not always `path`**: for `callees` the
-    symbol is the callee's definition while the reference is a line in the
-    caller. See `_store.Hit`."""
+    """The file that holds `ref_line`. **It is not always `path`.** For `callees`,
+    the symbol is the definition of the callee, and the reference is a line in
+    the caller. See `_store.Hit`."""
     via: str
-    """The name the edge was written as."""
+    """The name that the reference used."""
 
 
 class RingValue(ToolModel):
@@ -346,14 +353,14 @@ class GraphValue(ToolModel):
     mode: str
     query: str | None
     definitions: int
-    """How many places `query` is defined. **Above 1 means the answer is
-    ambiguous** — this index matches by name; see the module docstring."""
+    """The number of places that define `query`. **A value above 1 means that the
+    answer is ambiguous.** This index matches by name. See the module docstring."""
     total: int
     offset: int
     truncated: bool
     indexed_files: int
     indexing: bool = False
-    """A run is still building the index: the answer is from what it has indexed
+    """A run is still building the index. The answer comes from what is indexed
     so far."""
     symbols: list[SymbolValue] = Field(default_factory=list)
     edges: list[EdgeValue] = Field(default_factory=list)
@@ -392,14 +399,14 @@ def _render_index(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: 
 
 
 SHOWN = 20
-"""How many skipped files a result names before it counts the rest."""
+"""The number of skipped files that a result names before it only counts the rest."""
 
 
 def _index_summary(value: Mapping[str, Any], *, shown: int = SHOWN) -> str:
-    """What a finished run did: its counts, and each file it skipped and why, up
-    to `shown`. The note about a run nobody waited for says the same — a grammar
-    that could not be fetched leaves a graph of nothing, and "finished" alone
-    would not say so."""
+    """What a finished run did: its counts, and each file that it skipped with the
+    reason, up to `shown` files. The note about a run that nobody waited for says
+    the same. A grammar that could not be fetched leaves an empty graph, and the
+    word "finished" alone would not show that."""
     lines = [
         f"Indexed {count_of(value['indexed'], 'file')} "
         f"({value['unchanged']} already current), {count_of(value['symbols'], 'symbol')}."
@@ -415,12 +422,13 @@ def _index_summary(value: Mapping[str, Any], *, shown: int = SHOWN) -> str:
 
 
 def _said(value: Mapping[str, Any]) -> str:
-    """A run's note for whoever did not wait for it (`ph.toolcli.reported`)."""
+    """The note of a run, for a caller that did not wait for it
+    (`ph.toolcli.reported`)."""
     return _index_summary(value, shown=BRIEFLY)
 
 
 def _changed(value: Mapping[str, Any]) -> bool:
-    """Whether a run changed the graph: a file parsed, or one removed."""
+    """Whether a run changed the graph: it parsed a file or removed one."""
     return as_int(value.get("indexed")) + as_int(value.get("removed")) > 0
 
 
@@ -440,8 +448,8 @@ def _ambiguity(value: Any) -> str:  # noqa: ANN401
 
 
 def _render_graph(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
-    """The answer, and under it the warning it carries while its index is still
-    being built."""
+    """Render the answer. While the index is still being built, add the warning
+    below the answer."""
     answer = _render_answer(args, value)
     indexing = value.get("indexing")
     if not indexing:
@@ -483,9 +491,9 @@ def _render_answer(args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa:
         )
         lines = [f"{count_of(value['total'], 'site')} — {header}:"]
         for one in value["edges"]:
-            # `ref_path`, not `path`: the reference and the definition are in
-            # different files for `callees`, and printing the line against the
-            # wrong one is a pointer to nothing (`_store.Hit`).
+            # Use `ref_path`, not `path`. For `callees`, the reference and the
+            # definition are in different files. A line that is printed against
+            # the wrong file points to nothing (`_store.Hit`).
             at = f"{one['ref_path']}:{one['ref_line']}"
             lines.append(
                 f"  {one['name']:<24} {at:<44} (defined {_where(one)})"
@@ -544,13 +552,14 @@ DEFAULT_LANGUAGES = (
     "sql",
     "bash",
 )
-"""What `/code-graph install|status` covers when the row names no languages.
+"""The languages that `/code-graph install|status` covers when the row names none.
 
-A convenience list, and **filtered through `indexable` before use** — `bash` and
-`sql` are in it and have no tags query, so an unfiltered list reported them
-ready and then handed the extractor a language it could not use. Not read by the
-indexer, which asks `indexable`/`local` per file, so a language outside this
-list still works when the pack has it.
+This is a convenience list, and it is **filtered through `indexable` before
+use**. `bash` and `sql` are in the list and have no tags query. An unfiltered
+list reported them as ready, and then gave the extractor a language that it
+could not use. The indexer does not read this list. It asks `indexable` and
+`obtained` for each file, so a language outside this list still works when the
+pack has it.
 """
 
 
@@ -561,28 +570,29 @@ async def apply(ctx: Context, config: Config) -> None:
         if importlib.util.find_spec(module) is None:
             raise MountRefusal(MISSING)
 
-    # Before anything parses. The pack keeps every grammar it uses in a writable
-    # cache directory and fails hard without one, so the row
-    # names a path it can vouch for rather than inheriting whatever `HOME`
-    # happens to be — see `use_cache`.
+    # Do this before anything parses. The pack keeps every grammar that it uses
+    # in a writable cache directory, and fails hard without one. The row
+    # therefore names a path that it can vouch for, and does not inherit whatever
+    # `HOME` is. See `use_cache`.
     try:
-        # Through `ctx.effect` and in a worker thread, for two reasons that
-        # happen to share one line. The effect is so the library's
-        # process-global cache setting unwinds with this row rather than
-        # outliving it (§4.9, I2 — see `cache_release`); the thread is because
-        # `use_cache` imports `tree_sitter_language_pack`, a 20 ms dlopen that
-        # a profile mounting many rows would otherwise serialize on the loop.
+        # This goes through `ctx.effect` and runs in a worker thread, for two
+        # separate reasons. The effect makes the process-global cache setting of
+        # the library unwind with this row, so that it does not outlive the row
+        # (§4.9, I2; see `cache_release`). The thread is needed because
+        # `use_cache` imports `tree_sitter_language_pack`. That is a 20 ms
+        # dlopen, and a profile that mounts many rows would otherwise run those
+        # one after the other on the loop.
         await ctx.effect(
             lambda: anyio.to_thread.run_sync(cache_release, grammar_default()),
             label="tree-sitter-cache",
         )
     except OSError as error:
-        # `MountRefusal`, not the `OSError`: every command that mounts a profile
-        # turns this one type into a sentence and an exit code, and leaves
-        # anything else as the traceback a bug deserves. A read-only `$PH_CACHE`
-        # is a deployment fact an operator can fix, not a bug — measured inside
-        # a sandbox that made `~/.cache` read-only, where this arrived as
-        # fourteen frames of `pathlib`.
+        # Raise `MountRefusal`, not the `OSError`. Every command that mounts a
+        # profile turns this one type into a sentence and an exit code, and
+        # leaves anything else as the traceback that a bug deserves. A read-only
+        # `$PH_CACHE` is a fact of the deployment that an operator can fix. It is
+        # not a bug. It was measured inside a sandbox that made `~/.cache`
+        # read-only, where it arrived as fourteen frames of `pathlib`.
         raise MountRefusal(
             f"code-graph cannot write the tree-sitter grammar cache at {error.filename}: "
             f"{error.strerror}. The grammars are materialized there on first use, so this "
@@ -602,7 +612,8 @@ async def apply(ctx: Context, config: Config) -> None:
         known: Mapping[str, tuple[str, str]],
         run: ToolRunContext,
     ) -> int:
-        """Drop every indexed path that is no longer on disk. One thread hop."""
+        """Remove every indexed path that is no longer on disk. This takes one
+        thread hop."""
         gone = [path for path in known if not fs.resolve(path, agent=run.agent).exists()]
         return book.forget(gone) if gone else 0
 
@@ -618,8 +629,8 @@ async def apply(ctx: Context, config: Config) -> None:
     async def index_run(
         args: IndexArgs, run: ToolRunContext, progress: RunProgress
     ) -> dict[str, Any]:
-        """One indexing run, to its end — or the answer that another run holds
-        the index. Its caller's cancellation is asked at each file."""
+        """One indexing run, to its end, or the answer that another run holds the
+        index. The cancellation of the caller is checked at each file."""
         fs = ctx.require(FS)
         book = store(run)
         skipped: list[dict[str, str]] = []
@@ -635,7 +646,8 @@ async def apply(ctx: Context, config: Config) -> None:
                     total_refs=stats["refs"],
                     languages=stats["languages"],
                 ).model_dump()
-            # Under the lock: a call that will answer "indexing" walks nothing.
+            # This is under the lock, so a call that will answer "indexing" walks
+            # nothing.
             await anyio.to_thread.run_sync(claim_home, index_base(), fs.root_for(run.agent))
             wanted = config.index.narrowed(paths=args.paths, glob=args.glob, exclude=args.exclude)
             paths = await fs.collect(
@@ -650,19 +662,19 @@ async def apply(ctx: Context, config: Config) -> None:
             progress.begin(total)
             await anyio.to_thread.run_sync(book.prepare)
             if args.forget:
-                # Falls through to the one `stats` read and the one return
-                # below: `indexed`, `unchanged` and `symbols` are already 0 and
-                # `skipped` already empty, so a second copy of the payload was
-                # eleven lines saying that again — and a second shape for one
-                # `IndexValue` schema, in the mode with no test asserting it.
+                # This falls through to the one `stats` read and the one return
+                # below. `indexed`, `unchanged`, and `symbols` are already 0, and
+                # `skipped` is already empty. A second copy of the payload was
+                # eleven lines that repeated that. It was also a second shape for
+                # one `IndexValue` schema, in the mode that no test asserts.
                 removed = await anyio.to_thread.run_sync(book.forget, paths)
                 paths = []
             known = await anyio.to_thread.run_sync(book.known)
             # **Ask the version control what changed before reading anything.**
-            # `tree_state` never raises and answers an empty state for a tree
-            # with no backend, so the loop below is correct either way — it just
-            # reads every file when nothing can vouch for one. Which backend
-            # answers is the workspace provider's to say (`ph.seams.changes`).
+            # `tree_state` never raises, and it returns an empty state for a tree
+            # with no backend. The loop below is correct in both cases. It reads
+            # every file when nothing can vouch for one. The workspace provider
+            # decides which backend answers (`ph.seams.changes`).
             parsers: dict[str, bool] = {}
             stored_token = await anyio.to_thread.run_sync(book.token)
             state = await tree_state(ctx, fs.root_for(run.agent), since=stored_token)
@@ -670,26 +682,29 @@ async def apply(ctx: Context, config: Config) -> None:
                 run.raise_if_canceled()
                 progress.tick(count)
                 language = detect_language(path)
-                # Derived from the pack rather than checked against a name
-                # list: `.txt`, `.ini`, `.proto` and a dozen others are
-                # languages the detector claims and the tags queries do not
-                # cover, and the row's default `include` reaches all of them.
+                # This is derived from the pack and not checked against a list of
+                # names. `.txt`, `.ini`, `.proto`, and a dozen others are
+                # languages that the detector recognizes and that the tags
+                # queries do not cover. The default `include` of the row reaches
+                # all of them.
                 if language is None or not indexable(language):
                     continue
                 if config.languages and language not in config.languages:
                     continue
                 if language not in parsers:
-                    # **One hop per language, not per file.** The first file of a
-                    # language is worth a worker thread — `obtained` loads a
-                    # grammar, and fetches one that is not on disk, seconds the
-                    # first time — and every later file of it is a cached
-                    # boolean, so the 60.6 µs hop was the entire cost: 1.2 s
-                    # across a 20 000-file tree, which is the whole saving the
-                    # change filter exists to deliver, handed back.
+                    # **One thread hop for each language, not for each file.** The
+                    # first file of a language is worth a worker thread:
+                    # `obtained` loads a grammar, and fetches one that is not on
+                    # disk, which takes seconds the first time. For every later
+                    # file of that language the answer is a cached boolean, so
+                    # the 60.6 µs hop was the entire cost. Over a tree of 20 000
+                    # files that was 1.2 s, which is the whole saving that the
+                    # change filter exists to give.
                     #
-                    # Keyed per call rather than `@cache`d for the process: a
-                    # person who runs `/code-graph install` between two calls has
-                    # to see the grammar that appeared.
+                    # The answers are kept for one call, not cached for the
+                    # process with `@cache`. A person who runs `/code-graph
+                    # install` between two calls must see the grammar that
+                    # appeared.
                     parsers[language] = await anyio.to_thread.run_sync(obtained, language)
                 if not parsers[language]:
                     skipped.append(
@@ -704,9 +719,10 @@ async def apply(ctx: Context, config: Config) -> None:
                     continue
                 stored_digest, stored_vcs = known.get(path, ("", ""))
                 if stored_digest and state.vouches_for(path, stored_vcs):
-                    # Proved unchanged by git or jj, so the file is never opened.
-                    # The saving is the whole read: 5.2 ms of I/O plus 3.0 ms of
-                    # sha256 per 136 files, which is ~1.2 s on a 20 000-file tree.
+                    # git or jj proved that the file is unchanged, so the file is
+                    # never opened. The saving is the whole read: 5.2 ms of I/O
+                    # plus 3.0 ms of sha256 for 136 files, which is about 1.2 s
+                    # on a tree of 20 000 files.
                     unchanged += 1
                     continue
                 refused = fs.skip_reason(path, max_bytes=config.max_bytes, agent=run.agent)
@@ -716,27 +732,27 @@ async def apply(ctx: Context, config: Config) -> None:
                 slice_ = await fs.read(
                     path,
                     limit=None,
-                    # `skip_reason` above is this walk's bound, and it is a skip
-                    # rather than a raise on purpose: an indexing pass must not
-                    # fail because it found a minified bundle. `read`'s own
-                    # default would be a second, larger bound that raises.
+                    # `skip_reason` above is the limit for this walk. It skips and
+                    # does not raise, on purpose: an indexing pass must not fail
+                    # because it found a minified bundle. The default of `read`
+                    # would be a second, larger limit that raises.
                     max_bytes=None,
                     scope=run.scope,
                     agent=run.agent,
                     session=run.session,
                 )
-                # **No prose test here, deliberately** (X6 review). The text
-                # index refuses documents that hold no prose; source code is not
-                # prose, and the same predicate refused a module whose only
+                # **There is deliberately no prose test here** (X6 review). The
+                # text index refuses documents that hold no prose. Source code is
+                # not prose. The same predicate refused a module whose only
                 # statement is a long `__all__`, and a `TABLE = {...}` literal
-                # beside `def lookup()` — so `lookup` would have vanished from
-                # this index with nothing but a skip line to say so. Telling a
-                # minified bundle from a legitimate data module by shape is not
-                # reliable for code, and a false positive here loses symbols
-                # silently. `skip_reason`'s size bound stays this walk's guard.
-                # The content hash stays the authority on *whether* a file
-                # changed — the filter above only decides whether to open it, so
-                # the "content, not clock" guarantee is untouched.
+                # beside `def lookup()`. `lookup` would then have been lost from
+                # this index, with only a skip line to show it. The shape of a
+                # file does not reliably separate a minified bundle from a
+                # legitimate data module, and a false positive here loses
+                # symbols silently. The size limit of `skip_reason` stays the
+                # guard of this walk. The content hash stays the authority on
+                # *whether* a file changed. The filter above only decides whether
+                # to open the file, so the "content, not clock" guarantee holds.
                 digest = digest_of(slice_.text)
                 if stored_digest == digest:
                     unchanged += 1
@@ -746,9 +762,10 @@ async def apply(ctx: Context, config: Config) -> None:
                         extract, path, slice_.text, language
                     )
                 except Exception as error:
-                    # Reported and skipped rather than raised: a tree walk that
-                    # died on one unparseable file would be the failure mode the
-                    # package this replaced actually had.
+                    # The failure is reported and the file is skipped. It is not
+                    # raised. A tree walk that stopped on one file that does not
+                    # parse was a real failure of the package that this one
+                    # replaced.
                     log.debug("ph_code_graph: %s did not parse", path, exc_info=True)
                     skipped.append({"path": path, "reason": f"did not parse ({error})"})
                     continue
@@ -757,27 +774,29 @@ async def apply(ctx: Context, config: Config) -> None:
                 )
                 indexed += 1
             if not args.forget:
-                # **Gone from disk is gone from the index** (X3). A deleted file
-                # kept its symbols until somebody ran `forget` by hand, so
-                # `code_graph` went on naming definitions at paths that are not
-                # there — and a rename showed the symbol twice, once under each
-                # name, with nothing saying which was real. A pointer into a file
-                # that does not exist is the one answer this tool must not give,
-                # because the model's next move is to open it.
+                # **A file that is gone from disk is removed from the index**
+                # (X3). A deleted file used to keep its symbols until someone ran
+                # `forget` by hand. `code_graph` then continued to name
+                # definitions at paths that did not exist. A rename showed the
+                # symbol twice, one time under each name, and nothing said which
+                # one was real. A pointer into a file that does not exist is the
+                # one answer that this tool must not give, because the next step
+                # of the model is to open that file.
                 #
-                # **Asked of the filesystem, not of the walk.** "Absent from
-                # `paths`" looks like the same question and is not: `collect`
-                # stops at `max_files` and reports nothing, and the policy screen
-                # prunes whole directories — so on a tree past the cap, or with a
-                # `permissions-fs` rule hiding a subtree, the walk is a *subset*
-                # of the scope and differencing against it would forget
-                # everything it did not reach. It also settles the narrowed walk
-                # for free, where the question is not "did we cover the scope"
-                # but "is this file still there".
+                # **The question goes to the filesystem, not to the walk.**
+                # "Absent from `paths`" looks like the same question, and it is
+                # not. `collect` stops at `max_files` and reports nothing, and
+                # the policy screen prunes whole directories. On a tree past the
+                # cap, or with a `permissions-fs` rule that hides a subtree, the
+                # walk is a *subset* of the scope. A difference against the walk
+                # would remove everything that the walk did not reach. The
+                # filesystem check also handles the narrowed walk at no cost.
+                # There the question is not "did the walk cover the scope" but
+                # "is this file still there".
                 removed = await anyio.to_thread.run_sync(_forget_missing, fs, book, known, run)
-            # Stored last, and only after the loop: a token recorded before the
-            # writes would, on a crash between the two, vouch for files this run
-            # never actually indexed.
+            # Store the token last, after the loop. If the token were recorded
+            # before the writes, a crash between the two would leave a token that
+            # vouches for files that this run never indexed.
             if state.token:
                 await anyio.to_thread.run_sync(book.remember, state.token)
             stats = await anyio.to_thread.run_sync(book.stats)
@@ -806,14 +825,15 @@ async def apply(ctx: Context, config: Config) -> None:
             raise HarnessError(f"mode={args.mode} needs `query`", CODE_GRAPH_FAILED)
         indexing = await anyio.to_thread.run_sync(seam.indexing, book)
 
-        # `file_count`, not `stats()`: the header needs one number and `stats`
-        # counts symbols and refs and groups files by language — three full
-        # scans per query, growing with the corpus (1.97 ms against 0.22 ms on a
-        # 2 000-file index).
+        # Use `file_count`, not `stats()`. The header needs one number. `stats`
+        # counts symbols and refs and groups files by language: three full scans
+        # for each query, which grow with the corpus (1.97 ms against 0.22 ms on
+        # an index of 2 000 files).
         indexed = await anyio.to_thread.run_sync(book.file_count)
         name = args.query or ""
-        # `COUNT(*)`, not `len(define(name, 100))`, which materialized a hundred
-        # rows and then reported the *cap* as the count for anything past it.
+        # Use `COUNT(*)`, not `len(define(name, 100))`. That call materialized a
+        # hundred rows, and for any name past the cap it reported the *cap* as
+        # the count.
         defined = (
             await anyio.to_thread.run_sync(book.definition_count, name)
             if args.mode != "search" and name
@@ -879,8 +899,9 @@ async def apply(ctx: Context, config: Config) -> None:
             parameters=IndexArgs,
             output=ToolOutput(schema=IndexValue, render=_render_index),
             execute=index_tool,
-            # See `CodeGraphSeam` — the lock makes the outcome correct, and this
-            # keeps the scheduler from queueing two against each other (B6).
+            # See `CodeGraphSeam`. The lock makes the outcome correct, and this
+            # setting keeps the scheduler from queueing two runs against each
+            # other (B6).
             is_concurrency_safe=False,
             self_limits=True,
             **simple_views("search", "Index code", "paths"),
@@ -900,11 +921,12 @@ async def apply(ctx: Context, config: Config) -> None:
     )
 
     async def grammar_command(verb: Provisioning, _invocation: CommandContext) -> str:
-        """`/code-graph install|status` — make the grammars ready, on purpose.
+        """`/code-graph install|status`: make the grammars ready, deliberately.
 
-        A **command** rather than a tool, per the seam's own rule: a person asks
-        the harness to provision, and it costs no model turn. A confined agent
-        cannot fetch a grammar, so this is what makes its index work.
+        This is a **command** and not a tool, by the rule of the seam: a person
+        asks the harness to provision, and that costs no model turn. A confined
+        agent cannot fetch a grammar, so this command is what makes the index of
+        such an agent work.
         """
         wanted = [one for one in (config.languages or DEFAULT_LANGUAGES) if indexable(one)]
         if verb == "status":
@@ -940,13 +962,15 @@ def _symbols(rows: list[SymbolRow]) -> list[dict[str, Any]]:
 
 
 def _fts(query: str) -> str:
-    """A model's words as an FTS5 expression, with its syntax neutralized.
+    """Convert the words of a model to an FTS5 expression, with the FTS5 syntax
+    neutralized.
 
-    FTS5 reads `-`, `"`, `*`, `(`, `:` and `NEAR` as operators, so a query like
-    `read-before-edit` is a syntax error and `foo:bar` is a column filter that
-    matches nothing. A model writing prose did not mean either. Every term is
-    quoted and the set is OR-ed, which is what "find symbols about these words"
-    should do — and it cannot raise on the model's phrasing.
+    FTS5 reads `-`, `"`, `*`, `(`, `:`, and `NEAR` as operators. A query such as
+    `read-before-edit` is therefore a syntax error, and `foo:bar` is a column
+    filter that matches nothing. A model that writes prose means neither. Each
+    term is quoted and the terms are joined with OR, which is the correct meaning
+    of "find symbols about these words". The expression also cannot raise on the
+    wording of the model.
     """
     terms = [one for one in query.replace('"', " ").split() if one]
     if not terms:

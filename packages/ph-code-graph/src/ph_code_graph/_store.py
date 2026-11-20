@@ -1,47 +1,48 @@
-"""The graph on disk: four tables and a small `meta`, an FTS index, and one
-recursive query.
+"""The graph on disk: four tables, a small `meta`, an FTS index, and one recursive query.
 
 ## Why the standard library and not `pyturso`
 
-pH's session log runs on turso, so this is the odd one out and the reason is
-measured. Against a real 40 MB CodeGraph database (11 396 nodes, 36 830 edges),
-`pyturso` served indexed lookups, joins and aggregates correctly — and then:
+The session log of pH runs on turso, so this module is the exception, and the
+reason is measured. Against a real 40 MB CodeGraph database (11 396 nodes,
+36 830 edges), `pyturso` served indexed lookups, joins, and aggregates correctly.
+It then failed in three ways:
 
-* **FTS5 is absent.** A `CREATE VIRTUAL TABLE … USING fts5` is invisible to it,
-  shadow tables included. That is `search`.
-* **`Recursive CTEs are not yet supported`.** That is `impact`.
-* **`json_extract` silently returns NULL** where SQLite returns the value —
+* **FTS5 is absent.** `pyturso` does not see a `CREATE VIRTUAL TABLE … USING
+  fts5`, or its shadow tables. `search` needs FTS5.
+* **`Recursive CTEs are not yet supported`.** `impact` needs a recursive CTE.
+* **`json_extract` silently returns NULL** where SQLite returns the value:
   measured `0.95` against `None` on the same rows. A wrong answer with no error
-  is worse than a missing feature, and it is what makes the first two look like
-  gaps rather than the same class of problem.
+  is worse than a missing feature. It also shows that the first two are not only
+  gaps but the same class of problem.
 
-Two of the six queries this store answers are exactly the two turso cannot do, so
-it uses `sqlite3` from the standard library — SQLite 3.45, FTS5 compiled in, no
-dependency to add. If turso grows both, this is one import.
+Two of the six queries that this store answers are exactly the two that turso
+cannot run. The store therefore uses `sqlite3` from the standard library: SQLite
+3.45, with FTS5 compiled in, and no dependency to add. If turso gets both
+features, the change here is one import.
 
 ## The schema, and what it deliberately is not
 
-`files` · `symbols` · `refs` · `imports`, plus `symbols_fts`, and `meta` for the
-two facts about the store itself: its schema version and the version-control
-token it was last indexed at. A **name-based**
-graph: a reference records the name it used, and `callers`/`callees` join on
-that name. It is not a resolved graph — two `register` methods in two classes
-are one name here — and every query that could be ambiguous reports how many
-definitions the name has, so the caller can see it rather than being quietly
-given one of them.
+The tables are `files`, `symbols`, `refs`, and `imports`, plus `symbols_fts`.
+`meta` holds the two facts about the store itself: its schema version, and the
+version-control token at which it was last indexed. This is a **name-based**
+graph. A reference records the name that it used, and `callers` and `callees`
+join on that name. It is not a resolved graph: two `register` methods in two
+classes are one name here. Every query that could be ambiguous reports how many
+definitions the name has. The caller can then see the ambiguity, and is not
+silently given one of the definitions.
 
-That is the honest ceiling of this approach, and the reason is worth stating: a
-*resolved* graph is import-graph plus scope plus type inference per language, and
-in the tool this package replaces that was 29 708 lines of it. Name-based
-answers most of what an agent asks ("who calls this", "what does this touch")
-and says so where it cannot.
+That is the real limit of this approach, and the reason is worth stating. A
+*resolved* graph needs an import graph, scope, and type inference for each
+language. In the tool that this package replaces, that was 29 708 lines. A
+name-based graph answers most of what an agent asks ("who calls this", "what does
+this touch") and says so where it cannot.
 
 ## Incremental by content, not by clock
 
-A file is re-extracted when its **sha256 changes**, never on an mtime — a
-checkout, a rebase or a `touch` moves mtimes without moving content, and
-re-indexing a repository because git changed some timestamps is the kind of cost
-nobody attributes correctly. Re-running the indexer over an unchanged tree
+A file is extracted again when its **sha256 changes**, never because of an mtime.
+A checkout, a rebase, or a `touch` changes mtimes without changing content.
+Nobody attributes the cost correctly when a repository is indexed again because
+git changed some timestamps. A second run of the indexer over an unchanged tree
 therefore reads and hashes, and writes nothing.
 
 @module ph_code_graph._store
@@ -66,16 +67,17 @@ __all__ = ["EMPTY_STATS", "CodeGraphStore", "Hit", "IndexVersion", "SymbolRow", 
 log = logging.getLogger("ph_code_graph.store")
 
 SCHEMA_VERSION = 1
-"""The baseline. Nothing has shipped, so there is no second shape in the world
-and no migration to write — `SCHEMA` is simply what a version-1 index is.
+"""The baseline. Nothing has shipped, so only one shape exists and there is no
+migration to write. `SCHEMA` is simply what a version-1 index is.
 
-Read and refused by `prepare()` even so, because that is the half that was
-missing rather than a courtesy: `meta` was written on every open and read
-nowhere, so it was state that could only ever be wrong. The first bump that
-costs anybody a rebuild is the first one that will be believed."""
+`prepare()` still reads the version and refuses a mismatch. That check was the
+missing half, not a courtesy. `meta` was written on every open and read nowhere,
+so it was state that could only be wrong. The first version bump that costs
+someone a rebuild is the first one that will be believed."""
 
 EMPTY_STATS: dict[str, Any] = {"files": 0, "symbols": 0, "refs": 0, "languages": []}
-"""What an absent or schemaless index reports. One literal, two callers."""
+"""What an absent index, or an index with no schema, reports. One literal for
+two callers."""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -130,10 +132,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbols_fts USING fts5(
 
 
 class IndexVersion(RuntimeError):
-    """The database was written by a schema this build does not read.
+    """A schema that this build does not read wrote the database.
 
-    Its own type because the only fix is a human decision — delete and rebuild
-    — exactly as `ph_text_index._store.IndexMismatch` is for the same reason.
+    This has its own type because the only fix is a human decision: delete the
+    file and rebuild. `ph_text_index._store.IndexMismatch` exists for the same
+    reason.
     """
 
 
@@ -167,12 +170,12 @@ class SymbolRow:
 
     @property
     def lines(self) -> int:
-        """How many lines the definition spans.
+        """The number of lines that the definition spans.
 
-        Derived rather than stored. It was a field fed by an `AS span` clause in
-        six separate SELECTs, so a seventh query that forgot the alias failed at
-        row-mapping time rather than at the query — and it was a third value
-        that had to agree with two others.
+        This is derived, not stored. It was a field that an `AS span` clause
+        filled in six separate SELECTs. A seventh query that forgot the alias
+        would fail when a row was mapped, not at the query. It was also a third
+        value that had to agree with two others.
         """
         return self.end_line - self.start_line + 1
 
@@ -190,22 +193,23 @@ class SymbolRow:
 
 @dataclass(frozen=True, slots=True)
 class Hit:
-    """An edge: a symbol at the far end, and where the reference itself is.
+    """An edge: a symbol at the far end, and the place of the reference itself.
 
-    **`path` and `ref_path` are different files and both matter.** For `callers`
-    they coincide — the calling symbol contains the call. For `callees` they do
-    not: the symbol is the callee's *definition*, while the reference is a line
-    in the caller. Rendering one against the other printed `target.py:941` for a
-    line that lives in `context.py`, which is a pointer to nothing.
+    **`path` and `ref_path` are different files, and both matter.** For
+    `callers` they are the same file, because the calling symbol contains the
+    call. For `callees` they are not: the symbol is the *definition* of the
+    callee, and the reference is a line in the caller. When one was rendered
+    against the other, the output was `target.py:941` for a line that is in
+    `context.py`, which points to nothing.
     """
 
     symbol: SymbolRow
     line: int
-    """Where the reference is written — the line to open."""
+    """The line where the reference is written. This is the line to open."""
     ref_path: str
-    """Which file that line is in. See the class docstring."""
+    """The file that holds that line. See the class docstring."""
     via: str
-    """The referenced name, which for a name-based graph is the edge's label."""
+    """The referenced name. In a name-based graph it is the label of the edge."""
 
     def as_value(self) -> dict[str, Any]:
         return {
@@ -217,16 +221,16 @@ class Hit:
 
 
 def _fts_values(rowid: int, name: str, doc: str | None, path: str) -> tuple[int, str, str, str]:
-    """One `symbols_fts` row, for the insert **and** the delete that undoes it.
+    """One `symbols_fts` row, for the insert **and** for the delete that undoes it.
 
-    FTS5's `'delete'` command re-derives the postings to remove from the values
-    it is given, so a delete whose tuple differs from the insert's by so much as
-    one NULL removes nothing — and SQLite reports no error for it. `_forget`
-    carried a copy of this expression with a comment saying it mirrored the
-    insert, which is a reader being asked to check two expressions in two
-    methods rather than a compiler being asked to.
+    The `'delete'` command of FTS5 derives the postings to remove from the values
+    that it is given. A delete whose tuple differs from the tuple of the insert,
+    even by one NULL, removes nothing, and SQLite reports no error. `_forget`
+    used to carry a copy of this expression, with a comment that said it mirrored
+    the insert. That asked a reader to check two expressions in two methods, when
+    one function makes the agreement structural.
 
-    `doc or ""` is the whole substance: `symbols.doc` is nullable and the FTS
+    The essential part is `doc or ""`: `symbols.doc` is nullable, and the FTS
     column is not.
     """
     return (rowid, name, doc or "", path)
@@ -234,7 +238,7 @@ def _fts_values(rowid: int, name: str, doc: str | None, path: str) -> tuple[int,
 
 @dataclass(slots=True)
 class CodeGraphStore:
-    """The index. **Blocking**; the seam calls it in a worker thread."""
+    """The index. Its methods **block**, so the seam calls them in a worker thread."""
 
     path: Path
 
@@ -242,22 +246,22 @@ class CodeGraphStore:
 
     @contextmanager
     def _open(self) -> Iterator[sqlite3.Connection]:
-        """A connection with the pragmas this index wants, closed on the way out.
+        """A connection with the pragmas that this index needs, closed on exit.
 
-        Opened per call rather than held: `sqlite3` connections are not safe to
-        share across threads, and every caller here arrives on whichever worker
-        `to_thread` picked. WAL so a read during a write does not block, and
-        `foreign_keys` off because the cascades are done in Python — a file's
-        rows are deleted by path, which is one statement per table and clearer
-        than a trigger nobody sees.
+        A connection is opened for each call and not held. `sqlite3` connections
+        are not safe to share across threads, and each caller here arrives on
+        whichever worker `to_thread` chose. WAL is on, so that a read during a
+        write does not block. `foreign_keys` is off because the cascades are done
+        in Python: the rows of a file are deleted by path, with one statement for
+        each table, which is clearer than a trigger that nobody sees.
 
-        **It creates nothing.** It used to take `write=True` and then replay
-        `SCHEMA` plus a `meta` upsert on every call — and `put` is per file, so a
-        20 000-file index ran 20 000 no-op schema scripts and 20 000 durable
-        commits of a row nobody read. Measured at 1.8 ms per file, 24 % of all
-        write time, and 70x on a synthetic run where WAL checkpointed per file.
-        `prepare()` is the one writer of the schema, and the indexer already
-        calls it once before the loop.
+        **This method creates nothing.** It used to take `write=True`, and then
+        ran `SCHEMA` and a `meta` upsert on every call. `put` runs for each file,
+        so an index of 20 000 files ran 20 000 schema scripts that did nothing,
+        and 20 000 durable commits of a row that nobody read. That measured
+        1.8 ms per file, 24 % of all write time, and 70x on a synthetic run in
+        which WAL checkpointed for each file. `prepare()` is the one writer of
+        the schema, and the indexer already calls it one time before the loop.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path, isolation_level=None)) as connection:
@@ -268,24 +272,24 @@ class CodeGraphStore:
 
     @contextmanager
     def _writing(self) -> Iterator[sqlite3.Connection]:
-        """One connection with an actual transaction around it.
+        """One connection, with a real transaction around it.
 
-        **`with connection:` is not one here**, which is the trap this exists to
-        close. `_open` asks for `isolation_level=None` so that a read costs no
-        implicit transaction and `PRAGMA journal_mode` can take effect at all —
-        and in autocommit the connection's own context manager has no
-        transaction to commit, so each of a file's ~60 statements was its own
-        durable commit. Measured over 137 real files: **8.19 ms per file as it
-        was, 3.42 ms with this**, for the atomicity `put`'s docstring already
-        claimed.
+        **`with connection:` is not a transaction here.** This method exists to
+        close that trap. `_open` asks for `isolation_level=None`, so that a read
+        costs no implicit transaction and `PRAGMA journal_mode` can take effect.
+        In autocommit, the context manager of the connection has no transaction
+        to commit. Each of the roughly 60 statements for a file was therefore its
+        own durable commit. Measured over 137 real files: **8.19 ms per file
+        before, 3.42 ms with this method**. It also gives the atomicity that the
+        docstring of `put` already claimed.
 
-        `BEGIN IMMEDIATE` rather than a deferred begin: this only ever wraps
-        writes, and taking the write lock up front turns a later
-        mid-transaction contention into an honest wait at the start.
+        The transaction starts with `BEGIN IMMEDIATE`, not a deferred begin. This
+        method only wraps writes. Taking the write lock at the start turns
+        contention in the middle of a transaction into a plain wait at the start.
 
-        Used by the single-statement writer too, which does not need it: what
-        that one needed was to stop *reading* as though `, connection:` were a
-        transaction, since that is the whole mistake.
+        The single-statement writer also uses this method, although it does not
+        need a transaction. Its code must not *read* as if `, connection:` were a
+        transaction, because that reading is the whole mistake.
         """
         with self._open() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -297,13 +301,14 @@ class CodeGraphStore:
             connection.execute("COMMIT")
 
     def prepare(self) -> None:
-        """Create the schema and stamp its version. Idempotent.
+        """Create the schema and stamp its version. Safe to call again.
 
-        :raises IndexVersion: when the file on disk was written by a schema this
-            build does not read. Checked rather than assumed, which is the half
-            that was missing: `meta` was written on every open and read nowhere,
-            so it was state that could only ever be wrong. The sibling package's
-            sidecar `format` is read and refused, and this is that.
+        :raises IndexVersion: when a schema that this build does not read wrote
+            the file on disk. The version is checked, not assumed. That check was
+            the missing half: `meta` was written on every open and read nowhere,
+            so it was state that could only be wrong. The sibling package reads
+            the `format` of its sidecar and refuses a mismatch, and this is the
+            same check.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.path, isolation_level=None)) as connection:
@@ -327,15 +332,16 @@ class CodeGraphStore:
     # -------------------------------------------------------------- indexing ----
 
     def known(self) -> dict[str, tuple[str, str]]:
-        """`{path: (digest, vcs_id)}` for everything already indexed.
+        """`{path: (digest, vcs_id)}` for every file that is already indexed.
 
-        The whole map in one read, because the indexer's next act is to compare
-        every candidate against it — a `SELECT` per file would be one statement
-        per file to answer a question one statement answers.
+        The whole map comes from one read, because the indexer next compares
+        every candidate with it. A `SELECT` for each file would use one statement
+        per file for a question that one statement answers.
 
-        Both ids, because the indexer asks two questions per file and they have
-        different answers: `vcs_id` decides whether the file need be *opened*,
-        and `digest` decides whether what was opened is different.
+        Both ids are returned, because the indexer asks two questions for each
+        file, and they have different answers. `vcs_id` decides whether the file
+        must be *opened*. `digest` decides whether the opened content is
+        different.
         """
         if not self.exists():
             return {}
@@ -343,16 +349,18 @@ class CodeGraphStore:
             try:
                 rows = connection.execute("SELECT path, digest, vcs_id FROM files").fetchall()
             except sqlite3.OperationalError:
-                # No schema yet: an empty index and an absent one are the same
-                # thing to a caller, and the indexer is about to create it.
+                # No schema yet. To a caller, an empty index and an absent index
+                # are the same, and the indexer is about to create the schema.
                 return {}
         return {row["path"]: (row["digest"], row["vcs_id"]) for row in rows}
 
     def token(self) -> str:
-        """The version-control token stored at the last index. `""` if none.
+        """The version-control token that was stored at the last index, or `""` if
+        there is none.
 
-        jj's working-copy id, which its one-call diff needs as a starting point.
-        Per index rather than per file, because it describes the *tree*."""
+        This is the working-copy id of jj, which its one-call diff needs as a
+        starting point. It is kept for the index and not for each file, because
+        it describes the *tree*."""
         if not self.exists():
             return ""
         with self._open() as connection:
@@ -363,14 +371,15 @@ class CodeGraphStore:
         return str(row["value"]) if row is not None else ""
 
     def remember(self, token: str) -> None:
-        """Store the token for the next run to diff from."""
+        """Store the token, so that the next run can diff from it."""
         with self._writing() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES ('vcs', ?)", (token,)
             )
 
     def forget(self, paths: Sequence[str]) -> int:
-        """Drop every row belonging to `paths`. Returns how many files went."""
+        """Delete every row that belongs to `paths`. Returns the number of files
+        removed."""
         if not paths:
             return 0
         with self._writing() as connection:
@@ -380,23 +389,24 @@ class CodeGraphStore:
     def _forget(self, connection: sqlite3.Connection, paths: Sequence[str]) -> int:
         gone = 0
         for path in paths:
-            # The FTS rows first, **with the values they were inserted under**: a
-            # contentless table cannot be asked which rows belong to a path, so
-            # they come from `symbols` while it still has them (X1).
+            # Delete the FTS rows first, **with the values that they were inserted
+            # with**. A contentless table cannot report the rows that belong to a
+            # path, so the values come from `symbols` while it still has them
+            # (X1).
             #
-            # The columns and not just the rowid, because that is what FTS5's
-            # `'delete'` command needs: it re-derives the postings to remove from
-            # the values it is given, and three empty strings therefore remove
-            # *nothing*. SQLite reports no error for it. Every posting of every
-            # re-indexed symbol stayed, and `symbols.id` has no `AUTOINCREMENT` —
-            # so the next insert took the dead row's id and the stale posting
-            # started pointing at a different symbol. `search` joins the rowid
-            # back to `symbols`, so the old name returned the new symbol: worse
-            # than a miss, because it reads like an answer.
+            # The delete passes the columns and not only the rowid, because the
+            # `'delete'` command of FTS5 needs them. It derives the postings to
+            # remove from the values that it is given, so three empty strings
+            # remove *nothing*, and SQLite reports no error. In that state, every
+            # posting of every re-indexed symbol stayed. `symbols.id` has no
+            # `AUTOINCREMENT`, so the next insert took the id of the dead row,
+            # and the stale posting then pointed at a different symbol. `search`
+            # joins the rowid back to `symbols`, so the old name returned the new
+            # symbol. That is worse than a miss, because it reads like an answer.
             #
-            # Both tuples come from `_fts_values`, so the agreement the paragraph
-            # above depends on is structural rather than a comment asking a
-            # reader to check two expressions in two methods.
+            # Both tuples come from `_fts_values`. The agreement that the
+            # paragraph above depends on is therefore structural, and does not
+            # depend on a reader who checks two expressions in two methods.
             stale = [
                 _fts_values(row["id"], row["name"], row["doc"], row["path"])
                 for row in connection.execute(
@@ -415,13 +425,15 @@ class CodeGraphStore:
         return gone
 
     def put(self, path: str, digest: str, extraction: Extraction, vcs_id: str = "") -> int:
-        """Replace one file's rows with `extraction`. Returns symbols written.
+        """Replace the rows of one file with `extraction`. Returns the number of
+        symbols written.
 
-        Replace, not merge: a file is the unit of extraction, so the old rows are
-        deleted and the new ones written in one transaction. A crash mid-write
-        therefore leaves the file absent from `files`, which the indexer treats
-        as "not indexed" and does again — rather than leaving half its symbols
-        behind, which nothing would ever notice.
+        This replaces and does not merge. A file is the unit of extraction, so
+        the old rows are deleted and the new rows are written in one transaction.
+        A crash during the write therefore leaves the file absent from `files`.
+        The indexer treats that as "not indexed" and does the file again. The
+        alternative, half of its symbols left behind, is something that nothing
+        would ever notice.
         """
         with self._writing() as connection:
             self._forget(connection, [path])
@@ -457,16 +469,16 @@ class CodeGraphStore:
                     "INSERT INTO symbols_fts(rowid, name, doc, path) VALUES (?, ?, ?, ?)",
                     _fts_values(identifier, definition.name, definition.doc, path),
                 )
-            # One `{line: tightest definition}` table for the whole file, rather
-            # than a scan of every definition per reference: that was
-            # O(definitions x references), which a generated file with 1 500
-            # definitions and 3 000 references turned into 58 ms — as much as its
-            # entire parse.
+            # Build one `{line: tightest definition}` table for the whole file,
+            # and do not scan every definition for each reference. The scan was
+            # O(definitions x references). For a generated file with 1 500
+            # definitions and 3 000 references it took 58 ms, as much as the
+            # whole parse.
             #
-            # Resolved here rather than by a later pass either way: the
-            # containing definition is known while the file's own definitions are
-            # in hand, and a join that recomputed containment per query would be
-            # a range scan over every symbol in the file.
+            # The owner is resolved here, not in a later pass. The containing
+            # definition is known while the definitions of the file are in hand.
+            # A join that computed containment again for each query would be a
+            # range scan over every symbol in the file.
             owner = owners(extraction.definitions)
             connection.executemany(
                 "INSERT INTO refs(path, name, kind, line, from_symbol) VALUES (?, ?, ?, ?, ?)",
@@ -491,7 +503,8 @@ class CodeGraphStore:
     # --------------------------------------------------------------- queries ----
 
     def search(self, query: str, limit: int) -> list[SymbolRow]:
-        """Names and docstrings, by relevance. FTS5, which is why not turso."""
+        """Search names and docstrings by relevance. This uses FTS5, which turso
+        does not have."""
         with self._open() as connection:
             rows = connection.execute(
                 """SELECT s.*
@@ -513,7 +526,8 @@ class CodeGraphStore:
         return [_row(one) for one in rows]
 
     def callers(self, name: str, limit: int) -> list[Hit]:
-        """Symbols containing a reference to `name`, and the line of each."""
+        """The symbols that contain a reference to `name`, and the line of each
+        reference."""
         with self._open() as connection:
             rows = connection.execute(
                 """SELECT s.*,
@@ -528,7 +542,7 @@ class CodeGraphStore:
         ]
 
     def callees(self, name: str, limit: int) -> list[Hit]:
-        """Definitions of the names referenced from inside `name`."""
+        """The definitions of the names that are referenced from inside `name`."""
         with self._open() as connection:
             rows = connection.execute(
                 """SELECT t.*,
@@ -550,17 +564,18 @@ class CodeGraphStore:
         ]
 
     def impact(self, name: str, distance: int, limit: int) -> list[tuple[int, SymbolRow]]:
-        """Transitive callers, `1..distance` hops out, with the hop each is at.
+        """The transitive callers, `1..distance` hops out, each with its hop count.
 
-        **The recursive CTE that turso cannot run.** One statement rather than a
-        BFS of N queries per ring — the difference is not style: a Python loop
-        would issue a query per frontier symbol, and this is the query an agent
-        asks when it wants to know what a change breaks, over a graph where the
-        interesting names have hundreds of callers.
+        **This is the recursive CTE that turso cannot run.** It is one statement,
+        not a breadth-first search with N queries for each ring. The difference
+        is not style. A Python loop would issue one query for each symbol on the
+        frontier. An agent asks this query when it wants to know what a change
+        breaks, over a graph in which the interesting names have hundreds of
+        callers.
 
-        `MIN(depth)` because a symbol reachable at two distances is at the
-        nearer one, which is what makes the rings a budget rather than a
-        multiset — the same rule the old row's hand-written walk had.
+        `MIN(depth)` is used because a symbol that can be reached at two
+        distances belongs to the nearer one. That makes the rings a budget and
+        not a multiset. The hand-written walk of the old row had the same rule.
         """
         with self._open() as connection:
             rows = connection.execute(
@@ -585,7 +600,7 @@ class CodeGraphStore:
     def entities(
         self, prefix: str | None, kind: str | None, limit: int, offset: int
     ) -> tuple[list[SymbolRow], int]:
-        """The biggest definitions first — "what is worth opening" in one list."""
+        """The biggest definitions first: "what is worth opening", in one list."""
         where = ["1 = 1"]
         args: list[Any] = []
         if prefix:
@@ -612,12 +627,13 @@ class CodeGraphStore:
         return [_row(one) for one in rows], total
 
     def file_count(self) -> int:
-        """How many files are indexed. **The only number a query header needs.**
+        """The number of indexed files. **A query header needs only this number.**
 
-        Its own method because `stats()` also counts `symbols` and `refs` and
-        groups `files` by language — three full scans a query was paying per
-        call to fill one field. Measured on a 2 000-file index: 1.97 ms against
-        0.22 ms, and it grows with the corpus without bound.
+        This is its own method because `stats()` also counts `symbols` and
+        `refs`, and groups `files` by language. Those are three full scans, and a
+        query paid for them on each call to fill one field. Measured on an index
+        of 2 000 files: 1.97 ms against 0.22 ms, and the cost grows with the
+        corpus without limit.
         """
         if not self.exists():
             return 0
@@ -628,11 +644,12 @@ class CodeGraphStore:
                 return 0
 
     def definition_count(self, name: str) -> int:
-        """How many places define `name` — the ambiguity a name-based graph owes.
+        """The number of places that define `name`. A name-based graph must report
+        this ambiguity.
 
-        `COUNT(*)` rather than `len(define(name, 100))`, which materialized up to
-        a hundred rows and then reported the *cap* as the count for anything
-        past it.
+        This uses `COUNT(*)` and not `len(define(name, 100))`. That call
+        materialized up to a hundred rows, and for any name past the cap it
+        reported the *cap* as the count.
         """
         with self._open() as connection:
             return int(
@@ -642,7 +659,7 @@ class CodeGraphStore:
             )
 
     def stats(self) -> dict[str, Any]:
-        """What `phern doctor` and every result's header report."""
+        """The counts that `phern doctor` and the header of every result report."""
         if not self.exists():
             return dict(EMPTY_STATS)
         with self._open() as connection:

@@ -1,38 +1,40 @@
-"""One file in, definitions and references out — with the lines they are on.
+"""One file in, definitions and references out, with the lines that they are on.
 
-Two passes over `tree-sitter-language-pack`, because each answers something the
-other cannot and both are cheap:
+The module makes two passes over `tree-sitter-language-pack`. Each pass answers
+something that the other cannot, and both are cheap:
 
-* **`process()`** — the pack's own intelligence layer. Definitions with kinds,
-  the file's imports, and its docstrings and comments. What it does not give is
-  *references*: `SymbolInfo` says a function exists, never who calls it. It also
-  does not give a symbol its own prose — `SymbolInfo.doc` is always `None`; see
-  `_documented`.
-* **the tags query** — tree-sitter's own `tags.scm` for the language, the same
-  data GitHub's code navigation is built on. `@definition.*` and, crucially,
-  `@reference.call`. That is the edge this package exists to record.
+* **`process()`** is the intelligence layer of the pack. It gives definitions
+  with kinds, the imports of the file, and its docstrings and comments. It does
+  not give *references*: `SymbolInfo` says that a function exists, never who
+  calls it. It also does not give a symbol its own prose. `SymbolInfo.doc` is
+  always `None`. See `_documented`.
+* **The tags query** is the `tags.scm` of tree-sitter for the language. GitHub
+  builds its code navigation on the same data. It gives `@definition.*` and,
+  most important, `@reference.call`. That is the edge that this package exists
+  to record.
 
-Measured over `packages/ph-core/src/ph`: 136 files and 1.58 MiB through
-`process()` in 219 ms and through the tags query in 108 ms, so both passes
-together index this repository's core in about a third of a second. Parsing
-twice is worth more than the parse it saves.
+Measured over `packages/ph-core/src/ph`: 136 files and 1.58 MiB take 219 ms
+through `process()` and 108 ms through the tags query. Both passes together index
+the core of this repository in about a third of a second. The second parse gives
+more value than it costs.
 
 ## The two coordinate systems, reconciled here
 
-`ProcessConfig` spans are **0-based**; tree-sitter points are 0-based too, and
-every line number pH puts in front of a model is **1-based**, because that is
-what `read` takes and what an editor shows. Both are normalized on the way out
-of this module, once, so nothing downstream has to remember which source a
-number came from. Getting this wrong is a one-line-off pointer, which is the
-kind of error a model stops trusting the tool over rather than reporting.
+`ProcessConfig` spans are **0-based**, and tree-sitter points are 0-based too.
+Every line number that pH shows to a model is **1-based**, because that is what
+`read` takes and what an editor shows. Both are normalized one time, on the way
+out of this module. Nothing downstream has to remember which source a number came
+from. An error here gives a pointer that is off by one line. A model does not
+report that kind of error. It stops trusting the tool.
 
 ## Query inheritance
 
-`tree-sitter-typescript`'s grammar extends javascript's, and upstream splits the
-tags queries the same way: the typescript query covers only what typescript adds
-(interfaces, signatures, abstract classes), so `class`, `function` and `call`
-live in the *javascript* query. A `.ts` file matched against the typescript
-query alone yields two tags and no calls — measured. `INHERITS` is that fact.
+The grammar of `tree-sitter-typescript` extends the javascript grammar, and
+upstream splits the tags queries in the same way. The typescript query covers
+only what typescript adds (interfaces, signatures, abstract classes). `class`,
+`function`, and `call` are in the *javascript* query. A `.ts` file that is
+matched against the typescript query alone yields two tags and no calls
+(measured). `INHERITS` records that fact.
 
 @module ph_code_graph._extract
 """
@@ -70,52 +72,56 @@ __all__ = [
 log = logging.getLogger("ph_code_graph.extract")
 
 _configured: Path | None = None
-"""The cache base this process last handed the pack, or `None` for its default.
+"""The cache base that this process last gave to the pack, or `None` for the
+default of the pack.
 
-Mirrored here because the pack does not report it: `cache_dir()` answers with the
-resolved leaf it derives, which cannot be fed back in. Module state because the
-thing it mirrors is a module-level global in somebody else's library — recording
-it anywhere narrower would be a second answer to a process-wide question.
+The value is mirrored here because the pack does not report it. `cache_dir()`
+returns the resolved leaf that it derives, and that leaf cannot be passed back
+in. The value is module state because it mirrors a module-level global in
+another library. A record in any narrower place would be a second answer to a
+process-wide question.
 """
 
 _fetch_refused = False
-"""Whether a grammar fetch has failed in this process: the last `obtained`
-tries. Process-wide for `_configured`'s reason; `_reset` clears it."""
+"""Whether a grammar fetch has failed in this process. After a failure,
+`obtained` tries no more fetches. The value is process-wide for the same reason
+as `_configured`, and `_reset` clears it."""
 
 _claims: list[_CacheClaim] = []
-"""Every mount's claim on the pack's cache, oldest first (`cache_release`): the
-newest is in force, and the base from before the first is what the last release
-puts back."""
+"""The claim of each mount on the cache of the pack, oldest first
+(`cache_release`). The newest claim is in force. The last release restores the
+base from before the first claim."""
 
 _base: Path | None = None
-"""What the cache was before the first claim still held was made."""
+"""The cache base before the first claim that is still held was made."""
 
 INHERITS: dict[str, tuple[str, ...]] = {
     "typescript": ("javascript",),
     "tsx": ("javascript",),
 }
-"""Languages whose tags query is only half the story. See the module docstring."""
+"""The languages whose own tags query is only part of the query. See the module
+docstring."""
 
 REFERENCE_KINDS = ("call",)
-"""Which `@reference.*` captures become edges.
+"""The `@reference.*` captures that become edges.
 
-`call` only, deliberately. The tags queries also emit `reference.type`,
-`reference.class`, `reference.implementation` and more, and each is a real
-relationship — but they answer a different question than "what runs what", and
-mixing them into one edge table would make `callers` return the places that
-merely *mention* a type. They are dropped rather than stored-and-filtered so the
-index does not carry rows nothing reads.
+Only `call`, deliberately. The tags queries also emit `reference.type`,
+`reference.class`, `reference.implementation`, and more. Each is a real
+relationship, but they answer a different question from "what runs what". In one
+edge table with calls, they would make `callers` return the places that only
+*mention* a type. They are dropped, not stored and filtered, so that the index
+does not carry rows that nothing reads.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class Definition:
-    """A symbol this file defines."""
+    """A symbol that this file defines."""
 
     name: str
     kind: str
-    """`function`, `class`, `method`, `interface`, `module`, `constant` — whatever
-    the language's own tags query calls it, with the `definition.` prefix off."""
+    """`function`, `class`, `method`, `interface`, `module`, `constant`: the name
+    that the tags query of the language uses, without the `definition.` prefix."""
     start_line: int
     """1-based, inclusive."""
     end_line: int
@@ -125,7 +131,7 @@ class Definition:
 
 @dataclass(frozen=True, slots=True)
 class Reference:
-    """A name this file uses, and where."""
+    """A name that this file uses, and the line where it uses it."""
 
     name: str
     kind: str
@@ -135,7 +141,7 @@ class Reference:
 
 @dataclass(frozen=True, slots=True)
 class Extraction:
-    """Everything one file yielded."""
+    """Everything that one file yielded."""
 
     language: str
     definitions: tuple[Definition, ...]
@@ -152,34 +158,38 @@ def _pack() -> Any:  # noqa: ANN401
 
 
 def cache_release(directory: Path) -> Callable[[], None]:
-    """Point the pack's grammar cache at `directory`; return the restore.
+    """Point the grammar cache of the pack at `directory`, and return the function
+    that restores it.
 
-    **An `enter` returning its own release**, which is the shape `ctx.effect`
-    takes — so the mutation unwinds with the row that made it (§4.9, I2) instead
-    of outliving it. `pack.configure` is process-global and last-writer-wins, so
-    without this the library kept pointing at an unmounted row's `$PH_CACHE`:
-    visible in this suite, where that path is a per-test `tmp_path` the pack went
-    on holding after teardown.
+    **This is an `enter` that returns its own release**, which is the shape that
+    `ctx.effect` takes. The change therefore unwinds with the row that made it
+    (§4.9, I2) and does not outlive it. `pack.configure` is process-global, and
+    the last writer wins. Without the release, the library kept pointing at the
+    `$PH_CACHE` of an unmounted row. This showed in the test suite, where that
+    path is a per-test `tmp_path` that the pack still held after teardown.
 
-    Harmless in production today — every mount in a process computes the same
-    path — and wrong depth all the same, which is the whole argument for the
-    rule: a global taken without a release is one nobody notices until two
-    deployments in one process disagree.
+    In production today this is harmless, because every mount in a process
+    computes the same path. It was still at the wrong depth, and that is the
+    argument for the rule: nobody notices a global that is taken without a
+    release until two deployments in one process disagree.
     """
-    # **The base we set, not `cache_dir()`.** That reports the *resolved* leaf —
-    # `<base>/tree-sitter-language-pack/<version>/libs` — so feeding it back to
-    # `PackConfig(cache_dir=...)` makes the pack append its own suffix a second
-    # time and the restore nests instead of restoring. Caught by the test for
-    # this function, which is the argument for having written one.
+    # **Restore the base that this module set, not `cache_dir()`.** `cache_dir()`
+    # reports the *resolved* leaf, `<base>/tree-sitter-language-pack/<version>/libs`.
+    # If that is passed back to `PackConfig(cache_dir=...)`, the pack appends its
+    # suffix a second time, and the restore nests the path and does not restore
+    # it. The test for this function caught that, which is the argument for the
+    # test.
     #
-    # **Each release takes back its own claim and no other** (Holdings rule 4). It
-    # restored whatever was set before it, so two mounts released out of order reset
-    # the cache under the one still up, and the last release then restored a
-    # directory already gone with its row. The newest claim still held is in force;
-    # with none left, the base from before the first.
-    # Recorded once the pack took it (Holdings rule 1): a directory it refused —
-    # an unwritable `$PH_CACHE` — raises out of here with no release handed back,
-    # and a claim recorded first stayed on top of the stack for good.
+    # **Each release takes back its own claim and no other** (Holdings rule 4).
+    # An earlier version restored whatever was set before the claim. Two mounts
+    # that were released out of order then reset the cache under the mount that
+    # was still up, and the last release restored a directory that was already
+    # gone with its row. Now the newest claim that is still held is in force.
+    # With no claim left, the base from before the first claim is restored.
+    # The claim is recorded after the pack accepted the directory (Holdings rule
+    # 1). When the pack refuses a directory, such as an unwritable `$PH_CACHE`,
+    # this function raises and returns no release. A claim that was recorded
+    # first then stayed on top of the stack permanently.
     global _base
     previous = _configured
     use_cache(directory)
@@ -189,9 +199,9 @@ def cache_release(directory: Path) -> Callable[[], None]:
     _claims.append(claim)
 
     def restore() -> None:
-        # Best-effort and logged rather than raised: a disposer that throws is
-        # logged and the unwind continues anyway, so failing loudly here would
-        # only obscure whatever else the scope was releasing.
+        # Best effort: a failure is logged and not raised. A disposer that raises
+        # is logged and the unwind continues anyway, so a loud failure here would
+        # only hide whatever else the scope was releasing.
         if claim not in _claims:
             return
         _claims.remove(claim)
@@ -209,35 +219,36 @@ def cache_release(directory: Path) -> Callable[[], None]:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class _CacheClaim:
-    """One mount's claim on the pack's cache: compared by identity, so two mounts
-    naming one directory are two claims."""
+    """The claim of one mount on the cache of the pack. Claims are compared by
+    identity, so two mounts that name one directory are two claims."""
 
     directory: Path
 
 
 def use_cache(directory: Path) -> Path:
-    """Point the pack's grammar cache at `directory`. Returns where it landed.
+    """Point the grammar cache of the pack at `directory`. Returns the directory
+    that is in effect.
 
-    **Not optional.** Every grammar the pack uses is kept in this directory —
-    the ones it calls bundled too, which it downloads here from GitHub the first
-    time a parser is asked for — so a deployment whose cache directory is not
-    writable fails:
+    **This is not optional.** The pack keeps every grammar that it uses in this
+    directory. That includes the grammars that it calls bundled, which it
+    downloads here from GitHub the first time a parser is requested. A deployment
+    whose cache directory is not writable therefore fails:
 
         Download error: Failed to create cache directory … Permission denied
 
-    The default is `$XDG_CACHE_HOME/tree-sitter-language-pack/<version>/libs`,
-    which is fine on a developer's laptop and wrong in a container with a
-    read-only `HOME` — measured both ways. So the row hands over `$PH_CACHE`
-    instead: the root pH already designates for rebuildable artifacts, on a path
-    it has created and verified.
+    The default is `$XDG_CACHE_HOME/tree-sitter-language-pack/<version>/libs`.
+    That is correct on the laptop of a developer and wrong in a container with a
+    read-only `HOME` (both measured). The row therefore gives the pack
+    `$PH_CACHE`: the root that pH already uses for rebuildable artifacts, on a
+    path that pH has created and verified.
 
-    Through the pack's own `configure()` rather than by setting
-    `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR`: a row that mutated the process
-    environment would change it for every child `ctx.subprocess` spawns too, and
-    this is a decision about *this* library.
+    The function uses the `configure()` of the pack and does not set
+    `TREE_SITTER_LANGUAGE_PACK_CACHE_DIR`. A row that changed the process
+    environment would also change it for every child that `ctx.subprocess`
+    starts, and this is a decision about *this* library only.
 
-    An operator who set the environment variable deliberately keeps it — their
-    spelling wins, which is what makes the variable still mean something.
+    An operator who set the environment variable deliberately keeps it. Their
+    value wins, which is what keeps the variable meaningful.
     """
     global _configured
 
@@ -252,7 +263,7 @@ def use_cache(directory: Path) -> Path:
 
 
 def _reset() -> None:
-    """Hand the pack back its own default. The `previous is None` restore."""
+    """Give the pack its own default back. This is the restore for a base of `None`."""
     global _configured, _fetch_refused
 
     pack = _pack()
@@ -262,12 +273,14 @@ def _reset() -> None:
 
 
 def detect_language(path: str) -> str | None:
-    """The pack's own name for this path's language, or `None` for "not code".
+    """The name that the pack uses for the language of this path, or `None` for
+    "not code".
 
-    `None` is the ordinary answer for most of a repository — a `.md`, a lockfile,
-    an image — so it is a value and not an error. Markdown and the other prose
-    languages the pack recognizes are excluded by the caller, which knows it
-    wants code; this only reports what the extension says.
+    `None` is the ordinary answer for most of a repository (a `.md` file, a
+    lockfile, an image), so it is a value and not an error. The pack also
+    recognizes Markdown and other prose languages. The caller excludes those,
+    because the caller knows that it wants code. This function only reports what
+    the extension says.
     """
     try:
         found: str | None = _pack().detect_language_from_path(path)
@@ -278,19 +291,19 @@ def detect_language(path: str) -> str | None:
 
 @cache
 def indexable(language: str) -> bool:
-    """Whether this language has a tags query, and so can yield an edge at all.
+    """Whether this language has a tags query, and can therefore yield an edge.
 
-    **Derived, not listed.** This replaced a hand-written `PROSE` set of nine
-    names, which was a copy of a property the pack reports directly — and an
-    incomplete one, because the detector claims 371 languages: `.txt`, `.ini`,
-    `.proto`, `.rst`, `.conf` and a dozen others also have no tags query, and
-    with the row's default `glob: "**/*"` every one of them reached the
-    extractor and came back as an internal `TypeError` dressed up as a per-file
-    skip reason.
+    **The answer is derived, not listed.** This function replaced a hand-written
+    `PROSE` set of nine names. That set copied a property that the pack reports
+    directly, and the copy was incomplete, because the detector recognizes 371
+    languages. `.txt`, `.ini`, `.proto`, `.rst`, `.conf`, and a dozen others also
+    have no tags query. With the default `glob: "**/*"` of the row, each of them
+    reached the extractor and came back as an internal `TypeError` that was
+    presented as a per-file skip reason.
 
-    Asking the pack cannot drift and covers all 371. It also costs nothing: the
-    answer is cached, and `get_tags_query` reads a string the pack already holds
-    rather than materializing a grammar.
+    Asking the pack cannot drift, and it covers all 371 languages. It also costs
+    nothing. The answer is cached, and `get_tags_query` reads a string that the
+    pack already holds. It does not materialize a grammar.
     """
     try:
         return bool(_pack().get_tags_query(language))
@@ -299,16 +312,17 @@ def indexable(language: str) -> bool:
 
 
 def local(language: str) -> bool:
-    """Whether this language's grammar is **already on disk**.
+    """Whether the grammar of this language is **already on disk**.
 
-    A cache listing, so it reads the disk and fetches nothing — which is what
-    makes it the right question for `/code-graph status`: a person asking "is
-    this ready" must not be answered by an action that makes it ready.
+    This lists the cache, so it reads the disk and fetches nothing. That makes it
+    the correct question for `/code-graph status`. A person who asks "is this
+    ready" must not get an answer from an action that makes it ready.
 
-    **Deliberately not the indexer's question.** The indexer asks `obtained`,
-    which fetches a missing grammar where the network allows, so an unconfined
-    run on a fresh cache still indexes. Where it cannot — a confined command, no
-    network — the file is skipped with a reason that names `/code-graph install`.
+    **This is deliberately not the question of the indexer.** The indexer asks
+    `obtained`, which fetches a missing grammar where the network allows it. An
+    unconfined run on a fresh cache therefore still indexes. Where a fetch is not
+    possible (a confined command, or no network), the file is skipped with a
+    reason that names `/code-graph install`.
     """
     try:
         return language in set(_pack().downloaded_languages())
@@ -319,11 +333,12 @@ def local(language: str) -> bool:
 def parseable(language: str) -> bool:
     """Whether a parser for `language` can be obtained at all.
 
-    Materializing, and that is the point: `get_parser` loads a grammar from the
-    cache and fetches one that is not there. Measured 2026-11-11 with packs
-    1.16.2 and 1.25.0: on an empty cache with no network no parser is to be had,
-    python's included — the 26 the pack calls bundled come as one archive from
-    GitHub. `local` answers the readiness question without fetching.
+    This call materializes the grammar, on purpose. `get_parser` loads a grammar
+    from the cache and fetches one that is not there. Measured 2026-11-11 with
+    packs 1.16.2 and 1.25.0: on an empty cache with no network, no parser can be
+    obtained, including the python parser. The 26 grammars that the pack calls
+    bundled come as one archive from GitHub. `local` answers the readiness
+    question without a fetch.
     """
     if not indexable(language):
         return False
@@ -335,11 +350,12 @@ def parseable(language: str) -> bool:
 
 
 def obtained(language: str) -> bool:
-    """Whether a parser for `language` is had: the indexer's question. What is on
-    disk is loaded, and what is not is fetched until a fetch fails in this
-    process — a confined command cannot reach GitHub, and asking for each missing
-    language was a `sandbox/denied` apiece. A grammar on disk that will not load
-    stops nothing."""
+    """Whether a parser for `language` is available. This is the question of the
+    indexer. A grammar on disk is loaded. A grammar that is not on disk is
+    fetched, until one fetch fails in this process. A confined command cannot
+    reach GitHub, and a fetch attempt for each missing language caused one
+    `sandbox/denied` each. A grammar on disk that does not load does not stop
+    later fetches."""
     global _fetch_refused
 
     if local(language):
@@ -352,14 +368,14 @@ def obtained(language: str) -> bool:
 
 
 def readiness(languages: Sequence[str]) -> tuple[list[str], list[str]]:
-    """Which of `languages` are on disk, and which are not. One pass.
+    """The `languages` that are on disk, and those that are not, in one pass.
 
-    Here rather than beside its caller because there were two of these: the
-    provisioning command partitioned the list one way and `ensure` re-derived
-    the same partition with a `one not in ready` scan three functions along —
-    the very O(n²) rederivation the other one's docstring claimed to have
-    replaced. One function, so the two cannot disagree about which list the
-    unavailable side is drawn from.
+    The function is here and not beside its caller because there were two
+    versions of it. The provisioning command partitioned the list one way.
+    `ensure` derived the same partition again, three functions later, with a
+    `one not in ready` scan. That was the same O(n²) work that the docstring of
+    the first version claimed to have replaced. With one function, the two
+    callers cannot disagree about the list that the unavailable side comes from.
     """
     ready = [one for one in languages if local(one)]
     have = set(ready)
@@ -367,14 +383,17 @@ def readiness(languages: Sequence[str]) -> tuple[list[str], list[str]]:
 
 
 def ensure(languages: Sequence[str]) -> tuple[list[str], list[str]]:
-    """Fetch what is missing. `(ready, unavailable)` — the provisioning door.
+    """Fetch the grammars that are missing. Returns `(ready, unavailable)`. The
+    provisioning command uses this function.
 
-    The pack's `prefetch`, which downloads what is not on disk and loads each.
-    Not `download()`: measured 2026-11-11 on an empty cache, pack 1.16.2's
-    fetches nothing for the languages it calls bundled, and `prefetch` fetches
-    all 18 defaults on 1.16.2 and 1.25.0 in about 3 s. One name the pack cannot
-    fetch fails the whole batch, so the rest are then asked for one at a time.
-    A confined agent cannot reach GitHub and depends on this having run.
+    It calls the `prefetch` of the pack, which downloads what is not on disk and
+    loads each grammar. It does not call `download()`. Measured 2026-11-11 on an
+    empty cache: the `download()` of pack 1.16.2 fetches nothing for the
+    languages that the pack calls bundled, and `prefetch` fetches all 18 defaults
+    on 1.16.2 and 1.25.0 in about 3 s. One name that the pack cannot fetch fails
+    the whole batch, so the remaining names are then requested one at a time. A
+    confined agent cannot reach GitHub and depends on an earlier run of this
+    function.
     """
     wanted = [one for one in languages if indexable(one)]
     _, missing = readiness(wanted)
@@ -391,17 +410,18 @@ def ensure(languages: Sequence[str]) -> tuple[list[str], list[str]]:
 
 @cache
 def _tags_query(language: str) -> Any:  # noqa: ANN401
-    """The compiled tags query for one language. **Cached, and measurably so.**
+    """The compiled tags query for one language. **It is cached, and the saving
+    is measured.**
 
-    Compiling is per-language work that was being paid per *file*: 2.8 ms for
-    python, 22 ms for ruby, and 35.7 ms for typescript — the worst case, because
-    `INHERITS` concatenates two queries. Over this repo's `ph-core` tree (136
-    files) that was 44 % of all extraction time; a thousand-file TypeScript
-    package paid 35 s of it.
+    Compilation is work for each language, but it was done for each *file*:
+    2.8 ms for python, 22 ms for ruby, and 35.7 ms for typescript. Typescript is
+    the worst case, because `INHERITS` joins two queries. Over the `ph-core` tree
+    of this repo (136 files), that was 44 % of all extraction time. A TypeScript
+    package of a thousand files paid 35 s for it.
 
-    `functools.cache` is the `ph.seams.fs._compiled` precedent, and it is safe
-    for the same reason: a `Query` is read-only once built, and `extract` makes
-    a fresh `QueryCursor` per call — which is the mutable half.
+    `functools.cache` follows the precedent of `ph.seams.fs._compiled`, and it is
+    safe for the same reason. A `Query` is read-only after it is built. `extract`
+    makes a new `QueryCursor` for each call, and the cursor is the mutable part.
     """
     # Not a declared dependency: the row checks for it before this runs.
     from tree_sitter import Query  # noqa: PLC0415
@@ -413,12 +433,13 @@ def _tags_query(language: str) -> Any:  # noqa: ANN401
 
 
 def extract(path: str, text: str, language: str) -> Extraction:
-    """Parse `text` and return what it defines, what it references, what it imports.
+    """Parse `text` and return what it defines, what it references, and what it
+    imports.
 
-    :raises Exception: whatever the pack raises for an unparseable file. Not
-        caught here: the caller indexes a *batch*, and whether one bad file
-        should stop the batch or be reported and skipped is its decision, not
-        this function's.
+    :raises Exception: whatever the pack raises for a file that it cannot parse.
+        This function does not catch it. The caller indexes a *batch*, and the
+        caller decides whether one bad file stops the batch or is reported and
+        skipped.
     """
     # Not a declared dependency: the row checks for it before this runs.
     from tree_sitter import QueryCursor  # noqa: PLC0415
@@ -429,17 +450,17 @@ def extract(path: str, text: str, language: str) -> Extraction:
     )
     result = pack.process(text, config)
 
-    # +1: `Span.start_line` is 0-based and everything downstream is 1-based.
-    # See the module docstring.
+    # +1: `Span.start_line` is 0-based, and everything downstream is 1-based. See
+    # the module docstring.
     definitions = [
         Definition(
             name=symbol.name,
             kind=_kind_of(symbol.kind),
             start_line=symbol.span.start_line + 1,
             end_line=symbol.span.end_line + 1,
-            # **Not `symbol.doc`**, which this pack never populates — measured
-            # `None` for every symbol in a file full of docstrings. Prose
-            # arrives on two other channels and `_documented` merges them.
+            # **Not `symbol.doc`.** This pack never sets it: it measured `None`
+            # for every symbol in a file full of docstrings. The prose arrives on
+            # two other channels, and `_documented` merges them.
             doc=None,
         )
         for symbol in (result.symbols or [])
@@ -454,9 +475,9 @@ def extract(path: str, text: str, language: str) -> Extraction:
         named = capture.get("name") or []
         if not named:
             continue
-        # `Node.text` is `bytes | None` — `None` when the tree outlived the
-        # source it was parsed from, which cannot happen here but is the
-        # signature's promise, so it is handled rather than asserted away.
+        # `Node.text` is `bytes | None`. It is `None` when the tree outlived the
+        # source that it was parsed from. That cannot happen here, but the
+        # signature allows it, so the code handles it and does not assert.
         raw = named[0].text
         if raw is None:
             continue
@@ -467,11 +488,11 @@ def extract(path: str, text: str, language: str) -> Extraction:
             head, _, tail = label.partition(".")
             line = nodes[0].start_point[0] + 1
             if head == "definition":
-                # The tags query finds definitions too, and mostly the same ones
-                # `process()` did. Kept only where it found one `process()`
-                # missed — a language whose intel layer is thinner than its
-                # tags query — and matched on (name, line) so the union has no
-                # duplicates to deduplicate later.
+                # The tags query also finds definitions, mostly the same ones that
+                # `process()` found. One is kept only when `process()` missed it,
+                # which happens for a language whose intelligence layer is
+                # thinner than its tags query. The match is on (name, line), so
+                # the union has no duplicates to remove later.
                 if (name, line) not in seen_definitions:
                     seen_definitions.add((name, line))
                     definitions.append(
@@ -498,27 +519,28 @@ def _documented(
     definitions: list[Definition],
     result: object,
 ) -> tuple[Definition, ...]:
-    """Attach each definition's prose, from the two channels that carry it.
+    """Attach the prose of each definition, from the two channels that carry it.
 
-    **`SymbolInfo.doc` is always `None`** in this pack — measured against a file
-    full of docstrings — so a row that trusted it would have shipped an index
-    with an empty `doc` column and a `search` mode that matched names only. The
-    prose is there, on two other channels:
+    **`SymbolInfo.doc` is always `None`** in this pack (measured against a file
+    full of docstrings). A row that trusted it would have shipped an index with
+    an empty `doc` column and a `search` mode that matched names only. The prose
+    exists on two other channels:
 
-    * **`result.docstrings`** carries `associated_item`, the pack's own answer to
-      "which symbol is this the docstring of". Used verbatim where present,
-      because the pack knows each language's convention better than a heuristic
-      here would.
-    * **`result.comments`** carries doc comments — Rust's `///` and
-      TypeScript's block form (kind `Doc`), and Go's `//` (kind `Line`, because
-      that *is* Go's documented convention). `associated_item` is not set for
-      these, so the rule is positional and deliberately narrow: the comment's
-      last line must be **immediately above** a definition's first. A gap of one
-      blank line means it was about something else, and attaching it anyway
-      would put the wrong prose in front of the model.
+    * **`result.docstrings`** carries `associated_item`, which is the pack's own
+      answer to "which symbol does this docstring belong to". It is used as it
+      is where present, because the pack knows the convention of each language
+      better than a heuristic here would.
+    * **`result.comments`** carries doc comments: the `///` of Rust and the block
+      form of TypeScript (kind `Doc`), and the `//` of Go (kind `Line`, because
+      that *is* the documented convention of Go). `associated_item` is not set
+      for these. The rule is therefore positional and deliberately narrow: the
+      last line of the comment must be **immediately above** the first line of a
+      definition. A gap of one blank line means that the comment was about
+      something else. Attaching it anyway would show the model the wrong prose.
 
-    Anything owned by nobody — a module docstring, a comment inside a function
-    body — is dropped rather than attached to whatever happened to be nearest.
+    Prose that belongs to no definition, such as a module docstring or a comment
+    inside a function body, is dropped. It is not attached to the nearest
+    definition.
     """
     prose: dict[str, str] = {}
     starts: dict[int, str] = {}
@@ -532,32 +554,33 @@ def _documented(
             prose.setdefault(str(item), clean_prose(text))
 
     for _, last, text in _comment_blocks(result):
-        # **The comment's own text, not its `span.end_line`.** Rust's `///`
-        # comment node includes the trailing newline, so its `end_line` is one
-        # past the line it occupies — which made the immediately-above rule miss
-        # the definition it should have matched *and* match one a blank line
-        # away. Counting the lines the stripped text actually spans is exact for
-        # every language here, and was wrong for none.
+        # **Use the text of the comment, not its `span.end_line`.** The `///`
+        # comment node of Rust includes the trailing newline, so its `end_line`
+        # is one past the line that it occupies. With `end_line`, the
+        # immediately-above rule missed the definition that it should have
+        # matched *and* matched one a blank line away. A count of the lines that
+        # the stripped text spans is exact for every language here.
         owner = starts.get(last + 1)
         if owner and text:
             prose.setdefault(owner, clean_prose(text))
 
-    # `replace` rather than a hand-written six-field rebuild: the copy could
-    # silently drop a field the day `Definition` grows one.
+    # Use `replace`, not a hand-written rebuild of six fields. A hand-written copy
+    # could silently drop a field when `Definition` gets a new one.
     return tuple(
         replace(one, doc=prose[one.name]) if one.name in prose else one for one in definitions
     )
 
 
 def _comment_blocks(result: object) -> list[tuple[int, int, str]]:
-    """Doc comments as `(first line, last line, text)`, contiguous runs merged.
+    """Doc comments as `(first line, last line, text)`, with contiguous runs
+    merged.
 
-    Both 1-based. Merged because Rust and Go write a paragraph as a *run* of
-    single-line comments — each its own node — so attaching only the last one
-    would index the final sentence of every doc comment in those languages and
-    drop the rest.
+    Both line numbers are 1-based. Runs are merged because Rust and Go write a
+    paragraph as a *run* of single-line comments, each its own node. If only the
+    last node were attached, the index would hold the final sentence of every doc
+    comment in those languages and drop the rest.
 
-    A run breaks on a blank line, which is also how a reader would break it.
+    A blank line ends a run, which is also where a reader would end it.
     """
     blocks: list[tuple[int, int, str]] = []
     for comment in getattr(result, "comments", None) or []:
@@ -577,15 +600,17 @@ def _comment_blocks(result: object) -> list[tuple[int, int, str]]:
 
 
 MARKERS = ('"""', "'''", "///", "/**", "*/", "//", "#")
-"""Comment and docstring delimiters, longest-first within each family."""
+"""The comment and docstring delimiters, with the longest first within each family."""
 
 
 def clean_prose(text: str) -> str:
-    """The prose without its delimiters — what an FTS index should hold.
+    """Return the prose without its delimiters, which is what an FTS index should
+    hold.
 
-    A docstring stored with its quotes still attached puts punctuation into
-    every neighboring search term and shows the model syntax it did not ask
-    for. Stripped line by line, so a block comment loses its leading `*` too.
+    A docstring that is stored with its quotes puts punctuation into every
+    neighboring search term, and shows the model syntax that it did not ask for.
+    The text is stripped line by line, so a block comment also loses its leading
+    `*`.
     """
     lines: list[str] = []
     for raw in text.splitlines():
@@ -604,30 +629,32 @@ def clean_prose(text: str) -> str:
 def _kind_of(raw: object) -> str:
     """`SymbolKind.Function` / `"function"` / `"Function"` → `function`.
 
-    The pack's `kind` is an enum whose `str()` is the variant name, while the
-    tags query hands over a plain lowercase string. One spelling reaches the
-    index, so `kind: "class"` in a tool argument means the same thing whichever
-    pass produced the row.
+    The `kind` of the pack is an enum whose `str()` is the variant name. The tags
+    query gives a plain lowercase string. One spelling reaches the index, so
+    `kind: "class"` in a tool argument means the same thing for a row from either
+    pass.
     """
     text = getattr(raw, "name", None) or str(raw)
     return text.rsplit(".", 1)[-1].lower()
 
 
 def owners(definitions: Sequence[Definition]) -> dict[int, Definition]:
-    """`{line: the tightest definition containing it}`, in one pass per file.
+    """Return `{line: the tightest definition that contains it}`, in one pass for
+    each file.
 
-    **Tightest, not first**: a nested `def` inside a 40-line function is the
-    caller a reference belongs to, and taking the outer one would attribute
-    every closure's calls to whatever happened to contain it. `_registry.py`'s
-    `claim_key` spans 40-75 and its inner `release` spans 69-73, so a call on
-    line 70 has two candidates and exactly one right answer.
+    **The tightest definition, not the first.** A nested `def` inside a 40-line
+    function is the caller that a reference belongs to. With the outer function,
+    the calls of every closure would be attributed to whatever contains the
+    closure. In `_registry.py`, `claim_key` spans lines 40-75 and its inner
+    `release` spans lines 69-73. A call on line 70 has two candidates and exactly
+    one correct answer.
 
-    Built once for the file rather than searched per reference, which is what
-    this replaced: that was O(definitions x references), fine for a 30-symbol
-    module and 58 ms — as much as the whole parse — for a generated file with
-    1 500 definitions and 3 000 references, which `max_bytes` happily admits.
-    Widest first, so a narrower span overwrites it and the last writer per line
-    is the tightest.
+    The table is built one time for the file. The earlier version searched for
+    each reference, which was O(definitions x references). That was fine for a
+    module with 30 symbols. For a generated file with 1 500 definitions and
+    3 000 references, which `max_bytes` admits, it took 58 ms, as much as the
+    whole parse. The widest spans are written first, so a narrower span
+    overwrites a wider one, and the last writer for each line is the tightest.
     """
     table: dict[int, Definition] = {}
     for one in sorted(definitions, key=lambda d: d.start_line - d.end_line):

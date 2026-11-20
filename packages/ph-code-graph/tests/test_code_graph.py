@@ -1,34 +1,37 @@
-"""`code-graph` — line spans that are true, edges that point the right way.
+"""`code-graph`: line spans that are correct, and edges that point the right way.
 
-Gates: *every span slices the source it claims; a call inside a closure belongs
-to the closure; a second pass over an unchanged tree parses nothing.*
+Gates:
+
+* Every span slices the source that it claims.
+* A call inside a closure belongs to the closure.
+* A second pass over an unchanged tree parses nothing.
 
 ## Why spans are checked against the file
 
-Two coordinate systems meet in `_extract`: `ProcessConfig` spans are 0-based,
-tree-sitter points are 0-based, and every line pH shows a model is 1-based. An
-off-by-one survives every plausible test — the symbol is right, the file is
-right, the number looks fine — and shows up as a model that reads the wrong
-function and stops trusting the tool. So the assertions here slice the real
-source at the span and check the definition is actually there, rather than
-comparing against a number someone wrote down.
+Two coordinate systems meet in `_extract`. `ProcessConfig` spans are 0-based,
+tree-sitter points are 0-based, and every line that pH shows a model is 1-based.
+An off-by-one error passes every plausible test: the symbol is correct, the file
+is correct, and the number looks fine. It shows as a model that reads the wrong
+function and stops trusting the tool. The assertions here therefore slice the
+real source at the span and check that the definition is really there. They do
+not compare against a number that someone wrote down.
 
-## Why the enclosing rule gets its own test
+## Why the enclosing rule has its own test
 
-`callers` is only as good as the attribution of a reference to the symbol
-containing it, and the tempting implementation — first definition whose range
-covers the line — is wrong in exactly the case this codebase is full of: a
-closure inside a function. `_registry.py`'s `claim_key` spans 40-75 and its
-inner `release` spans 69-73, so a call on line 70 has two candidates. Taking the
-outer one would credit every closure's calls to whatever contained it, and no
-count would look obviously wrong.
+`callers` is only as good as the attribution of a reference to the symbol that
+contains it. The obvious implementation takes the first definition whose range
+covers the line. That is wrong in exactly the case that this codebase is full
+of: a closure inside a function. In `_registry.py`, `claim_key` spans lines 40-75
+and its inner `release` spans lines 69-73, so a call on line 70 has two
+candidates. With the outer one, the calls of every closure would be credited to
+whatever contains the closure, and no count would look wrong.
 
 ## Why the real parser and the real database
 
-Neither is stubbed. The parser is the thing under test — a language pack that
-changed its span base or its symbol kinds must fail here rather than in a
-session — and the index is 200 lines of SQL whose two interesting queries (FTS5
-and a recursive CTE) are exactly the ones a fake would not exercise.
+Neither is stubbed. The parser is the thing under test. A language pack that
+changed its span base or its symbol kinds must fail here and not in a session.
+The index is 200 lines of SQL, and its two interesting queries (FTS5 and a
+recursive CTE) are exactly the queries that a fake would not exercise.
 """
 
 from __future__ import annotations
@@ -64,11 +67,11 @@ from ph_code_graph.engine import CODE_GRAPH
 pytestmark = pytest.mark.anyio
 
 ROW: dict[str, Any] = {"id": "code-graph", "name": "code-graph-engine"}
-"""The engine row — the tools themselves, as the `ph-code-graph` command mounts them.
+"""The engine row: the tools themselves, as the `ph-code-graph` command mounts them.
 
-Under the session row's id, as the command spells it, so a config written for
-`code-graph` is read by the row that indexes. The row a session mounts is
-`test_code_graph_row.py`'s subject."""
+The row is mounted under the id of the session row, as the command does it. A
+config that is written for `code-graph` is then read by the row that indexes.
+`test_code_graph_row.py` covers the row that a session mounts."""
 
 MODULE = '''\
 """A module."""
@@ -98,9 +101,9 @@ async def apply(ctx, config):
 
     return enter
 '''
-"""Deliberately the shapes that break naive extractors: a closure inside a
-function, a method, and a module-level `async def` with a nested `def` (the
-shape that crashed the PyPI `codegraph` outright)."""
+"""Deliberately the shapes that break simple extractors: a closure inside a
+function, a method, and a module-level `async def` with a nested `def`. The last
+shape crashed the PyPI `codegraph` outright."""
 
 OTHER = SHARED
 
@@ -119,7 +122,8 @@ async def _indexed(mount: MountProfile, tmp_path: Path, **config: object) -> Con
 
 
 def test_every_span_slices_the_definition_it_claims() -> None:
-    """The off-by-one that would otherwise be invisible. See the docstring."""
+    """The off-by-one error that would be invisible without this test. See the
+    module docstring."""
     lines = MODULE.splitlines()
     found = extract("pkg/mod.py", MODULE, "python")
 
@@ -134,8 +138,8 @@ def test_the_shapes_that_break_naive_extractors_all_come_out() -> None:
     found = extract("pkg/mod.py", MODULE, "python")
     by_name = {one.name: one for one in found.definitions}
 
-    # A module-level `async def` containing a nested `def` — the shape the PyPI
-    # `codegraph` crashed on outright.
+    # A module-level `async def` that contains a nested `def`. The PyPI
+    # `codegraph` crashed outright on this shape.
     assert "apply" in by_name and "enter" in by_name
     # A closure inside a plain function, and a method on a class.
     assert "outer" in by_name and "inner" in by_name
@@ -145,7 +149,7 @@ def test_the_shapes_that_break_naive_extractors_all_come_out() -> None:
 
 
 def test_docstrings_ride_along() -> None:
-    """What makes a `search` hit readable without a second call."""
+    """Docstrings make a `search` hit readable without a second call."""
     found = extract("pkg/mod.py", MODULE, "python")
     docs = {one.name: (one.doc or "") for one in found.definitions}
 
@@ -168,7 +172,7 @@ def test_imports_are_recorded() -> None:
 
 
 def test_a_reference_belongs_to_the_tightest_enclosing_definition() -> None:
-    """The attribution rule `callers` rests on. See the module docstring."""
+    """The attribution rule that `callers` depends on. See the module docstring."""
     definitions = (
         Definition("claim_key", "function", 40, 75),
         Definition("release", "function", 69, 73),
@@ -182,11 +186,12 @@ def test_a_reference_belongs_to_the_tightest_enclosing_definition() -> None:
 
 
 def test_the_owner_table_is_built_once_for_the_whole_file() -> None:
-    """Why it is a table and not a search: it was O(definitions x references).
+    """Why this is a table and not a search: the search was O(definitions x
+    references).
 
-    A generated file with 1 500 definitions and 3 000 references spent 58 ms in
-    the per-reference scan — as much as its entire parse — and `max_bytes`
-    admits such files.
+    A generated file with 1 500 definitions and 3 000 references used 58 ms in
+    the scan for each reference, as much as its whole parse. `max_bytes` admits
+    such files.
     """
     definitions = tuple(Definition(f"f{n}", "function", n * 10 + 1, n * 10 + 9) for n in range(200))
 
@@ -198,7 +203,7 @@ def test_the_owner_table_is_built_once_for_the_whole_file() -> None:
 
 
 def test_the_typescript_query_inherits_javascript() -> None:
-    """A `.ts` file matched against the typescript query alone finds no calls."""
+    """A `.ts` file that is matched against the typescript query alone finds no calls."""
     assert INHERITS["typescript"] == ("javascript",)
 
     code = "class C { run(): number { return helper(1); } }\nfunction helper(n: number){return n}\n"
@@ -215,15 +220,15 @@ def test_the_typescript_query_inherits_javascript() -> None:
         ("rust", "fn helper() -> i32 { 1 }\nfn main() { helper(); }\n", "helper"),
         ("go", "package m\nfunc helper() int { return 1 }\nfunc main() { helper() }\n", "helper"),
         ("java", "class A { int helper(){return 1;} void run(){ helper(); } }\n", "helper"),
-        # Parenthesized on purpose: a *bare* Ruby send (`helper` with no
-        # parens) parses as an identifier, not a `call`, so the language's tags
-        # query cannot see it. That is a real limitation of this approach and
-        # the README says so rather than this fixture hiding it.
+        # The parentheses are deliberate. A *bare* Ruby send (`helper` with no
+        # parentheses) parses as an identifier and not as a `call`, so the tags
+        # query of the language cannot see it. That is a real limitation of this
+        # approach. The README states it, and this fixture does not hide it.
         ("ruby", "def helper\n 1\nend\ndef run\n helper()\nend\n", "helper"),
     ],
 )
 def test_other_languages_yield_definitions_and_calls(language: str, code: str, wanted: str) -> None:
-    """The claim that this is not a Python-only tool."""
+    """Evidence that this is not a tool for Python only."""
     found = extract(f"a.{language}", code, language)
 
     assert any(one.name == wanted for one in found.definitions), f"{language}: no definition"
@@ -243,7 +248,7 @@ def test_language_detection_reads_the_extension() -> None:
 async def test_indexing_then_asking_answers_with_a_readable_pointer(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """End to end: the whole reason the package exists."""
+    """End to end: the reason why the package exists."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -260,7 +265,7 @@ async def test_indexing_then_asking_answers_with_a_readable_pointer(
     assert not found.is_error, text_of(found.content)
     hit = found.value["symbols"][0]
     assert hit["path"] == "pkg/helpers.py"
-    # The pointer, verified against the real file rather than a number.
+    # The pointer is verified against the real file, not against a number.
     lines = (tmp_path / hit["path"]).read_text().splitlines()
     assert "def shared" in lines[hit["start_line"] - 1]
     assert f"{hit['path']}:{hit['start_line']}" in text_of(found.content)
@@ -269,8 +274,9 @@ async def test_indexing_then_asking_answers_with_a_readable_pointer(
 async def test_an_index_records_the_workspace_its_graph_serves(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """What lets a sweep remove the graph of a worktree that is gone: its directory
-    names the workspace, and a digest cannot (`ph.workspace_caches`).
+    """The record that lets a sweep remove the graph of a worktree that is gone.
+    The directory names the workspace, which a digest cannot do
+    (`ph.workspace_caches`).
 
     Sabotage: drop the `use` call from `code_index`, and nothing is recorded.
     """
@@ -288,7 +294,7 @@ async def test_an_index_records_the_workspace_its_graph_serves(
 async def test_callers_names_the_calling_symbol_and_the_calling_line(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Not the definition's line — the line to open."""
+    """The line is not the line of the definition. It is the line to open."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -300,7 +306,7 @@ async def test_callers_names_the_calling_symbol_and_the_calling_line(
     edges = found.value["edges"]
     assert edges, text_of(found.content)
     callers = {one["name"] for one in edges}
-    # `inner` and `enter` call it; `outer` and `apply` merely contain them.
+    # `inner` and `enter` call it. `outer` and `apply` only contain them.
     assert {"inner", "enter"} <= callers, f"got {callers}"
     assert "outer" not in callers, "a closure's call was credited to its parent"
     for one in edges:
@@ -321,7 +327,7 @@ async def test_callees_reports_what_a_symbol_reaches(mount: MountProfile, tmp_pa
 
 
 async def test_impact_walks_transitively_ring_by_ring(mount: MountProfile, tmp_path: Path) -> None:
-    """The recursive CTE — the query `pyturso` refuses. `shared` <- inner <- outer."""
+    """The recursive CTE, which `pyturso` refuses. `shared` <- inner <- outer."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -340,15 +346,15 @@ async def test_impact_walks_transitively_ring_by_ring(mount: MountProfile, tmp_p
     }
     assert rings, text_of(found.content)
     assert {"inner", "enter"} <= rings[1]
-    # `inner` is called by `outer`, so a second hop must reach it — this is what
-    # a single-hop implementation would silently miss.
+    # `outer` calls `inner`, so a second hop must reach it. An implementation
+    # with one hop would miss this silently.
     assert 2 in rings and "outer" in rings[2], f"rings were {rings}"
 
 
 async def test_a_symbol_reached_twice_is_reported_at_the_nearer_distance(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`MIN(depth)` in the CTE — what makes the rings a budget, not a multiset."""
+    """`MIN(depth)` in the CTE makes the rings a budget and not a multiset."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "m.py").write_text(
         "def leaf():\n    return 1\n\n\ndef mid():\n    return leaf()\n\n\n"
@@ -369,7 +375,7 @@ async def test_a_symbol_reached_twice_is_reported_at_the_nearer_distance(
 
 
 async def test_search_ranks_by_name_and_docstring(mount: MountProfile, tmp_path: Path) -> None:
-    """FTS5 — the other query `pyturso` cannot serve."""
+    """FTS5, the other query that `pyturso` cannot serve."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -386,10 +392,10 @@ async def test_search_ranks_by_name_and_docstring(mount: MountProfile, tmp_path:
 async def test_a_models_punctuation_does_not_become_fts_syntax(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`read-before-edit` is an FTS5 syntax error and `a:b` is a column filter.
+    """`read-before-edit` is an FTS5 syntax error, and `a:b` is a column filter.
 
-    A model writing prose meant neither, and a tool that raised on the phrasing
-    would teach it to stop using the mode.
+    A model that writes prose means neither. A tool that raised on the wording
+    would teach the model to stop using the mode.
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -421,7 +427,7 @@ async def test_entities_lists_the_biggest_definitions_first(
 
 
 async def test_an_ambiguous_name_says_it_is_ambiguous(mount: MountProfile, tmp_path: Path) -> None:
-    """The honest ceiling of a name-based graph, surfaced rather than hidden."""
+    """The real limit of a name-based graph is shown and not hidden."""
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("def register():\n    return 1\n", encoding="utf-8")
     (tmp_path / "pkg" / "b.py").write_text("def register():\n    return 2\n", encoding="utf-8")
@@ -445,7 +451,8 @@ async def test_an_ambiguous_name_says_it_is_ambiguous(mount: MountProfile, tmp_p
 async def test_a_second_pass_over_an_unchanged_tree_parses_nothing(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Content-keyed, so re-running after a turn is cheap and correct."""
+    """The index is keyed by content, so a second run after a turn is cheap and
+    correct."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -460,11 +467,11 @@ async def test_a_second_pass_over_an_unchanged_tree_parses_nothing(
 
 
 def _counting_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record every path `FsService.read` opens from here on.
+    """Record every path that `FsService.read` opens from here on.
 
-    Both change-filter tests want the same thing — *the file was never opened* is
-    the whole claim — and each had written the patch out, nine lines apiece. The
-    returned list is live: assert against it after the call under test.
+    Both change-filter tests need the same thing. Their whole claim is that *the
+    file was never opened*, and each had written the patch out in nine lines. The
+    returned list is live, so assert against it after the call under test.
     """
     from ph.seams.fs import FsService
 
@@ -482,7 +489,7 @@ def _counting_reads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def test_a_touched_but_unmodified_file_stays_unchanged(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """An mtime is not content. A rebase moves every mtime in the tree."""
+    """An mtime is not content. A rebase changes every mtime in the tree."""
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -518,29 +525,29 @@ async def test_an_edit_is_picked_up_and_replaces_the_old_rows(
 async def test_a_renamed_symbol_is_not_found_under_its_old_name(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The full-text index has to forget too, and it was not (X1).
+    """The full-text index must also forget, and it did not (X1).
 
-    `symbols_fts` is contentless, and a contentless FTS5 table cannot be asked
-    which postings belong to a row — the `'delete'` command needs the column
-    values the row was *inserted* with, and it was being handed three empty
-    strings. SQLite takes that quietly and removes nothing, so every posting for
-    every symbol ever re-indexed stayed in the index.
+    `symbols_fts` is contentless. A contentless FTS5 table cannot report which
+    postings belong to a row. The `'delete'` command needs the column values that
+    the row was *inserted* with, and it was given three empty strings. SQLite
+    accepts that silently and removes nothing. Every posting for every symbol
+    that was ever re-indexed therefore stayed in the index.
 
-    Stale postings would be merely wasteful if the rowids were retired; they are
-    not. `symbols.id` has no `AUTOINCREMENT`, so the next insert reuses the id
-    the deleted symbol had, and the old posting now points at a *different*
-    symbol. `search` joins the FTS rowid back to `symbols`, so asking for the old
-    name returns the new symbol — which is worse than a miss, because it reads
-    like an answer.
+    Stale postings would only be wasteful if the rowids were retired, but they
+    are not. `symbols.id` has no `AUTOINCREMENT`, so the next insert reuses the
+    id of the deleted symbol, and the old posting then points at a *different*
+    symbol. `search` joins the FTS rowid back to `symbols`. A search for the old
+    name therefore returns the new symbol, which is worse than a miss, because
+    it reads like an answer.
 
-    `define` was already covered by the sibling test above and passes either way:
-    it queries `symbols` directly and never touches the FTS table. `search` is
-    the mode that goes through it, which is why the defect survived.
+    The sibling test above already covers `define`, and it passes in both cases.
+    `define` queries `symbols` directly and never uses the FTS table. `search` is
+    the mode that uses it, which is why the defect survived.
     """
-    # **One file, and that is load-bearing.** `symbols.id` is reused only when
-    # the deleted row held the highest one; with a second file indexed after it,
-    # the stale posting points at an id nothing has taken back and the join in
-    # `search` drops it, hiding the defect behind a miss.
+    # **The test needs exactly one file.** `symbols.id` is reused only when the
+    # deleted row held the highest id. With a second file indexed after it, the
+    # stale posting points at an id that nothing has taken. The join in `search`
+    # then drops it, and the defect is hidden behind a miss.
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
     agent = new_agent(ctx)
@@ -591,8 +598,8 @@ async def test_non_code_and_oversized_files_are_skipped_not_fatal(
     assert not built.is_error, text_of(built.content)
     assert built.value["indexed"] == 2
     assert [one["path"] for one in built.value["skipped"]] == ["pkg/huge.py"]
-    # Markdown is not skipped-with-a-reason, it is simply not indexable —
-    # reporting every prose file would make the skip list the whole repository.
+    # Markdown is not skipped with a reason. It is simply not indexable. A report
+    # of every prose file would make the skip list as long as the repository.
     assert all("README" not in one["path"] for one in built.value["skipped"])
     assert not indexable("markdown"), "the predicate this rests on"
 
@@ -614,7 +621,7 @@ async def test_the_rows_scope_is_what_a_bare_call_indexes(
     mount: MountProfile, tmp_path: Path
 ) -> None:
     """A profile points the row at a package, and `code_index` with no arguments
-    indexes that package: its `paths`, less its `exclude`."""
+    indexes that package: its `paths`, without its `exclude`."""
     for package in ("ours", "theirs"):
         (tmp_path / package / "tests").mkdir(parents=True)
         (tmp_path / package / "mod.py").write_text(OTHER, encoding="utf-8")
@@ -632,8 +639,8 @@ async def test_the_rows_scope_is_what_a_bare_call_indexes(
 async def test_a_call_can_narrow_the_rows_scope_and_cannot_lift_its_exclusions(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """A call's `exclude` is added to the row's. One that replaced it would make a
-    deployment's exclusion something any call could undo."""
+    """The `exclude` of a call is added to the `exclude` of the row. If it
+    replaced it, any call could undo the exclusion of a deployment."""
     (tmp_path / "pkg" / "vendor").mkdir(parents=True)
     for name in ("a.py", "b.py", "vendor/dep.py"):
         (tmp_path / "pkg" / name).write_text(OTHER, encoding="utf-8")
@@ -659,11 +666,12 @@ async def test_a_mode_that_needs_a_query_says_so(mount: MountProfile, tmp_path: 
 
 
 async def test_indexing_reads_through_the_fs_seam(mount: MountProfile, tmp_path: Path) -> None:
-    """The claim that makes this a tool and not a tree-reading primitive (I-9).
+    """The claim that makes this a tool and not a primitive that reads the tree
+    (I-9).
 
-    A screen registered on `ctx.fs` decides what a walk may show, so a file it
-    refuses must never reach the index — which holds only because the row globs
-    and reads through the seam.
+    A screen that is registered on `ctx.fs` decides what a walk may show. A file
+    that the screen refuses must never reach the index. That holds only because
+    the row globs and reads through the seam.
     """
     _tree(tmp_path)
     (tmp_path / "pkg" / "secret.py").write_text("def hidden():\n    return 1\n", encoding="utf-8")
@@ -695,12 +703,12 @@ async def test_the_row_reports_itself_to_doctor(mount: MountProfile, tmp_path: P
 async def test_a_callees_reference_line_names_its_own_file(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`path` and `ref_path` are different files for `callees`, and both matter.
+    """For `callees`, `path` and `ref_path` are different files, and both matter.
 
-    The symbol is the callee's *definition*; the reference is a line in the
-    caller. Rendering the line against the definition's path printed
-    `helpers.py:19` for a line that lives in `mod.py` — a pointer to nothing,
-    and one that looks entirely plausible.
+    The symbol is the *definition* of the callee, and the reference is a line in
+    the caller. When the line was rendered against the path of the definition,
+    the output was `helpers.py:19` for a line that is in `mod.py`. That points to
+    nothing, and it looks entirely plausible.
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -714,18 +722,19 @@ async def test_a_callees_reference_line_names_its_own_file(
     edge = edges[0]
     assert edge["path"] == "pkg/helpers.py", "the definition is in helpers"
     assert edge["ref_path"] == "pkg/mod.py", "the call is in mod"
-    # And the line really is the call, in the file the result names.
+    # The line really is the call, in the file that the result names.
     line = (tmp_path / edge["ref_path"]).read_text().splitlines()[edge["ref_line"] - 1]
     assert "shared(" in line, f"{edge['ref_path']}:{edge['ref_line']} reads {line!r}"
     assert f"{edge['ref_path']}:{edge['ref_line']}" in text_of(found.content)
 
 
 def test_doc_comments_attach_only_when_directly_above() -> None:
-    """The positional rule, and the off-by-one that broke it in both directions.
+    """The positional rule, and the off-by-one error that broke it in both
+    directions.
 
-    Rust's `///` comment node includes its trailing newline, so trusting
-    `span.end_line` missed the definition one line below *and* matched one two
-    lines below. Counting the lines the text actually spans is exact.
+    The `///` comment node of Rust includes its trailing newline. With
+    `span.end_line`, the rule missed the definition one line below *and* matched
+    one two lines below. A count of the lines that the text spans is exact.
     """
     attached = extract("a.rs", "/// Doc for helper.\nfn helper() -> i32 { 1 }\n", "rust")
     assert {one.name: one.doc for one in attached.definitions}["helper"] == "Doc for helper."
@@ -737,8 +746,8 @@ def test_doc_comments_attach_only_when_directly_above() -> None:
 def test_a_run_of_doc_comments_is_kept_whole() -> None:
     """Rust and Go write a paragraph as consecutive single-line comments.
 
-    Attaching only the last would index the closing sentence of every doc
-    comment in those languages and silently drop the rest.
+    If only the last comment were attached, the index would hold the closing
+    sentence of every doc comment in those languages and silently drop the rest.
     """
     found = extract(
         "a.go",
@@ -759,11 +768,13 @@ def test_prose_is_stored_without_its_delimiters() -> None:
 
 
 def test_c_has_definitions_but_no_call_references() -> None:
-    """A per-language limitation, pinned so it is a known shape and not a surprise.
+    """A limitation of one language, tested so that it is a known shape and not a
+    surprise.
 
-    C's tags query has `@definition.*` captures and no `@reference.*` ones at
-    all, so `search`, `define` and `entities` work for C while `callers` and
-    `callees` are empty. Better stated in a test than discovered in a session.
+    The tags query of C has `@definition.*` captures and no `@reference.*`
+    captures. `search`, `define`, and `entities` therefore work for C, and
+    `callers` and `callees` are empty. It is better to state this in a test than
+    to find it in a session.
     """
     found = extract("a.c", "int helper(void){return 1;}\nint main(void){return helper();}\n", "c")
 
@@ -774,14 +785,14 @@ def test_c_has_definitions_but_no_call_references() -> None:
 async def test_an_unwritable_grammar_cache_refuses_with_a_sentence(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A deployment fact an operator can fix, not a traceback.
+    """A fact of the deployment that an operator can fix, not a traceback.
 
     The grammars are materialized into `$PH_CACHE` on first use, so a read-only
-    one is fatal — and pH's contract is that a row which cannot honor its
-    configuration raises `MountRefusal`, which every command that mounts a
-    profile turns into a sentence and an exit code. Measured inside a sandbox
-    that made `~/.cache` read-only, where it arrived as fourteen frames of
-    `pathlib` instead.
+    cache is fatal. The contract of pH is that a row that cannot honor its
+    configuration raises `MountRefusal`. Every command that mounts a profile
+    turns that into a sentence and an exit code. This was measured inside a
+    sandbox that made `~/.cache` read-only, where the failure arrived as fourteen
+    frames of `pathlib`.
     """
     from ph.cordis import MountRefusal
 
@@ -800,12 +811,12 @@ async def test_an_unwritable_grammar_cache_refuses_with_a_sentence(
 
 # ---------------------------------------------------- the bundle, and the RLM ----
 #
-# `ph-code-graph` exists so an agent can ask a codebase about itself, and the
-# agent it was added for writes Python rather than tool calls. Under Code Mode
-# the model is handed one callable and a generated SDK listing, and *every*
-# registered tool is in that listing — so these tools need no Code Mode work of
-# their own. What needs pinning is that they are actually there: a bundle that
-# resolves to nothing, or a row that mounts and registers nothing, both look
+# `ph-code-graph` exists so that an agent can ask a codebase about itself. The
+# agent that it was added for writes Python and not tool calls. In Code Mode the
+# model gets one callable and a generated SDK listing, and *every* registered
+# tool is in that listing. These tools therefore need no Code Mode work of their
+# own. What needs a test is that the tools are really there. A bundle that
+# resolves to nothing, and a row that mounts and registers nothing, both look
 # fine from outside and leave the model with no way to ask.
 
 
@@ -813,9 +824,9 @@ def test_the_bundle_is_discoverable_without_importing_it() -> None:
     """The entry point is the whole coupling between a profile and this package.
 
     `ph-app` must be able to compose a profile that layers this bundle without
-    depending on this distribution, so the profile discovers it through the
-    `ph.bundles` group. A typo in that entry point would leave the profile
-    failing for a user and nothing else in the suite would notice.
+    depending on this distribution. The profile therefore discovers the bundle
+    through the `ph.bundles` group. With a typo in that entry point, the profile
+    would fail for a user, and nothing else in the suite would notice.
     """
     from ph.bundles import installed_bundles, resolve_bundle
     from ph_code_graph import BUNDLE
@@ -825,7 +836,7 @@ def test_the_bundle_is_discoverable_without_importing_it() -> None:
 
 
 def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
-    """A row whose `name:` does not resolve fails at mount, in someone's session."""
+    """A row whose `name:` does not resolve fails at mount, in the session of a user."""
     from ph.cordis import Profile
     from ph.cordis.loader import resolve_plugin
     from ph_code_graph import BUNDLE
@@ -838,26 +849,27 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
 
 
 def test_the_bundles_row_is_enabled() -> None:
-    """Unlike `tool-todo`, this one is on: layering it has one meaning.
+    """Unlike `tool-todo`, this row is on, because layering the bundle has one
+    meaning.
 
-    A row that stood down would make the profile that layers this bundle a no-op
-    with a comment explaining why.
+    A row that stood down would make the profile that layers this bundle do
+    nothing.
     """
     from ph.cordis import Profile
     from ph_code_graph import BUNDLE
 
-    # `to_dump` omits `disabled` when it is false, so `enabled_rows()` is the
-    # question rather than a key that may not be there.
+    # `to_dump` omits `disabled` when it is false. The test therefore asks
+    # `enabled_rows()` and does not read a key that may be absent.
     assert [row.id for row in Profile.from_paths([BUNDLE]).enabled_rows()] == ["code-graph"]
 
 
 async def test_the_rlm_indexed_profile_layers_this_bundle() -> None:
-    """The wiring a person can type: `phern --profile rlm-indexed`.
+    """The wiring that a person can type: `phern --profile rlm-indexed`.
 
-    Asserted here rather than only in `ph-app`, because the *reason* the profile
-    exists is this package — and `available_profiles()` gating on bundle
-    resolution is what makes an install without this distribution see no
-    `rlm-indexed` rather than one that fails at mount.
+    This is asserted here and not only in `ph-app`, because this package is the
+    *reason* why the profile exists. `available_profiles()` checks that bundles
+    resolve. An install without this distribution therefore sees no
+    `rlm-indexed`, and does not see one that fails at mount.
     """
     from ph_app.profiles import available_profiles, resolve_profile
     from ph_code_graph import BUNDLE
@@ -871,31 +883,32 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
 ) -> None:
     """Five documents from four distributions, and nothing inactive.
 
-    A row that mounts and never activates — an unmet `inject` key — looks
-    identical in `--dump-config` to one that runs, so this is the only place the
-    difference is visible. It matters more for this profile than for the others
-    because it is the only one composed from four distributions' bundles: a key
-    one of them provides and another waits on is exactly what would fail here
-    and nowhere else.
+    A row that mounts and never activates, because an `inject` key is not met,
+    looks the same in `--dump-config` as a row that runs. This test is the only
+    place where the difference shows. It matters more for this profile than for
+    the others, because this is the only profile that is composed from the
+    bundles of four distributions. A key that one of them provides and another
+    waits on would fail here and in no other place.
 
-    Asserted from this package because the profile exists for it. `ph-app` owns
-    the `PROFILES` entry and cannot test it — nothing there depends on the two
-    indexing distributions, which is the point of discovering them as bundles.
+    This is asserted from this package because the profile exists for it.
+    `ph-app` owns the `PROFILES` entry and cannot test it. Nothing in `ph-app`
+    depends on the two indexing distributions, which is the purpose of
+    discovering them as bundles.
     """
     from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
     from ph_app.profiles import resolve_profile
 
-    # `PH_HOME`/`PH_CACHE` are not pinned here: the suite's autouse
-    # `_isolated_home` already does it, and a second writer of one rule is how
-    # the first comes to be believed and bypassed.
+    # `PH_HOME` and `PH_CACHE` are not set here. The autouse `_isolated_home`
+    # fixture of the suite already sets them. A second writer of one rule leads
+    # people to trust the first and then bypass it.
     documents = load_profile_documents(resolve_profile("rlm-indexed"))
     documents.append(
         ProfileDocument(
             "test-overlay",
             [
                 {"id": "fs", "config": {"root": str(tmp_path)}},
-                # The host probe and the managed venv are the two rows that
-                # reach outside the process; neither is what this asserts.
+                # The host probe and the managed venv are the two rows that reach
+                # outside the process. This test asserts neither.
                 {"id": "sandbox-local", "disabled": True},
                 {"id": "code-runtime-python", "disabled": True},
                 {"id": "code-runtime-stub", "name": "code-runtime-stub"},
@@ -905,18 +918,18 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
     ctx = Context()
     try:
         mount = await Profile.from_documents(documents, name="rlm-indexed").mount(ctx)
-        # **Exactly these two, and no others.** `rlm-skills-python` and
-        # `rlm-kernel-snapshot` both `inject=["python_runtime"]`, which only the
-        # real `code-runtime-python` provides — so swapping in the stub above is
-        # what makes them inactive, and saying so keeps the assertion able to
-        # catch a *third* row that stops activating. `<=` rather than `==`
-        # because a build without those rows must not fail here either.
+        # **Exactly these two rows, and no others.** `rlm-skills-python` and
+        # `rlm-kernel-snapshot` both have `inject=["python_runtime"]`, which only
+        # the real `code-runtime-python` provides. The stub above therefore makes
+        # them inactive. Stating that keeps the assertion able to catch a *third*
+        # row that stops activating. The comparison is `<=` and not `==`, because
+        # a build without those rows must not fail here.
         assert set(mount.inactive()) <= {"rlm-skills-python", "rlm-kernel-snapshot"}, (
             mount.inactive()
         )
         for row in ("code-graph", "text-index", "text-index-local"):
             assert row not in mount.inactive(), f"{row} mounted and never activated"
-        # And the point of the profile: the RLM's own surface has all four.
+        # The purpose of the profile: the RLM's own surface has all four tools.
         from ph.cordis import DEPLOYMENT
 
         visible = set(ctx.require(TOOLS).view(scope=DEPLOYMENT).visible)
@@ -931,11 +944,12 @@ async def test_every_row_in_the_rlm_indexed_profile_activates(
 
 
 async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_path: Path) -> None:
-    """A person asks before an agent does. Costs no model turn — the seam's rule.
+    """A person asks before an agent does. It costs no model turn, by the rule of
+    the seam.
 
-    It matters less here than for `text-index`, because 26 grammars are inside
-    the wheel and only the long tail fetches — but "is this ready" should have
-    one answer per plugin, asked the same way.
+    This matters less here than for `text-index`, because 26 grammars are inside
+    the wheel and only the remaining ones are fetched. But "is this ready" must
+    have one answer for each plugin, asked in the same way.
     """
     ctx = await mount(ROW)
     agent = new_agent(ctx)
@@ -943,7 +957,7 @@ async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_pa
     said = await ctx.require(COMMANDS).dispatch("/code-graph status", agent=agent, scope=agent.ctx)
 
     assert said is not None and "ready" in said
-    # The path it names is the one `use_cache` chose, not `~/.cache`.
+    # The path that it names is the one that `use_cache` chose, not `~/.cache`.
     assert said is not None and "tree-sitter" in said
     installed = await ctx.require(COMMANDS).dispatch(
         "/code-graph install", agent=agent, scope=agent.ctx
@@ -954,13 +968,13 @@ async def test_the_command_reports_grammar_readiness(mount: MountProfile, tmp_pa
 async def test_a_fetch_that_fails_is_the_last_the_process_tries(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A confined command cannot reach GitHub. Asked once for each language it
-    had no grammar for, it made a refused connection apiece — each a
-    `sandbox/denied` in the agent's log — on every call a host answered. The
-    first fetch that fails is now the last the process tries, across calls; every
-    such file is still skipped, with the reason that names the command. A
-    grammar on disk that will not load is not a refused fetch, and stops
-    nothing."""
+    """A confined command cannot reach GitHub. When it asked one time for each
+    language that had no grammar, it made one refused connection for each. Each
+    was a `sandbox/denied` in the log of the agent, on every call that a host
+    answered. Now the first fetch that fails is the last one that the process
+    tries, across calls. Every such file is still skipped, with the reason that
+    names the command. A grammar on disk that does not load is not a refused
+    fetch, and stops nothing."""
     from ph_code_graph import _extract
 
     _tree(tmp_path)
@@ -999,12 +1013,12 @@ async def test_a_fetch_that_fails_is_the_last_the_process_tries(
 async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Not "missing" — not applicable, which is a different sentence.
+    """Not "missing" but not applicable, which is a different sentence.
 
-    `/code-graph` used to report a language ready when the pack had a *parser*
-    for it, so `bash` and `sql` counted as ready and then handed the extractor a
-    language with no tags query. Filtering the list through `indexable` first
-    means the count only ever covers languages that can produce an edge.
+    `/code-graph` used to report a language as ready when the pack had a *parser*
+    for it. `bash` and `sql` then counted as ready, and the extractor got a
+    language with no tags query. The list is now filtered through `indexable`
+    first, so the count covers only languages that can produce an edge.
     """
     ctx = await mount(
         {
@@ -1018,7 +1032,7 @@ async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
 
     said = await ctx.require(COMMANDS).dispatch("/code-graph install", agent=agent, scope=agent.ctx)
 
-    # One of the three can yield an edge, so one is what the count reports.
+    # One of the three can yield an edge, so the count reports one.
     assert said is not None and "1 grammar" in said, said
     assert "not-a-language" not in said
     assert not indexable("sql"), "the premise: sql has a parser and no tags query"
@@ -1027,16 +1041,18 @@ async def test_a_name_that_is_not_an_indexable_language_is_filtered_out(
 async def test_a_grammar_that_is_not_on_disk_is_named(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reported by name, because "19 of 20" sends a person looking.
+    """The grammar is reported by name, because "19 of 20" makes a person search
+    for the missing one.
 
-    `local` is patched rather than pointed at a genuinely unfetched language:
-    which languages a host has cached is not something a test can pin, and the
-    branch under test is the reporting, not the pack's download.
+    `local` is patched. The test does not use a language that is really not
+    fetched, because a test cannot control which languages a host has cached.
+    The branch under test is the reporting, not the download of the pack.
 
-    Patched **where it is defined**, not on the package that re-exported it:
-    `readiness` resolves `local` in `_extract`'s own namespace, so a patch on the
-    re-export bound nothing and the test passed by reporting the host's real
-    grammars. Which is what it did when the partition moved next to `local`.
+    The patch is applied **where `local` is defined**, not on the package that
+    re-exported it. `readiness` resolves `local` in the namespace of `_extract`.
+    A patch on the re-export bound nothing, and the test passed by reporting the
+    real grammars of the host. That happened when the partition moved next to
+    `local`.
     """
     from ph_code_graph import _extract, engine
 
@@ -1060,13 +1076,14 @@ async def test_a_grammar_that_is_not_on_disk_is_named(
 def test_install_fetches_what_is_missing_in_one_batch_and_one_at_a_time_if_it_fails(
     monkeypatch: pytest.MonkeyPatch, fetchable: bool
 ) -> None:
-    """`ensure` asks the pack's `prefetch` for the grammars not on disk, which
-    fetches all of them where pack 1.16.2's `download()` fetched none it calls
-    bundled. One name the pack cannot fetch fails the whole batch, so then each
-    still missing is asked for alone, and the one that cannot be had is named.
+    """`ensure` asks the `prefetch` of the pack for the grammars that are not on
+    disk. `prefetch` fetches all of them, where the `download()` of pack 1.16.2
+    fetched none of those that it calls bundled. One name that the pack cannot
+    fetch fails the whole batch. Each name that is still missing is then
+    requested alone, and the one that cannot be obtained is named.
 
-    A pack of one method stands in for the real one: which grammars a host has
-    cached is not something a test can pin.
+    A pack with one method stands in for the real pack, because a test cannot
+    control which grammars a host has cached.
     """
     from ph_code_graph import _extract
 
@@ -1103,9 +1120,10 @@ def test_install_fetches_what_is_missing_in_one_batch_and_one_at_a_time_if_it_fa
 
 
 def test_a_note_about_a_run_nobody_waited_for_says_what_it_skipped_and_why() -> None:
-    """A background run's end is told with what its result would have said. For
-    a graph that means the skips: a grammar that could not be fetched leaves
-    every file skipped, and "finished: 34 files" alone reads as a built graph."""
+    """The note about the end of a background run says what its result would have
+    said. For a graph, that means the skips. A grammar that could not be fetched
+    leaves every file skipped, and "finished: 34 files" alone reads as a built
+    graph."""
     from ph.text import BRIEFLY
     from ph_code_graph.engine import SHOWN, _index_summary
 
@@ -1134,11 +1152,12 @@ def test_a_note_about_a_run_nobody_waited_for_says_what_it_skipped_and_why() -> 
 async def test_the_grammars_are_cached_under_a_ph_root(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Not `$XDG_CACHE_HOME`, which no pH root covers and no `phern doctor` names.
+    """Not under `$XDG_CACHE_HOME`, which no pH root covers and no `phern doctor`
+    names.
 
     The pack unpacks even its *bundled* grammars into this directory on first
-    use, so where it points is not housekeeping — it is whether the row works
-    in a container with a read-only `HOME`.
+    use. Where the cache points therefore decides whether the row works in a
+    container with a read-only `HOME`.
     """
     monkeypatch.delenv("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR", raising=False)
     monkeypatch.setenv("PH_CACHE", str(tmp_path / "cache"))
@@ -1156,25 +1175,27 @@ def test_the_grammar_cache_release_restores_the_base_it_replaced(
 ) -> None:
     """`pack.configure` is process-global, so it is taken as an effect (§4.9, I2).
 
-    Without a release the library kept pointing at an unmounted row's
-    `$PH_CACHE` — a per-test `tmp_path` this suite then deleted. Harmless while
-    every mount in a process computes the same path, and exactly the kind of
-    global that is wrong depth until two deployments in one process disagree.
+    Without a release, the library kept pointing at the `$PH_CACHE` of an
+    unmounted row, which was a per-test `tmp_path` that this suite then deleted.
+    That is harmless while every mount in a process computes the same path. It
+    is still the kind of global that is at the wrong depth until two deployments
+    in one process disagree.
 
-    Asserted against the function rather than through a mount and a dispose,
-    because the thing under test *is* a process-wide global: a test that read it
-    before and after a mount would be reading whatever the previous test left,
-    and would pass or fail on collection order.
+    The test asserts against the function and not through a mount and a dispose,
+    because the thing under test *is* a process-wide global. A test that read it
+    before and after a mount would read whatever the previous test left, and
+    would pass or fail by collection order.
 
-    This is also the test that caught the first version of the fix, which
-    restored `pack.cache_dir()` — the resolved leaf — and so re-appended the
-    pack's own suffix on every unwind.
+    This test also caught the first version of the fix. That version restored
+    `pack.cache_dir()`, the resolved leaf, and so appended the suffix of the
+    pack again on every unwind.
     """
     import tree_sitter_language_pack as pack
 
     from ph_code_graph._extract import cache_release, use_cache
 
-    # The env var is `use_cache`'s operator override and short-circuits it.
+    # The environment variable is the operator override of `use_cache`, and it
+    # short-circuits the function.
     monkeypatch.delenv("TREE_SITTER_LANGUAGE_PACK_CACHE_DIR", raising=False)
     first, second = tmp_path / "one", tmp_path / "two"
 
@@ -1189,7 +1210,7 @@ def test_the_grammar_cache_release_restores_the_base_it_replaced(
     settled = pack.cache_dir()
     assert str(first) in settled, "the base it replaced was not restored"
     assert str(second) not in settled
-    # And the leaf is not nested: restoring a *resolved* path would have made
+    # The leaf is also not nested. A restore of a *resolved* path would have made
     # `<base>/tree-sitter-language-pack/<v>/libs/tree-sitter-language-pack/...`.
     assert settled.count("tree-sitter-language-pack") == 1
 
@@ -1201,12 +1222,12 @@ def test_the_grammar_cache_release_restores_the_base_it_replaced(
 async def test_a_reindex_under_git_never_opens_an_unchanged_file(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The point of the filter: proved unchanged, so never read.
+    """The purpose of the filter: a file that is proved unchanged is never read.
 
-    Counted at `ctx.fs.read`, because "unchanged" was already reported by the
-    content hash before the filter existed — the *only* observable difference is
-    whether the file was opened, and a test that watched the counts alone would
-    pass against both implementations.
+    The count is taken at `ctx.fs.read`. The content hash already reported
+    "unchanged" before the filter existed. The *only* difference that can be
+    observed is whether the file was opened. A test that watched only the counts
+    would pass against both implementations.
     """
     ctx = await mount(ROW)
     root = await git_repo(ctx, tmp_path)
@@ -1232,8 +1253,8 @@ async def test_a_reindex_under_git_never_opens_an_unchanged_file(
 async def test_an_edited_file_is_still_read_and_reindexed(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The safe direction. git's index still holds the old blob id for it, so
-    this is `status` doing its job — see `ph.seams.changes`."""
+    """The safe direction. The index of git still holds the old blob id for the
+    file, so this is `status` doing its job. See `ph.seams.changes`."""
     ctx = await mount(ROW)
     root = await git_repo(ctx, tmp_path)
     (root / "pkg").mkdir(exist_ok=True)
@@ -1256,10 +1277,10 @@ async def test_an_edited_file_is_still_read_and_reindexed(
 async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
     mount: MountProfile, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """jj needs no commit — it snapshots the working copy, so the token moves.
+    """jj needs no commit. It snapshots the working copy, so the token changes.
 
-    The interesting half is that the *first* run stores a usable token even
-    though it proved nothing, which is what makes the second run cheap.
+    The interesting part is that the *first* run stores a usable token although
+    it proved nothing. That is what makes the second run cheap.
     """
     ctx = await mount(ROW)
     root = await jj_repo(ctx, tmp_path)
@@ -1280,10 +1301,10 @@ async def test_a_reindex_under_jj_never_opens_an_unchanged_file(
 async def test_a_tree_with_no_version_control_still_indexes(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The filter is an optimization, so losing it must cost nothing but speed.
+    """The filter is an optimization, so its loss must cost only speed.
 
-    This is the property that makes it safe to put in front of an indexer at
-    all: a caller that ignored `TreeState` entirely would still be correct.
+    This property makes it safe to put the filter in front of an indexer. A
+    caller that ignored `TreeState` entirely would still be correct.
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -1293,24 +1314,25 @@ async def test_a_tree_with_no_version_control_still_indexes(
     again = await run_tool(ctx, "code_index", {"paths": ["pkg"]}, agent=new_agent(ctx))
 
     assert first.value["indexed"] == 2, "the fixture's two modules"
-    # Still reported unchanged — by the content hash, which never went away.
+    # Still reported as unchanged, by the content hash, which was never removed.
     assert again.value["indexed"] == 0 and again.value["unchanged"] == 2
 
 
 async def test_a_deleted_file_leaves_the_index_on_the_next_sweep(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """X3 — the walk never diffed itself against what the index already held.
+    """X3: the walk never compared itself with what the index already held.
 
-    A file removed from the tree kept its symbols until somebody ran `forget` by
-    hand, so `code_graph` went on naming definitions at paths that are not there
-    — and a *rename* showed the symbol twice, once under each name, with nothing
-    saying which was real. A pointer into a file that does not exist is the one
-    answer this tool must not give, because the model's next move is to open it.
+    A file that was removed from the tree kept its symbols until someone ran
+    `forget` by hand. `code_graph` then continued to name definitions at paths
+    that did not exist. A *rename* showed the symbol twice, one time under each
+    name, and nothing said which one was real. A pointer into a file that does
+    not exist is the one answer that this tool must not give, because the next
+    step of the model is to open that file.
 
-    Only a full sweep does this, which is the second half: narrowing the walk
-    must not empty the index, or `code_index paths=["src/x.py"]` would delete
-    everything else.
+    Only a full sweep removes files. That is the second half of the test: a
+    narrowed walk must not empty the index, or `code_index paths=["src/x.py"]`
+    would delete everything else.
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -1329,17 +1351,17 @@ async def test_a_deleted_file_leaves_the_index_on_the_next_sweep(
 async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """X3's guard rail, and the reason the sweep asks the filesystem.
+    """The safeguard for X3, and the reason why the sweep asks the filesystem.
 
-    The first cut of this fix differenced the index against the *walk* and
-    decided it was a full sweep by pattern-matching the arguments
-    (`paths == ["."]`). Two things make that wrong, and both empty the index
-    rather than trimming it: `fs.collect` stops at `max_files` and reports
-    nothing, so on a tree past the cap the walk is a prefix of the scope; and
-    the `permissions-fs` screen prunes whole directories, so a rule hiding a
-    subtree makes those files "absent". Asking `exists()` settles all three —
-    truncated, pruned and narrowed — because "is this file still there" is the
-    question, and it never depended on the walk at all.
+    The first version of this fix compared the index with the *walk*. It decided
+    that a walk was a full sweep by matching the arguments (`paths == ["."]`).
+    Two things make that wrong, and both empty the index and do not only trim
+    it. `fs.collect` stops at `max_files` and reports nothing, so on a tree past
+    the cap the walk is a prefix of the scope. The `permissions-fs` screen prunes
+    whole directories, so a rule that hides a subtree makes those files
+    "absent". A call to `exists()` handles all three cases (truncated, pruned,
+    and narrowed), because the question is "is this file still there", and that
+    question never depended on the walk.
     """
     _tree(tmp_path)
     ctx = await _indexed(mount, tmp_path)
@@ -1352,8 +1374,8 @@ async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
     still = await run_tool(ctx, "code_graph", {"mode": "define", "query": "shared"}, agent=agent)
     assert still.value["symbols"], "a narrowed walk emptied the index"
 
-    # And a walk truncated by `max_files`, which *looks* like a full sweep: the
-    # arguments are the row's own defaults and `paths` is still only a subset.
+    # A walk that `max_files` truncated *looks* like a full sweep. The arguments
+    # are the defaults of the row, and `paths` is still only a subset.
     capped = await _indexed(mount, tmp_path / "capped", max_files=1)
     narrow_agent = new_agent(capped)
     await run_tool(capped, "code_index", {"paths": ["."]}, agent=narrow_agent)
@@ -1365,24 +1387,24 @@ async def test_a_walk_that_did_not_reach_a_file_does_not_forget_it(
 async def test_a_forgotten_symbols_docstring_stops_being_searchable(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """N5 — the FTS delete has to carry the values the insert used.
+    """N5: the FTS delete must carry the values that the insert used.
 
-    FTS5's `'delete'` re-derives the postings to remove from the values it is
-    handed, so a delete that passes different values removes only the postings
-    those values imply. Measured against SQLite 3.45: deleting with `""` for a
-    symbol inserted with real docstring text removes the **name** posting and
-    leaves every **doc** posting behind.
+    The `'delete'` command of FTS5 derives the postings to remove from the values
+    that it is given. A delete that passes different values removes only the
+    postings that those values imply. Measured against SQLite 3.45: a delete with
+    `""`, for a symbol that was inserted with real docstring text, removes the
+    **name** posting and leaves every **doc** posting behind.
 
-    A stale posting is worse than a miss: `symbols.id` has no `AUTOINCREMENT`,
-    so a later insert takes the dead row's id and the old docstring starts
-    answering with a different symbol — which is what this stages, because
-    `search` joins the rowid back to `symbols` and a posting whose symbol is
+    A stale posting is worse than a miss. `symbols.id` has no `AUTOINCREMENT`, so
+    a later insert takes the id of the dead row, and the old docstring then
+    answers with a different symbol. The test stages exactly that, because
+    `search` joins the rowid back to `symbols`, and a posting whose symbol is
     simply gone is invisible.
 
-    Driven through `code_index`/`code_graph` rather than against `_fts_values`,
-    which is how this first shipped: the helper was written, exported to a unit
-    test, and never called, so the test passed while both live expressions
-    stayed inline.
+    The test goes through `code_index` and `code_graph`, not against
+    `_fts_values`. The first version of the fix shipped with the helper written,
+    exported to a unit test, and never called. That test passed while both live
+    expressions stayed inline.
 
     Sabotage: pass `""` as the doc at either call site and `zarquon` answers
     with the symbol that took the id.
@@ -1397,7 +1419,7 @@ async def test_a_forgotten_symbols_docstring_stops_being_searchable(
     seen = await run_tool(ctx, "code_graph", {"mode": "search", "query": "zarquon"}, agent=agent)
     assert [one["name"] for one in seen.value["symbols"]] == ["retired"], "never indexed"
 
-    # Forget it, then index a *new* symbol that recycles the dead row's id.
+    # Forget it, then index a *new* symbol that takes the id of the dead row.
     (tmp_path / "pkg" / "old.py").unlink()
     await run_tool(ctx, "code_index", {"paths": ["pkg/old.py"], "forget": True}, agent=agent)
     (tmp_path / "pkg" / "new.py").write_text("def arrived():\n    return 2\n", encoding="utf-8")
@@ -1416,10 +1438,11 @@ def test_two_mounts_released_out_of_order_leave_the_one_still_mounted(
     """Each release takes back only its own claim on the grammar cache (Holdings
     rule 4).
 
-    The release restored whatever was set before its claim. Two mounts in one
-    process, the first released first, reset the cache under the second while it was
-    still mounted; releasing the second then restored the first's directory, by then
-    gone with its row.
+    The release used to restore whatever was set before its claim. With two
+    mounts in one process, and the first mount released first, the release reset
+    the cache under the second mount while it was still mounted. The release of
+    the second mount then restored the directory of the first, which was gone
+    with its row by then.
 
     Sabotage: restore the previous base in `cache_release` again, and the second
     mount's cache is lost when the first is released.

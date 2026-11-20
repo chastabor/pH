@@ -1,9 +1,10 @@
-"""`ph-code-graph` — `code_index` and `code_graph` from a command line.
+"""`ph-code-graph`: `code_index` and `code_graph` from a command line.
 
-For trying a query by hand, and what this package's UTCP manual calls. The tools
-are the ones the `code-graph-engine` row registers (`ph_code_graph.engine`);
-`ph.toolcli` mounts that row in this process and runs them through the registry.
-The `code-graph` row a session mounts reaches them by running this command.
+The command is for trying a query by hand, and it is what the UTCP manual of this
+package calls. The tools are the ones that the `code-graph-engine` row registers
+(`ph_code_graph.engine`). `ph.toolcli` mounts that row in this process and runs
+the tools through the registry. The `code-graph` row that a session mounts
+reaches the tools by running this command.
 
 ```bash
 ph-code-graph call code_index --paths packages/ph-core --format text
@@ -32,8 +33,8 @@ CLI = ToolCli(
     manual="ph_code_graph",
     summary="Index a code tree and ask about its structure: definitions, callers, impact.",
     version=version("ph-code-graph"),
-    # The engine row, under the session row's id: the config a profile writes for
-    # `code-graph` is then the config this command reads for it.
+    # The engine row, under the id of the session row. The config that a profile
+    # writes for `code-graph` is then the config that this command reads.
     rows=({"id": ROW, "name": "code-graph-engine"},),
     command=ROW,
     inherit_env=(GRAMMAR_CACHE_ENV,),
