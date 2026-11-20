@@ -1,31 +1,31 @@
 """A deterministic embedder, and a `ph-text-index` command that mounts it.
 
-## Why a stub embedder rather than the real model
+## Why a stub embedder and not the real model
 
 The shipped provider is `sentence-transformers`, which downloads weights on
-first use. A suite that loaded it would be a suite that fails in an airgapped
-CI, takes a minute to prove that paging works, and tests the model rather than
-this package. So the suites use a deterministic hashing embedder and exercise
+first use. A suite that loaded it would fail in an airgapped CI. It would take a
+minute to prove that paging works, and it would test the model and not this
+package. The suites therefore use a deterministic hashing embedder and exercise
 **the real turbovec index** through it.
 
-`HashingEmbedder` is a bag of words over `blake2b` buckets, so similar text
-really does produce similar vectors and the retrieval assertions are about
-ranking rather than about a fixture. `blake2b` and not `hash()`, which is salted
-per process — a stub whose vectors changed between runs would make a reopened
-index look corrupt, and here the index is built by one process and searched by
-the next.
+`HashingEmbedder` is a bag of words over `blake2b` buckets. Similar text
+therefore really produces similar vectors, and the retrieval assertions are
+about ranking and not about a fixture. It uses `blake2b` and not `hash()`,
+which is salted for each process. A stub whose vectors changed between runs
+would make a reopened index look corrupt. Here one process builds the index and
+the next process searches it.
 
 ## Why it is also a command
 
-The tools run in the package's command, so a suite that proves the session's
-rows needs a command whose embedder is this one. `python -m text_index_stub` is
-`ph-text-index` with one difference: its embedder row is `engine` below. It is
-the package's own engine row, tools, envelope and manual otherwise
-(`ph.toolcli`).
+The tools run in the command of the package. A suite that proves the rows of
+the session therefore needs a command whose embedder is this one.
+`python -m text_index_stub` is `ph-text-index` with one difference: its
+embedder row is `engine` below. Everything else is the package's own: the
+engine row, the tools, the envelope, and the manual (`ph.toolcli`).
 
-Apart from `text_index_helpers`, which the session's side of a test imports:
-this module is what the command's process loads on every call, and it must not
-pay for `ph-utcp` to do it.
+This module is separate from `text_index_helpers`, which the session side of a
+test imports. The process of the command loads this module on every call, and
+it must not pay for `ph-utcp` to do that.
 
 @module text_index_stub
 """
@@ -86,8 +86,9 @@ class HashingEmbedder:
     dim: int = 96
     calls: int = 0
     delay: float = 0.0
-    """Seconds each `encode` takes: what a model's forward pass costs, for a test
-    that needs a run to still be going when it looks."""
+    """How many seconds each `encode` takes. This stands for the cost of the
+    forward pass of a model. A test uses it when a run must still be working at
+    the time that the test looks."""
 
     @property
     def name(self) -> str:
@@ -111,31 +112,37 @@ class HashingEmbedder:
 
 @dataclass(slots=True)
 class BoundedEmbedder(HashingEmbedder):
-    """A hashing embedder that reads only so many tokens, where a token is a
-    word — so a test can count them by eye.
+    """A hashing embedder that reads only a set number of tokens. A token is a
+    word here, so a reader can count the tokens in a test.
 
-    Three separate facts, because the code under test treats them separately:
-    what a profile *set* (`max_tokens`), what the model *reports* when asked
-    (`reads`), and what it *does* with an input that is too long
-    (`refuses_over`: refuse it, in a llama.cpp's words). `asked` counts the
-    times the limit was asked for, which of a real model means loading it.
+    There are three separate facts, because the code under test treats them
+    separately:
+
+    * `max_tokens` is what a profile *set*.
+    * `reads` is what the model *reports* when it is asked.
+    * `refuses_over` is what the model *does* with an input that is too long. It
+      refuses the input, in the words of a llama.cpp server.
+
+    `asked` counts how many times the limit was asked for. For a real model,
+    asking means loading the model.
     """
 
     max_tokens: int | None = None
     reads: int | None = None
     refuses_over: int | None = None
     vague: bool = False
-    """Refuse without numbers, as a provider whose prose names none."""
+    """Refuse without numbers, like a provider whose refusal names no number."""
     estimates: bool = False
-    """Measure by the bytes, as an embedder with no tokenizer does, and not by
-    the words it really counts."""
+    """Measure by bytes, as an embedder with no tokenizer does, and not by the
+    words that this embedder really counts."""
     prefix: str = ""
-    """What an estimate counts in front of each passage, as an endpoint's
-    `document_prefix` is."""
+    """The text that an estimate counts in front of each passage, like the
+    `document_prefix` of an endpoint."""
     breaks: int = 0
-    """Tokens a blank line between two paragraphs costs when a passage is counted
-    whole. Weighing its paragraphs one at a time does not see them: a
-    tokenizer's count of a whole can be more than the sum of its parts'."""
+    """How many tokens a blank line between two paragraphs costs when a passage
+    is counted whole. Weighing the paragraphs one at a time does not count them.
+    The count that a tokenizer gives for a whole passage can be more than the
+    sum of the counts of its parts."""
     asked: int = 0
     refused: int = 0
     """How many calls were turned away as too long."""
@@ -156,7 +163,7 @@ class BoundedEmbedder(HashingEmbedder):
         return [self._whole(text) for text in texts]
 
     def _whole(self, text: str) -> int:
-        """What `text` is as one input: its words, and its paragraph breaks."""
+        """The count of `text` as one input: its words plus its paragraph breaks."""
         return len(text.split()) + self.breaks * text.count("\n\n")
 
     def weigh(self, texts: Sequence[str], bytes_per_token: float) -> Sequence[float]:
@@ -185,8 +192,9 @@ class StubConfig(WireModel):
     delay: float = 0.0
     """`HashingEmbedder.delay`."""
     record: str = ""
-    """A file to add a line to each time the embedder is made — each time "the
-    model is loaded" — so a test can count the processes that loaded one."""
+    """A file that gets one more line each time the embedder is made, which
+    stands for each time "the model is loaded". A test can then count the
+    processes that loaded one."""
 
 
 @plugin("text-index-stub-engine", affects="environment", inject=[TEXT_INDEX], config=StubConfig)

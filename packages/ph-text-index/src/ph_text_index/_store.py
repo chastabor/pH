@@ -1,50 +1,54 @@
-"""The index on disk: a turbovec file for the vectors, JSON for what they mean.
+"""The index on disk: a turbovec file for the vectors, and JSON for what they mean.
 
-Two files, because they answer to different rules. `index.tvim` is turbovec's
-own format, written through `sync()` — incremental, one fsync per call, and
-crash-safe at any byte. `chunks.json` is the sidecar: which document each vector
-came from, which lines, and the passage itself.
+There are two files, because they follow different rules. `index.tvim` is the
+format of turbovec itself. It is written through `sync()`, which is incremental,
+does one fsync for each call, and is crash-safe at any byte. `chunks.json` is the
+sidecar: for each vector, the document that it came from, the lines, and the
+passage itself.
 
-**The sidecar holds the passage text, and that is a deliberate cost.** Search
-could return a path and a line range and let the caller `read` it, which would
-keep this file small. It would also make every hit a second tool call before the
-model learns whether the hit was any good, and would silently answer from a file
-that has changed since it was indexed. Holding the text means one call answers,
-and what it answers with is what was actually indexed.
+**The sidecar holds the passage text, and that cost is deliberate.** Search could
+return a path and a line range and let the caller `read` it, which would keep
+this file small. But every hit would then need a second tool call before the
+model learns whether the hit was any good. The answer would also come silently
+from a file that has changed since it was indexed. Because the sidecar holds the
+text, one call answers, and the answer is the text that was really indexed.
 
 ## What is *not* claimed
 
 The sidecar is rewritten whole on every save, while the vectors append. That is
-fine for a corpus of documents and wrong for a corpus of millions; the ceiling
-is the sidecar, not turbovec. It is stated here rather than discovered later.
+fine for a corpus of documents and wrong for a corpus of millions. The ceiling is
+the sidecar, not turbovec. It is stated here so that nobody has to discover it
+later.
 
-The pair can also diverge — a crash between the two writes leaves vectors with
-no meaning, or meanings with no vectors. `open` reconciles toward the sidecar
-both ways. It drops any chunk the index does not hold, because a chunk nobody can
-retrieve is invisible. It removes any vector the sidecar does not name, because
-its id is one the next `add` would allocate again.
+The two files can also diverge. A crash between the two writes leaves vectors
+with no meaning, or meanings with no vectors. `open` reconciles toward the
+sidecar in both directions. It drops any chunk that the index does not hold,
+because a chunk that nobody can retrieve is invisible. It removes any vector that
+the sidecar does not name, because the next `add` would allocate the id of that
+vector again.
 
 **One writer at a time, across processes.** Every root and process on a
 workspace shares its directory. Each holds its own copy in memory, and a save
-writes that copy whole, so two writers left the sidecar describing whichever
-saved last. The service opens and writes under a file lock, and loads again a
-copy another writer has changed since (`stale`); see `TextIndexSeam.writing`.
+writes that copy whole. With two writers, the sidecar therefore described
+whichever writer saved last. The service opens and writes under a file lock. It
+loads a copy again when another writer has changed it since (`stale`). See
+`TextIndexSeam.writing`.
 
 ## Calibration
 
-turbovec's TQ+ calibration is worth 2.5 to 8.7 points of R@10, and its
-documentation is emphatic about the one way to get it wrong: the sample must be
-a uniform random, representative draw of what the index will hold, and a
-clustered prefix "fits a calibration that actively destroys recall". An
-incremental indexer does not have such a draw at the moment it would have to
-commit one — the first document is the most clustered prefix there is.
+The TQ+ calibration of turbovec is worth 2.5 to 8.7 points of R@10. Its
+documentation is emphatic about the one way to get it wrong. The sample must be a
+uniform random, representative draw of what the index will hold, and a clustered
+prefix "fits a calibration that actively destroys recall". An incremental indexer
+does not have such a draw at the moment when it would have to commit one: the
+first document is the most clustered prefix that exists.
 
-So it is committed in exactly one situation, which is the one the upstream
-advice describes: the index is **empty**, and the batch about to land is large
-enough to sample from. Then a random sample of that batch *is* a representative
-draw of the index's contents, and calibrating before the add is the documented
-order. Otherwise the index stays uncalibrated, which is plain TurboQuant and
-merely good rather than wrong.
+The calibration is therefore committed in exactly one situation, the one that
+the upstream advice describes: the index is **empty**, and the batch that is
+about to be added is large enough to sample from. A random sample of that batch
+*is* then a representative draw of the contents of the index, and calibrating
+before the add is the documented order. Otherwise the index stays uncalibrated.
+That is plain TurboQuant, which is merely good and not wrong.
 
 @module ph_text_index._store
 """
@@ -73,37 +77,39 @@ __all__ = ["CALIBRATION_SAMPLE", "IndexMismatch", "Record", "TextIndex"]
 log = logging.getLogger("ph_text_index.store")
 
 FORMAT = 1
-"""The sidecar's shape. Bumped when a field changes meaning; an unknown version
-is refused rather than guessed at.
+"""The shape of the sidecar. The number goes up when a field changes meaning. An
+unknown version is refused and not guessed at.
 
-Still the baseline: nothing has shipped, so `vcs` and `vcs_ids` are part of what
-a version-1 sidecar *is* rather than an addition to migrate to. Every field is
-read back through `.get` with a default, so the refusal here is for a shape from
-the future, not for one of ours missing a key."""
+This is still the baseline. Nothing has shipped, so `vcs` and `vcs_ids` are part
+of what a version-1 sidecar *is*, and not an addition to migrate to. Every field
+is read back through `.get` with a default. The refusal here is therefore for a
+shape from the future, not for one of our own that is missing a key."""
 
 CALIBRATION_SAMPLE = 1_024
-"""Rows turbovec's own guidance calls enough for a calibration fit."""
+"""The number of rows that the guidance of turbovec calls enough for a
+calibration fit."""
 
 _Signature: TypeAlias = tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]
-"""The sidecar's and the vectors' `file_stamp`."""
+"""The `file_stamp` of the sidecar, and of the vectors."""
 
 
 class IndexMismatch(RuntimeError):
-    """The index on disk was built by a different embedder than this one.
+    """A different embedder than this one built the index on disk.
 
-    Its own type because the only fix is a human decision — re-embed the corpus
-    under the new model, or put the old row back — and a caller has to be able
-    to say that rather than reporting a dimension number.
+    This has its own type because the only fix is a human decision: embed the
+    corpus again under the new model, or put the old row back. A caller must be
+    able to say that, and not report a dimension number.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    """One indexed passage: the vector's id, and everything it means."""
+    """One indexed passage: the id of the vector, and everything that it means."""
 
     id: int
     path: str
-    """As the workspace names it, so a hit is a path the agent can hand to `read`."""
+    """As the workspace names it, so that a hit is a path that the agent can pass
+    to `read`."""
     start_line: int
     end_line: int
     text: str
@@ -120,13 +126,13 @@ class Record:
 
 @dataclass(slots=True)
 class TextIndex:
-    """A turbovec index and its sidecar, as one thing that opens and saves.
+    """A turbovec index and its sidecar, as one object that opens and saves.
 
-    Every method here is **blocking** — file I/O and SIMD search — and is called
-    through a worker thread by the service that owns it. Written synchronously on
-    purpose: an index whose consistency depends on interleaving is one nobody can
-    reason about, and the service's lock is easier to see than an await inside a
-    mutation.
+    Every method here **blocks**, because it does file I/O and SIMD search. The
+    service that owns the index calls each method through a worker thread. The
+    class is synchronous on purpose. Nobody can reason about an index whose
+    consistency depends on interleaving, and the lock of the service is easier to
+    see than an await inside a mutation.
     """
 
     root: Path
@@ -139,40 +145,43 @@ class TextIndex:
     _by_path: dict[str, list[int]] = field(default_factory=dict)
     _next_id: int = 1
     _token: str = ""
-    """The version-control token from the last index — see `ph.seams.changes`."""
+    """The version-control token from the last index. See `ph.seams.changes`."""
     _vcs_ids: dict[str, str] = field(default_factory=dict)
-    """Path → the backend's content id when this path was last indexed.
+    """Path → the content id from the backend when this path was last indexed.
 
-    Beside the digests rather than inside a `Record`, because it is one fact per
-    *document* while a record is one per passage: storing it per chunk would be
-    the same string repeated once for every paragraph of every file."""
+    This map is beside the digests and not inside a `Record`. It holds one fact
+    for each *document*, while a record is one for each passage. Stored for each
+    chunk, it would be the same string repeated for every paragraph of every
+    file."""
     _digests: dict[str, str] = field(default_factory=dict)
-    """Path → a digest of the document's text when this path was last indexed.
+    """Path → a digest of the text of the document when this path was last
+    indexed.
 
-    What says "unchanged" in a tree with no version control, and after a run
-    that was stopped before it could store its token: the next run reads the
-    document, finds the digest it has, and embeds nothing. Per document, beside
-    `_vcs_ids`, for that field's reason."""
+    The digest shows "unchanged" in a tree with no version control, and after a
+    run that was stopped before it could store its token. The next run reads the
+    document, finds the digest that it already has, and embeds nothing. The map
+    is for each document, beside `_vcs_ids`, for the same reason as that field."""
     _seen: _Signature = (None, None)
     """The files as this copy last read or wrote them. See `stale`."""
     readonly: bool = False
-    """Whether this copy was opened by a reader (`open`). Such a copy may hold
-    vectors no record names, so it is one to search and never one to add to."""
+    """Whether a reader opened this copy (`open`). Such a copy may hold vectors
+    that no record names, so it can be searched and must never be added to."""
     _embedder: list[EmbedderRecord] = field(default_factory=list)
-    """The embedder log, oldest first: what the embedder said of itself each
-    time an index run found its answer changed (`EmbedderRecord`). Saved with
-    the passages, so the log and what it was used to cut never part."""
+    """The embedder log, oldest first: what the embedder reported about itself
+    each time an index run found that its answer had changed (`EmbedderRecord`).
+    The log is saved with the passages, so the log and the passages that it was
+    used to cut never separate."""
 
     # ------------------------------------------------------------- paths ----
 
     @property
     def _dim(self) -> int | None:
-        """The vector width, asked of the index rather than tracked beside it.
+        """The vector width, read from the index and not tracked beside it.
 
-        It was a field read from the sidecar and then immediately overwritten
-        from `self._index.dim` whenever an index file existed — two values that
-        had to agree, one of which could be stale in exactly the state `stats()`
-        reports to `phern doctor`.
+        It used to be a field that was read from the sidecar and then immediately
+        overwritten from `self._index.dim` whenever an index file existed. Those
+        were two values that had to agree, and one of them could be stale in
+        exactly the state that `stats()` reports to `phern doctor`.
         """
         return None if self._index is None else int(self._index.dim)
 
@@ -189,15 +198,16 @@ class TextIndex:
     def open(self, *, readonly: bool = False) -> None:
         """Load what is on disk, or start empty. Idempotent.
 
-        `readonly` is a reader's open, made without the writer lock: a search, a
-        status. It changes no file. A writer may be part-way through a save —
-        the vectors synced, the sidecar naming them not yet written — and those
-        vectors are then left where they are, since `search` answers only for a
-        vector the sidecar names. Removing them (`_remove_strays`) is a writer's,
-        under the lock: done by a reader it took out of the file what the writer
-        was about to name.
+        `readonly` is the open of a reader, made without the writer lock: a
+        search, or a status. It changes no file. A writer may be part-way through
+        a save, with the vectors synced and the sidecar that names them not yet
+        written. Those vectors are then left where they are, because `search`
+        answers only for a vector that the sidecar names. Only a writer removes
+        them (`_remove_strays`), under the lock. When a reader removed them, it
+        took out of the file what the writer was about to name.
 
-        :raises IndexMismatch: when the sidecar names a different embedder.
+        :raises IndexMismatch: when the sidecar has a different `format`, or names
+            a different embedder.
         """
         self._seen = self._signature()
         self.readonly = readonly
@@ -220,8 +230,8 @@ class TextIndex:
         self._next_id = as_int(raw.get("next_id"), 1)
         self._token = as_str(raw.get("vcs"))
         self._vcs_ids = {str(path): str(one) for path, one in (raw.get("vcs_ids") or {}).items()}
-        # Absent from an index written before documents had one: each then reads
-        # as changed once, and is embedded again.
+        # An index that was written before documents had a digest has none. Each
+        # document then reads as changed one time, and is embedded again.
         self._digests = {str(path): str(one) for path, one in (raw.get("digests") or {}).items()}
         self._embedder = _embedder_log(raw.get("embedder"), self.sidecar_path)
         if self.index_path.exists():
@@ -236,8 +246,8 @@ class TextIndex:
             )
             for record in raw.get("records", [])
         }
-        # Trusting the sidecar and dropping what the index cannot answer for; see
-        # the module docstring on divergence.
+        # Trust the sidecar, and drop what the index cannot answer for. See the
+        # module docstring on divergence.
         self._records = {
             id_: record
             for id_, record in held.items()
@@ -255,20 +265,22 @@ class TextIndex:
         self._reindex_paths()
 
     def _remove_strays(self) -> None:
-        """Remove every vector the sidecar does not name, and write that down.
+        """Remove every vector that the sidecar does not name, and write the
+        result to disk.
 
-        What a crash between `save`'s two writes leaves: the vectors synced, the
-        sidecar naming them never written. Their ids start at the sidecar's
-        `next_id`, which is where the next `add` allocates, and turbovec refuses
-        an id it already holds, so every later add raised until the directory
-        was deleted.
+        Such vectors are what a crash between the two writes of `save` leaves:
+        the vectors synced, and the sidecar that names them never written. Their
+        ids start at the `next_id` of the sidecar, which is where the next `add`
+        allocates. turbovec refuses an id that it already holds, so every later
+        add raised until the directory was deleted.
 
-        turbovec lists no ids, so they are found with a search whose `k` is the
-        whole index. That is one full scan, and only when the count says there is
-        something to find: every id the sidecar kept is in the index, so the
-        difference in size is exactly the number of strays. Synced at once, so
-        the scan is made once and not on every open until somebody saves. Only
-        for an open under the writer lock, where nobody else is writing.
+        turbovec lists no ids, so the strays are found with a search whose `k` is
+        the whole index. That is one full scan, and it runs only when the count
+        shows that there is something to find. Every id that the sidecar kept is
+        in the index, so the difference in size is exactly the number of strays.
+        The removal is synced immediately, so the scan is made one time and not
+        on every open until somebody saves. This runs only for an open under the
+        writer lock, where nobody else is writing.
         """
         if self._index is None:
             return
@@ -297,10 +309,11 @@ class TextIndex:
     def stale(self) -> bool:
         """Whether another writer changed the files since this copy read or wrote them.
 
-        A stat of each, so it is cheap enough to ask before every use. Both files,
-        because a writer that died between its two writes changed only the
-        vectors, and a copy checked against the sidecar alone would sync its own
-        changes onto a file that had moved under it."""
+        The check is one stat of each file, so it is cheap enough to make before
+        every use. It covers both files, because a writer that died between its
+        two writes changed only the vectors. A copy that was checked against the
+        sidecar alone would sync its own changes onto a file that had changed
+        under it."""
         return self._signature() != self._seen
 
     def _reindex_paths(self) -> None:
@@ -311,12 +324,14 @@ class TextIndex:
     # -------------------------------------------------------------- save ----
 
     def save(self) -> None:
-        """Persist both halves — vectors first, so a crash never orphans text.
+        """Persist both files, vectors first, so that a crash never leaves text
+        without a vector.
 
-        The order is the whole of the crash story. `sync` commits durably before
-        it returns, so a failure after it leaves vectors the next `open` cannot
-        name and drops; a failure *before* it would leave named chunks with no
-        vector, which is the divergence that surfaces as an unanswerable hit.
+        The order is all of the crash handling. `sync` commits durably before it
+        returns. A failure after it leaves vectors that the next `open` cannot
+        name, and `open` drops them. A failure *before* it would leave named
+        chunks with no vector. That is the divergence that appears as a hit that
+        cannot be answered.
         """
         self.root.mkdir(parents=True, exist_ok=True)
         if self._index is not None:
@@ -333,24 +348,25 @@ class TextIndex:
             "next_id": self._next_id,
             "records": [record.as_value() for record in self._records.values()],
         }
-        # Replace, never truncate-in-place: the sidecar is the only copy of what
-        # the vectors mean, and a partial write of it loses the corpus.
+        # Replace the file, and never truncate it in place. The sidecar is the
+        # only copy of what the vectors mean, and a partial write of it loses the
+        # corpus.
         write_atomic(self.sidecar_path, json.dumps(payload))
         self._seen = self._signature()
 
     # ---------------------------------------------------------- embedder ----
 
     def embedder(self) -> EmbedderRecord | None:
-        """What the embedder last said of itself, as an index run asked it: the
-        newest entry of the log, or `None` before any run has embedded."""
+        """What the embedder last reported about itself when an index run asked
+        it: the newest entry of the log, or `None` before any run has embedded."""
         return self._embedder[-1] if self._embedder else None
 
     def note_embedder(self, record: EmbedderRecord) -> bool:
-        """Add `record` to the log when it says something the newest entry does
-        not. Whether it was added; it is saved with the next `save`, which the
-        caller then owes."""
+        """Add `record` to the log when it says something that the newest entry
+        does not. Returns whether it was added. The record is saved with the next
+        `save`, which the caller must then make."""
         newest = self.embedder()
-        # When it was asked is not something it said.
+        # The time when it was asked is not part of what it reported.
         if newest is not None and newest.model_dump(exclude={"asked_at_ms"}) == record.model_dump(
             exclude={"asked_at_ms"}
         ):
@@ -369,30 +385,33 @@ class TextIndex:
         self._token = token
 
     def vcs_id(self, path: str) -> str:
-        """What the backend called this document's content when it was indexed."""
+        """The content id that the backend gave this document when it was
+        indexed."""
         return self._vcs_ids.get(path, "")
 
     def digest(self, path: str) -> str:
-        """The digest of this document's text when it was indexed, or `""`."""
+        """The digest of the text of this document when it was indexed, or `""`."""
         return self._digests.get(path, "")
 
     def vouch(self, path: str, vcs_id: str) -> None:
-        """Record what the backend calls this document's content now, for a
-        document found unchanged by its digest — so the next run is told by the
-        backend, and does not have to read it to find out."""
+        """Record the content id that the backend gives this document now, for a
+        document that its digest showed to be unchanged. The backend then tells
+        the next run that the document is unchanged, and the run does not have to
+        read it."""
         if vcs_id:
             self._vcs_ids[path] = vcs_id
 
     def holds(self, path: str) -> bool:
-        """Whether this index has passages for `path` at all.
+        """Whether this index has any passages for `path`.
 
-        **The guard in front of `vouches_for`**, and it has to exist here rather
-        than in the caller's head. jj answers with no per-file ids, so
-        `vouches_for` proves only that a path has not *changed* since the token —
-        which is equally true of a document that was never indexed. Without this,
-        a first run over `docs/a.md` followed by a run over `docs/` counted every
-        other document as unchanged and left them out of the index permanently.
-        The sibling package spells the same guard as `stored_digest and …`.
+        **This is the guard in front of `vouches_for`**, and it must exist here
+        and not only in the mind of the caller. jj answers with no per-file ids,
+        so `vouches_for` proves only that a path has not *changed* since the
+        token. That is equally true of a document that was never indexed. Without
+        this guard, a first run over `docs/a.md` followed by a run over `docs/`
+        counted every other document as unchanged, and left them out of the index
+        permanently. The sibling package writes the same guard as
+        `stored_digest and …`.
         """
         return path in self._by_path
 
@@ -415,9 +434,11 @@ class TextIndex:
         vcs_id: str = "",
         digest: str = "",
     ) -> int:
-        """Index `chunks`, whose rows are `vectors`. Returns how many landed.
+        """Index `chunks`, whose rows are `vectors`. Returns the number that were
+        added.
 
-        :raises IndexMismatch: when the vectors' width is not the index's.
+        :raises IndexMismatch: when the width of the vectors is not the width of
+            the index.
         """
         # Heavy, and needed only where an index is built or searched.
         import numpy as np  # noqa: PLC0415
@@ -454,7 +475,8 @@ class TextIndex:
         return len(chunks)
 
     def _maybe_calibrate(self, rows: Vectors) -> None:
-        """Fit TQ+ before the first add, when this batch is a fair sample of it."""
+        """Fit TQ+ before the first add, when this batch is a fair sample of the
+        index."""
         # Heavy, and needed only where an index is built or searched.
         import numpy as np  # noqa: PLC0415
 
@@ -475,20 +497,20 @@ class TextIndex:
     ) -> list[tuple[float, Record]]:
         """The best `k` passages for one query vector, best first.
 
-        **Takes the id set rather than the paths**, so a filtered search builds
-        it once. It used to take `paths` and call `ids_under` itself, while the
-        caller called `ids_under` separately for the count it reports — two
-        O(chunks) passes per query, measured at 7.5 ms against a 0.22 ms
-        unfiltered search on a 10 000-chunk index.
+        **This takes the id set and not the paths**, so that a filtered search
+        builds the set one time. It used to take `paths` and call `ids_under`
+        itself, while the caller called `ids_under` separately for the count that
+        it reports. Those were two O(chunks) passes for each query, measured at
+        7.5 ms against a 0.22 ms unfiltered search on a 10 000-chunk index.
 
-        That also retires a claim this docstring used to make. turbovec does
-        filter inside the SIMD kernel, but the Python-side allowlist dominates
-        it by roughly fifteen times, so a selective filter does **not** cost
-        less than an unfiltered search — it costs more, and the honest reason to
-        use one is precision, not speed.
+        That also removes a claim that this docstring used to make. turbovec does
+        filter inside the SIMD kernel, but the Python-side allowlist costs
+        roughly fifteen times as much. A selective filter therefore does **not**
+        cost less than an unfiltered search. It costs more, and the correct
+        reason to use one is precision, not speed.
 
-        `None` means no filter; an empty list means nothing is allowed, which is
-        this layer's answer to give because turbovec raises on an empty
+        `None` means no filter. An empty list means that nothing is allowed. This
+        layer must give that answer, because turbovec raises on an empty
         allowlist and cannot tell the two apart.
         """
         # Heavy, and needed only where an index is built or searched.
@@ -509,25 +531,26 @@ class TextIndex:
         return hits
 
     def ids_under(self, paths: Sequence[str]) -> list[int]:
-        """Chunk ids of every indexed document at or under one of `paths`.
+        """The chunk ids of every indexed document at or under one of `paths`.
 
-        **The prefix test is per document, not per id.** It used to sit inside
-        the id loop, so the `any()` and its `startswith` ran once per chunk and
-        an FFI `contains` went with it: 3.26 ms for 10 000 chunks against 0.11 ms
-        here, and selectivity bought nothing because the cost was in building
-        the list rather than in scoring it.
+        **The prefix test runs for each document, not for each id.** It used to
+        be inside the id loop, so the `any()` and its `startswith` ran one time
+        for each chunk, with an FFI `contains` call beside it. That took 3.26 ms
+        for 10 000 chunks, against 0.11 ms here. Selectivity gave no benefit,
+        because the cost was in building the list and not in scoring it.
 
-        The `contains` probe is gone with it. `open()` already reconciles the
-        sidecar against the index and `add`/`forget` maintain the pair, so
-        re-verifying an established invariant once per chunk per query was
-        paying for a divergence that cannot survive a load.
+        The `contains` probe was removed at the same time. `open()` already
+        reconciles the sidecar against the index, and `add` and `forget` maintain
+        the pair. A check of an established invariant for each chunk of each
+        query paid for a divergence that cannot survive a load.
 
-        The prefix itself is `ph.paths.is_under`'s, spelled once here instead of
-        called per document: `is_under` takes `Path`s and rebuilds the normcased
-        root string on every call, so asking it per document rebuilt it 1 500
-        times for a filter of one — 4.20 ms against 0.42 ms for 1 500 documents,
-        for the same answer. The comparison is its body, case-folded the way
-        every other path comparison in the tree is.
+        The prefix rule itself is the rule of `ph.paths.is_under`, written one
+        time here and not called for each document. `is_under` takes `Path`s and
+        rebuilds the normcased root string on every call. Called for each
+        document, it rebuilt that string 1 500 times for a filter of one:
+        4.20 ms against 0.42 ms for 1 500 documents, for the same answer. The
+        comparison here is the body of `is_under`, case-folded in the same way as
+        every other path comparison in the tree.
         """
         roots = [os.path.normcase(one).rstrip("/") for one in paths]
         found: list[int] = []
@@ -557,8 +580,8 @@ class TextIndex:
 
 
 def _embedder_log(raw: object, where: Path) -> list[EmbedderRecord]:
-    """The sidecar's embedder log, oldest first. One that will not read is no
-    log: the next run that embeds asks again and starts another."""
+    """The embedder log of the sidecar, oldest first. A log that cannot be read
+    counts as no log: the next run that embeds asks again and starts a new log."""
     try:
         return [EmbedderRecord.model_validate(entry) for entry in as_seq(raw)]
     except ValueError:
@@ -567,8 +590,8 @@ def _embedder_log(raw: object, where: Path) -> list[EmbedderRecord]:
 
 
 def _turbovec() -> Any:  # noqa: ANN401
-    # No py.typed marker upstream, and the surface used here is four methods on
-    # one class — a stub file would be more of this module than the module.
+    # Upstream has no py.typed marker, and the surface used here is seven methods
+    # on one class. A stub file would be more of this module than the module.
     # Heavy, and needed only where an index is built or searched.
     import turbovec  # type: ignore[import-untyped]  # noqa: PLC0415
 

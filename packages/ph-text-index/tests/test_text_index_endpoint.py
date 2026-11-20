@@ -1,27 +1,32 @@
-"""`text-index-endpoint` — an embedder that is somebody else's process.
+"""`text-index-endpoint`: an embedder that is a process that someone else runs.
 
-Gates: *against a fixture HTTP server, indexing and search work with no model on
-this machine; an unset key variable and a host that cannot be reached each
-produce a named failure and no traceback.*
+Gates:
+
+* Against a fixture HTTP server, indexing and search work with no model on this
+  machine.
+* A key variable that is not set and a host that cannot be reached each produce
+  a named failure and no traceback.
 
 ## The server
 
-A thread serving the OpenAI-compatible `/v1/embeddings` request with the suite's
-hashing embedder behind it, so the vectors mean something and retrieval can be
-asserted. It doubles every vector on the way out: not every server normalizes,
-and the index scores by inner product. It keeps what it was asked, which is how
-a test sees the key a command was handed without the key ever being printed.
+The server is a thread that serves the OpenAI-compatible `/v1/embeddings`
+request, with the hashing embedder of the suite behind it. The vectors therefore
+have meaning, and a test can assert retrieval. The server doubles every vector
+on the way out, because not every server normalizes and the index scores by
+inner product. It keeps what it was asked. That is how a test sees the key that
+a command was given, and the key is never printed.
 
 ## Two levels
 
-The engine's row mounted in this process proves the embedder. The session's row
-proves the join: that naming the endpoint in a profile is enough for the
-package's own command to mount that embedder, and that the one variable the row
+The row of the engine, mounted in this process, proves the embedder. The row of
+the session proves the join. Naming the endpoint in a profile is enough for the
+package's own command to mount that embedder. The one variable that the row
 names reaches a command whose environment drops everything that looks like a
 credential.
 
-A third, for a harness that is not pH: a UTCP client of the library's own, which
-hands a command the variables its template names and no others.
+There is a third level, for a harness that is not pH: a UTCP client from the
+library itself. It gives a command the variables that the template of the
+command names, and no others.
 """
 
 from __future__ import annotations
@@ -90,10 +95,11 @@ def _session(url: str, **config: object) -> tuple[dict[str, Any], ...]:
 async def test_an_endpoint_embeds_and_the_index_answers(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**The gate.** Indexing and search with no model on this machine: the
-    documents go to the endpoint a batch at a time with the passage prefix, the
-    question goes with its own, the key is the named variable's, and vectors a
-    server did not normalize are normalized before they are scored."""
+    """**The gate.** Indexing and search with no model on this machine. The
+    documents go to the endpoint one batch at a time, with the passage prefix.
+    The question goes with its own prefix. The key is the value of the named
+    variable. Vectors that a server did not normalize are normalized before they
+    are scored."""
     docs_tree(tmp_path, documents=3)
     monkeypatch.setenv(KEY_ENV, "sekrit")
     ctx = await mount(
@@ -130,8 +136,8 @@ async def test_an_endpoint_embeds_and_the_index_answers(
 async def test_a_key_that_is_not_set_is_said_by_name_and_nothing_is_sent(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**The gate.** A named failure and no traceback — and no request, so a
-    document's text is never sent to an endpoint that would have refused it."""
+    """**The gate.** A named failure and no traceback. No request is made, so the
+    text of a document is never sent to an endpoint that would have refused it."""
     docs_tree(tmp_path)
     monkeypatch.delenv(KEY_ENV, raising=False)
     ctx = await mount(*_engine(endpoint.url, apiKeyEnv=KEY_ENV))
@@ -148,9 +154,10 @@ async def test_a_key_that_is_not_set_is_said_by_name_and_nothing_is_sent(
 async def test_an_endpoint_that_cannot_be_reached_or_will_not_answer_says_which(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """**The gate.** Two failures a person fixes in two places, so two codes: the
-    address reaches nothing, and the server answered with something that is not
-    embeddings — whose own words are kept."""
+    """**The gate.** A person fixes these two failures in two places, so there
+    are two codes. In the first, the address reaches nothing. In the second, the
+    server answered with something that is not embeddings, and the words of the
+    server are kept."""
     docs_tree(tmp_path)
     nowhere = await mount(*_engine("http://127.0.0.1:9/v1", timeoutS=5))
     unreachable = await run_tool(
@@ -172,9 +179,10 @@ async def test_an_endpoint_that_cannot_be_reached_or_will_not_answer_says_which(
 
 
 def test_the_identity_is_the_model_and_not_the_address() -> None:
-    """What moves the vector space moves the index: the model, both prefixes and
-    an asked-for width. The address does not — the same model served somewhere
-    else is the same space, and moving a server must not cost an index."""
+    """What changes the vector space changes the index: the model, both prefixes,
+    and a requested width. The address does not. The same model served from
+    another place is the same space, and moving a server must not cost an
+    index."""
     here = EndpointEmbedder(base_url="http://a/v1", model="m")
     there = EndpointEmbedder(base_url="http://b/v1", model="m")
     other = EndpointEmbedder(base_url="http://a/v1", model="n")
@@ -191,13 +199,14 @@ def test_the_identity_is_the_model_and_not_the_address() -> None:
 async def test_naming_the_endpoint_in_a_profile_is_enough_and_its_key_reaches_the_command(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**The gate.** The shipped command, with no local model to be had.
+    """**The gate.** The shipped command, with no local model available.
 
     `sentence-transformers` is hidden from this process, as it is on an install
-    without the `[local]` extra: the endpoint's row mounts all the same. The
-    command learns which embedder to mount from the row being named to it, and
-    is handed the one variable the row names — though a command's environment
-    drops every name that looks like a credential, which this one does.
+    without the `[local]` extra. The row of the endpoint still mounts. The
+    command learns which embedder to mount because the row is named to it. The
+    command is given the one variable that the row names, although the
+    environment of a command drops every name that looks like a credential, and
+    this name does.
     """
     docs_tree(tmp_path, documents=3)
     monkeypatch.setenv(KEY_ENV, "sekrit")
@@ -231,9 +240,10 @@ async def test_naming_the_endpoint_in_a_profile_is_enough_and_its_key_reaches_th
 async def test_a_confined_agent_is_told_when_its_endpoints_host_is_not_allowed(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """**The gate.** A confined command has the network its deployment allows and
-    no more. An endpoint outside it is a failure with a code and the way out,
-    not a traceback: the host goes in `sandbox-allow`."""
+    """**The gate.** A confined command has the network that its deployment
+    allows and no more. An endpoint outside that network is a failure with a
+    code and a fix, not a traceback. The fix is to put the host in
+    `sandbox-allow`."""
     ctx = await mount({"id": "sandbox-local", "disabled": False}, *_session(endpoint.url))
     if not ctx.require(SANDBOX).available:
         pytest.skip(f"no enforcing sandbox backend: {report_section(ctx, 'Local confinement')}")
@@ -258,9 +268,10 @@ async def test_a_confined_agent_is_told_when_its_endpoints_host_is_not_allowed(
 async def test_a_confined_agent_reaches_an_endpoint_whose_host_its_deployment_allows(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """The other half: named in `sandbox-allow`, host and port, the endpoint is
-    reached from inside the sandbox — through the deployment's egress proxy,
-    whose variables the standard library's client honors."""
+    """The other half. When `sandbox-allow` names the host and port, the endpoint
+    is reached from inside the sandbox. The request goes through the egress
+    proxy of the deployment, and the client of the standard library honors the
+    variables of that proxy."""
     port = endpoint.url.rsplit(":", 1)[1].split("/")[0]
     allowed = {"network": {"mode": "allowlist", "hosts": [f"127.0.0.1:{port}"]}}
     ctx = await mount(
@@ -286,10 +297,11 @@ async def test_a_confined_agent_reaches_an_endpoint_whose_host_its_deployment_al
 async def test_the_key_reaches_the_tools_command_and_not_the_agents_shell(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**The gate.** The key's value is set on the manual's own command and on
-    nothing else. Under a real sandbox the tool embeds with it, and the same
-    agent's `bash` has no such variable and cannot read it off another process:
-    its environment is the scrubbed one, and its `/proc` is its own."""
+    """**The gate.** The value of the key is set on the command of the manual and
+    on nothing else. Under a real sandbox the tool embeds with the key. The
+    `bash` of the same agent has no such variable and cannot read it from
+    another process. The environment of that `bash` is the scrubbed one, and it
+    has its own `/proc`."""
     monkeypatch.setenv(KEY_ENV, "sekrit-value")
     port = endpoint.url.rsplit(":", 1)[1].split("/")[0]
     allowed = {"network": {"mode": "allowlist", "hosts": [f"127.0.0.1:{port}"]}}
@@ -322,9 +334,10 @@ async def test_the_key_reaches_the_tools_command_and_not_the_agents_shell(
 
 
 def test_an_endpoint_says_what_it_reads_where_it_can_be_asked(endpoint: Endpoint) -> None:
-    """A llama.cpp answers `/props` with its window, so nobody has to write it
-    down; a server with nothing to ask has no limit known ahead of time; and a
-    setting is the answer wherever one is written."""
+    """Three cases. A llama.cpp server answers `/props` with its window, so
+    nobody has to write the window down. A server with nothing to ask has no
+    limit that is known ahead of time. Where a setting is written, the setting
+    is the answer."""
     from ph_text_index._config import Limit
 
     endpoint.window = 512
@@ -339,10 +352,10 @@ def test_an_endpoint_says_what_it_reads_where_it_can_be_asked(endpoint: Endpoint
 async def test_passages_are_cut_to_the_window_a_server_reports(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """**The gate.** The shipped command, asking a server that reads 60 tokens:
-    it is asked once what it reads, passages are packed to that, and it is never
-    sent an input it would refuse — where a passage cut at `max_chars` was a 500
-    that ended the run."""
+    """**The gate.** The shipped command asks a server that reads 60 tokens. The
+    server is asked one time what it reads, and passages are packed to that
+    size. The server is never sent an input that it would refuse. Before, a
+    passage cut at `max_chars` got a 500 that ended the run."""
     long_document(tmp_path)
     endpoint.window, endpoint.reads = 60, 60
     ctx = await mount(*_session(endpoint.url))
@@ -351,7 +364,7 @@ async def test_passages_are_cut_to_the_window_a_server_reports(
 
     assert not indexed.is_error, text_of(indexed.content)
     assert indexed.value["limit"] == "60 tokens (the server's)"
-    # 58 tokens of text: two of the 60 are the markers every passage carries.
+    # 58 tokens of text. Two of the 60 are the markers that every passage carries.
     assert indexed.value["passage_tokens"] == 58
     assert max(endpoint.took) <= 60
     assert "Passages are held to 58 tokens of text" in text_of(indexed.content)
@@ -360,10 +373,10 @@ async def test_passages_are_cut_to_the_window_a_server_reports(
 async def test_a_server_that_refuses_a_passage_is_sent_a_smaller_one(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """**The gate.** A server with nothing to ask, which reads 40 tokens and says
-    so only by refusing: its own sentence is recognized as "too long", the
-    document is packed smaller and sent again, and the run ends with an index
-    and a line naming the document."""
+    """**The gate.** A server with nothing to ask reads 40 tokens, and says so
+    only by refusing. Its sentence is recognized as "too long". The document is
+    packed smaller and sent again. The run ends with an index and a line that
+    names the document."""
     long_document(tmp_path)
     endpoint.reads = 40
     ctx = await mount(*_session(endpoint.url))
@@ -379,11 +392,11 @@ async def test_a_server_that_refuses_a_passage_is_sent_a_smaller_one(
 async def test_a_key_whose_name_the_scrub_does_not_match_is_said_at_mount(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """The key is this tool's alone because every other command starts from the
-    scrubbed environment — and the scrub goes by name. A variable it does not
-    drop is in an agent's `bash` already, so `ph-utcp` says so of any manual
-    that passes one, where a person reads it. One the scrub does drop is said
-    nothing about."""
+    """Only this tool has the key, because every other command starts from the
+    scrubbed environment. The scrub works by name. A variable that the scrub
+    does not drop is already in the `bash` of an agent. `ph-utcp` therefore
+    reports any manual that passes such a variable, in a place where a person
+    reads it. It reports nothing about a variable that the scrub does drop."""
     docs_tree(tmp_path)
     loud = await mount(*_session(endpoint.url, apiKeyEnv="FX_EMBEDDINGS_AUTH"))
     quiet = await mount(*_session(endpoint.url, apiKeyEnv=KEY_ENV))
@@ -416,10 +429,11 @@ def _record(ctx: Any, agent: Any) -> dict[str, Any]:  # noqa: ANN401
 async def test_what_the_server_said_is_kept_beside_the_index_and_a_search_asks_nothing(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """**The gate.** An index run asks the server once what it reads and keeps
-    the answer in the index itself, saved with the passages it was used to cut.
-    Every search is a command of its own, and each reads it there rather than
-    putting the question again. There is no file beside the index."""
+    """**The gate.** An index run asks the server one time what it reads. It
+    keeps the answer in the index itself, saved with the passages that the
+    answer was used to cut. Every search is a separate command, and each one
+    reads the answer there and does not ask the server again. There is no file
+    beside the index."""
     long_document(tmp_path)
     endpoint.window, endpoint.reads = 60, 60
     ctx = await mount(*_session(endpoint.url))
@@ -444,12 +458,13 @@ async def test_what_the_server_said_is_kept_beside_the_index_and_a_search_asks_n
 async def test_what_a_refusal_taught_is_kept_until_the_server_says_something_else(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """**The gate.** A llama.cpp reports its window and refuses past its batch.
-    The first run learns the real limit from one refusal and keeps it, so the
-    next run — another command — is refused nothing. When the server is given
-    another window the next run notices: the result says so, what was learned
-    under the old answer is dropped, and passages are packed to the new one.
-    The log keeps both answers, the newest last: what changed, and when."""
+    """**The gate.** A llama.cpp server reports its window and refuses an input
+    that is past its batch. The first run learns the real limit from one refusal
+    and keeps it. The next run, which is another command, is therefore refused
+    nothing. When the server is given another window, the next run notices. The
+    result says so, what was learned under the old answer is dropped, and
+    passages are packed to the new window. The log keeps both answers, with the
+    newest last. It shows what changed, and when."""
     long_document(tmp_path)
     endpoint.window, endpoint.reads = 200, 40
     ctx = await mount(*_session(endpoint.url))
@@ -488,9 +503,9 @@ async def test_what_a_refusal_taught_is_kept_until_the_server_says_something_els
 async def test_a_server_asked_at_another_address_is_said_and_logged(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
-    """The index is keyed by the model and not the address, so a moved server
-    keeps its index. The next run asks the new address, and its result says the
-    embedder is asked somewhere else now; the log keeps both."""
+    """The index is keyed by the model and not by the address, so a server that
+    moved keeps its index. The next run asks the new address. Its result says
+    that the embedder is now asked at another address, and the log keeps both."""
     docs_tree(tmp_path)
     endpoint.window = 60
     first = await mount(*_engine(endpoint.url))
@@ -513,9 +528,10 @@ async def test_a_runs_progress_says_what_the_endpoint_spent(
     mount: MountProfile, tmp_path: Path, endpoint: Endpoint
 ) -> None:
     """Every progress line carries what the run has spent so far, and the last
-    one the whole of it: requests, texts, and the tokens the server's `usage`
-    reported — so whoever reads the stream can track what an index cost. The
-    result says it too, for a caller that waited and read no stream."""
+    line carries the total: requests, texts, and the tokens that the `usage` of
+    the server reported. A reader of the stream can therefore track what an
+    index cost. The result also carries the total, for a caller that waited and
+    read no stream."""
     docs_tree(tmp_path, documents=3)
     ctx = await mount(*_engine(endpoint.url))
     out = io.StringIO()
@@ -540,15 +556,16 @@ async def test_a_runs_progress_says_what_the_endpoint_spent(
 async def test_a_utcp_client_of_another_harness_hands_the_key_to_the_command(
     tmp_path: Path, endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Outside pH nothing hands a variable across by `pass_env`: a UTCP client
-    passes a command what its template names. So the manual names the variable
-    the endpoint's config names — after the ones the package always reads, and
-    by name alone — and the library's own client, with no pH around it, embeds
-    with the key. Indexing is the proof; a search through such a client is
-    `test_text_index_cli`'s.
+    """Outside pH, nothing passes a variable to a command by `pass_env`. A UTCP
+    client passes a command the variables that its template names. The manual
+    therefore names the variable that the config of the endpoint names. It comes
+    after the variables that the package always reads, and it is given by name
+    only. The client of the library itself, with no pH around it, then embeds
+    with the key. Indexing is the proof. `test_text_index_cli` covers a search
+    through such a client.
     """
     docs_tree(tmp_path, documents=3)
-    # A UTCP call runs in the client's working directory, which is the workspace.
+    # A UTCP call runs in the working directory of the client, which is the workspace.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(KEY_ENV, "sekrit")
     settings = {"baseUrl": endpoint.url, "model": "fx-embed", "apiKeyEnv": KEY_ENV}

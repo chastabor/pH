@@ -1,9 +1,10 @@
-"""What the `ph-text-index` suites share on the session's side: an agent, a tree,
-and the row that names the stub embedder.
+"""What the `ph-text-index` suites share on the side of the session: an agent, a
+tree, and the row that names the stub embedder.
 
-A `<package>_helpers.py` on `pythonpath`, as `code_graph_helpers` is, rather than
-a `conftest.py`: `ph-rlm`'s tests import their conftest as a top-level module,
-and a second file of that name anywhere in `testpaths` shadows it on `sys.path`.
+This is a `<package>_helpers.py` on `pythonpath`, like `code_graph_helpers`, and
+not a `conftest.py`. The tests of `ph-rlm` import their conftest as a top-level
+module. A second file of that name anywhere in `testpaths` shadows it on
+`sys.path`.
 """
 
 from __future__ import annotations
@@ -51,14 +52,15 @@ ROWS: tuple[dict[str, Any], ...] = (
     {"id": "text-index", "name": "text-index"},
     {"id": STUB_ROW, "name": "text_index_helpers:stub"},
 )
-"""What the `utcp` and `text-index` bundles add to a profile, in their order —
-with the stub embedder's row where the bundle has `text-index-local`."""
+"""What the `utcp` and `text-index` bundles add to a profile, in their order. The
+row of the stub embedder is where the bundle has `text-index-local`."""
 
 
 @plugin(STUB_ROW, affects="environment", inject=[TEXT_INDEX, UTCP], config=StubConfig)
 async def stub(ctx: Context, config: StubConfig) -> None:
-    """Name the stub embedder, as `text-index-local` names a model: which row of
-    which command makes the vectors, and that row's config."""
+    """Name the stub embedder, as `text-index-local` names a model. The name says
+    which row of which command makes the vectors, and gives the config of that
+    row."""
     await ctx.require(TEXT_INDEX).register(
         Provider(row=STUB_ROW, config=config, cli=STUB_CLI, label=f"stub-hashing:{config.dim}"),
         scope=ctx,
@@ -67,18 +69,20 @@ async def stub(ctx: Context, config: StubConfig) -> None:
 
 @pytest.fixture(autouse=True)
 def command_environment(tmp_path: Path) -> Iterator[Path]:
-    """What a test's `ph-text-index` processes need, for the length of the test.
+    """What the `ph-text-index` processes of a test need, for the length of the
+    test.
 
-    **`PYTHONPATH`**, so `python -m text_index_stub` finds this directory: the
-    stub command is on the suite's `pythonpath`, which pytest gives its own
-    process and no child.
+    **`PYTHONPATH`**, so that `python -m text_index_stub` finds this directory.
+    The stub command is on the `pythonpath` of the suite. pytest gives that path
+    to its own process and to no child process.
 
-    **`$PH_CACHE` beside the workspace, and a short `$PH_RUNTIME` of its own**,
-    as `code_graph_helpers.cache_beside_the_tree` says: a grant that overlaps the
-    workspace is refused, and a socket's address is at most 108 bytes.
+    **`$PH_CACHE` beside the workspace, and a short `$PH_RUNTIME` for the test**,
+    for the reasons that `code_graph_helpers.cache_beside_the_tree` gives. A
+    grant that overlaps the workspace is refused, and the address of a socket is
+    at most 108 bytes.
 
-    Autouse in each module that imports it, after `_isolated_home`, so this
-    spelling wins.
+    The fixture is autouse in each module that imports it, after
+    `_isolated_home`, so these values win.
     """
     directory = tmp_path.parent / f"{tmp_path.name}-cache"
     here = str(Path(__file__).parent)
@@ -95,7 +99,8 @@ def command_environment(tmp_path: Path) -> Iterator[Path]:
 
 
 KEY_ENV = "FX_EMBEDDINGS_API_KEY"
-"""A name the deployment's scrubbed environment drops: it contains `KEY`."""
+"""A name that the scrubbed environment of the deployment drops, because it
+contains `KEY`."""
 
 
 @dataclass(slots=True)
@@ -107,11 +112,11 @@ class Endpoint:
     keys: list[str | None] = field(default_factory=list)
     status: int = 200
     window: int | None = None
-    """What `/props` says the server reads, as a llama.cpp does; `None` for a
-    server with nothing to ask, which answers 404."""
+    """How many tokens `/props` says that the server reads, as a llama.cpp server
+    answers. `None` is a server with nothing to ask, which answers 404."""
     reads: int | None = None
-    """How many tokens — words, here — an input may be before it is refused, in a
-    llama.cpp's own sentence."""
+    """How many tokens an input may have before the server refuses it, in the
+    sentence that a llama.cpp server uses. A token is a word here."""
     took: list[int] = field(default_factory=list)
     """The longest input, in words, of each embeddings request it answered."""
     props: int = 0
@@ -123,10 +128,10 @@ class Endpoint:
 @pytest.fixture(name="endpoint")
 def embeddings_server() -> Iterator[Endpoint]:
     """`endpoint`, to a test: a server that speaks the OpenAI-compatible
-    embeddings request, with the suite's hashing embedder behind it. It doubles
-    every vector on the way out — not every server normalizes — and keeps what
-    it was asked, which is how a test sees the key a request carried without the
-    key ever being printed."""
+    embeddings request, with the hashing embedder of the suite behind it. It
+    doubles every vector on the way out, because not every server normalizes.
+    It keeps what it was asked. That is how a test sees the key that a request
+    carried, and the key is never printed."""
     embedder = HashingEmbedder(dim=96)
     state = Endpoint(url="")
 
@@ -186,8 +191,9 @@ def embeddings_server() -> Iterator[Endpoint]:
 
 
 def prose(paragraphs: int) -> str:
-    """`paragraphs` paragraphs of three lines, six words a line: 18 words and
-    about 125 characters each, so the sizes in a test can be read off."""
+    """`paragraphs` paragraphs of three lines, with six words in each line. Each
+    paragraph is 18 words and about 125 characters, so a reader can work out the
+    sizes in a test."""
     return "\n\n".join(
         "\n".join(" ".join(f"w{p}l{line}n{n}" for n in range(6)) for line in range(3))
         for p in range(paragraphs)
@@ -195,8 +201,8 @@ def prose(paragraphs: int) -> str:
 
 
 def long_document(root: Path, paragraphs: int = 12) -> Path:
-    """`root/docs/long.md`, of `paragraphs` paragraphs of `prose`: longer in all
-    than a small model reads at one go."""
+    """`root/docs/long.md`, which holds `paragraphs` paragraphs of `prose`. In
+    total it is longer than a small model reads in one input."""
     (root / "docs").mkdir(parents=True, exist_ok=True)
     (root / "docs" / "long.md").write_text(prose(paragraphs), encoding="utf-8")
     return root

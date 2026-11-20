@@ -1,26 +1,28 @@
-"""The `text-index` rows a session mounts: the manual, registered through `ph-utcp`.
+"""The `text-index` rows that a session mounts: the manual, registered through `ph-utcp`.
 
-Gates: *a session offers `text_index` and `text_search` under their own names; a
-child agent in a worktree indexes its own tree; the session's process never
-loads the model; a profile that names a different embedder gets a separate
-index.*
+Gates:
+
+* A session offers `text_index` and `text_search` under those names.
+* A child agent in a worktree indexes its own tree.
+* The process of the session never loads the model.
+* A profile that names a different embedder gets a separate index.
 
 ## What is under test
 
-`test_text_index.py` proves the engine and `test_text_index_cli.py` the command.
-This file proves the join: that mounting the rows a profile gets from the
-`utcp` and `text-index` bundles gives an agent the same tools, values, text and
-error codes it had when they were registered in-process — and that what changed
-is what was meant to change.
+`test_text_index.py` proves the engine, and `test_text_index_cli.py` proves the
+command. This file proves the join. A profile gets rows from the `utcp` and
+`text-index` bundles. Mounting those rows gives an agent the same tools, values,
+text, and error codes that it had when the tools were registered in-process. The
+file also proves that what changed is what was intended to change.
 
 ## Real processes, and a stub embedder
 
 Every call below starts a command, as `ph-utcp` does for an agent. The command
-is `python -m text_index_stub`: the package's own engine, tools and manual, with
-a deterministic embedder where the shipped one downloads a model
-(`text_index_stub`). The session's side names it with a row of its own, as
-`text-index-local` names a model — which is the seam a deployment's own embedder
-uses, exercised.
+is `python -m text_index_stub`. It is the package's own engine, tools, and
+manual, with a deterministic embedder in place of the shipped embedder, which
+downloads a model (`text_index_stub`). The session side names the stub embedder
+with a row of its own, as `text-index-local` names a model. That is the seam
+that the embedder of a deployment uses, so these tests exercise it.
 """
 
 from __future__ import annotations
@@ -72,7 +74,8 @@ pytestmark = pytest.mark.anyio
 
 
 def _indexes(ctx: Any, agent: Any) -> Path:  # noqa: ANN401
-    """Where `agent`'s indexes are: the rows' directory in that agent's scratch."""
+    """The location of the indexes of `agent`: the directory of the rows in the
+    scratch directory of that agent."""
     return scratch_of(ctx, agent.session.id, agent) / "text-index"
 
 
@@ -82,8 +85,8 @@ def _indexes(ctx: Any, agent: Any) -> Path:  # noqa: ANN401
 async def test_a_session_has_both_tools_under_their_own_names(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** Not `ph_text_index_text_search`: the skill, the prompts and
-    every program a model has written say `text_search`."""
+    """**The gate.** The name is not `ph_text_index_text_search`. The skill, the
+    prompts, and every program that a model has written say `text_search`."""
     ctx = await mount(*ROWS)
 
     schemas = {one.name: one for one in ctx.require(TOOLS).schemas(scope=DEPLOYMENT)}
@@ -129,14 +132,14 @@ async def test_a_call_gives_the_value_and_the_text_the_tool_always_gave(
     assert hit["path"] == "docs/w.md"
     lines = (tmp_path / hit["path"]).read_text(encoding="utf-8").splitlines()
     assert hit["text"].splitlines()[0] == lines[hit["start_line"] - 1]
-    # The tool's own rendering, written in its process — not pH's default JSON.
+    # The tool's own rendering, written in its process, and not the default JSON of pH.
     assert text_of(found.content).startswith("1 passage for")
 
 
 async def test_an_argument_the_tool_refuses_keeps_the_tools_own_words(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Validation is the tool's, in its process, and the sentence comes back."""
+    """The tool validates in its own process, and its sentence comes back."""
     ctx = await mount(*ROWS)
 
     refused = await run_tool(ctx, "text_search", {"query": "x", "k": 500}, agent=new_agent(ctx))
@@ -148,8 +151,9 @@ async def test_an_argument_the_tool_refuses_keeps_the_tools_own_words(
 async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Under Code Mode "can the RLM use this" is "are these in the SDK listing".
-    A tool that arrives through a manual is registered like any other, so it is."""
+    """Under Code Mode, "can the RLM use this" is "are these in the SDK listing".
+    A tool that arrives through a manual is registered like any other tool, so
+    it is in the listing."""
     ctx = await mount(
         {"id": "tools", "config": {"mode": "code"}},
         {"id": "tools-code-mode", "name": "tools-code-mode"},
@@ -176,9 +180,10 @@ async def test_code_mode_hands_the_model_both_tools_through_the_sdk(
 async def test_no_embedder_means_no_tools_no_skill_and_a_doctor_line(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The absence is complete, not partial. A tool named in every prompt and
-    refused on every call would teach a capability the deployment does not have,
-    so the manual is registered by the embedder's claim and not before."""
+    """The absence is complete, not partial. A tool that is named in every prompt
+    and refused on every call would teach a capability that the deployment does
+    not have. The claim of the embedder therefore registers the manual, and
+    nothing registers it earlier."""
     ctx = await mount(*ROWS[:2])
     agent = new_agent(ctx)
 
@@ -193,8 +198,9 @@ async def test_no_embedder_means_no_tools_no_skill_and_a_doctor_line(
 async def test_unmounting_the_embedder_takes_the_tools_and_the_skill_with_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Registered on the provider's scope, so they leave on it — and the slot is
-    free for another embedder to claim."""
+    """The tools and the skill are registered on the scope of the provider, so
+    they leave with that scope. The slot is then free for another embedder to
+    claim."""
     ctx = await mount(*ROWS)
     assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is not None
 
@@ -221,8 +227,9 @@ async def test_a_second_embedder_is_refused(mount: MountProfile, tmp_path: Path)
 async def test_without_the_utcp_row_the_rows_stand_down_and_offer_nothing(
     mount: MountProfile,
 ) -> None:
-    """A catalog entry for tools nobody has is the failure this must not have. The
-    rows wait on `ctx.utcp`; with nothing providing it, they never activate."""
+    """A catalog entry for tools that nobody has is the failure that these rows
+    must not have. The rows wait on `ctx.utcp`. With nothing that provides it,
+    the rows never activate."""
     ctx = await mount(*ROWS[1:])
 
     assert ctx.require(TOOLS).get("text_search", scope=DEPLOYMENT) is None
@@ -230,9 +237,10 @@ async def test_without_the_utcp_row_the_rows_stand_down_and_offer_nothing(
 
 
 async def test_the_skill_arrives_with_the_tools(mount: MountProfile, tmp_path: Path) -> None:
-    """What the RLM reads before it reaches for these tools. Registered by the
-    embedder's claim, so the catalog entry exists exactly when the tools do — and
-    only its description rides the prompt (G9); the body is a page, on disk."""
+    """What the RLM reads before it uses these tools. The claim of the embedder
+    registers the skill, so the catalog entry exists exactly when the tools do.
+    Only the description of the skill is in the prompt (G9). The body is a page
+    on disk."""
     ctx = await mount(*ROWS)
 
     skill = ctx.require(SKILLS).get("text-search", DEPLOYMENT)
@@ -250,10 +258,11 @@ async def test_the_skill_arrives_with_the_tools(mount: MountProfile, tmp_path: P
 async def test_an_agent_in_its_own_tree_indexes_that_tree(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** Two agents, two trees, one session's rows.
+    """**The gate.** Two agents, two trees, and the rows of one session.
 
-    The command runs in the calling agent's workspace, so the index it builds is
-    that workspace's: the child's own documents, kept in the child's own scratch.
+    The command runs in the workspace of the calling agent, so the index that it
+    builds belongs to that workspace: the documents of the child, kept in the
+    scratch directory of the child.
     """
     docs_tree(tmp_path, documents=2)
     worktree = docs_tree(tmp_path.parent / f"{tmp_path.name}-worktree", documents=4)
@@ -279,20 +288,22 @@ async def test_an_agent_in_its_own_tree_indexes_that_tree(
 async def test_a_confined_agent_that_may_not_write_its_tree_still_indexes_it(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** Read-only bars the repository, and not what a tool builds
-    about it.
+    """**The gate.** A read-only session protects the repository, and not what a
+    tool builds about it.
 
-    The default posture is read-only, and on a host with a sandbox backend that
-    is enforced. The command keeps its index in the agent's scratch — writable
-    under every mode — so it is built by an agent whose own `bash` could not
-    create a file beside the documents, the tree is exactly as it was, and a
-    second run finds the first one's work: git vouches for every document.
+    The default sandbox mode is read-only, and a host with a sandbox backend
+    enforces it. The command keeps its index in the scratch directory of the
+    agent, which is writable in every mode. The index is therefore built by an
+    agent whose own `bash` could not create a file beside the documents, and the
+    tree is exactly as it was. A second run finds the work of the first run,
+    because git vouches for every document.
 
-    In a directory of its own, because the suite's `$PH_HOME` — and so the
-    scratch — is `tmp_path`.
+    The repository is in its own directory, because the `$PH_HOME` of the suite,
+    and therefore the scratch directory, is `tmp_path`.
     """
-    # Beside the command's log, which is the one shared directory this manual is
-    # granted: a confined command can write nothing else outside its scratch.
+    # The record is beside the log of the command. That is the one shared
+    # directory that this manual is granted. A confined command can write
+    # nothing else outside its scratch directory.
     record = resolve_roots().cache / "logs" / "loads"
     embedder = {**ROWS[2], "config": {"record": str(record)}}
     ctx = await mount({"id": "sandbox-local", "disabled": False}, *ROWS[:2], embedder)
@@ -317,18 +328,19 @@ async def test_a_confined_agent_that_may_not_write_its_tree_still_indexes_it(
     assert _indexes(ctx, agent).is_dir()
     _, changed, _ = await git(ctx, repo, "status", "--porcelain")
     assert changed == "", "the tree was written"
-    # Each call was a confined command of its own, beside the one that printed
-    # the manual: nothing stayed up between them.
+    # Each call was a separate confined command, in addition to the command that
+    # printed the manual. Nothing stayed running between them.
     assert len(record.read_text(encoding="utf-8").splitlines()) == 4
 
 
 async def test_a_profile_that_names_a_different_embedder_gets_a_separate_index(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate, and E1.** The embedder's settings are the session's profile's,
-    carried to the command; and the index is keyed by the embedder's identity, so
-    changing them starts a second index beside the first and changing back would
-    find the first intact."""
+    """**The gate, and E1.** The settings of the embedder come from the profile
+    of the session and are carried to the command. The index is keyed by the
+    identity of the embedder. A change to the settings therefore starts a second
+    index beside the first, and a change back would find the first index
+    intact."""
     docs_tree(tmp_path)
     ctx = await mount(*ROWS[:2], {**ROWS[2], "config": {"dim": 64}})
     agent = new_agent(ctx)
@@ -341,8 +353,8 @@ async def test_a_profile_that_names_a_different_embedder_gets_a_separate_index(
 
 
 async def test_the_rows_config_reaches_the_command(mount: MountProfile, tmp_path: Path) -> None:
-    """A profile that points the row at a tree and leaves a file out is obeyed by
-    a process the session never configured directly."""
+    """A profile points the row at a tree and leaves a file out. A process that
+    the session never configured directly obeys that profile."""
     docs_tree(tmp_path, documents=3)
     (tmp_path / "notes.md").write_text("# Elsewhere\n\nNot under docs.\n", encoding="utf-8")
     scope = {"paths": ["docs"], "exclude": ["**/billing1.md"]}
@@ -355,10 +367,10 @@ async def test_the_rows_config_reaches_the_command(mount: MountProfile, tmp_path
 
 
 def test_the_manual_names_both_rows_so_the_command_mounts_that_embedder() -> None:
-    """Being named in `$PH_TOOL_CONFIG` is how the command learns which embedder
-    row to mount, so a default embedder is named too. `preload` travels with the
-    rest of the embedder's config, and the command does not read it: the session
-    asks for the load once, by running `install`."""
+    """The command learns which embedder row to mount from the rows that
+    `$PH_TOOL_CONFIG` names, so a default embedder is named too. `preload`
+    travels with the rest of the config of the embedder, and the command does
+    not read it. The session asks for the load one time, by running `install`."""
     provider = Provider(
         row="text-index-local", config=LocalConfig(preload=True), cli=CLI, label="m"
     )
@@ -375,7 +387,8 @@ def test_the_manual_names_both_rows_so_the_command_mounts_that_embedder() -> Non
 
 def test_the_manual_grants_what_agents_share_and_not_the_index() -> None:
     """The weights and the log are granted, both under `$PH_CACHE`. The index is
-    not: it is named as state, so it goes in the calling agent's own scratch."""
+    not granted. It is named as state, so it goes in the scratch directory of
+    the calling agent."""
     cache = resolve_roots().cache
     provider = Provider(
         row="text-index-local",
@@ -396,8 +409,9 @@ def test_the_manual_grants_what_agents_share_and_not_the_index() -> None:
 async def test_status_counts_the_index_of_the_agent_that_asked(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """Each agent has its own index, so "is it built" has an answer per agent: the
-    command is told the asking agent's state directory, as its tools are."""
+    """Each agent has its own index, so "is it built" has an answer for each
+    agent. The command gets the state directory of the asking agent, as its tools
+    do."""
     docs_tree(tmp_path, documents=3)
     ctx = await mount(*ROWS)
     builder, other = new_agent(ctx), new_agent(ctx)
@@ -420,7 +434,7 @@ async def test_the_rows_report_themselves_to_doctor(mount: MountProfile, tmp_pat
 
     assert rows["tools"] == "text_index, text_search (through UTCP)"
     assert rows["embedder"] == "stub-hashing:96"
-    # No setting, and nothing a session can ask without starting the command.
+    # There is no setting, and a session can ask nothing without starting the command.
     assert rows["limit"] == "asked of the embedder when it embeds; `/text-index status` shows it"
     assert "scratch" in rows["index"]
     assert rows["details"] == "/text-index status"
@@ -432,10 +446,11 @@ async def test_the_rows_report_themselves_to_doctor(mount: MountProfile, tmp_pat
 async def test_the_local_row_names_the_model_and_grants_its_weights(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`text-index-local`, as the bundle mounts it. The session's process decides
-    nothing about the model but its name: the row hands its config across and
-    grants the one shared directory the model's weights are in. Discovery mounts
-    the real engine rows and loads no model, so this downloads nothing."""
+    """`text-index-local`, as the bundle mounts it. The process of the session
+    decides nothing about the model except its name. The row passes its config
+    to the command and grants the one shared directory that holds the weights of
+    the model. Discovery mounts the real engine rows and loads no model, so this
+    test downloads nothing."""
     ctx = await mount(
         *ROWS[:2],
         {
@@ -462,12 +477,14 @@ async def test_the_local_row_names_the_model_and_grants_its_weights(
 async def test_preload_refuses_the_mount_on_the_commands_refusal(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """The cookbook's rule, and the whole reason `preload` exists: an unattended
-    run has nobody to type `/text-index install`, so it finds out at mount.
+    """The rule of the cookbook, and the reason why `preload` exists. An
+    unattended run has nobody to type `/text-index install`, so it learns of the
+    failure at mount.
 
-    The session's row asks the command, which is where the model loads. A model
-    named by a path that is not one fails to load without touching the network,
-    and the command's refusal is the session's.
+    The row of the session asks the command, which is where the model loads. The
+    model here is named by a path that holds no model. It fails to load without
+    using the network, and the refusal of the command becomes the refusal of the
+    session.
     """
     with pytest.raises(MountRefusal, match="asked to preload and could not"):
         await mount(
@@ -481,8 +498,9 @@ async def test_preload_refuses_the_mount_on_the_commands_refusal(
 
 
 def test_the_sessions_process_never_loads_the_model(tmp_path: Path) -> None:
-    """**The gate.** The model, torch and the index library belong to the command:
-    several hundred megabytes a session that never searches does not hold."""
+    """**The gate.** The model, torch, and the index library belong to the
+    command. They are several hundred megabytes that a session that never
+    searches does not hold."""
     probe = """
 import json, sys
 from pathlib import Path
@@ -557,11 +575,11 @@ def test_every_row_in_the_bundle_names_a_resolvable_plugin() -> None:
 
 
 def test_the_bundle_ships_the_provider_beside_the_seam() -> None:
-    """**The subtlety that would otherwise be a silence.**
+    """**A detail that would otherwise fail without a sign.**
 
-    The manual is registered by an embedder's claim, so a bundle carrying only
-    `text-index` would mount a service and advertise nothing — and nothing would
-    fail. Both rows, or the bundle means nothing.
+    The claim of an embedder registers the manual. A bundle that carried only
+    `text-index` would therefore mount a service and offer nothing, and nothing
+    would fail. The bundle needs both rows, or it does nothing.
     """
     from ph.cordis import Profile
     from ph_text_index import BUNDLE
@@ -597,7 +615,8 @@ def _step(agent: Any) -> PreStepRequest:  # noqa: ANN401
 
 
 def _loads(record: Path) -> int:
-    """How many processes mounted the stub embedder — "loaded the model"."""
+    """How many processes mounted the stub embedder, which stands for "loaded the
+    model"."""
     return len(record.read_text(encoding="utf-8").splitlines())
 
 
@@ -613,9 +632,9 @@ async def test_every_call_is_one_command_and_nothing_stays_up(
 ) -> None:
     """**The gate.** No process outlives its call, and none listens anywhere.
 
-    Four processes mount the embedder: the one that printed the manual, the run
-    `text_index` started — whose result answered that call — and one for each
-    search.
+    Four processes mount the embedder: the process that printed the manual, the
+    run that `text_index` started, and one process for each search. The result
+    of the run answered the `text_index` call.
     """
     docs_tree(tmp_path)
     record, embedder = _recording(tmp_path)
@@ -636,9 +655,10 @@ async def test_every_call_is_one_command_and_nothing_stays_up(
 async def test_a_child_that_shares_its_parents_tree_shares_its_index(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """One index a tree, not one an agent. A child with no worktree of its own
-    reads its parent's files, so it asks its parent's index — and a fan-out of
-    such children is one index, not the same documents embedded for each."""
+    """There is one index for each tree, not one for each agent. A child with no
+    worktree of its own reads the files of its parent, so it asks the index of
+    its parent. A fan-out of such children uses one index. The same documents
+    are not embedded for each child."""
     docs_tree(tmp_path, documents=3)
     record, embedder = _recording(tmp_path)
     ctx = await mount(*ROWS[:2], embedder)
@@ -664,12 +684,14 @@ async def test_a_child_that_shares_its_parents_tree_shares_its_index(
 async def test_a_root_agents_first_step_starts_the_index_and_it_is_told_when_it_ends(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The gate.** The index is being built before anything asks for it; the
-    footer reading moves while it is; and when it ends the agent is told, with a
-    note that waits in its inbox for its next step and starts no turn.
+    """**The gate.** The index is being built before anything asks for it. The
+    footer reading changes while the build runs. When the build ends, the agent
+    gets a note. The note waits in the inbox of the agent for its next step and
+    starts no turn.
 
-    No tool is called here. The row's `agent/pre-step` listener starts the index
-    tool in the background, and its progress is read from the command's stderr.
+    No tool is called here. The `agent/pre-step` listener of the row starts the
+    index tool in the background, and the progress is read from the stderr of
+    the command.
     """
     docs_tree(tmp_path, documents=12)
     _, embedder = _recording(tmp_path, delay=0.15)
@@ -690,10 +712,12 @@ async def test_a_root_agents_first_step_starts_the_index_and_it_is_told_when_it_
 
     [note] = agent.inbox.next_step
     assert "The text index is finished: 12 documents" in text_of(note.content)
-    # With what the tool's result would have said to a caller that waited for it.
+    # The note includes what the result of the tool would have said to a caller
+    # that waited for it.
     assert "Indexed 12 documents: 12 passages added, 0 removed." in text_of(note.content)
     assert "The index now holds 12 passages from 12 documents." in text_of(note.content)
-    # Once for the tree: a later step does not index the tree again for nobody.
+    # One time for the tree. A later step does not index the tree again when
+    # nobody asked.
     assert not utcp.runs
     await utcp.eager(_step(agent), _entered)
     assert not utcp.runs
@@ -708,9 +732,9 @@ async def test_a_root_agents_first_step_starts_the_index_and_it_is_told_when_it_
 async def test_on_mount_false_leaves_indexing_to_the_tool_and_a_child_waits_for_a_call(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """`index.on_mount: false`, and the other half of the rule for free: a
-    sub-agent's step starts nothing either way, so a child in a throwaway
-    worktree that never searches never embeds a document."""
+    """`index.on_mount: false`, and the other half of the rule, which needs no
+    setting. The step of a sub-agent starts nothing in either case. A child in a
+    throwaway worktree that never searches therefore never embeds a document."""
     docs_tree(tmp_path)
     off = {**ROWS[1], "config": {"index": {"onMount": False}}}
     ctx = await mount(ROWS[0], off, ROWS[2])
@@ -730,10 +754,10 @@ async def test_on_mount_false_leaves_indexing_to_the_tool_and_a_child_waits_for_
 
 
 async def test_unmounting_the_embedder_ends_its_run(mount: MountProfile, tmp_path: Path) -> None:
-    """A run is a job of the agent whose tree it works on, and it is the manual's
-    too: the tools go with the embedder's row, and so does a run still going.
-    Stopped, and not said to have failed: nobody is told of a run its own row
-    ended."""
+    """A run is a job of the agent whose tree it works on, and it also belongs to
+    the manual. The tools leave with the row of the embedder, and so does a run
+    that is still working. The run is stopped and is not reported as failed.
+    Nobody is told about a run that its own row ended."""
     docs_tree(tmp_path, documents=12)
     _, embedder = _recording(tmp_path, delay=0.3)
     ctx = await mount(ROWS[0], {**ROWS[1], "config": {"waitS": 0.2}}, embedder)
@@ -753,12 +777,12 @@ async def test_unmounting_the_embedder_ends_its_run(mount: MountProfile, tmp_pat
 async def test_a_child_builds_its_own_index_only_when_it_has_a_tree_it_writes_for_keeps(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """**The rule a read-only fan-out rests on.** A child granted only to read the
-    project asks its parent's index: it has no tree of its own — its directory
-    is an empty one beside a repository it cannot write — so it embeds nothing,
-    holds no model, and is told which tree the paths it is handed belong to. A
-    child with a worktree it writes for keeps has files that diverge, so it is
-    the owner of that tree and builds its own.
+    """**The rule that a read-only fan-out depends on.** A child that may only
+    read the project asks the index of its parent. It has no tree of its own:
+    its directory is an empty one beside a repository that it cannot write. It
+    therefore embeds nothing and holds no model. It is told which tree the paths
+    that it gets belong to. A child with a worktree that it writes for keeps has
+    files that diverge. It is the owner of that tree and builds its own index.
 
     Sabotage: decide by the root alone, and the reader indexes its own empty
     directory into its parent's index and sweeps every document out as gone.

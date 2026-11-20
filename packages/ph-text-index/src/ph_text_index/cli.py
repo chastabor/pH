@@ -1,10 +1,10 @@
-"""`ph-text-index` — `text_index` and `text_search` from a command line.
+"""`ph-text-index`: `text_index` and `text_search` from a command line.
 
-For trying a query by hand, and what this package's UTCP manual calls. The tools
-are the ones the `text-index-engine` row registers (`ph_text_index.engine`);
-`ph.toolcli` mounts that row and an embedder's in this process and runs them
-through the registry. The rows a session mounts reach them by running this
-command.
+The command is for trying a query by hand, and it is what the UTCP manual of this
+package calls. The tools are the ones that the `text-index-engine` row registers
+(`ph_text_index.engine`). `ph.toolcli` mounts that row and an embedder row in
+this process, and runs the tools through the registry. The rows that a session
+mounts reach the tools by running this command.
 
 ```bash
 ph-text-index call text_index --paths docs --format text
@@ -14,9 +14,10 @@ ph-text-index manual
 ```
 
 The embedder is the local `sentence-transformers` model unless a config names
-another provider row (`ToolCli.providers`); its settings — the model, its
-prefixes — are that row's, in `$PH_HOME/tools/ph-text-index.yaml` for a person
-and handed across by the session's row for an agent.
+another provider row (`ToolCli.providers`). The settings of the embedder (the
+model and its prefixes) belong to that row. For a person, they are in
+`$PH_HOME/tools/ph-text-index.yaml`. For an agent, the session row passes them
+across.
 
 @module ph_text_index.cli
 """
@@ -40,19 +41,21 @@ MODEL_ENV: tuple[str, ...] = (
     "OMP_NUM_THREADS",
     "CUDA_VISIBLE_DEVICES",
 )
-"""What an operator sets to say how a local model is fetched and run: a mirror,
-no network, how many threads, which device. Not `HF_TOKEN` — the deployment's
-scrubbed environment drops a credential whatever a template names."""
+"""The variables that an operator sets to say how a local model is fetched and
+run: a mirror, no network, the number of threads, and the device. `HF_TOKEN` is
+not here. The scrubbed environment of the deployment drops a credential,
+whatever a template names."""
 
 CLI = ToolCli(
     program="ph-text-index",
     manual="ph_text_index",
     summary="Index documents by meaning and search them: passages back, with their lines.",
     version=version("ph-text-index"),
-    # The engine row, under the session row's id: the config a profile writes for
-    # `text-index` is then the config this command reads for it.
+    # The engine row, under the id of the session row. The config that a profile
+    # writes for `text-index` is then the config that this command reads.
     rows=({"id": ROW, "name": "text-index-engine"},),
-    # What makes a vector. One of these, and the first unless a config says.
+    # The rows that make a vector. The command mounts one of them: the first,
+    # unless a config names another.
     providers=(
         {"id": LOCAL_ROW, "name": "text-index-local-engine"},
         {"id": ENDPOINT_ROW, "name": "text-index-endpoint-engine"},

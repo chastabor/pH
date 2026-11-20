@@ -1,20 +1,21 @@
-"""`ph-text-index` — semantic retrieval over the agent's own documents.
+"""`ph-text-index`: semantic retrieval over the agent's own documents.
 
-Two tools. `text_index` cuts documents into passages that remember their line
-numbers, embeds them and puts them in a turbovec index on disk. `text_search`
-answers a question with the passages themselves plus the `path:start-end` each
-came from — so a hit is both an answer and a pointer the agent can `read`.
+The package has two tools. `text_index` cuts documents into passages that keep
+their line numbers, embeds them, and puts them in a turbovec index on disk.
+`text_search` answers a question with the passages themselves, and with the
+`path:start-end` that each passage came from. A hit is therefore both an answer
+and a pointer that the agent can `read`.
 
-Three groups of modules, by which process loads them:
+There are three groups of modules, by the process that loads them:
 
-* `row` — what a session mounts. Its rows register the package's UTCP manual
-  with `ph-utcp`, so the tools, turbovec and the embedding model run in the
-  command rather than in the session.
-* `cli` and `__main__` — the `ph-text-index` command, which mounts `engine`.
-* `engine`, `_chunk`, `_embed`, `_store` — the tools themselves.
+* `row` is what a session mounts. Its rows register the UTCP manual of the
+  package with `ph-utcp`, so the tools, turbovec, and the embedding model run in
+  the command and not in the session.
+* `cli` and `__main__` are the `ph-text-index` command, which mounts `engine`.
+* `engine`, `_chunk`, `_embed`, and `_store` are the tools themselves.
 
-This module is kept to the bundle's path because `python -m ph_text_index`
-imports it before every call: whatever it imports, every call pays for.
+This module holds only the path of the bundle, because `python -m ph_text_index`
+imports it before every call. Every call pays for whatever this module imports.
 
 @module ph_text_index
 """
@@ -26,8 +27,8 @@ from pathlib import Path
 __all__ = ["BUNDLE"]
 
 BUNDLE = Path(__file__).parent / "bundle.yaml"
-"""This distribution's profile layer, for the `ph.bundles` group.
+"""The profile layer of this distribution, for the `ph.bundles` group.
 
-Discovered rather than imported, which is what lets `ph-app` compose a
-profile that layers this package without depending on it.
+The bundle is discovered, not imported. That lets `ph-app` compose a profile that
+layers this package without depending on it.
 """

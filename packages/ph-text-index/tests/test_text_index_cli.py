@@ -1,23 +1,26 @@
-"""`ph-text-index` — the engine's tools from a command line, and through a UTCP client.
+"""`ph-text-index`: the tools of the engine from a command line, and through a UTCP client.
 
-Gates: *the command answers with the values the engine answers with; an index
-built by one process is searched by the next, where the caller said; a real UTCP
-client registers the manual and calls a tool, with an argument left out and an
-argument that is a list.*
+Gates:
+
+* The command answers with the values that the engine answers with.
+* An index that one process builds is searched by the next process, in the place
+  that the caller named.
+* A real UTCP client registers the manual and calls a tool, with one argument
+  left out and one argument that is a list.
 
 ## Why real processes
 
-What this file is about only exists between processes: an index one command
-builds and another searches, and a UTCP client that reaches the tool by running
-a shell command with a cut-down environment. Calling `run()` in this process
-would prove the argument parsing and none of that.
+The subject of this file exists only between processes: an index that one
+command builds and another command searches, and a UTCP client that reaches the
+tool by running a shell command with a reduced environment. A call to `run()` in
+this process would prove the argument parsing and none of that.
 
 ## Which command
 
-`python -m text_index_stub` for everything that embeds — the package's own
-engine, tools and manual with a deterministic embedder (`text_index_stub`) — and
-the shipped `ph-text-index` for what it can say without loading its model: which
-tools it has, how a harness registers it, and where its model stands.
+`python -m text_index_stub` runs everything that embeds. It is the package's own
+engine, tools, and manual, with a deterministic embedder (`text_index_stub`).
+The shipped `ph-text-index` runs what it can answer without loading its model:
+which tools it has, how a harness registers it, and what state its model is in.
 """
 
 from __future__ import annotations
@@ -79,9 +82,9 @@ def _call(root: Path, tool: str, *argv: str) -> dict[str, Any]:
 async def test_the_command_answers_with_the_values_the_engine_answers_with(
     mount: MountProfile, tmp_path: Path
 ) -> None:
-    """One body per tool. The engine is mounted here and the command mounts it
-    again in its own process; both read one index, so the answers are equal or
-    there are two implementations."""
+    """There is one body for each tool. The engine is mounted here, and the
+    command mounts it again in its own process. Both read one index. The answers
+    are therefore equal, or there are two implementations."""
     docs_tree(tmp_path, documents=3)
     ctx = await mount({"id": "text-index", "name": "text-index-engine"})
     ctx.require(TEXT_INDEX).register(HashingEmbedder())
@@ -106,14 +109,14 @@ async def test_the_command_answers_with_the_values_the_engine_answers_with(
 async def test_the_index_goes_where_the_caller_says_and_is_found_there_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--state`, and `$PH_TOOL_STATE` under it: the directory a session names for
-    each agent, and a person names to try one. The processes share nothing but
-    that directory, so the second finding the first's passages is the index being
-    reused — which is what a restarted agent gets, because its directory is the
-    same one.
+    """`--state`, and `$PH_TOOL_STATE` below it. A session names this directory
+    for each agent, and a person names one to try the command. The processes
+    share nothing except that directory. When the second process finds the
+    passages of the first, the index was reused. A restarted agent gets the same
+    result, because its directory is the same one.
 
-    And with neither, the index is where it has always been: under `$PH_CACHE`,
-    keyed by the workspace.
+    With neither setting, the index is where it has always been: under
+    `$PH_CACHE`, keyed by the workspace.
     """
     docs_tree(tmp_path, documents=2)
     state = tmp_path.parent / f"{tmp_path.name}-state"
@@ -134,13 +137,13 @@ async def test_the_index_goes_where_the_caller_says_and_is_found_there_again(
     assert [one.name for one in state.iterdir()] == [digest(HashingEmbedder().name)]
     assert [hit["path"] for hit in found["value"]["hits"]] == ["docs/w.md"]
     assert apart["value"]["searched"] == 0, "with no state named, it is a different index"
-    # And a search of an index nobody has built makes nothing: it is a reader.
+    # A search of an index that nobody has built creates nothing. It only reads.
     assert not (resolve_roots().cache / "text-index" / digest(str(tmp_path))).exists()
 
 
 async def test_a_failure_from_the_tool_is_in_the_answer(tmp_path: Path) -> None:
-    """The exit code is ignored by a UTCP client, so the refusal has to be in what
-    the command prints, with a code a caller can route on."""
+    """A UTCP client ignores the exit code. The refusal must therefore be in the
+    text that the command prints, with a code that a caller can route on."""
     answer = await anyio.to_thread.run_sync(lambda: _call(tmp_path, "text_search", "--k", "3"))
 
     assert answer["ok"] is False
@@ -154,10 +157,10 @@ async def test_a_failure_from_the_tool_is_in_the_answer(tmp_path: Path) -> None:
 async def test_the_shipped_command_names_its_tools_without_loading_its_model(
     tmp_path: Path,
 ) -> None:
-    """Discovery, and `status`: what a harness and a person ask before anything is
-    embedded. Neither loads the model, so neither downloads it — and `status`
-    says so, rather than "not loaded", which is true of every process that has
-    only just started."""
+    """Discovery and `status`: what a harness and a person ask before anything is
+    embedded. Neither loads the model, so neither downloads it. `status` says
+    "not downloaded" and not "not loaded", because "not loaded" is true of every
+    process that has just started."""
     manual = await anyio.to_thread.run_sync(lambda: _run(CLI, tmp_path, "manual"))
     status = await anyio.to_thread.run_sync(lambda: _run(CLI, tmp_path, "status"))
 
@@ -174,9 +177,10 @@ async def test_the_shipped_command_names_its_tools_without_loading_its_model(
 
 
 def test_the_registration_names_this_interpreter_and_the_model_settings() -> None:
-    """What another harness registers: the module run by the interpreter that
-    printed it, and the variables an operator steers a local model with — a
-    mirror, no network — among those the command inherits."""
+    """What another harness registers: the module, run by the interpreter that
+    printed the registration, and the variables that an operator uses to steer a
+    local model, for example to a mirror or to no network. These variables are
+    among the variables that the command inherits."""
     template = manual_call_template(CLI)
 
     assert template["name"] == "ph_text_index"
@@ -192,16 +196,17 @@ def test_the_registration_names_this_interpreter_and_the_model_settings() -> Non
 async def test_a_real_utcp_client_registers_the_manual_and_calls_a_tool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The whole path another harness takes: discovery by running `manual`, then a
-    call through the tool's own template, in the client's cut-down environment.
+    """The whole path that another harness takes: discovery by running `manual`,
+    then a call through the template of the tool, in the reduced environment of
+    the client.
 
-    `glob`, `exclude` and `forget` are left out of the first call and `paths` of
-    the last on purpose. The client substitutes `MISSING_ARG_<name>` for a
-    placeholder with no argument, so a command that read its flags as plain text
-    would index a file of that name.
+    `glob`, `exclude`, and `forget` are left out of the first call on purpose,
+    and `paths` is left out of the last call. The client substitutes
+    `MISSING_ARG_<name>` for a placeholder that has no argument. A command that
+    read its flags as plain text would index a file of that name.
     """
     docs_tree(tmp_path, documents=3)
-    # A UTCP call runs in the client's working directory, which is the workspace.
+    # A UTCP call runs in the working directory of the client, which is the workspace.
     monkeypatch.chdir(tmp_path)
     client = await UtcpClient.create(
         config={"manual_call_templates": [manual_call_template(STUB_CLI)]}
@@ -210,7 +215,7 @@ async def test_a_real_utcp_client_registers_the_manual_and_calls_a_tool(
     names = {tool.name for tool in await client.config.tool_repository.get_tools()}
     assert names == {"ph_text_index.text_index", "ph_text_index.text_search"}
 
-    # A list argument: it arrives as Python's repr of the list.
+    # A list argument. It arrives as the Python repr of the list.
     indexed = await client.call_tool("ph_text_index.text_index", {"paths": ["docs"]})
     assert indexed["ok"] is True, indexed
     assert indexed["value"]["total_documents"] == 3
@@ -237,8 +242,9 @@ async def test_a_real_utcp_client_registers_the_manual_and_calls_a_tool(
 def _running(
     root: Path, *argv: str, config: dict[str, Any] | None = None
 ) -> Iterator[subprocess.Popen[str]]:
-    """`call text_index --progress`, as a session starts a run in the background:
-    a process of its own, its stderr a pipe to read the report from."""
+    """`call text_index --progress`, as a session starts a run in the background.
+    The run is a separate process, and its stderr is a pipe that the report is
+    read from."""
     env = {**os.environ, **({CONFIG_ENV: json.dumps(config)} if config else {})}
     process = subprocess.Popen(
         [*STUB_CLI.invocation(), "call", "text_index", "--progress", *argv],
@@ -268,11 +274,12 @@ def _reported(process: subprocess.Popen[str], until: Callable[[dict[str, Any]], 
 def test_a_run_reports_on_stderr_and_a_search_meanwhile_reads_what_it_has_saved(
     tmp_path: Path,
 ) -> None:
-    """**The gate.** A run says how far it has got on stderr and ends with one
-    last line. While it works nothing waits for it: a second `text_index` that
-    will not wait answers `indexing`, and `text_search` answers at once from
-    what the run has saved so far and says the index is not finished. When the
-    run is over the warning is gone, and asking again finds nothing to embed.
+    """**The gate.** A run reports its progress on stderr and ends with one last
+    line. While the run works, nothing waits for it. A second `text_index` that
+    will not wait answers `indexing`. `text_search` answers immediately from
+    what the run has saved so far, and says that the index is not finished. When
+    the run is over, the warning is gone, and a new `text_index` finds nothing
+    to embed.
     """
     docs_tree(tmp_path, documents=20)
     config = {"text-index": {"saveEveryS": 0.2}, "text-index-stub": {"delay": 0.25}}
@@ -311,10 +318,11 @@ def test_a_run_reports_on_stderr_and_a_search_meanwhile_reads_what_it_has_saved(
 def test_a_run_that_is_killed_writes_no_last_line_and_the_next_one_goes_on(
     tmp_path: Path,
 ) -> None:
-    """**The gate.** A run killed with SIGKILL embeds nothing twice — up to its
-    last save — and its report ends without a last line, which is how whoever
-    reads it knows the run did not finish. The documents it had saved are found
-    by the next run, by their digests, and only the rest are embedded.
+    """**The gate.** A run is killed with SIGKILL. Nothing that it embedded up to
+    its last save is embedded a second time. Its report ends without a last
+    line, and that is how a reader of the report knows that the run did not
+    finish. The next run finds the saved documents by their digests and embeds
+    only the others.
     """
     docs_tree(tmp_path, documents=12)
     config = {"text-index": {"saveEveryS": 0.2}, "text-index-stub": {"delay": 0.3}}
