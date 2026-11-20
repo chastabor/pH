@@ -1,4 +1,4 @@
-"""What every ph-clm suite builds on: a mounted bundle, an agent, a conversation."""
+"""The base for every ph-clm test suite: a mounted bundle, an agent, and a conversation."""
 
 from __future__ import annotations
 
@@ -50,21 +50,21 @@ ROW: dict[str, Any] = {"id": "clm-context", "name": "clm-context"}
 MIRROR_ROW: dict[str, Any] = {"id": "clm-mirror", "name": "clm-mirror"}
 
 OUTPUT = "parser.py line 1\n" + "noise from a long listing\n" * 60
-"""A tool output long enough that removing it is worth something."""
+"""A tool output that is long enough to make its removal worthwhile."""
 
 CALL_ID = "t1"
-"""The id of the one call `answer_first_request` scripts."""
+"""The id of the one call that `answer_first_request` scripts."""
 
 _SEQ = itertools.count()
 
 
 async def mounted(mount: MountProfile, *extra: dict[str, Any], **config: object) -> Context:
-    """The `clm-context` row, with `config`, and any rows after it."""
+    """Mount the `clm-context` row with `config`, and any rows after it."""
     return await mount({**ROW, "config": config} if config else ROW, *extra)
 
 
 def agent_in(ctx: Context) -> ReactLoopAgent:
-    """A fresh agent, on a session id nothing else has taken."""
+    """Create a fresh agent, on a session id that nothing else has taken."""
     agent = ctx.require(AGENTS).create(
         ctx.require(SESSIONS).create(f"clm-{next(_SEQ)}"), FAKE_OPTIONS
     )
@@ -115,32 +115,33 @@ def converse(session: Session) -> None:
 
 
 def sections_of(ctx: Context, session: Session) -> tuple[Section, ...]:
-    """The session's section map, built fresh."""
+    """The section map of the session, built fresh."""
     return SectionMap(ctx.require(TOKEN_METER), protect_task=True)(session)
 
 
 def model_text(session: Session) -> str:
-    """What the model is sent, tool output included."""
+    """The text that the model is sent, including tool output."""
     return render_messages(session.derive_messages())
 
 
 def human_text(session: Session) -> str:
-    """What the person's transcript shows."""
+    """The text that the transcript shows to the user."""
     return render_messages(session.transcript())
 
 
 async def edit(
     ctx: Context, agent: ReactLoopAgent, name: str, arguments: dict[str, object]
 ) -> ToolExecutionResult:
-    """One context tool call, the way the loop makes it."""
+    """Make one context tool call, in the way that the loop makes it."""
     return await run_tool(ctx, name, arguments, agent=agent, session=agent.session)
 
 
 def answer_first_request(
     ctx: Context, name: str, arguments: Callable[[], dict[str, object]]
 ) -> None:
-    """Script the model: the loop's first request is answered with one call to `name`,
-    its arguments built at that moment; every later request goes to the fake."""
+    """Script the model. The first request of the loop is answered with one call to
+    `name`, and its arguments are built at that moment. Every later request goes
+    to the fake."""
     asked = False
 
     async def first(options: GenerateOptions, next_: Callable[..., Awaitable[Any]]) -> Any:  # noqa: ANN401
@@ -155,13 +156,14 @@ def answer_first_request(
 
 
 def context_tokens(ctx: Context, session: Session) -> int:
-    """The context as compaction, the `fit` gate and a readout count it."""
+    """The size of the context, as compaction, the `fit` gate, and a readout count it."""
     return ctx.require(TOKEN_METER).baseline(session).tokens
 
 
 def filler(meter: TokenMeter, tokens: int, unit: str = "word ") -> str:
-    """Text the meter counts as at least `tokens`, in whole `unit`s: as many as the
-    estimate of one says, then one at a time until the meter agrees."""
+    """Text that the meter counts as at least `tokens`, in whole `unit`s. It starts
+    with as many units as the estimate for one unit suggests, then adds one unit
+    at a time until the meter agrees."""
     text = unit * (tokens // max(1, meter.measure_text(unit)))
     while meter.measure_text(text) < tokens:
         text += unit
@@ -169,7 +171,7 @@ def filler(meter: TokenMeter, tokens: int, unit: str = "word ") -> str:
 
 
 def readout_share(line: str) -> int:
-    """The share of the window a readout line reports, `(57%)` → 57."""
+    """The share of the window that a readout line reports: `(57%)` → 57."""
     found = re.search(r"tokens \((\d+)%\)", line)
     assert found is not None, line
     return int(found.group(1))

@@ -1,10 +1,14 @@
-"""ph-clm Phase 1: the section map, the edit door, and the context tools.
+"""ph-clm Phase 1: the section map, the edit entry point, and the context tools.
 
-The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 1): each verb lands as a
-surface `replace`; the model's view shows the replacement and the person's
-transcript the original; a resumed session derives the same context; every refusal
-leaves the log as it was; the record lands in the edit's own batch; and the
-agent-loop invariant holds across an edit made mid-step.
+The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 1):
+
+* Each verb lands as a surface `replace`.
+* The view of the model shows the replacement, and the transcript of the user
+  shows the original.
+* A resumed session derives the same context.
+* Every refusal leaves the log as it was.
+* The record lands in the same batch as the edit.
+* The agent-loop invariant holds across an edit that is made mid-step.
 """
 
 from __future__ import annotations
@@ -59,7 +63,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def test_the_map_cuts_where_no_call_is_outstanding(mount: MountProfile) -> None:
-    """A call and its result are one section; every other message is its own."""
+    """A call and its result are one section. Every other message is its own section."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -83,7 +87,7 @@ async def test_the_map_cuts_where_no_call_is_outstanding(mount: MountProfile) ->
 
 
 async def test_a_section_keeps_its_id_as_the_log_grows(mount: MountProfile) -> None:
-    """The ids are seqs (A1): appending moves nothing the model already read."""
+    """The ids are seqs (A1). An append moves nothing that the model already read."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -97,9 +101,10 @@ async def test_a_section_keeps_its_id_as_the_log_grows(mount: MountProfile) -> N
 
 
 async def test_the_section_map_is_a_fold_of_the_log(mount: MountProfile) -> None:
-    """The per-event memo keeps `SessionFoldCache`'s contract, checked two ways over a
-    log with revisions in it: the fold laws over every prefix, and a map kept across
-    the edits agreeing with one built from nothing."""
+    """The per-event memo keeps the contract of `SessionFoldCache`. The test checks
+    this in two ways, over a log that has revisions in it. The fold laws hold over
+    every prefix. A map kept across the edits agrees with a map built from
+    nothing."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     kept = SectionMap(ctx.require(TOKEN_METER), protect_task=True)
@@ -120,7 +125,7 @@ async def test_the_section_map_is_a_fold_of_the_log(mount: MountProfile) -> None
 
 
 async def test_the_step_in_flight_cannot_be_edited(mount: MountProfile) -> None:
-    """A call still waiting for its result is the step making the edit."""
+    """A call that still waits for its result is the step that makes the edit."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -203,7 +208,8 @@ async def test_a_replace_lands_the_text_the_model_wrote(mount: MountProfile) -> 
 
 
 async def test_a_rewrite_changes_only_the_passage(mount: MountProfile) -> None:
-    """In place: the call id and the pairing stay, so nothing about the step moves."""
+    """The rewrite is in place. The call id and the pairing stay, so the step does
+    not change."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -232,8 +238,10 @@ async def test_a_rewrite_changes_only_the_passage(mount: MountProfile) -> None:
 
 
 async def test_a_rewritten_reply_keeps_its_section_name(mount: MountProfile) -> None:
-    """In place, through the door: the same message, so the same section — what the
-    door keeps beyond that (the id, the usage left behind) is tested at the door."""
+    """The rewrite is in place, through the revision function. The message is the
+    same message, so the section is the same section. What the revision function
+    keeps beyond that (the id, the usage left behind) is tested with that
+    function."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -331,8 +339,8 @@ async def test_a_revised_id_names_what_stands_for_it(mount: MountProfile) -> Non
 
 
 async def test_a_tombstoned_message_gets_a_new_name(mount: MountProfile) -> None:
-    """A substitution standing for one node is not an in-place rewrite: the marker is
-    a new section, and the old name says what stands for it now."""
+    """A substitution that stands for one node is not an in-place rewrite. The
+    marker is a new section, and the old name says what stands for it now."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -363,7 +371,7 @@ async def test_the_shrink_gate_refuses_growth(mount: MountProfile) -> None:
 
 
 async def test_with_no_gate_growth_is_taken_and_said(mount: MountProfile) -> None:
-    """Decision 4: growth is the model's call, and the receipt names it."""
+    """Decision 4: growth is the decision of the model, and the receipt names it."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -397,9 +405,10 @@ async def test_recall_reads_back_what_a_revision_stands_for(mount: MountProfile)
 
 
 async def test_a_diff_shows_both_versions_and_every_edit_between(mount: MountProfile) -> None:
-    """The section as first written against now, after the edits that led there,
-    oldest first, which the session's history lists (`Session.history`). Sabotage: list
-    only the latest edit."""
+    """The diff shows the section as first written against the section now. Before
+    it comes the list of the edits that led there, oldest first, which the history
+    of the session gives (`Session.history`). Sabotage: list only the latest
+    edit."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -431,8 +440,9 @@ async def test_an_unrevised_section_has_nothing_to_recall(mount: MountProfile) -
 
 
 async def test_a_restored_rewrite_is_the_text_before_it_exactly(mount: MountProfile) -> None:
-    """In place and exact: the same message comes back, so the section keeps its id.
-    Sabotage: restore through a substitution instead, and the id moves."""
+    """The restore is in place and exact. The same message comes back, so the
+    section keeps its id. Sabotage: restore through a substitution instead, and
+    the id moves."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -458,9 +468,10 @@ async def test_a_restored_rewrite_is_the_text_before_it_exactly(mount: MountProf
 
 
 async def test_a_restored_tombstone_brings_its_run_back_as_text(mount: MountProfile) -> None:
-    """Flattened, under a label, and not a stand-in: it is the conversation back, so
-    compaction may summarize it again. Sabotage: land it as `compaction`, and it reads
-    as a summary compaction declines to touch."""
+    """The run comes back flattened, under a label, and not as a stand-in. It is
+    the conversation itself, so compaction may summarize it again. Sabotage: land
+    it as `compaction`, and it reads as a summary that compaction declines to
+    touch."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -486,8 +497,8 @@ async def test_a_restored_tombstone_brings_its_run_back_as_text(mount: MountProf
 
 
 async def test_restoring_a_restore_brings_the_marker_back_exactly(mount: MountProfile) -> None:
-    """One user-role message stood there, so it comes back as itself. Sabotage: drop
-    the copy, and the marker returns as text under a second label."""
+    """One user-role message stood there, so it comes back as itself. Sabotage:
+    drop the copy, and the marker returns as text under a second label."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -508,9 +519,9 @@ async def test_restoring_a_restore_brings_the_marker_back_exactly(mount: MountPr
 
 
 async def test_restoring_a_restore_redoes_the_edit_it_undid(mount: MountProfile) -> None:
-    """A restore is an edit, and the latest one: restoring again toggles, it does not
-    step further back. Sabotage: pass over restores when picking the edit, and the
-    second restore finds nothing to undo."""
+    """A restore is an edit, and it is the latest one. A second restore toggles. It
+    does not step further back. Sabotage: skip restores when picking the edit,
+    and the second restore finds nothing to undo."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -527,9 +538,10 @@ async def test_restoring_a_restore_redoes_the_edit_it_undid(mount: MountProfile)
 
 
 async def test_only_a_context_edit_is_restored(mount: MountProfile) -> None:
-    """A section as written has nothing to undo, and one the harness revised — a
-    compaction summary here — is not the model's edit to take back. Sabotage: restore
-    any replacement, and the summary is unpicked."""
+    """A section as written has nothing to undo. A section that the harness
+    revised (a compaction summary here) is not an edit of the model, so the model
+    cannot take it back. Sabotage: restore any replacement, and the summary is
+    undone."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -551,8 +563,8 @@ async def test_only_a_context_edit_is_restored(mount: MountProfile) -> None:
 
 
 async def test_the_shrink_gate_refuses_a_restore(mount: MountProfile) -> None:
-    """A restore brings text back, which is growth: `shrink` refuses it, as the plan
-    says it would (decision 4)."""
+    """A restore brings text back, which is growth. `shrink` refuses it, as the
+    plan says (decision 4)."""
     ctx = await mounted(mount, gate="shrink")
     agent = agent_in(ctx)
     converse(agent.session)
@@ -571,7 +583,7 @@ async def test_the_shrink_gate_refuses_a_restore(mount: MountProfile) -> None:
 
 
 async def test_a_resumed_session_derives_the_same_context(mount: MountProfile) -> None:
-    """The edits are core events: the store's fold rebuilds exactly this view."""
+    """The edits are core events. The fold of the store rebuilds exactly this view."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -593,7 +605,8 @@ async def test_a_resumed_session_derives_the_same_context(mount: MountProfile) -
 
 
 async def test_a_crash_after_an_edit_reconciles_as_done(mount: MountProfile) -> None:
-    """The record is in the edit's batch, so finding it is finding the edit."""
+    """The record is in the batch of the edit, so finding the record means that
+    the edit landed."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -613,9 +626,10 @@ async def test_a_crash_after_an_edit_reconciles_as_done(mount: MountProfile) -> 
 
 
 async def test_a_reconciled_restore_says_what_it_did(mount: MountProfile) -> None:
-    """The record does not say whether a restore kept its section's id; the edit it
-    describes does. Sabotage: leave `in_place` unset when reconciling, and a restored
-    rewrite reads as a section that came back under a new id."""
+    """The record does not say whether a restore kept the id of its section. The
+    edit that it describes does. Sabotage: leave `in_place` unset when
+    reconciling, and a restored rewrite reads as a section that came back under a
+    new id."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -639,8 +653,8 @@ async def test_a_reconciled_restore_says_what_it_did(mount: MountProfile) -> Non
 
 
 async def test_an_edit_made_mid_step_reaches_the_next_request(mount: MountProfile) -> None:
-    """The whole path: the model calls the tool, the edit lands while its step is
-    open, and the next request is built from the edited surface — which the
+    """The whole path. The model calls the tool, and the edit lands while its step
+    is open. The next request is built from the edited surface, which the
     `agent-loop-invariant` row checks on every request."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
@@ -664,9 +678,9 @@ async def test_an_edit_made_mid_step_reaches_the_next_request(mount: MountProfil
 
 
 async def test_a_receipt_counts_the_context_as_compaction_does(mount: MountProfile) -> None:
-    """The receipt's "Context ~X" is the meter's baseline — the provider's last count,
-    system prompt included — so a receipt and a readout never disagree about the size
-    of one context."""
+    """The "Context ~X" of the receipt is the baseline of the meter: the last
+    count of the provider, which includes the system prompt. A receipt and a
+    readout therefore never disagree about the size of one context."""
     ctx = await mounted(mount)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -684,8 +698,8 @@ async def test_a_receipt_counts_the_context_as_compaction_does(mount: MountProfi
 
 
 async def test_fit_gates_a_batch_as_one_change(mount: MountProfile) -> None:
-    """Two replacements in one batch that each fit the window can together overflow it:
-    the batch is gated as the one change its receipt reports.
+    """Two replacements in one batch can each fit the window and together overflow
+    it. The batch is gated as the one change that its receipt reports.
 
     Sabotage: gate each draft on its own again, and the batch lands.
     """

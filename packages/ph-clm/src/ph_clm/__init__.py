@@ -1,16 +1,17 @@
-"""pH's CLM bundle: the model manages its own context.
+"""The CLM bundle of pH: the model manages its own context.
 
-After *Context Language Models* (Shao et al., 2026): a model keeps the context it
-works best with when it may edit that context itself. Here an edit is never a
-rewrite of the log. Every one is a surface `replace` ph-core already folds — a
-**tombstone** or a **replace** stands in for a run of whole sections, a
-**rewrite** changes one result or reply in place — so the model's view changes,
-the log keeps every original, and `transcript()` still shows the person what
-happened. `context_diff` and `context_recall` read the originals back, and
-`context_restore` undoes a section's latest edit.
+This package follows *Context Language Models* (Shao et al., 2026). The idea of
+that paper is that a model keeps the context it works best with when it can edit
+that context itself. Here, an edit never rewrites the log. Each edit is a surface
+`replace`, a core event that ph-core already folds. A **tombstone** or a
+**replace** stands in for a run of whole sections. A **rewrite** changes one
+result or one reply in place. The view of the model changes, the log keeps every
+original, and `transcript()` still shows the user what happened. `context_diff`
+and `context_recall` read the originals back. `context_restore` undoes the latest
+edit of a section.
 
-Ideas from the paper's harness and from `pi-clm`; no code from either — the CLM
-repository is CC BY-NC, and this package is MIT.
+The ideas come from the harness of the paper and from `pi-clm`. No code comes
+from either. The CLM repository is CC BY-NC, and this package is MIT.
 
 @module ph_clm
 """
@@ -22,6 +23,6 @@ from pathlib import Path
 from . import kinds as kinds
 
 BUNDLE = Path(__file__).parent / "bundle.yaml"
-"""The rows the `clm` bundle layers over a profile."""
+"""The rows that the `clm` bundle layers over a profile."""
 
 __all__ = ["BUNDLE", "kinds"]

@@ -1,11 +1,15 @@
 """ph-clm Phase 3: context readouts on tool results.
 
-The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 3): a result that takes the
-context past a share of its window ends with one readout line, and nothing else is
-added to the context; the next result past the same share says nothing, and once an
-edit brings the context back down, crossing it again says so again; the last share
-says it is the last; the readout names the context file when a row keeps one, and
-measures after that file's edit has landed; with no window there is no readout.
+The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 3):
+
+* A result that takes the context past a share of its window ends with one
+  readout line, and nothing else is added to the context.
+* The next result past the same share adds no readout. After an edit brings the
+  context back down, a new crossing adds a readout again.
+* The last share says that it is the last.
+* The readout names the context file when a row keeps one, and it measures after
+  the edit of that file has landed.
+* With no window there is no readout.
 """
 
 from __future__ import annotations
@@ -52,8 +56,8 @@ pytestmark = pytest.mark.anyio
 async def _filled(
     mount: MountProfile, share: float, *extra: dict[str, Any], **config: object
 ) -> tuple[Context, ReactLoopAgent, int]:
-    """A conversation filling `share` of its window, a tool that prints as many tokens
-    as it is asked for, and the window."""
+    """A conversation that fills `share` of its window, a tool that prints as many
+    tokens as it is asked for, and the window."""
     ctx = await mounted(mount, *extra, **config)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -147,8 +151,9 @@ async def test_the_readout_names_the_context_file(mount: MountProfile) -> None:
 
 
 async def test_the_readout_measures_after_the_files_edit_lands(mount: MountProfile) -> None:
-    """One call that removes the long step from the file and prints a little: measured
-    before the edit, it would cross 50%; after, it does not."""
+    """One call removes the long step from the file and prints a little. Measured
+    before the edit, the context would cross 50%. Measured after the edit, it
+    does not."""
     ctx, agent, window = await _filled(mount, 0.45, MIRROR_ROW)
     service = ctx.require(CLM_MIRROR)
     path = await service.render(agent.session, agent)
@@ -171,7 +176,8 @@ async def test_the_readout_measures_after_the_files_edit_lands(mount: MountProfi
 
 
 async def test_a_dispatch_inside_a_cell_carries_no_readout(mount: MountProfile) -> None:
-    """The cell's own call does, once, rather than each dispatch it made."""
+    """The call of the cell itself carries the readout, one time. Each dispatch
+    that the cell made does not."""
     ctx, agent, window = await _filled(mount, 0.4)
 
     nested = await run_tool(
@@ -188,9 +194,10 @@ async def test_a_dispatch_inside_a_cell_carries_no_readout(mount: MountProfile) 
 
 
 async def test_the_readout_counts_what_the_provider_counted(mount: MountProfile) -> None:
-    """The system prompt and tool schemas are in the provider's count and in no section:
-    a conversation at 30% of the window by its sections, in a request the provider
-    counted at 60%, is past the first share — in the units compaction reads."""
+    """The system prompt and the tool schemas are in the count of the provider, and
+    in no section. Take a conversation at 30% of the window by its sections, in a
+    request that the provider counted at 60%. It is past the first share, in the
+    units that compaction reads."""
     ctx, agent, window = await _filled(mount, 0.3)
     assert _readout(await _emit(ctx, agent, 10)) is None
     usage = TokenUsage(input_tokens=window * 3 // 5, output_tokens=10)
@@ -204,9 +211,10 @@ async def test_the_readout_counts_what_the_provider_counted(mount: MountProfile)
 
 
 def test_the_last_reminder_gives_way_below_compactions_trigger() -> None:
-    """A margin below the engine's trigger, so the model has room to act before a summary;
-    a share at or past that point gives way to it. Nothing moves without an engine, and
-    no shares stays no readouts."""
+    """The last reminder comes a margin below the trigger of the engine, so the
+    model has room to act before a summary. That reminder replaces a share at or
+    past that point. Nothing moves without an engine, and no shares still means
+    no readouts."""
     assert Shares.of([0.5, 0.75], 0.2, 0.85, 16_384).thresholds == (0.5, 0.65)
     assert Shares.of([0.5, 0.75], 0.2, None, 16_384).thresholds == (0.5, 0.75)
     assert Shares.of([], 0.2, 0.85, 16_384).thresholds == ()
@@ -216,8 +224,8 @@ def test_the_last_reminder_gives_way_below_compactions_trigger() -> None:
 async def test_the_last_reminder_comes_before_compaction_and_says_so(
     mount: MountProfile,
 ) -> None:
-    """With an engine compacting at 85%, the last reminder is at 65% — and it says what
-    happens if the model does nothing.
+    """With an engine that compacts at 85%, the last reminder is at 65%. It says
+    what happens if the model does nothing.
 
     Sabotage: ignore the engine's trigger, and 70% is no last reminder at all.
     """
@@ -231,8 +239,9 @@ async def test_the_last_reminder_comes_before_compaction_and_says_so(
 
 
 async def test_under_code_mode_the_readout_spells_the_call(mount: MountProfile) -> None:
-    """The keywords and all, as a cell writes it: a live model passed the sections
-    positionally and lost its one chance to edit to the error."""
+    """The readout shows the call as a cell writes it, including the keywords. A
+    live model passed the sections as positional arguments, and the error cost it
+    its one chance to edit."""
     ctx, agent, window = await _filled(mount, 0.4, code_mode_stub())
     ctx.require(TOOLS).present_as("code", scope=agent.ctx)
     ctx.require(CODE_RUNTIME_STUB).register_program("big", lambda _b, _emit: "word " * window)
@@ -245,9 +254,9 @@ async def test_under_code_mode_the_readout_spells_the_call(mount: MountProfile) 
 
 
 def test_a_recall_cut_at_its_token_bound_ends_between_characters() -> None:
-    """`context_recall` halves its way to the longest start that fits the bound,
-    and that start is moved back to fall between characters: a family is never
-    recalled in part.
+    """`context_recall` finds the longest start that fits the bound by halving.
+    That start is then moved back so that it falls between characters. A family
+    is never recalled in part.
 
     Sabotage: return `text[:low]` again and the recall ends inside a family.
     """

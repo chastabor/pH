@@ -1,17 +1,21 @@
 """ph-clm Phase 2: the context file, edited with ordinary tools.
 
-The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 2): a write to the file
-lands as the edits it describes; a reorder, a damaged header, a section that is not
-there, a protected section and a file written before a revision are each refused,
-recorded and rewritten; sections appended since the file was written are left
-alone; a dispatch inside a cell does not read back, the call that ran the cell
-does; a file this process did not write is rewritten, never applied; and the edit
-lands before the result that reports it — so a crash between them leaves an edit
-that landed beside a call that did not finish.
+The gates (`plans/Ph_Clm_Context_Editing_Plan.md`, Phase 2):
 
-The model's write is a tool here (`scribble`) rather than `edit` or `bash`: the
-read-back keys on the file, not on which tool touched it, and a tool of the test's
-own keeps the fs and sandbox rows out of a test about neither.
+* A write to the file lands as the edits that it describes.
+* Each of these is refused, recorded, and rewritten: a reorder, a damaged header,
+  a section that is not there, a protected section, and a file that was written
+  before a revision.
+* Sections that were appended after the file was written are left alone.
+* A dispatch inside a cell does not read back. The call that ran the cell does.
+* A file that this process did not write is rewritten, never applied.
+* The edit lands before the result that reports it. A crash between them
+  therefore leaves an edit that landed beside a call that did not finish.
+
+Here the model writes with a tool of the test (`scribble`), not with `edit` or
+`bash`. The read-back depends on the file, not on the tool that changed it. A
+tool of the test also keeps the fs and sandbox rows out of a test that is about
+neither.
 """
 
 from __future__ import annotations
@@ -69,7 +73,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def _ready(mount: MountProfile) -> tuple[Context, ReactLoopAgent, Path]:
-    """Both rows, a conversation, the file rendered, and a tool that writes it."""
+    """Both rows, a conversation, the rendered file, and a tool that writes the file."""
     ctx = await mounted(mount, MIRROR_ROW)
     agent = agent_in(ctx)
     converse(agent.session)
@@ -84,15 +88,15 @@ async def _ready(mount: MountProfile) -> tuple[Context, ReactLoopAgent, Path]:
 
 
 async def _write(ctx: Context, agent: ReactLoopAgent, text: str) -> str:
-    """The model writes the file; what the call's result says, folded to lower case so a
-    receipt reads the same whichever edit it names first."""
+    """The model writes the file. Returns what the result of the call says, in
+    lower case, so that a receipt reads the same whichever edit it names first."""
     result = await edit(ctx, agent, "scribble", {"text": text})
     assert not result.is_error, result.content
     return text_of(result.content).lower()
 
 
 def _without(text: str, name: str) -> str:
-    """The file with one section's block cut out."""
+    """The file with the block of one section cut out."""
     return re.sub(rf"\n\[\[SECTION {name} .*?(?=\n\[\[SECTION |\Z)", "", text, flags=re.S)
 
 
@@ -100,8 +104,9 @@ def _without(text: str, name: str) -> str:
 
 
 async def test_the_file_round_trips_to_no_change(mount: MountProfile) -> None:
-    """Rendered and read back untouched, the file is nothing — including a body line
-    that looks like a header, which is escaped on the way out and back on the way in."""
+    """A file that is rendered and read back unchanged produces no edit. This
+    includes a body line that looks like a header, which is escaped on the way
+    out and unescaped on the way in."""
     ctx, agent, path = await _ready(mount)
     log_event(
         agent.session,
@@ -134,8 +139,9 @@ async def test_the_file_names_every_section_by_its_id(mount: MountProfile) -> No
 async def test_a_revisions_label_is_its_header_and_its_body_the_models_text(
     mount: MountProfile,
 ) -> None:
-    """The harness's words go on the header line; under it is only what the model wrote,
-    which is the second of the replacement's two text blocks."""
+    """The words of the harness go on the header line. Under the header is only
+    what the model wrote, which is the second of the two text blocks of the
+    replacement."""
     ctx, agent, _ = await _ready(mount)
     step, reply = sections_of(ctx, agent.session)[1:3]
     await edit(
@@ -177,8 +183,8 @@ async def test_a_revision_edited_in_the_file_says_what_it_stands_for_once(
 
 
 async def test_a_tombstones_marker_is_its_header(mount: MountProfile) -> None:
-    """A marker is all harness words: its header says what it removed, it has no body,
-    and left alone it is no edit."""
+    """A marker is all harness words. Its header says what it removed, and it has
+    no body. A marker that is left unchanged is no edit."""
     ctx, agent, _ = await _ready(mount)
     step = sections_of(ctx, agent.session)[1]
     await edit(ctx, agent, "context_tombstone", {"sections": [step.name], "reason": "stale"})
@@ -194,8 +200,9 @@ async def test_a_tombstones_marker_is_its_header(mount: MountProfile) -> None:
 
 
 async def test_an_edited_body_is_unescaped_before_it_lands(mount: MountProfile) -> None:
-    """A line the file escaped stays escaped in the file and lands as the text it was:
-    only bodies that changed are unescaped, and they are unescaped whole."""
+    """A line that the file escaped stays escaped in the file, and it lands as the
+    text that it was. Only bodies that changed are unescaped, and each is
+    unescaped whole."""
     ctx, agent, _ = await _ready(mount)
     log_event(
         agent.session,
@@ -296,8 +303,9 @@ async def test_one_write_lands_all_its_edits_together(mount: MountProfile) -> No
 
 
 async def test_deletions_either_side_of_a_marker_become_one_marker(mount: MountProfile) -> None:
-    """Two runs with only an earlier marker between them are one run: one marker, which
-    says what all three stood for, rather than two markers both claiming the first."""
+    """Two runs with only an earlier marker between them are one run. The result is
+    one marker that says what all three stood for, not two markers that both
+    claim the first."""
     ctx, agent, path = await _ready(mount)
     reply = sections_of(ctx, agent.session)[2]
     await edit(ctx, agent, "context_tombstone", {"sections": [reply.name], "reason": "old note"})
@@ -392,7 +400,7 @@ async def test_a_refused_file_is_recorded_and_rewritten(
 
 
 async def test_a_file_written_before_a_revision_is_refused(mount: MountProfile) -> None:
-    """The tools edited the context after the file was read; its ids may be retired."""
+    """The tools edited the context after the file was read, so its ids may be retired."""
     ctx, agent, path = await _ready(mount)
     written = path.read_text(encoding="utf-8")
     step, reply = sections_of(ctx, agent.session)[1:3]
@@ -408,7 +416,8 @@ async def test_a_file_written_before_a_revision_is_refused(mount: MountProfile) 
 
 
 async def test_a_dispatch_inside_a_cell_does_not_read_back(mount: MountProfile) -> None:
-    """The cell's own call does: it ends after every write the cell made."""
+    """The call of the cell itself reads back. It ends after every write that the
+    cell made."""
     ctx, agent, path = await _ready(mount)
     step = sections_of(ctx, agent.session)[1]
     path.write_text(_without(path.read_text(encoding="utf-8"), step.name), encoding="utf-8")
@@ -433,9 +442,9 @@ async def test_a_dispatch_inside_a_cell_does_not_read_back(mount: MountProfile) 
 async def test_a_file_this_process_did_not_write_is_rewritten_not_applied(
     mount: MountProfile,
 ) -> None:
-    """After a restart the file on disk is a leftover, possibly half written by a call
-    the log shows interrupted: rewritten from the log, not credited to the first call
-    that ends."""
+    """After a restart, the file on disk is a leftover. A call that the log shows
+    as interrupted may have half written it. It is rewritten from the log, and it
+    is not credited to the first call that ends."""
     ctx, agent, path = await _ready(mount)
     written = path.read_text(encoding="utf-8")
     step = sections_of(ctx, agent.session)[1]
@@ -467,11 +476,12 @@ async def test_the_file_goes_with_its_session(mount: MountProfile) -> None:
 async def test_a_file_written_as_its_session_goes_is_not_left_behind(
     mount: MountProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A render whose session was let go while it wrote takes its file back.
+    """A render whose session was released while it wrote removes its file.
 
-    The write runs on a thread, and the session can be let go while it does: the
-    render then recorded the file under a session nothing would forget again, and
-    the file stayed in the agent's scratch for good.
+    The write runs on a thread, and the store can release the session while the
+    write runs. Before the fix, the render then recorded the file under a session
+    that nothing would forget again, and the file stayed in the scratch directory
+    of the agent permanently.
 
     Sabotage: drop the check after the write in `render`, and the file is still
     there.
@@ -505,13 +515,14 @@ def _piped(path: Path, _secret: Path) -> None:
 async def test_a_file_swapped_for_a_link_or_a_pipe_is_never_read(
     mount: MountProfile, tmp_path: Path, swap: Callable[[Path, Path], None]
 ) -> None:
-    """Read through a link, a refusal quoting a damaged line would put another file's
-    contents in the model's context; a pipe would hold the read forever. Both are
-    refused unread, and a file is written in their place."""
+    """If the row read through a link, a refusal that quotes a damaged line would
+    put the contents of another file in the context of the model. A pipe would
+    hold the read forever. Both are refused without a read, and a file is written
+    in their place."""
     ctx, agent, path = await _ready(mount)
     secret = tmp_path / "secret.txt"
-    # A first line the parse accepts, so a read through the link would reach the
-    # damaged header below and quote it.
+    # A first line that the parse accepts. A read through the link would then
+    # reach the damaged header below and quote it.
     first = path.read_text(encoding="utf-8").splitlines()[0]
     secret.write_text(f"{first}\n[[SECTION oops the secret]]\n", encoding="utf-8")
 
@@ -530,8 +541,9 @@ async def test_a_file_swapped_for_a_link_or_a_pipe_is_never_read(
 
 
 async def test_an_edit_no_call_made_is_declined_and_overwritten(mount: MountProfile) -> None:
-    """The person in an editor, or another process: nothing applies it (decision 7). It
-    is recorded, and the next request's file replaces it."""
+    """The user in an editor, or another process, changed the file. Nothing applies
+    that change (decision 7). It is recorded, and the file for the next request
+    replaces it."""
     ctx, agent, path = await _ready(mount)
     written = path.read_text(encoding="utf-8")
     step = sections_of(ctx, agent.session)[1]
@@ -554,10 +566,11 @@ async def test_a_file_no_one_touched_is_not_declined(mount: MountProfile) -> Non
 
 
 async def test_the_edit_lands_before_the_result_that_reports_it(mount: MountProfile) -> None:
-    """In the loop: rendered before the request, edited by the model's call, landed in
-    that call's post-execute — before its `tool/result`, which carries the receipt.
-    So a crash between them leaves the edit in the log and the call unfinished. And
-    nothing but the revision and the call's own result is added to the context."""
+    """In the loop: the file is rendered before the request, the call of the model
+    edits it, and the edit lands in the post-execute of that call. That is before
+    its `tool/result`, which carries the receipt. A crash between them therefore
+    leaves the edit in the log and the call unfinished. Nothing except the
+    revision and the result of the call is added to the context."""
     ctx, agent, path = await _ready(mount)
     step = sections_of(ctx, agent.session)[1]
     answer_first_request(

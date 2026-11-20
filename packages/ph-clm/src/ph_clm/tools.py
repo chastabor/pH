@@ -1,21 +1,24 @@
-"""`clm-context` — the section map and the seven context tools.
+"""`clm-context`: the section map and the seven context tools.
 
-The tools are the explicit front end of `ph_clm.edits`: the model names sections
-and says what to do with them, and the edit lands in the session log before the
-call returns, so the call's own result is the receipt — no notice is added to the
-context to say it happened. Under Code Mode they are `tools.context_*` like any
-other tool, so a cell can compute an edit in Python and make it.
+The tools are the explicit front end of `ph_clm.edits`. The model names sections
+and says what to do with them. The edit lands in the session log before the call
+returns, so the result of the call is the receipt. No notice is added to the
+context to say that the edit happened. In Code Mode the tools are
+`tools.context_*` like any other tool, so a cell can compute an edit in Python
+and make it.
 
-**Readouts ride on tool results** (`ph_clm.budget`): when a result takes the context
-past a share of its window (`remindAt`), that result ends with one line saying how
-large the context is and how to free space. The outermost listener on the result, so
-it measures what is logged: after the context file's read-back has landed the call's
-edit, and after any row that spills or trims the result.
+**Readouts are appended to tool results** (`ph_clm.budget`). When a result takes
+the context past a share of its window (`remindAt`), that result ends with one
+line that gives the size of the context and says how to free space. The readout
+listener is the outermost listener on the result, so it measures what is logged.
+It runs after the read-back of the context file has landed the edit of the call,
+and after any row that spills or trims the result.
 
-An edit lands inside the step that asked for it, on sections that step cannot be
-part of: the step in flight is protected (`SectionMap._protection`). A crash between
-the edit and its result is answered by `reconcile`: the edit and its `clm/revised`
-record land in one batch, so the record is in the log exactly when the edit is.
+An edit lands inside the step that asked for it, on sections that the step
+cannot be part of. The step in flight is protected (`SectionMap._protection`).
+`reconcile` handles a crash between the edit and its result. The edit and its
+`clm/revised` record land in one batch, so the record is in the log exactly when
+the edit is.
 
 @module ph_clm.tools
 """
@@ -80,33 +83,36 @@ from .sections import (
 __all__ = ["Config", "apply"]
 
 DIFF_CHARS = 20_000
-"""The most of a diff one result carries; the rest is cut with a note saying so."""
+"""The maximum length of a diff in one result. The rest is cut, with a note that says so."""
 
 
 class Config(WireModel):
-    """Row config."""
+    """The row config for `clm-context`."""
 
     protect_task: bool = True
-    """Keep the first message the person typed out of every edit — the paper harness
-    pins its task the same way. `false` makes it as editable as anything else."""
+    """Keep the first message that the user typed out of every edit. The harness
+    of the paper pins its task in the same way. `false` makes that message as
+    editable as any other."""
     gate: Gate = "none"
-    """`none` takes any edit; `fit` refuses growth past the context window; `shrink`
-    refuses any growth."""
+    """`none` accepts any edit. `fit` refuses growth past the context window.
+    `shrink` refuses any growth."""
     map_limit: int = Field(default=60, ge=1)
-    """How many sections `context_sections` lists when the model does not say."""
+    """How many sections `context_sections` lists when the model gives no limit."""
     remind_at: list[Annotated[float, Field(gt=0, lt=1)]] = Field(
         default_factory=lambda: [0.5, 0.75]
     )
-    """Shares of the context window at which a tool result carries a readout of the
-    context's size, once per crossing. Empty turns readouts off. With a compaction
-    engine mounted, the last reminder is `lastMargin` below its trigger instead of any
-    share here at or past that point."""
+    """The shares of the context window at which a tool result carries a readout
+    of the size of the context, one time for each crossing. An empty list turns
+    readouts off. When a compaction engine is mounted, the last reminder comes
+    `lastMargin` below the compaction trigger. It replaces every share here at or
+    past that point."""
     last_margin: float = Field(default=0.2, gt=0, lt=1)
-    """How far below compaction's trigger, as a share of the window, the last reminder
-    comes — room for the model to act before a summary is written for it. 0.2 puts it
-    at 65% under compaction's default 0.85: about 3,000 tokens on a 16k slot, two or
-    three steps, where 0.1 left one file read and a live run lost its edit to the
-    summary."""
+    """How far below the compaction trigger the last reminder comes, as a share of
+    the window. This gives the model room to act before compaction writes a
+    summary for it. With the default trigger of 0.85, a value of 0.2 puts the
+    last reminder at 65%. On a 16k slot that is about 3,000 tokens, or two or
+    three steps. A value of 0.1 left room for one file read, and a live run lost
+    its edit to the summary."""
 
 
 # ------------------------------------------------------------------ schemas --
@@ -170,7 +176,7 @@ class MapValue(ToolModel):
     total_sections: int
     total_tokens: int
     next: str | None
-    """The section to pass as `start` to list on, when the map was cut."""
+    """The section to pass as `start` to continue the list, when the map was cut."""
 
 
 class EditValue(ToolModel):
@@ -182,9 +188,11 @@ class EditValue(ToolModel):
     reread: int
     context_before: int
     context_after: int
-    """`context_before - tokens_before + tokens_after`, given so a cell need not."""
+    """`context_before - tokens_before + tokens_after`, given so that a cell does
+    not need to compute it."""
     receipt: str
-    """What the model reads: what changed and what it cost (`edits.receipt`)."""
+    """The text that the model reads: what changed and what it cost
+    (`edits.receipt`)."""
 
 
 class RecallValue(ToolModel):
@@ -215,8 +223,9 @@ async def apply(ctx: Context, config: Config) -> None:
     mapper = SectionMap(meter, protect_task=config.protect_task)
     editor = Editor(mapper, config.gate)
     ctx.provide(CLM, editor)
-    # The map's per-event facts are a fold over the log, and every such cache gets
-    # its own invariant row (`docs/seams/invariants.md`, "Fold caches get one row each").
+    # The per-event facts of the map are a fold over the log. Every such cache gets
+    # its own invariant row (`docs/seams/invariants.md`, "Fold caches get one row
+    # each").
     contribute_fold_cache(ctx, id="clm-section-map", subject="section map", stale=mapper.stale)
     readouts = Readouts()
 
@@ -238,8 +247,9 @@ async def apply(ctx: Context, config: Config) -> None:
         before = baseline.tokens
         compacts_at = ctx.require(COMPACTION).trigger_fraction()
         shares = Shares.of(config.remind_at, config.last_margin, compacts_at, window)
-        # A token is at least a byte, so the result's UTF-8 length bounds its count, and
-        # it is tokenized only when that bound could cross a threshold.
+        # A token is at least one byte, so the UTF-8 length of the result is an
+        # upper bound on its token count. The result is tokenized only when that
+        # bound could cross a threshold.
         after = readouts.crossed(
             session,
             shares,
@@ -253,7 +263,8 @@ async def apply(ctx: Context, config: Config) -> None:
         return replace(decision, content=[*content, TextBlock(text=line)])
 
     if config.remind_at:
-        # Outermost, whatever order the rows mounted in (see the module docstring).
+        # Make this the outermost listener, whatever the mount order of the rows
+        # (see the module docstring).
         ctx.on("tools/post-execute", after_call, prepend=True)
 
     def sections_tool(args: SectionsArgs, run: ToolRunContext) -> JsonObject:
@@ -406,7 +417,8 @@ def _edit_tool[A: ToolModel](
     edit: Callable[[A, Session, str], Revision],
     title: str,
 ) -> ToolDefinition:
-    """One editing tool: its edit lands in the call, and a crash is reconciled."""
+    """Define one editing tool. Its edit lands during the call, and a crash is
+    reconciled."""
 
     def execute(args: A, run: ToolRunContext) -> JsonObject:
         return _edit_value(edit(args, _session(run), run.call_id))
@@ -430,11 +442,13 @@ async def _reconcile_edit(
     opened: SessionEvent,
     session: Session,
 ) -> Reconciled:
-    """Did this edit land? Asked on resume, for a call a crash left open.
+    """Decide whether this edit landed. Called on resume, for a call that a crash
+    left open.
 
-    The edit and its `clm/revised` record are one batch, so the record is in the log
-    exactly when the edit is: found, the call is done and the model is shown its
-    receipt; absent, nothing changed and running it again is safe.
+    The edit and its `clm/revised` record are one batch, so the record is in the
+    log exactly when the edit is. If the record is found, the call is done and
+    the model is shown its receipt. If the record is absent, nothing changed and
+    it is safe to run the call again.
     """
     call_id = call_id_of(opened)
     if not call_id:
@@ -452,10 +466,11 @@ async def _reconcile_edit(
 
 
 def _how(ctx: Context, execution: ToolExecution) -> str:
-    """How a readout says to free space: the context file when a row keeps one, and
-    the tools either way — under Code Mode as the call a cell writes, keywords and all,
-    since a live model passed the sections positionally and lost its one chance to
-    edit to the error."""
+    """How a readout tells the model to free space. It names the context file
+    when a row keeps one, and it names the tools in every case. In Code Mode it
+    shows the full call that a cell writes, including the keywords. A live model
+    passed the sections as positional arguments, and the error cost it its one
+    chance to edit."""
     if ctx.require(TOOLS).mode_for(execution.scope) == "code":
         verbs = (
             "in a cell, await tools.context_tombstone(sections=['S12'], reason='...') "
@@ -485,21 +500,22 @@ def _revised(session: Session, mapper: SectionMap, name: str) -> Section:
 
 
 def _edit_line(session: Session, event: SessionEvent) -> str:
-    """One revision behind a section, as `context_diff` lists it: where it landed, what
-    it did, and the records its producer wrote for it."""
+    """One revision behind a section, as `context_diff` lists it: where it landed,
+    what it did, and the records that its producer wrote for it."""
     records = ", ".join(record.type for record in session.records_of(event.seq))
     return f"seq {event.seq}: {shape_of(event)}" + (f" ({records})" if records else "")
 
 
 def _original_text(session: Session, section: Section) -> str:
-    """The conversation a section stands for, as it was first written."""
+    """The conversation that a section stands for, as it was first written."""
     return render_messages(message for seq in section.nodes for message in originals(session, seq))
 
 
 def _bounded(measure: Callable[[str], int], text: str, max_tokens: int) -> tuple[str, bool]:
-    """`text` cut to at most `max_tokens`, and whether it was cut: the longest
-    start that fits, found by halving, then moved back to fall between
-    characters (`ph.characters.head`) — a shorter start never measures more."""
+    """Cut `text` to at most `max_tokens`, and report whether it was cut. The
+    function finds the longest start that fits by halving. It then moves the cut
+    back so that it falls between characters (`ph.characters.head`). A shorter
+    start never measures more."""
     if measure(text) <= max_tokens:
         return text, False
     marker = "\n[recall cut at the token bound; the session log holds the rest]"

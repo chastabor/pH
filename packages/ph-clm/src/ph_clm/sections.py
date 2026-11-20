@@ -1,22 +1,24 @@
-"""The section map: the model's view of its own context, cut where it may be edited.
+"""The section map: the model's view of its own context, divided where it can be edited.
 
 A **section** is the run of surface nodes between two consecutive balanced cuts
-(`ph.session.balance`): a user message on its own, an assistant reply on its own, or
-an assistant message together with every tool result it opened. It is the smallest
-unit that can leave the surface without orphaning a call or a result, so it is the
-unit every edit names.
+(`ph.session.balance`). It is a user message alone, an assistant reply alone, or
+an assistant message together with every tool result that it opened. A section
+is the smallest unit that can leave the surface without leaving a call or a
+result with no partner. It is therefore the unit that every edit names.
 
-**Named by the seq its first node was appended at** (`S412`), which never moves
-(A1). The model can read an id on one call and use it on the next, however much was
-appended in between. An in-place rewrite keeps the id — the node it lands is a
-near-copy of the one it replaced, so the section is the same section — and only a
-substitution retires one, after which the refusal names what stands for it.
+**A section is named by the seq at which its first node was appended** (`S412`).
+That seq never changes (A1). The model can read an id on one call and use it on
+the next call, whatever was appended in between. An in-place rewrite keeps the
+id. The node that it lands is a near-copy of the node that it replaced, so the
+section is the same section. Only a substitution retires an id. After that, the
+refusal names the section that stands for the retired one.
 
-**Folded once per event.** What a node contributes to the map — its size, its
-calls, its preview, where it came from — depends only on its event and the log
-before it, neither of which ever changes, so `SectionMap` keeps those facts in a
-`SessionFoldCache` and a call pays only for what was appended since the last one.
-Only the cut into sections is redone, because the surface moves.
+**The facts of each event are folded one time.** A node contributes facts to the
+map: its size, its calls, its preview, and its origin. Those facts depend only on
+the event of the node and the log before it, and neither ever changes.
+`SectionMap` therefore keeps the facts in a `SessionFoldCache`, and a call pays
+only for the events that were appended since the last call. Only the division
+into sections is computed again, because the surface changes.
 
 @module ph_clm.sections
 """
@@ -67,20 +69,21 @@ __all__ = [
 ]
 
 SectionKind = Literal["task", "user", "assistant", "step", "context", "revised"]
-"""What a section is, for the map and for the protection rules.
+"""The kind of a section, for the map and for the protection rules.
 
-`task` is the first message the person typed; `user` any later one. `step` is an
-assistant message that made calls, with their results. `context` is plugin-authored
-text — the context snapshot, a relayed message. `revised` is text standing in for
-conversation that has left the surface (`is_stand_in`): a ph-clm edit or a
-compaction summary."""
+`task` is the first message that the user typed, and `user` is any later one.
+`step` is an assistant message that made calls, together with their results.
+`context` is text that a plugin wrote, such as the context snapshot or a relayed
+message. `revised` is text that stands in for conversation that has left the
+surface (`is_stand_in`): a ph-clm edit or a compaction summary."""
 
 PREVIEW_CHARS = 80
 
 
 class EditRefused(HarnessError):
-    """A context edit or read declined, with the reason the model reads — a name that
-    is not a section, a protected section, a run with a gap, an edit the gate stops."""
+    """A context edit or read that was declined, with the reason that the model
+    reads. Examples: a name that is not a section, a protected section, a run
+    with a gap, or an edit that the gate stops."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message, "CONTEXT_EDIT_REFUSED")
@@ -93,19 +96,21 @@ class Section:
     nodes: tuple[int, ...]
     """Every surface node in the section, in surface order."""
     origins: tuple[int, ...]
-    """The seq each node was first appended at, through in-place rewrites of it."""
+    """The seq at which each node was first appended, traced back through its
+    in-place rewrites."""
     kind: SectionKind
     tokens: int
     after: int
-    """Tokens in every section after this one — what an edit here makes a provider
-    read again, since a prefix cache cannot serve anything past the first change."""
+    """The tokens in every section after this one. An edit here makes a provider
+    read them again, because a prefix cache cannot serve anything past the first
+    change."""
     protected: str | None
     """Why this section may not be edited, or `None`."""
     calls: tuple[str, ...]
-    """The names of the calls a `step` made."""
+    """The names of the calls that a `step` made."""
     preview: str
     stands_for: tuple[int, ...]
-    """The nodes the replacements in this section took off the surface."""
+    """The nodes that the replacements in this section took off the surface."""
 
     @property
     def id(self) -> int:
@@ -117,12 +122,12 @@ class Section:
 
 
 def label(seq: int) -> str:
-    """A section id as the model reads and writes it."""
+    """Format a section id as the model reads and writes it."""
     return f"S{seq}"
 
 
 def span_label(first: int, last: int) -> str:
-    """Two section ids as one span, or one id when they are the same."""
+    """Format two section ids as one span, or as one id when they are the same."""
     return label(first) if first == last else f"{label(first)}..{label(last)}"
 
 
@@ -131,24 +136,26 @@ def span_label(first: int, last: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _Node:
-    """What one surface event contributes to a map."""
+    """The facts that one surface event contributes to a map."""
 
     origin: int
     shown: bool
-    """Whether it projects to a message at all."""
+    """Whether the event projects to a message at all."""
     kind: SectionKind
-    """`user` for anything the person typed; the map decides which one is the task."""
+    """`user` for everything that the user typed. The map decides which one is the
+    task."""
     snapshot: bool
     tokens: int
     delta: int
-    """`open_call_delta`: how it moves the count of calls awaiting a result."""
+    """`open_call_delta`: how the event changes the count of calls that wait for a
+    result."""
     calls: tuple[str, ...]
     preview: str
     replaced: tuple[int, ...]
 
 
 class SectionMap:
-    """The section map of any session, under one row's protection settings."""
+    """The section map of any session, with the protection settings of one row."""
 
     __slots__ = ("_nodes", "meter", "protect_task")
 
@@ -160,12 +167,12 @@ class SectionMap:
         )
 
     def stale(self, sessions: Iterable[Session]) -> list[str]:
-        """Every cached map whose facts no longer equal the fold of its log (I6) —
-        the delegate `contribute_fold_cache` polls."""
+        """Each cached map whose facts no longer equal the fold of its log (I6).
+        `contribute_fold_cache` polls this method."""
         return self._nodes.stale(sessions)
 
     def __call__(self, session: Session) -> tuple[Section, ...]:
-        """The session's current surface, as sections, oldest first."""
+        """Return the current surface of the session as sections, oldest first."""
         known = self._nodes.read(session)
         order = session.surface.nodes
         facts = [known[seq] for seq in order]
@@ -209,20 +216,22 @@ class SectionMap:
         return None
 
     def fold(self, session: Session) -> dict[int, _Node]:
-        """Every surface event's facts, from the start of the log."""
+        """Compute the facts of every surface event, from the start of the log."""
         return self.extend({}, session, 0)
 
     def extend(self, known: dict[int, _Node], session: Session, start: int) -> dict[int, _Node]:
-        """`known`, with the facts of every surface event from `start` on — in place,
-        which `SessionFoldCache` allows (`ph.testing.check_fold_laws` says why)."""
+        """Add to `known` the facts of every surface event from `start` onward.
+        `known` is changed in place, which `SessionFoldCache` allows
+        (`ph.testing.check_fold_laws` says why)."""
         for event in session.events_from(start):
             if event.surface_op is not None:
                 known[event.seq] = self._node(session, event)
         return known
 
     def _node(self, session: Session, event: SessionEvent) -> _Node:
-        # A rewrite in place keeps its section's name; a substitution is a new one
-        # (`origin_of`, which follows only what `is_in_place_rewrite` calls a rewrite).
+        # An in-place rewrite keeps the name of its section. A substitution gets a
+        # new name. (`origin_of` follows only what `is_in_place_rewrite` calls a
+        # rewrite.)
         origin = origin_of(session, event.seq)
         replaced = shadowed_by(event)
         message = derive_event_message(event)
@@ -248,11 +257,12 @@ class SectionMap:
 def resolve_one(
     session: Session, sections: Sequence[Section], name: str, *, editing: bool
 ) -> Section:
-    """The one section `name` means — or a refusal that says why.
+    """Return the one section that `name` means, or raise a refusal that gives the
+    reason.
 
-    An id that is no longer a section gets an answer the model can act on: which
-    section now stands for it, or which section it sits inside. `editing` refuses a
-    protected section, which a read does not.
+    An id that is no longer a section gets an answer that the model can act on:
+    the section that now stands for it, or the section that contains it. With
+    `editing`, a protected section is refused. A read does not refuse it.
     """
     parts = _span(name)
     if len(parts) != 1:
@@ -266,11 +276,13 @@ def resolve_one(
 def resolve_run(
     session: Session, sections: Sequence[Section], names: Sequence[str]
 ) -> tuple[int, int]:
-    """`[start, stop)`: the positions of the one unbroken, editable run `names` mean.
+    """Return `[start, stop)`: the positions of the one unbroken, editable run
+    that `names` mean.
 
-    A name is one id (`S412`) or a span (`S412..S431`, `S412-S431`) meaning every
-    section from one to the other. One run, because a replacement lands where the
-    earliest of its nodes was; nothing protected, because the edit would take it.
+    A name is one id (`S412`) or a span (`S412..S431`, `S412-S431`). A span means
+    every section from the first id to the second. The names must give one run,
+    because a replacement lands where the earliest of its nodes was. The run must
+    contain nothing protected, because the edit would remove it.
     """
     chosen: set[int] = set()
     for name in names:
@@ -308,7 +320,8 @@ def _id(text: str) -> int:
 
 
 def _position(session: Session, sections: Sequence[Section], seq: int) -> int:
-    """Where section `seq` sits in the map, or a refusal naming what replaced it."""
+    """Return the position of section `seq` in the map, or raise a refusal that
+    names what replaced it."""
     for position, section in enumerate(sections):
         if section.id == seq:
             return position
@@ -322,7 +335,8 @@ def _position(session: Session, sections: Sequence[Section], seq: int) -> int:
 
 
 def _ever_stood_for(session: Session, nodes: Iterable[int]) -> set[int]:
-    """Every seq the nodes replaced, recursively. Only asked on the refusal path."""
+    """Every seq that the nodes replaced, recursively. Called only on the refusal
+    path."""
     seen: set[int] = set()
     pending = list(nodes)
     while pending:
@@ -334,12 +348,13 @@ def _ever_stood_for(session: Session, nodes: Iterable[int]) -> set[int]:
 
 
 def _groups(facts: Sequence[_Node], cuts: Sequence[bool]) -> list[tuple[int, int]]:
-    """`[start, stop)` index ranges of the sections, in surface order.
+    """Return the `[start, stop)` index ranges of the sections, in surface order.
 
-    A node that projects to no message (an empty assistant reply hosting a
-    max-tokens step's usage) is balanced on both sides, so the cuts alone would make
-    it a section of nothing. It joins its neighbor instead: every node belongs to
-    exactly one section, so a span of sections is always a span of the surface.
+    Some nodes project to no message. An example is an empty assistant reply that
+    carries the usage of a max-tokens step. Such a node is balanced on both
+    sides, so the cuts alone would make it a section with no content. It joins
+    its neighbor instead. Every node then belongs to exactly one section, so a
+    span of sections is always a span of the surface.
     """
     groups: list[tuple[int, int]] = []
     start = 0
@@ -365,7 +380,8 @@ def _kind(event: SessionEvent, message: Message, calls: tuple[str, ...]) -> Sect
 
 
 def _preview(message: Message) -> str:
-    """The first line of text a message shows: its words, or a result's output."""
+    """The first line of text that a message shows: its words, or the output of a
+    result."""
     for block in message.content:
         match block:
             case TextBlock():

@@ -1,58 +1,70 @@
-"""`clm-mirror` — the model's context as a file it edits with its ordinary tools.
+"""`clm-mirror`: the context of the model as a file that it edits with its ordinary tools.
 
-Before each request the surface is written to a file in the agent's workspace
-scratch, one `[[SECTION S<id>]]` block per section and one `[[RESULT S<id>]]` block
-per tool result inside a step. The model edits it with whatever it already has —
-`edit`, `sed`, Python in a cell — and when the tool call that touched the file
-finishes, its changes are compiled into the editor's verbs and landed in one batch:
+Before each request, the surface is written to a file in the scratch directory
+of the agent's workspace. The file has one `[[SECTION S<id>]]` block for each
+section, and one `[[RESULT S<id>]]` block for each tool result inside a step.
+The model edits the file with the tools that it already has: `edit`, `sed`, or
+Python in a cell. When the tool call that changed the file finishes, the changes
+are compiled into the verbs of the editor and landed in one batch:
 
-| what changed in a section | becomes |
+| Change in a section | Result |
 |---|---|
-| its block is gone, or its body emptied | a tombstone (consecutive ones, one marker) |
-| a `RESULT` body, headers unchanged | that result rewritten in place |
-| the reply text above the results | the reply rewritten in place, its calls kept |
-| the `RESULT` headers themselves | the whole step replaced by the text left |
-| a user message's or a revision's text | a replacement standing for it |
-| no `SECTION` lines at all | one replacement for everything editable |
+| Its block is gone, or its body is empty | A tombstone (consecutive ones become one marker) |
+| A `RESULT` body changed, with the headers unchanged | That result is rewritten in place |
+| The reply text above the results changed | The reply is rewritten in place; its calls stay |
+| The `RESULT` headers themselves changed | The whole step is replaced by the text that is left |
+| The text of a user message or of a revision changed | A replacement that stands for it |
+| No `SECTION` lines are left | One replacement for everything editable |
 
-**A body holds only text the model may edit; the harness's words go in the header.**
-A revision's label ("revised context, standing for S412..S431", a tombstone's "removed
-from context: …") is its own block in the message (`edits.labeled`), so the file shows
-it on the section's header line and the body below holds the model's text alone. A
-revision edited again says what it stands for once, with no pattern to strip.
+**A body holds only text that the model may edit. The words of the harness go in
+the header.** The label of a revision is its own block in the message
+(`edits.labeled`). Examples of a label are "revised context, standing for
+S412..S431" and the "removed from context: …" of a tombstone. The file shows the
+label on the header line of the section, and the body below holds only the text
+of the model. A revision that is edited again therefore says what it stands for
+one time, and there is no pattern to strip.
 
-**Read back in `tools/post-execute`, before the call's result is logged**, so the
-edit lands before the result that reports it: a crash between the two leaves an
-edit that landed beside a call that did not finish, which is what happened. Read
-back on the next step instead, the log could say a write succeeded whose edit a
-restart then lost. The receipt rides on that result, so nothing else is added to
-the context to say what changed.
+**The file is read back in `tools/post-execute`, before the result of the call is
+logged.** The edit therefore lands before the result that reports it. A crash
+between the two leaves an edit that landed beside a call that did not finish,
+which is what happened. If the file were read back on the next step instead, the
+log could say that a write succeeded, and a restart could then lose its edit.
+The receipt is appended to that result, so nothing else is added to the context
+to say what changed.
 
-**Each node's file form is folded once** (`MirrorService`'s `SessionFoldCache`): its
-body already escaped, and its label. What a node shows depends only on its event, so
-a render is a join, and read-back compares the file's raw bodies with the folded ones
-and unescapes only those that changed.
+**The file form of each node is folded one time** (the `SessionFoldCache` of
+`MirrorService`): its body, already escaped, and its label. What a node shows
+depends only on its event, so a render is a join. Read-back compares the raw
+bodies in the file with the folded bodies, and unescapes only the bodies that
+changed.
 
-**The file is a cache of the log, never a source.** Its first line names the session,
-the surface's `replace_generation` and the last section it holds. While the
-generation stands, the sections up to that one are exactly what the log folds to
-now, so read-back rebuilds the file's base from the log rather than remembering a
-render — which is also what makes it right after a restart. A file written against
-an older generation is refused, and every refusal is rewritten from the log. A file
-this process did not write is never applied: after a restart, whatever is on disk is
-rewritten from the log, since it may be an edit a crashed call left half done. And
-an edit no call made — the person in an editor, another process — is caught before
-the next request and recorded as declined, never applied (decision 7).
+**The file is a cache of the log, never a source.** Its first line names the
+session, the `replace_generation` of the surface, and the last section that the
+file holds. While the generation is current, the sections up to that last
+section are exactly what the log folds to now. Read-back therefore rebuilds the
+base of the file from the log and does not remember a render. This is also what
+makes it correct after a restart. Four rules follow:
 
-**Private, and no longer than its session.** The `clm/` directory is 0700 and the
-file 0600, since the file is a whole conversation. Both go when the session leaves the
-store. A link at either path is replaced, never followed: read through one, a refusal
-quoting a damaged line would put another file's contents in the model's context.
+* A file that was written against an older generation is refused.
+* After every refusal, the file is rewritten from the log.
+* A file that this process did not write is never applied. After a restart, the
+  file on disk is rewritten from the log, because it may hold an edit that a
+  crashed call left half done.
+* An edit that no call made (the user in an editor, or another process) is
+  caught before the next request and recorded as declined. It is never applied
+  (decision 7).
 
-**A harness-owned file, written directly** like the spill store's, not through
-`ctx.fs`: that seam gates what the *model* may touch, and routing the harness's own
-render through it would ask the person's permission rules about a file the model
-never chose to write, on every step.
+**The file is private, and it does not outlive its session.** The `clm/`
+directory has mode 0700 and the file has mode 0600, because the file is a whole
+conversation. Both are removed when the session leaves the store. A link at
+either path is replaced, never followed. If the row read through a link, a
+refusal that quotes a damaged line would put the contents of another file in the
+context of the model.
+
+**The harness owns the file and writes it directly**, like the file of the spill
+store, and not through `ctx.fs`. That seam controls what the *model* may touch.
+If the render of the harness went through it, the permission rules of the user
+would be applied on every step to a file that the model never chose to write.
 
 @module ph_clm.mirror
 """
@@ -95,19 +107,20 @@ _LOG = log_writer(__name__)
 __all__ = ["Block", "MirrorService", "apply", "parse", "render"]
 
 REMOVED_IN_FILE = "removed in the context file"
-"""The reason a tombstone made by deleting a section from the file gives."""
+"""The reason that a tombstone gives when it was made by deleting a section from the file."""
 
 OUTSIDE = (
     "the context file changed outside any tool call — in an editor, or by another "
     "process — and only an edit a tool call makes is applied"
 )
-"""Why an edit no call made was declined (decision 7)."""
+"""Why an edit that no call made was declined (decision 7)."""
 
 Declined = Literal["mirror", "outside"]
-"""How a declined edit came: a call's write to the file, or a change no call made."""
+"""How a declined edit arrived: a write to the file by a call, or a change that
+no call made."""
 
 LABEL_CHARS = 300
-"""The most of a revision's label a section header carries."""
+"""The maximum length of a revision label on a section header."""
 
 _HEADER = re.compile(r"^\[\[(LIVE_CONTEXT|SECTION|RESULT)(?:\s+(.*?))?\]\]\s*$")
 _ESCAPED = re.compile(r"^(\\*)(\[\[(?:LIVE_CONTEXT|SECTION|RESULT)\b)")
@@ -119,17 +132,18 @@ _ID = re.compile(r"^S(\d+)$")
 
 @dataclass(frozen=True, slots=True)
 class Shown:
-    """What one node shows in the file — a function of its event, so folded once."""
+    """What one node shows in the file. It depends only on the event of the node,
+    so it is folded one time."""
 
     text: str
-    """Its body as the file holds it: the text the model may edit, already escaped."""
+    """The body as the file holds it: the text that the model may edit, already escaped."""
     label: str
-    """A revision's label, for its section's header; `""` for anything else."""
+    """The label of a revision, for the header of its section. `""` for anything else."""
     result: bool
     answers: str
-    """The call a result answers; `""` for anything else."""
+    """The call that a result answers. `""` for anything else."""
     calls: tuple[tuple[str, str], ...]
-    """The `(call id, tool name)` pairs a reply made."""
+    """The `(call id, tool name)` pairs that a reply made."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +159,7 @@ class Block:
 
 
 def block_of(section: Section, shown: Mapping[int, Shown]) -> Block:
-    """What a section looks like in the file: its text, and its results if a step."""
+    """Build the file form of a section: its text, and its results when it is a step."""
     texts: list[str] = []
     results: list[tuple[int, str]] = []
     for seq, origin in zip(section.nodes, section.origins, strict=True):
@@ -160,7 +174,8 @@ def block_of(section: Section, shown: Mapping[int, Shown]) -> Block:
 
 
 def render(session: Session, sections: Sequence[Section], shown: Mapping[int, Shown]) -> str:
-    """The file for these sections — deterministic, so read-back can rebuild it."""
+    """Render the file for these sections. The output is deterministic, so
+    read-back can rebuild it."""
     through = sections[-1].name if sections else "none"
     generation = session.surface.replace_generation
     lines = [f"[[LIVE_CONTEXT session={session.id} generation={generation} through={through}]]"]
@@ -188,14 +203,16 @@ class Parsed:
     lead: str
     """Any text before the first `[[SECTION]]` line, as written: escaped."""
     blocks: tuple[Block, ...]
-    """Each section as written: escaped, so it compares with `block_of`'s as it is."""
+    """Each section as written. It is still escaped, so it compares directly with
+    the output of `block_of`."""
 
 
 def parse(text: str) -> Parsed:
-    """A context file read back, or a refusal naming the first line that cannot be read.
+    """Read a context file back, or raise a refusal that names the first line that
+    cannot be read.
 
-    Bodies stay escaped: compared with the folded bodies as they are, and unescaped
-    only where they changed (`_unescaped`).
+    Bodies stay escaped. They are compared with the folded bodies as they are,
+    and unescaped only where they changed (`_unescaped`).
     """
     lines = text.lstrip("\n").splitlines()
     first = _HEADER.match(lines[0]) if lines else None
@@ -239,14 +256,14 @@ def parse(text: str) -> Parsed:
 
 
 def _escaped(text: str) -> str:
-    """A body as the file holds it: lines rejoined with `\n`, edges trimmed, and every
-    line that would read as a header given one more backslash, which `_unescaped`
-    takes back off."""
+    """A body as the file holds it. The lines are joined again with `\n` and the
+    edges are trimmed. Each line that would read as a header gets one more
+    backslash, which `_unescaped` removes again."""
     return "\n".join(_ESCAPED.sub(r"\\\1\2", line) for line in text.splitlines()).strip("\n")
 
 
 def _unescaped(text: str) -> str:
-    """A body as written in the file, back to the text it stands for."""
+    """Convert a body as written in the file back to the text that it stands for."""
     return "\n".join(
         line[1:] if (match := _ESCAPED.match(line)) is not None and match.group(1) else line
         for line in text.splitlines()
@@ -263,11 +280,12 @@ def compile_drafts(
     shown: Mapping[int, Shown],
     parsed: Parsed,
 ) -> list[Pending]:
-    """The drafts a file asks for, against the base it was written from.
+    """Compile the drafts that a file asks for, against the base that it was
+    written from.
 
-    Refuses a file written against another session or an older generation, a reorder,
-    a section that is not in the base, a change to a protected section, and text that
-    belongs to no section.
+    Refuses a file that was written against another session or an older
+    generation, a reorder, a section that is not in the base, a change to a
+    protected section, and text that belongs to no section.
     """
     if parsed.header.get("session") != session.id:
         raise EditRefused("this context file belongs to another session")
@@ -312,7 +330,8 @@ def compile_drafts(
 
 
 def _base(sections: Sequence[Section], through: str) -> list[Section]:
-    """The sections up to the one the file names last — what it was written against."""
+    """The sections up to the last one that the file names. The file was written
+    against these."""
     if through == "none":
         return []
     for position, section in enumerate(sections):
@@ -322,7 +341,7 @@ def _base(sections: Sequence[Section], through: str) -> list[Section]:
 
 
 def _whole(editor: Editor, session: Session, base: Sequence[Section], text: str) -> list[Pending]:
-    """A file with no sections left: one revision for every editable section."""
+    """Handle a file with no sections left: one revision for every editable section."""
     editable = [position for position, section in enumerate(base) if section.protected is None]
     if not editable:
         raise EditRefused("there is nothing in this context file you may edit")
@@ -346,9 +365,10 @@ def _changed(
     was: Block,
     block: Block,
 ) -> list[Pending]:
-    """The drafts for one section whose body changed: its reply and results rewritten in
-    place while their structure stands, a replacement holding the text once it does not.
-    Only what changed is unescaped."""
+    """The drafts for one section whose body changed. While the structure of the
+    section is intact, its reply and its results are rewritten in place. When the
+    structure is not intact, a replacement holds the text. Only the changed text
+    is unescaped."""
     section = base[position]
     reply = next((seq for seq in section.nodes if seq in shown and not shown[seq].result), None)
     if (
@@ -380,12 +400,14 @@ class MirrorService:
     editor: Editor
     _shown: SessionFoldCache[dict[int, Shown]] = field(init=False)
     _written: SessionTable[dict[Path, tuple[int, int]]] = field(init=False)
-    """Each session's files, by session id, with the `(mtime_ns, size)` this process
-    last wrote each at: a call that left a file alone costs an `lstat`, not a parse;
-    a file not here is not this process's; and these are what go with the session
-    (`_remove_all`, as the store lets it go)."""
+    """The files of each session, with the `(mtime_ns, size)` at which this
+    process last wrote each file. A call that left a file unchanged then costs
+    one `lstat`, not a parse. A file that is not in this table was not written by
+    this process. These are the files that are removed with the session
+    (`_remove_all`, when the store releases it)."""
     _locks: KeyedLocks[Path] = field(default_factory=KeyedLocks)
-    """One use of a context file at a time, held only while somebody uses it."""
+    """Allows one use of a context file at a time. A lock is held only while the
+    file is in use."""
 
     def __post_init__(self) -> None:
         self._shown = SessionFoldCache(self.fold, extend=self.extend)
@@ -395,7 +417,8 @@ class MirrorService:
         return self.extend({}, session, 0)
 
     def extend(self, known: dict[int, Shown], session: Session, start: int) -> dict[int, Shown]:
-        """`known`, with what every surface event from `start` on shows — in place."""
+        """Add to `known` what every surface event from `start` onward shows.
+        `known` is changed in place."""
         for event in session.events_from(start):
             message = None if event.surface_op is None else derive_event_message(event)
             if message is None:
@@ -422,16 +445,19 @@ class MirrorService:
         return [block_of(section, shown) for section in self.editor.sections(session)]
 
     def path(self, session: Session, agent: AgentHandle) -> Path:
-        """Where this agent's context file lives: its workspace scratch, which every
-        tier keeps writable and outside the tree a repository tracks."""
+        """The location of the context file of this agent: the scratch directory of
+        its workspace. Every tier keeps that directory writable, and it is outside
+        the tree that a repository tracks."""
         return scratch_of(self.ctx, session.id, agent) / "clm" / "context.md"
 
     async def refresh(self, session: Session, agent: AgentHandle) -> Path:
-        """Before a request: catch an edit no call made, then write the file afresh.
+        """Before a request: catch an edit that no call made, then write the file
+        again.
 
-        Every call's own edit was read back when the call ended, so a file that moved
-        since this process last wrote it was moved by no call: declined and recorded,
-        and overwritten (decision 7). A file deleted outside a call is only rewritten.
+        The edit of each call was read back when the call ended. A file that
+        changed since this process last wrote it was therefore changed by no call.
+        That change is declined and recorded, and the file is overwritten
+        (decision 7). A file that was deleted outside a call is only rewritten.
         """
         path = self.path(session, agent)
         async with self._lock(path):
@@ -441,13 +467,14 @@ class MirrorService:
             return await self.render(session, agent)
 
     async def render(self, session: Session, agent: AgentHandle) -> Path:
-        """Write the file for the surface as it stands.
+        """Write the file for the surface as it is now.
 
-        **Only for a session the store still holds.** The write runs on a thread, and
-        the session can be let go while it does: recorded after that, the file was
-        kept under a session nothing would forget again, and stayed in the agent's
-        scratch. It is taken back instead (Holdings rule 4: the record and the file
-        are one holding, and the session leaving was its door out).
+        **Only for a session that the store still holds.** The write runs on a
+        thread, and the store can release the session while the write runs. If the
+        file were recorded after that, it would be kept under a session that
+        nothing would forget again, and it would stay in the scratch directory of
+        the agent. The file is removed instead (Holdings rule 4: the record and
+        the file are one holding, and the session leaving the store ended it).
         """
         path = self.path(session, agent)
         text = render(session, self.editor.sections(session), self._shown.read(session))
@@ -461,19 +488,21 @@ class MirrorService:
     async def read_back(
         self, session: Session, agent: AgentHandle, *, call_id: str | None
     ) -> str | None:
-        """Land whatever the model changed in the file, and say what happened — `None`
-        when it changed nothing."""
+        """Land what the model changed in the file, and return a description of
+        what happened. Returns `None` when the model changed nothing."""
         path = self.path(session, agent)
         async with self._lock(path):
-            # Inline: a local `lstat` is a microsecond, and every tool call asks.
+            # Done inline, not on a thread. A local `lstat` takes about a
+            # microsecond, and every tool call makes this check.
             found = _signature(path)
             if found is None:
                 return None
             written = self._written.get(session, {}).get(path)
             if written is None:
-                # Not this process's: a leftover from before a restart, possibly half
-                # written by a call the log shows interrupted. Rewritten, never
-                # credited to whichever call happens to end first.
+                # This process did not write the file. It is left over from before
+                # a restart, and a call that the log shows as interrupted may have
+                # half written it. Rewrite it, and never credit it to whichever
+                # call happens to end first.
                 await self.render(session, agent)
                 return None
             if found == written:
@@ -512,7 +541,7 @@ class MirrorService:
 
 
 def protocol(path: Path) -> str:
-    """The prompt section that tells the model the file exists and how it reads."""
+    """The prompt section that tells the model that the file exists and how to read it."""
     return f"""## Your context, as a file
 
 Before each request, the conversation you can see is written to `{path}`. Edit that
@@ -552,8 +581,9 @@ async def apply(ctx: Context, config: None) -> None:
     async def before_request(
         proposal: RequestProposal, next_: Next[LlmCallConfig]
     ) -> LlmCallConfig:
-        # After the rest of the chain, so a listener that revises the surface on the
-        # way to the request (a paste offloaded) is in the file the model edits.
+        # Run after the rest of the chain. A listener that revises the surface on
+        # the way to the request (for example, a paste that is offloaded) is then
+        # in the file that the model edits.
         config = await next_(proposal)
         await service.refresh(proposal.session, proposal.agent)
         return config
@@ -562,8 +592,9 @@ async def apply(ctx: Context, config: None) -> None:
         execution: ToolExecution, result: ToolExecutionResult, next_: Next[PostToolDecision]
     ) -> PostToolDecision:
         decision = await next_(execution, result)
-        # The call the model made, not a dispatch inside a Code Mode cell: the cell's
-        # own call ends after every write the cell made, its Python's included.
+        # Handle only the call that the model made, not a dispatch inside a Code
+        # Mode cell. The call of the cell itself ends after every write that the
+        # cell made, including the writes of its Python.
         if execution.parent is not None or execution.session is None or execution.agent is None:
             return decision
         said = await service.read_back(
@@ -594,30 +625,33 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 def _remove(path: Path) -> None:
-    """A context file, and its directory when nothing else is in it."""
+    """Remove a context file, and its directory when nothing else is in it."""
     path.unlink(missing_ok=True)
     with suppress(OSError):
         path.parent.rmdir()
 
 
 def _remove_all(files: dict[Path, tuple[int, int]]) -> None:
-    """A session's context files, as its record of them goes.
+    """Remove the context files of a session, when the record of them is released.
 
-    Synchronous, because the store's disposal is: an `unlink` and an `rmdir` per agent.
-    A directory something else wrote into stays.
+    This function is synchronous, because the disposal of the store is
+    synchronous: one `unlink` and one `rmdir` for each agent. A directory that
+    something else wrote into stays.
     """
     for path in files:
         _remove(path)
 
 
 def _write(path: Path, text: str) -> tuple[int, int]:
-    """Write, and say what was written (`_signature`), in one thread hop. Not durable:
-    the file is rebuilt from the log on the next request, and syncing it before every
-    model call would be a disk barrier spent on a cache.
+    """Write the file and return what was written (`_signature`), in one thread
+    hop. The write is not durable. The file is rebuilt from the log on the next
+    request, and a sync before every model call would spend a disk barrier on a
+    cache.
 
-    The directory is made 0700 and the file written 0600. Anything but a directory at
-    the directory's path — a link the model planted — is removed rather than followed:
-    a `chmod` through a link changes whatever it names.
+    The directory is created with mode 0700 and the file is written with mode
+    0600. If the path of the directory holds anything that is not a directory,
+    such as a link that the model planted, it is removed and not followed. A
+    `chmod` through a link changes the file that the link names.
     """
     directory = path.parent
     with suppress(FileNotFoundError):
@@ -631,13 +665,13 @@ def _write(path: Path, text: str) -> tuple[int, int]:
 
 
 def _decline(session: Session, via: Declined, call_id: str | None, reason: str) -> None:
-    """The auditor's copy of a file edit not applied (`clm/declined`)."""
+    """Write the auditor's copy of a file edit that was not applied (`clm/declined`)."""
     _LOG.append(session, DECLINED, {"via": via, "callId": call_id, "reason": reason})
 
 
 def _signature(path: Path) -> tuple[int, int] | None:
-    """`(mtime_ns, size)` of the path itself, never what a link names; `None` when
-    nothing is there."""
+    """The `(mtime_ns, size)` of the path itself, never of what a link names.
+    Returns `None` when nothing is at the path."""
     try:
         found = os.lstat(path)
     except FileNotFoundError:
@@ -646,9 +680,11 @@ def _signature(path: Path) -> tuple[int, int] | None:
 
 
 def _read(path: Path) -> str:
-    """The file's text, never through a link: a link, a pipe, or anything but UTF-8
-    text is a refusal — whose reason, unlike a damaged line's, quotes nothing from the
-    file. Non-blocking, so a pipe put in the file's place cannot hold the thread."""
+    """Read the text of the file, never through a link. A link, a pipe, or
+    anything that is not UTF-8 text is refused. Unlike the reason for a damaged
+    line, the reason for this refusal quotes nothing from the file. The open is
+    non-blocking, so a pipe that was put in place of the file cannot hold the
+    thread."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as error:
@@ -670,8 +706,8 @@ def _read(path: Path) -> str:
 
 
 def _result_names(section: Section, shown: Mapping[int, Shown]) -> dict[int, str]:
-    """Each result's tool name, by the result's id: the call it answers, as its reply
-    named it."""
+    """The tool name of each result, keyed by the id of the result. The name is
+    that of the call that the result answers, as the reply named it."""
     facts = [
         (origin, shown[seq])
         for seq, origin in zip(section.nodes, section.origins, strict=True)
