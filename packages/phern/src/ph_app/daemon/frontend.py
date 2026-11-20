@@ -2,39 +2,41 @@
 
 Under the daemon there was nobody to ask. `ApprovalService` runs its waterfall
 with an `inner` that answers `unavailable` when no answerer took the prompt, and
-no answerer was ever registered on a root — so a gated tool call under
-`phern daemon` was **denied**, not because a person said no but because nobody could
-be asked, and both doctors reported the deployment as healthy. This is the piece
-that was missing.
+no answerer was ever registered on a root. A gated tool call under
+`phern daemon` was therefore **denied**. No person said no: nobody could be
+asked. Both doctors still reported the deployment as healthy. This module is the
+piece that was missing.
 
-**One desk per root, many front ends.** Attach is not exclusive: several UIs may
-watch one session — a terminal, a browser tab, `phern agents attach` — and each has
-its own private composer while the log is shared. So an ask goes to *every*
-attached front end, the **first answer wins**, and the rest are told
-`ask.settled`. pH still records exactly one decision, because pH is what records
-it: a front end only decides.
+**One desk for each root, and many front ends.** Attach is not exclusive.
+Several UIs may watch one session: a terminal, a browser tab,
+`phern agents attach`. Each has its own private composer, and the log is shared.
+So an ask goes to *every* attached front end, the **first answer wins**, and the
+others are told `ask.settled`. pH still records exactly one decision, because pH
+records it. A front end only decides.
 
-**Nobody attached is not a denial.** The ask sits here and the answerer waits on
-it, and `join` re-poses it to whoever turns up. A gate that became a denial
-because a terminal closed would lose the human's actual answer.
+**Nobody attached is not a denial.** The ask stays here and the answerer waits
+on it. `join` poses it again to whoever arrives. If a gate became a denial
+because a terminal closed, the actual answer of the human would be lost.
 
-That re-posing is **in-memory, and so lasts as long as the daemon does** — which
-is the whole of what it promises, and no longer a silent edge. A restart cannot
-carry the ask across, because what was waiting on it was a coroutine inside a
-turn, and both are gone. What it does instead is **settle** it: repair writes the
-`approval/decided` the crash never got to (P5-13), so the log holds no ask nobody
-can answer and the transcript says the person was still being asked when the
-harness stopped.
+The ask is posed again **from memory, so that lasts only as long as the daemon
+does**. That is all that it promises, and it is no longer a silent edge. A
+restart cannot carry the ask across, because a coroutine inside a turn was
+waiting on it, and both are gone. The restart **settles** the ask instead.
+Repair writes the `approval/decided` that the crash never reached (P5-13). The
+log then holds no ask that nobody can answer, and the transcript says that the
+person was still being asked when the harness stopped.
 
-So the guarantee is bounded and stated rather than absent. Within one daemon, an
-ask outlives every front end and waits for whoever turns up. Across a restart it
-does not survive; it is closed honestly, nothing ran, and the work resumes the
-way every interrupted turn does — the model reads `TOOL_NOT_STARTED` and asks
-again, to whoever is attached by then.
+So the guarantee is bounded and stated, not absent. Within one daemon, an ask
+outlives every front end and waits for whoever arrives. An ask does not survive
+a restart. It is closed truthfully, nothing ran, and the work resumes in the way
+that every interrupted turn does: the model reads `TOOL_NOT_STARTED` and asks
+again, and the ask goes to whoever is attached by then.
 
-**A slow front end is dropped, not waited on.** `_Connection.ask` queues into a
-bounded outbox; a client that cannot keep up raises rather than blocking the
-turn, and it simply stops being asked. The ask stays pending for the others.
+**A slow front end does not hold up the others.** Each delivery is a task of its
+own. `_Connection.ask` queues into a bounded outbox and waits for room there, so
+a client that cannot keep up delays only its own delivery. The ask stays pending
+for the others. A front end that cannot be told `ask.settled` stops being asked
+(`_answer`).
 
 @module ph_app.daemon.frontend
 """
@@ -56,8 +58,8 @@ from ph.seams.user_questions import UserQuestion
 from ph.session_profile import ProfileChange, listing
 
 if TYPE_CHECKING:
-    # `supervisor` imports this module for `AskDesk`, so the edge only runs the
-    # other way for the checker.
+    # `supervisor` imports this module for `AskDesk`. The import in the other
+    # direction therefore exists only for the checker.
     from .supervisor import Root
 
 from ..payloads import (
@@ -86,11 +88,12 @@ class FrontEnd(Protocol):
 
 @dataclass(slots=True)
 class PendingAsk:
-    """One question in flight, and the answer whoever gets there first leaves.
+    """One question in flight, and the answer that the first front end to reply
+    leaves.
 
-    `tasks` is the fan-out's own group, kept so a front end that arrives *while*
-    the question is open can be posted to as well — which is what makes "nobody
-    was attached" a delay rather than an outcome.
+    `tasks` is the group of the fan-out itself. It is kept so that a front end
+    which arrives *while* the question is open can also be asked. That makes
+    "nobody was attached" a delay and not an outcome.
     """
 
     ask_id: str
@@ -110,19 +113,20 @@ class AskDesk:
 
     @property
     def front_ends(self) -> set[FrontEnd]:
-        """The attached connections that can answer. The id's, not this desk's
-        (`Audience.front_ends`): a root started again has a new desk, and whoever
-        was answering for the last one is answering for this one."""
+        """The attached connections that can answer. They belong to the id, not to
+        this desk (`Audience.front_ends`). A root that is started again has a new
+        desk, and whoever answered for the last desk answers for this one."""
         return self.root.audience.front_ends
 
     # ------------------------------------------------------------- wiring --
 
     def attach(self) -> list[Disposer]:
-        """Register both answerers on the root's context. Returns their disposers.
+        """Register both answerers on the context of the root. Returns their
+        disposers.
 
-        `register_answerer` is sugar over `ctx.on(...)`, so these unwind with
-        whatever scope the root gives them — which is the root's own, since this
-        runs outside any row's `apply`.
+        `register_answerer` is sugar over `ctx.on(...)`, so the answerers unwind
+        with the scope that the root gives them. That is the scope of the root
+        itself, because this runs outside the `apply` of any row.
         """
         disposers: list[Disposer] = []
         approval = self.root.ctx.get(APPROVAL)
@@ -130,11 +134,12 @@ class AskDesk:
             disposers.append(approval.register_answerer(self.answer_approval))
         questions = self.root.ctx.get(USER_QUESTIONS)
         if questions is not None:
-            # `reachable`, unlike the approval seam's registration, because the
-            # two failure modes differ: an unanswerable approval must fail closed
-            # and *deny*, while an unanswerable question must not be asked at
-            # all. A daemon with no front end attached is exactly the case the
-            # seam declines to log, and this probe is how it finds out.
+            # This registration passes `reachable`, and the registration on the
+            # approval seam does not, because the two failure modes differ. An
+            # approval that cannot be answered must fail closed and *deny*. A
+            # question that cannot be answered must not be asked at all. A daemon
+            # with no front end attached is exactly the case that the seam
+            # declines to log, and this probe is how the seam finds out.
             disposers.append(
                 questions.register_answerer(
                     self.answer_question, reachable=lambda: bool(self.front_ends)
@@ -143,19 +148,21 @@ class AskDesk:
         return disposers
 
     def join(self, who: FrontEnd) -> None:
-        """A front end that can answer. Anything already pending goes to it too.
+        """Add a front end that can answer. Anything already pending goes to it
+        too.
 
-        Re-posing on arrival is what makes "nobody was attached" a delay rather
-        than an outcome: the turn parked, the person turned up, and the question
-        is still the one the model asked.
+        Because the ask is posed again on arrival, "nobody was attached" is a
+        delay and not an outcome. The turn waited, the person arrived, and the
+        question is still the one that the model asked.
         """
         if who in self.front_ends:
-            # **Attaching twice is an expected call** — `session/attach` is how a
-            # client resumes, and `_attach` already guards `subscribe` against it.
-            # Without the same guard here a re-attach starts a *second* delivery
-            # of every open ask to the same connection: a second frame, a second
-            # slot of that client's in-flight budget, and a second modal in front
-            # of one person, whose two answers then race for one question.
+            # **A second attach is an expected call.** `session/attach` is how a
+            # client resumes, and `_attach` already guards `subscribe` against
+            # it. Without the same guard here, a re-attach starts a *second*
+            # delivery of every open ask to the same connection. That is a second
+            # frame, a second slot of the in-flight budget of that client, and a
+            # second modal in front of one person, whose two answers then race
+            # for one question.
             return
         self.front_ends.add(who)
         for pending in list(self.asks.values()):
@@ -164,12 +171,12 @@ class AskDesk:
 
     @property
     def waiting(self) -> bool:
-        """Whether this root is parked on a person.
+        """Whether this root is waiting for a person.
 
-        Read by `Root.status`, which is what lets release take it: a root
-        waiting on a human is idle in every sense that matters, and holding a
-        process for somebody who closed their laptop is the failure P5-05 exists
-        to prevent.
+        `Root.status` reads this, and that lets release take the root. A root
+        that waits for a human is idle in every sense that matters. To hold a
+        process for somebody who closed their laptop is the failure that P5-05
+        exists to prevent.
         """
         return bool(self.asks)
 
@@ -180,11 +187,11 @@ class AskDesk:
         request: ApprovalRequest,
         _next: object = None,
     ) -> ApprovalAnswer:
-        """`ctx.approval`'s answerer, over the socket.
+        """The answerer of `ctx.approval`, over the socket.
 
-        Named on the wire by the desk (`asked`), not by its call id, which a
-        `refine` ask does not have. The call id and the tool name still travel, in
-        `request`.
+        The desk names the ask on the wire (`asked`). The call id does not name
+        it, because a `refine` ask has no call id. The call id and the tool name
+        still travel, in `request`.
         """
         result = ApprovalAskReply.model_validate(
             await self._ask(
@@ -192,11 +199,11 @@ class AskDesk:
             )
         )
         if reason := result.reason:
-            # "No, use the existing helper" redirects a turn where a bare refusal
-            # only stops it. Delivered as what it is — user input at the next step
-            # boundary — rather than as a new event type, because the log's
-            # vocabulary is fixed and a front end inventing one writes a log this
-            # build cannot read.
+            # "No, use the existing helper" redirects a turn, where a bare refusal
+            # only stops it. The reason is delivered as what it is, user input at
+            # the next step boundary, and not as a new event type. The vocabulary
+            # of the log is fixed, and a front end that invents an event type
+            # writes a log that this build cannot read.
             self.root.agent.steer(user_text(reason))
         return answer_from_wire(result.answer)
 
@@ -205,10 +212,11 @@ class AskDesk:
         question: UserQuestion,
         _next: object = None,
     ) -> str | None:
-        """`ctx.user_questions`' answerer, over the socket.
+        """The answerer of `ctx.user_questions`, over the socket.
 
-        Named on the wire by the desk (`asked`), as an approval is. The question's
-        own `ask_id`, the log's `askId`, still travels, in `question`.
+        The desk names the ask on the wire (`asked`), as it does for an approval.
+        The `ask_id` of the question itself, which is the `askId` of the log,
+        still travels, in `question`.
         """
         result = QuestionAskReply.model_validate(
             await self._ask(
@@ -218,12 +226,13 @@ class AskDesk:
         return result.answer
 
     async def decide_profile(self, change: ProfileChange) -> ProfileDecision:
-        """Ask whether this root takes its named profile's new version (S6).
+        """Ask whether this root takes the new version of its named profile (S6).
 
-        Not a seam's answerer, like the two above: nothing in the session asked.
-        The root was held at its start because a person's own profile moved since
-        it began, so it waits here — for whoever attaches, as every ask does —
-        before anything runs, and the supervisor records what was said.
+        Unlike the two methods above, this is not the answerer of a seam: nothing
+        in the session asked. The root was held at its start because a profile
+        that belongs to a person moved since the root began. So the root waits
+        here before anything runs, for whoever attaches, as every ask does. The
+        supervisor records the answer.
         """
         result = ProfileAskReply.model_validate(
             await self._ask(
@@ -238,13 +247,14 @@ class AskDesk:
         return result.decision
 
     def settle(self, method: str, answer: dict[str, Any]) -> None:
-        """Answer every open ask of `method` from outside the desk, and take it off
-        every front end's screen.
+        """Answer every open ask of `method` from outside the desk, and remove it
+        from the screen of every front end.
 
-        For a question something other than a person answered — `session/adopt`
-        settling the profile question a root was held on (S6). Every front end is
-        told `ask.settled`, as the ones a person did not answer are, so no modal is
-        left up asking about a decision already made.
+        This is for a question that something other than a person answered:
+        `session/adopt` settles the profile question on which a root was held
+        (S6). Every front end is told `ask.settled`, as the front ends that did
+        not give the answer are for any other ask. So no modal stays up that
+        asks about a decision that is already made.
         """
         for pending in list(self.asks.values()):
             if pending.method == method and not pending.answered.is_set():
@@ -253,9 +263,9 @@ class AskDesk:
     def _answer(
         self, pending: PendingAsk, answer: dict[str, Any], *, by: FrontEnd | None = None
     ) -> None:
-        """Take `answer` as the one decision, and tell every front end but the one
-        that gave it that the question is settled — one that cannot hear it stops
-        being asked."""
+        """Take `answer` as the one decision. Tell every front end except the one
+        that gave it that the question is settled. A front end that cannot be
+        told stops being asked."""
         pending.answer = answer
         pending.answered.set()
         settled = AskSettledNotice(session_id=self.root.id, ask_id=pending.ask_id)
@@ -277,10 +287,11 @@ class AskDesk:
     async def _ask(self, ask: ApprovalAsk | QuestionAsk | ProfileAsk) -> dict[str, Any]:
         """Put one question to every front end and wait for the first answer.
 
-        The fan-out has a task group of its own rather than borrowing the root's:
-        every delivery belongs to *this* question and ends with it, so canceling
-        the group when the answer lands is exactly the right lifetime — the other
-        front ends stop being waited on, and `ask.settled` tells them why.
+        The fan-out has its own task group and does not borrow the group of the
+        root. Every delivery belongs to *this* question and ends with it. To
+        cancel the group when the answer arrives is therefore exactly the right
+        lifetime. The other front ends are no longer waited on, and
+        `ask.settled` tells them why.
         """
         pending = PendingAsk(
             ask_id=ask.ask_id,
@@ -289,9 +300,9 @@ class AskDesk:
             answered=anyio.Event(),
         )
         self.asks[ask.ask_id] = pending
-        # `Root.status` reads `waiting` from here, and the agent's own status does
-        # not move, so the root says it itself: parked on a person, it may be
-        # released and no longer holds the daemon.
+        # `Root.status` reads `waiting` from here, and the status of the agent
+        # itself does not move. So the root reports the change itself: while it
+        # waits for a person, it may be released and no longer holds the daemon.
         self.root.recheck()
         try:
             async with anyio.create_task_group() as tasks:
@@ -311,12 +322,13 @@ class AskDesk:
             answer = await who.ask(pending.method, pending.params)
         except DaemonError as refused:
             if refused.reason == "invalid_params":
-                # It could not *read* this ask — a shape its build does not
-                # know — which says nothing about the next one of a different
-                # kind. Named rather than inferred from the message, which is
-                # what `InvalidParams` is for; kept joined, and logged loudly
-                # enough to find, because a front end silently answering
-                # nothing is how a person's modals stop appearing.
+                # The front end could not *read* this ask: its build does not
+                # know the shape. That says nothing about the next ask of a
+                # different kind. The reason is named and not inferred from the
+                # message, which is what `InvalidParams` is for. The front end
+                # stays joined. The warning is loud enough to find, because a
+                # front end that silently answers nothing is how the modals of a
+                # person stop appearing.
                 log.warning(
                     "ph_app.daemon: a front end could not read %s — %s", pending.method, refused
                 )
@@ -325,15 +337,15 @@ class AskDesk:
             self.front_ends.discard(who)
             return
         except Exception:
-            # A front end that cannot answer — a dead socket, a client that
-            # refused the method — stops being asked. The question stays pending
-            # for whoever else is here, or for whoever arrives.
+            # A front end that cannot answer stops being asked: a dead socket, or
+            # a client that refused the method. The question stays pending for
+            # whoever else is here, or for whoever arrives.
             log.debug("ph_app.daemon: a front end could not answer %s", pending.method)
             self.front_ends.discard(who)
             return
         if pending.answered.is_set():
-            # Somebody was faster. One question, one decision — and this answer
-            # is discarded rather than recorded, because pH appends the decision
-            # it acted on and a second one would be a log claiming two.
+            # Somebody was faster. One question has one decision. This answer is
+            # discarded and not recorded, because pH appends the decision that it
+            # acted on, and a second one would make the log claim two.
             return
         self._answer(pending, answer, by=who)

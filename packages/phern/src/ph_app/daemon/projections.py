@@ -1,38 +1,39 @@
-"""What a front end reads off a root it cannot reach into (P5-14).
+"""What a front end reads from a root that it cannot reach into (P5-14).
 
-`PHTuiApp` used to resolve nine seams out of `ctx` — the command registry, the
-screen registry, the status fields, the model routes, the presets, the
-credentials — because the harness was in its own process. Over a socket none of
-that is reachable, and the alternative to projecting it is a UI that quietly does
-less when it is remote, which is the split this whole plan exists to avoid.
+`PHTuiApp` used to resolve nine seams out of `ctx`, because the harness was in
+the process of the TUI itself: the command registry, the screen registry, the
+status fields, the model routes, the presets, the credentials. Over a socket,
+none of that is reachable. Without a projection, the UI would quietly do less
+when it is remote, and this whole plan exists to avoid that split.
 
-**Nothing here spells a field.** Each seam describes its own wire form —
-`StatusReading.to_wire()`, `CommandDefinition.schema()`, `ScreenDefinition.schema()`
-— the way `ToolSchema` already did for tools (P7-11), so a field added to a seam
-reaches a browser tab with no edit here. The alternative was a dict per item
-written at this edge, whose failure is the quiet kind: add `danger: bool` to a
-command and the terminal shows it, the browser does not, and nothing fails.
+**Nothing here names a field.** Each seam describes its own wire form:
+`StatusReading.to_wire()`, `CommandDefinition.schema()`,
+`ScreenDefinition.schema()`. `ToolSchema` already did this for tools (P7-11). So
+a field that is added to a seam reaches a browser tab with no edit here. The
+alternative was a dict for each item, written at this edge, and it fails
+quietly: add `danger: bool` to a command, and the terminal shows it, the browser
+does not, and nothing fails.
 
-**Every function here is a fold, not a fact.** Nothing is stored, nothing is
-appended, and a projection is computed from the root as it stands at the moment
-it is asked for. That is what makes them safe to send repeatedly and safe to
-recompute after a restart: a client that reconnects gets today's answer rather
-than a cached one that was true when somebody last wrote it down.
+**Every function here is a fold, not a fact.** Nothing is stored and nothing is
+appended. A projection is computed from the root as it is at the moment of the
+request. Projections are therefore safe to send repeatedly, and safe to compute
+again after a restart. A client that reconnects gets the current answer, and not
+a cached answer that was true when somebody last wrote it down.
 
 **Absence is normal and is not an error.** A profile need not mount `commands`,
-`tui_screens`, `tui_status` or `credentials`, and a projection of a seam that is
-not there is the empty list — the answer the in-process front end gave too,
-where each of these is a `ctx.get(...)` that may return `None`. A daemon that
-refused instead would make "this deployment has no screens" indistinguishable
-from "this deployment is broken".
+`tui_screens`, `tui_status` or `credentials`. The projection of a seam that is
+absent is the empty list. The in-process front end gave the same answer, because
+there each of these is a `ctx.get(...)` that may return `None`. If a daemon
+refused, "this deployment has no screens" would look the same as "this
+deployment is broken".
 
-`Root` and `Supervisor` are imported under `TYPE_CHECKING` and nowhere else:
-`supervisor` imports *this* module, so naming their types at runtime would close
-the cycle — and `from __future__ import annotations` makes every annotation below
-a string the checker reads and the interpreter never evaluates. Both were `Any`
-for want of that import, which is `ph.keys`' own arrangement and the reason it
-works there: a projection that takes `Any` is a projection nothing checks, on the
-one layer whose whole job is not to say less than the seam does.
+`Root` and `Supervisor` are imported under `TYPE_CHECKING` and nowhere else.
+`supervisor` imports *this* module, so their types named at runtime would close
+the cycle. `from __future__ import annotations` makes every annotation below a
+string that the checker reads and the interpreter never evaluates. Before that
+import, both were `Any`. `ph.keys` uses the same arrangement, and this is the
+reason why it works there. A projection that takes `Any` is a projection that
+nothing checks, on the one layer whose job is to say no less than the seam says.
 
 @module ph_app.daemon.projections
 """
@@ -48,6 +49,7 @@ from ph.keys import (
     COMMANDS,
     CREDENTIALS,
     MODELS,
+    MOUNT,
     PERMISSION_PRESETS,
     SKILLS,
     SUBAGENTS,
@@ -78,26 +80,28 @@ __all__ = [
     "family_of",
     "family_rows",
     "models_of",
+    "presets_of",
     "readings_of",
     "screens_of",
+    "skills_of",
     "tools_of",
 ]
 
-# **These return models, not their wire dicts (P8-08).** A projection is read by
-# two callers — the method that answers `commands/list`, and the notice that
-# announces a change — and each used to call `.to_wire()` itself, so the shape
-# reaching a client depended on which door it came through. The notice models in
-# `ph_app.payloads` declare `list[CommandSchema]`, so the dump happens once, in
-# `to_wire()`, at the edge.
+# **These return models, not their wire dicts (P8-08).** Two callers read a
+# projection: the method that answers `commands/list`, and the notice that
+# announces a change. Each used to call `.to_wire()` itself, so the shape that
+# reached a client depended on which of the two paths it came through. The notice
+# models in `ph_app.payloads` declare `list[CommandSchema]`, so the dump happens
+# one time, in `to_wire()`, at the edge.
 
 
 def readings_of(root: Root) -> list[StatusReading]:
-    """The footer, as the status seam currently reads it.
+    """The footer, as the status seam reads it now.
 
-    A reading is a fold of the log, so this is cheap and correct to recompute; it
-    rides `session.status` for that reason rather than being polled on the TUI's
-    30 Hz tick, which exists for the spinner and would otherwise ask this
-    question thirty times a second to get the same answer.
+    A reading is a fold of the log, so it is cheap and correct to compute again.
+    For that reason it is sent with `session.status` and is not polled on the
+    30 Hz tick of the TUI. That tick exists for the spinner. A poll on it would
+    ask this question thirty times a second and get the same answer.
     """
     registry = root.ctx.get(TUI_STATUS)
     if registry is None:
@@ -106,12 +110,12 @@ def readings_of(root: Root) -> list[StatusReading]:
 
 
 def commands_of(root: Root) -> list[CommandSchema]:
-    """Every slash command a person may run against this root.
+    """Every slash command that a person may run against this root.
 
-    `run` is deliberately not projected: it is a callable, and the client's job
-    is to *offer* the command and send the line back, not to run it. The daemon
-    runs it, in the root's own context — which is also the only place it could
-    work, since a command body reaches for seams that live there.
+    `run` is deliberately not projected. It is a callable, and the job of the
+    client is to *offer* the command and send the line back, not to run it. The
+    daemon runs it, in the context of the root. That is also the only place
+    where it could work, because a command body uses seams that live there.
     """
     registry = root.ctx.get(COMMANDS)
     if registry is None:
@@ -120,13 +124,14 @@ def commands_of(root: Root) -> list[CommandSchema]:
 
 
 def screens_of(root: Root) -> list[ScreenSchema]:
-    """The screens this deployment contributes, without their bodies.
+    """The screens that this deployment contributes, without their bodies.
 
-    `build(session)` stays in the client and runs against the session it
-    rebuilt from its own snapshot — which is enough while the client *is* the
-    TUI, as it is under textual-serve. A declarative screen body on the wire is
-    P5-15's other half and is deferred to P7-07; saying so here is the point,
-    because a projection that silently dropped `build` would look complete.
+    `build(session)` stays in the client, and runs against the session that the
+    client rebuilt from its own snapshot. That is enough while the client *is*
+    the TUI, as it is under textual-serve. A declarative screen body on the wire
+    is the other half of P5-15, and is deferred to P7-07. This docstring says so
+    on purpose, because a projection that silently dropped `build` would look
+    complete.
     """
     registry = root.ctx.get(TUI_SCREENS)
     if registry is None:
@@ -135,13 +140,14 @@ def screens_of(root: Root) -> list[ScreenSchema]:
 
 
 def family_of(root: Root) -> list[ChildState]:
-    """Every sub-agent beneath `root`, each from its own log (Phase 11) — the seam's
-    one walk of a delegation tree (`SubagentService.family`): a parent before its own
-    children, siblings in admission order, which is the order a tree is drawn in.
+    """Every sub-agent beneath `root`, each from its own log (Phase 11). This is
+    the one walk of a delegation tree that the seam has
+    (`SubagentService.family`): a parent comes before its own children, and
+    siblings are in admission order. A tree is drawn in that order.
 
-    **The whole tree**, read in one pass as the root's log opens
-    (`SubagentService.load_children`). A fold, like everything in this module:
-    asking loads nothing.
+    **The whole tree** is read in one pass when the log of the root opens
+    (`SubagentService.load_children`). This is a fold, like everything in this
+    module: a call loads nothing.
     """
     subagents = root.ctx.get(SUBAGENTS)
     return subagents.family(root.id) if subagents is not None else []
@@ -153,11 +159,12 @@ def family_rows(root: Root) -> list[ChildRow]:
 
 
 def tools_of(root: Root) -> list[ToolSchema]:
-    """What the model may call here, as `--mode rpc` already answers it.
+    """What the model may call here, in the form that `--mode rpc` already answers.
 
-    `DEPLOYMENT` and not an agent's scope (P6-32): this says what the deployment
-    offers, which is the question a front end is asking. An agent's narrowed view
-    is that agent's business and is not what a footer or a palette shows.
+    The scope is `DEPLOYMENT` and not the scope of an agent (P6-32). This says
+    what the deployment offers, which is the question that a front end asks. The
+    narrowed view of an agent is the concern of that agent, and a footer or a
+    palette does not show it.
     """
     tools = root.ctx.get(TOOLS)
     if tools is None:
@@ -166,11 +173,13 @@ def tools_of(root: Root) -> list[ToolSchema]:
 
 
 def models_of(root: Root) -> list[ModelEntry]:
-    """The models this root's profile lists, default first — what `/model` offers.
+    """The models that the profile of this root lists, with the default first.
+    This is what `/model` offers.
 
-    The list, not the route in force: that rides the status (`modelKey`), which
-    changes without the list changing. An unlisted route a person named is
-    therefore in neither, and the picker's free text is how it is named again.
+    This is the list, not the route in force. The route in force travels in the
+    status (`modelKey`), and it changes without a change to the list. An unlisted
+    route that a person named is therefore in neither. The free text of the
+    picker is the way to name it again.
     """
     models = root.ctx.get(MODELS)
     return models.entries() if models is not None else []
@@ -179,7 +188,7 @@ def models_of(root: Root) -> list[ModelEntry]:
 def presets_of(root: Root) -> list[PresetSchema]:
     """The permission postures, with the live one marked.
 
-    Resolved by the seam per call, like every projection here —
+    The seam resolves them on each call, like every projection here.
     `PermissionPresetService.schemas` says why that matters.
     """
     presets = root.ctx.get(PERMISSION_PRESETS)
@@ -189,17 +198,18 @@ def presets_of(root: Root) -> list[PresetSchema]:
 
 
 def skills_of(root: Root) -> list[Skill]:
-    """What is installed here, for `tools_of`'s reason and against its scope.
+    """What is installed here, for the same reason and with the same scope as
+    `tools_of`.
 
-    `DEPLOYMENT` again: a child narrowed at spawn sees less, and that narrowing
-    is the child's business — a person reading a sidebar is asking what this
-    deployment has, which is the same question the tool list answers one
-    function up.
+    The scope is `DEPLOYMENT` again. A child that was narrowed at spawn sees
+    less, and that narrowing is the concern of the child. A person who reads a
+    sidebar asks what this deployment has, which is the same question that
+    `tools_of` answers.
 
-    The catalog and not the bodies. `SkillService.list` is what the prompt's own
-    catalog renders from, so a panel built on this cannot drift from what the
-    model was told exists; reading a body is `ctx.skills.body`, which is a
-    request the model makes and not something a front end pages in.
+    This is the catalog and not the bodies. The catalog in the prompt renders
+    from `SkillService.list`, so a panel that is built on this cannot drift from
+    what the model was told exists. `ctx.skills.body` reads a body. That is a
+    request that the model makes, and not something that a front end pages in.
     """
     skills = root.ctx.get(SKILLS)
     if skills is None:
@@ -211,48 +221,54 @@ CREDENTIAL_CONFIG_KEY = "apiKeyEnv"
 """What an adapter row calls the environment variable holding its key."""
 
 
-def credentials_of(root: Root, supervisor: Supervisor) -> dict[str, bool]:
-    """Every credential this deployment names, and whether it is held —
-    **never the values.**
+def credentials_of(root: Root) -> dict[str, bool]:
+    """Every credential that the profile of this root names, and whether it is
+    held. **Never the values.**
 
-    Held-ness rather than the secret, and the shape is what enforces it: there is
-    no field here a value could travel in, so a future edit cannot leak one by
-    forgetting to strip it. The picker only ever needed the boolean.
+    This returns whether a credential is held and not the secret, and the shape
+    enforces that. No field here could carry a value, so a later edit cannot
+    leak one because it forgot to strip it. The picker only ever needed the
+    boolean.
 
-    **The names are found here, not sent here.** This took a `names` list, which
-    meant the client had to know them — so `daemon/config` shipped the *entire
-    composed profile* to every attached front end at attach, and a modal module
-    in the terminal re-mined it with a recursive walk. A projection is what that
-    should have been from the start (P5-14): the daemon holds the profile and the
-    credential seam, so it can answer the whole question, and the answer is a
-    `{name: bool}` map with no configuration in it.
+    **The names are found here, not sent here.** This function used to take a
+    `names` list, so the client had to know the names. `daemon/config` therefore
+    sent the *entire composed profile* to every attached front end at attach,
+    and a modal module in the terminal searched it again with a recursive walk.
+    That should have been a projection from the start (P5-14). The daemon holds
+    the profile and the credential seam, so it can answer the whole question.
+    The answer is a `{name: bool}` map with no configuration in it.
 
-    Two arguments because it is two facts: the composed profile is the
-    *supervisor's* — every root mounts the same one — while the store is the
-    root's own. In **row order**, which is the order the picker shows and the
-    reason this is a dict rather than a set.
+    **The names come from the profile that the root is mounted on**, and not
+    from the default profile of the daemon. Two roots on two profiles can share
+    one daemon (S5), and each one runs on the adapters of its own profile. This
+    function used to read the profile of the supervisor. A root on another
+    profile then got the names of the default, and the credential that its own
+    adapter needed was missing from the picker.
 
-    The service is resolved once for the whole batch. Asking per name walked the
-    scope chain per name, which is what the in-process caller did by looping over
-    a predicate.
+    The map is in **row order**. The picker shows that order, and it is the
+    reason why this is a dict and not a set.
+
+    The service is resolved one time for the whole batch. A lookup for each name
+    walked the scope chain for each name, which is what the in-process caller
+    did when it looped over a predicate.
     """
-    names = credentials_named(supervisor.profile.dump())
+    names = credentials_named(root.ctx.require(MOUNT).profile.dump())
     service = root.ctx.get(CREDENTIALS)
     if service is None:
         return dict.fromkeys(names, False)
-    # Plus whatever was handed to this process and is named in no row: the login
-    # screen takes free text, so a credential can be *held* without the profile
-    # having heard of it — and dropping it here would make it disappear from the
-    # picker the moment somebody set it.
+    # Add whatever was given to this process and is named in no row. The login
+    # screen takes free text, so a credential can be *held* although the profile
+    # does not know it. If it were dropped here, it would disappear from the
+    # picker at the moment somebody set it.
     names += [name for name in service.provided() if name not in names]
     return {name: bool(service.has(service.reference(name))) for name in names}
 
 
 def credentials_named(rows: Iterable[ConfigRow]) -> list[str]:
-    """Every credential the composed configuration names, in row order.
+    """Every credential that the composed configuration names, in row order.
 
-    Walks a row's config rather than matching on plugin names: the key is
-    declared, so an adapter pH has never heard of is still covered.
+    This walks the config of a row and does not match on plugin names. The key is
+    declared, so an adapter that pH does not know is still covered.
     """
     found: list[str] = []
     for row in rows:
@@ -270,30 +286,33 @@ def _walk(value: JsonValue) -> Iterable[str]:
             else:
                 yield from _walk(item)
     elif isinstance(value, (list, tuple)):
-        # `(list, tuple)` and not `Sequence`, which a `str` also satisfies —
-        # every character would recurse forever as a one-character string.
+        # `(list, tuple)` and not `Sequence`, because a `str` also satisfies
+        # `Sequence`. Every character would recurse forever as a one-character
+        # string.
         for item in value:
             yield from _walk(item)
 
 
 def browse_of(supervisor: Supervisor, *, cwd: str = "") -> list[SessionSummary]:
-    """Every session a person could open, stored and live, folded here (P5-14).
+    """Every session that a person could open, stored and live, folded here
+    (P5-14).
 
-    **One list from the one process that can see both halves.** The logs are on
-    the daemon's disk under the daemon's `$PH_HOME`, and which roots are *mounted*
-    is a fact only the supervisor holds — so a client that asked for them
-    separately had to be handed a directory path and read the files itself. It
-    does not any more: a front end on another machine, or one with no filesystem
-    at all, gets the same rows.
+    **One list, from the one process that can see both halves.** The logs are on
+    the disk of the daemon, under the `$PH_HOME` of the daemon. Only the
+    supervisor knows which roots are *mounted*. A client that asked for the two
+    separately therefore had to be given a directory path and read the files
+    itself. It does not have to any more: a front end on another machine, or one
+    with no filesystem at all, gets the same rows.
 
-    A live root's `status` is its own — `running`, `waiting`, `retrying` — because
-    that is what a person is choosing on: joining a session parked on somebody
-    else's approval modal is a different act from joining one that is working.
-    A stored row keeps `stored`.
+    The `status` of a live root is its own (`running`, `waiting`, `retrying`),
+    because that is what a person chooses on. To join a session that waits on
+    the approval modal of somebody else is a different act from joining one that
+    is working. A stored row keeps `stored`.
 
-    A live root the disk has not seen yet — its log still in a write buffer —
-    gets a row of its own, built from what the supervisor knows: the header's
-    `cwd`, so the repo it belongs to is on the row even before the file exists.
+    A live root that the disk has not seen yet, because its log is still in a
+    write buffer, gets its own row. The row is built from what the supervisor
+    knows: the `cwd` of the header, so the repo that the root belongs to is on
+    the row even before the file exists.
     """
     directory = supervisor.sessions_directory()
     stored = session_summaries(directory, cwd=cwd) if directory is not None else []

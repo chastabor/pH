@@ -1,14 +1,14 @@
-"""`sd_notify`, the four lines of it this daemon speaks (P13-12).
+"""`sd_notify`: the three states of it that this daemon sends (P13-12).
 
-A `Type=notify` unit waits for `READY=1` before it calls the service started, ends
-it when `WATCHDOG=1` stops arriving inside `WatchdogSec`, and reads `STOPPING=1` as
-an orderly exit beginning. All three are a datagram on the socket `NOTIFY_SOCKET`
-names, and that is the whole protocol — so this is stdlib rather than a dependency,
-and a no-op anywhere the variable is unset, which is every start that is not
-systemd's.
+A `Type=notify` unit waits for `READY=1` before it treats the service as started.
+It ends the service when `WATCHDOG=1` stops arriving inside `WatchdogSec`. It
+reads `STOPPING=1` as the start of an orderly exit. All three are a datagram on
+the socket that `NOTIFY_SOCKET` names, and that is the whole protocol. This
+module therefore uses the standard library and not a dependency. It does nothing
+where the variable is unset, which is every start that systemd did not make.
 
-**It never raises.** A watchdog that could not be fed because the socket went away
-is systemd's to notice, and the daemon has its own work to do.
+**It never raises.** If the watchdog could not be fed because the socket went
+away, systemd is the one to notice, and the daemon has its own work to do.
 
 @module ph_app.daemon.notify
 """
@@ -25,7 +25,8 @@ log = logging.getLogger("ph_app.daemon")
 
 
 def notify(state: str) -> bool:
-    """Send one `sd_notify` state. `False` when nothing is listening or it failed."""
+    """Send one `sd_notify` state. Return `False` when nothing is listening or the
+    send failed."""
     address = os.environ.get("NOTIFY_SOCKET")
     if not address:
         return False
@@ -43,11 +44,13 @@ def notify(state: str) -> bool:
 
 
 def watchdog_interval() -> float | None:
-    """Seconds between `WATCHDOG=1`s, or `None` when systemd asked for none.
+    """Return the seconds between `WATCHDOG=1` messages, or `None` when systemd
+    asked for none.
 
-    Half of `WATCHDOG_USEC`, which is what systemd's own documentation recommends,
-    so one missed beat is not the end. `WATCHDOG_PID`, when set, names the process
-    expected to feed it; a daemon that is not it stays quiet.
+    The interval is half of `WATCHDOG_USEC`, which the documentation of systemd
+    recommends, so that one missed beat does not end the service. `WATCHDOG_PID`,
+    when set, names the process that is expected to feed the watchdog. A daemon
+    that is not that process stays quiet.
     """
     usec = os.environ.get("WATCHDOG_USEC")
     if not usec:

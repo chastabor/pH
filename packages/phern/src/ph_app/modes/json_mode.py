@@ -1,8 +1,9 @@
-"""`--mode json` — the session log, streamed, camelCase (I-7).
+"""`--mode json`: the session log, streamed, in camelCase (I-7).
 
-Not a rendering: the *same* envelopes the JSONL holds, emitted as they commit.
-That is what makes the mode useful for a wrapper — a caller consuming this and a
-caller reading the stored log parse one format, and dsh tooling reads both (Q2).
+This mode is not a rendering. It emits the *same* envelopes that the JSONL
+holds, as they commit. That makes the mode useful for a wrapper: a caller that
+consumes this stream and a caller that reads the stored log parse one format,
+and dsh tooling reads both (Q2).
 
 @module ph_app.modes.json_mode
 """
@@ -52,10 +53,11 @@ async def run_json(
             stream.flush()
 
         stream.write(f"{dumps({'type': 'session/header', 'header': session.header.to_wire()})}\n")
-        # What this run committed before there was a stream to write it to: opening
-        # a session records its base first (S3), so a new session's log begins
-        # before this listener does. Everything after the last `session/resumed`
-        # — all of a new log — is this run's, and the stream is the log.
+        # Emit what this run committed before there was a stream to write to.
+        # Opening a session records its base first (S3), so the log of a new
+        # session begins before this listener does. Everything after the last
+        # `session/resumed` belongs to this run, and that is all of a new log.
+        # The stream is the log.
         for event in _opened_here(session):
             emit(session, event)
         ctx.on("session/event", emit)
@@ -69,16 +71,17 @@ async def run_json(
         before=attach,
     ) as (ctx, session):
         pass
-    # Counted after teardown, not inside it: scopes unwind on the way out and
-    # what they append — a released workspace, a reaped child — is streamed like
-    # any other event, so a count taken one line earlier would report fewer
-    # events than the reader just saw.
+    # The events are counted after teardown, not inside it. Scopes unwind on the
+    # way out, and what they append (a released workspace, a reaped child) is
+    # streamed like any other event. A count taken one line earlier would report
+    # fewer events than the reader just saw.
     return JsonResult(
         session_id=session.id, events=len(session.events), unwritten=unwritten_at_unwind(ctx)
     )
 
 
 def _opened_here(session: Session) -> tuple[SessionEvent, ...]:
-    """The events this run's open committed: after the history it resumed, if any."""
+    """Return the events that the open of this run committed: those after the
+    history that it resumed, if any."""
     resumed = session.last_event_of("session/resumed")
     return session.events_from(resumed.seq + 1 if resumed is not None else 0)

@@ -1,24 +1,25 @@
-"""Following one session on the daemon: catch up by paging, then go live, never twice.
+"""Follow one session on the daemon: page to catch up, then go live, with no event shown twice.
 
-`session/attach` subscribes before the history is fetched — deliberately, since
-the other order drops everything that happens in between — so live frames arrive
-while `session/snapshot` is still paging. Holding them and releasing them after,
-with anything the pages already showed discarded by `seq`, is what stops one event
-landing twice and a later one landing first.
+`session/attach` subscribes before the history is fetched. That is deliberate,
+because the other order drops everything that happens in between. Live frames
+therefore arrive while `session/snapshot` is still paging. This module holds
+them and releases them afterwards, and discards by `seq` anything that the pages
+already showed. That stops one event from arriving twice and a later event from
+arriving first.
 
-That rule was written twice — once for `phern agents attach`, once for the TUI over a
-socket — and the invariant it protects was tested once. This is the one copy; a
-caller supplies the sink and keeps whatever is its own (a console and a `--type`
-filter for the CLI, a transcript fold for the TUI).
+That rule was written twice, for `phern agents attach` and for the TUI over a
+socket, and the invariant that it protects was tested one time. This is the one
+copy. A caller supplies the sink and keeps what is its own: a console and a
+`--type` filter for the CLI, a transcript fold for the TUI.
 
 **The attach reply is the first status frame, and `seed` is what says so.** The
-same gap has a second half nobody named: a root that was already idle when the
-attach landed announces *nothing* afterwards, so that reply is the only status the
-feed will ever see. Both callers compensated for it and they did it differently —
-the TUI replayed the reply through its own handler, while the CLI made a second
-`session/status` round trip for a fact the daemon had already handed it, and then
-re-decided "idle means done" outside the handler that decides it. `seed` is the
-one compensation.
+same gap has a second half that nobody named. A root that was already idle when
+the attach arrived announces *nothing* afterwards, so that reply is the only
+status that the feed will ever see. Both callers compensated for it, and in
+different ways. The TUI replayed the reply through its own handler. The CLI made
+a second `session/status` round trip for a fact that the daemon had already
+given it, and then decided "idle means done" again, outside the handler that
+decides it. `seed` is the one compensation.
 
 @module ph_app.daemon.follow
 """
@@ -50,62 +51,80 @@ __all__ = ["EventFrame", "Followed"]
 log = logging.getLogger("ph_app.daemon.follow")
 
 type EventFrame = tuple[JsonObject, JsonValue]
-"""One session event as it came off the wire, and the card rendered beside it.
+"""One session event as it came off the wire, and the card that was rendered
+beside it.
 
-**Neither half is an event or a card yet**, and the asymmetry is the two
-producers disagreeing. The envelope is an object either way —
-`SessionEvent.from_wire` is what proves it is an *event*. The card is bare
-`JsonValue` because only one of its two sources says more: a live frame arrives
-as `SessionEventNotice.presentation: dict[str, Any] | None`, which pydantic has
-already checked is an object, while a rebuilt one is `SnapshotPage.presentations`
-*values* — typed `Any`, so nothing has looked at them. `JsonValue` is what is
-true of both.
+**Neither half is an event or a card yet.** The two halves have different types
+because the two producers disagree. The envelope is an object in both cases, and
+`SessionEvent.from_wire` is what proves that it is an *event*. The card is a
+bare `JsonValue` because only one of its two sources says more. A live frame
+arrives as `SessionEventNotice.presentation: dict[str, Any] | None`, and
+pydantic has already checked that it is an object. A rebuilt card is one of the
+*values* of `SnapshotPage.presentations`. Those are typed `Any`, so nothing has
+looked at them. `JsonValue` is what is true of both.
 
-Tightening `presentations` to `dict[str, dict[str, Any]]` would make the pair
-`JsonObject | None` and retire `view_of`'s `isinstance`, and was rejected: it
-moves the failure from "this one card renders generic" to "this whole 2048-event
-page fails validation", which is the opposite of what `view_of` is written for.
+A tighter `presentations` type, `dict[str, dict[str, Any]]`, would make the pair
+`JsonObject | None` and retire the `isinstance` in `view_of`. It was rejected.
+It moves the failure from "this one card renders generic" to "this whole
+2048-event page fails validation", which is the opposite of what `view_of` is
+written for.
 
-This pair was `tuple[Mapping[str, Any], Any]`, which said none of that — every
+This pair was `tuple[Mapping[str, Any], Any]`, which said none of that. Every
 implementer inherited two `Any`s, and a consumer could not tell "arbitrary JSON"
 from "not typed yet"."""
 
 Sink = Callable[[Sequence[EventFrame], bool], None]
-"""Called with `EventFrame`s and whether they are arriving **live**.
+"""Called with `EventFrame`s and whether they arrive **live**.
 
-The pairs keep the card the daemon rendered *beside* the event, never merged into
-it: `_EventWire` forbids extras, so an event carrying a `presentation` key fails
-validation and is dropped by the `except` that exists for unreadable frames.
+The pairs keep the card that the daemon rendered *beside* the event, and never
+merge it into the event. `_EventWire` forbids extras, so an event with a
+`presentation` key fails validation, and the `except` that exists for unreadable
+frames drops it.
 
-The flag says whether they are arriving live or being rebuilt — a distinction
-`TuiEventAdapter.Frame(live=…)` has drawn since P3, and one a consumer must not
-assume. `test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live` is why."""
+The flag says whether the frames arrive live or are rebuilt. `Frame(live=…)` in
+`ph_app.tui.adapter` has drawn that distinction since P3, and a consumer must
+not assume it. `test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live`
+shows why."""
 
 StatusSink = Callable[[StatusFacts], None]
-"""Where a status frame goes. `StatusFacts` and not a mapping, because the three
-shapes that reach it — the attach reply, an `announce`, a bare `passivated` —
-are one type with optional fields rather than three dicts a reader must sniff."""
+"""Where a status frame goes. It takes `StatusFacts` and not a mapping. The three
+shapes that reach it (the attach reply, an `announce`, a bare `passivated`) are
+one type with optional fields, and not three dicts that a reader must inspect."""
+
+
+def _seq_of(event: dict[str, Any]) -> int | None:
+    """The seq of a wire event, or `None` when the event has no readable seq.
+
+    A seq is never negative, so a negative number is unreadable too. The event
+    comes from the socket by reference, and nothing in this process has
+    validated its contents."""
+    at = as_int(event.get("seq"), -1)
+    return at if at >= 0 else None
 
 
 @dataclass(slots=True)
 class Followed:
-    """One session's feed: buffered until catch-up finishes, then live.
+    """The feed of one session: buffered until catch-up finishes, then live.
 
-    `pending` is the buffer *and* the phase — `None` means live — because a
-    separate flag beside it was a second copy of one fact that could be set apart
-    from it.
+    `pending` is the buffer *and* the phase, where `None` means live. A separate
+    flag was a second copy of one fact, and it could be set separately from the
+    buffer.
     """
 
     session_id: str
     on_events: Sink
     on_status: StatusSink
-    """The raw `session.status` params; the caller reads what it wants from them."""
-    seen: int = -1
-    """The highest seq already shown. **`-1`, not `0`**: a log's first event *is*
-    seq 0, so a zero sentinel conflated "nothing seen" with "seen the first one"
-    and silently dropped the opening event of every session that had none before
-    the attach — which is every new one. It surfaced only where the log was later
-    rebuilt as a `Session`, whose seed must be contiguous from 0."""
+    """Where a status goes. The caller reads what it wants from the `StatusFacts`."""
+    seen: int | None = None
+    """The highest seq already shown, or `None` when nothing has been shown.
+
+    **"Nothing shown" is `None` and not a number.** The first event of a log
+    *is* seq 0. When this field started at `0`, "nothing seen" and "seen the
+    first one" were the same value. That silently dropped the opening event of
+    every session that had no events before the attach, which is every new
+    session. The fault appeared only where the log was later rebuilt as a
+    `Session`, whose seed must be contiguous from 0. The field then started at
+    `-1`, which worked but was still a number that stood for "no number"."""
     pending: list[tuple[str, dict[str, Any]]] | None = field(default_factory=list)
 
     def __call__(self, method: str, params: dict[str, Any]) -> None:
@@ -113,61 +132,64 @@ class Followed:
         if self.pending is not None:
             self.pending.append((method, params))
             return
-        # Read off the raw frame, before any model sees it: "is this mine"
-        # is the one question that must be answered *without* validating,
-        # because a client watching one root receives notices for the
-        # others and parsing them to discard them is the work this skips.
+        # This is read from the raw frame, before any model sees it. "Is this
+        # mine" is the one question that must be answered *without* validation.
+        # A client that watches one root receives notices for the other roots,
+        # and this check skips the work of parsing them only to discard them.
         if params.get("sessionId") != self.session_id:
             return
-        # Gated before the table: this reader wants two of the six notices, and
-        # `Root.publish` fans all of them to every subscriber — so without this
-        # a palette republish was fully validated and then thrown away.
+        # This gate comes before the table. This reader wants two of the six
+        # notices, and `Root.publish` fans all of them out to every subscriber.
+        # Without the gate, a palette republish was fully validated and then
+        # thrown away.
         if method not in FED:
             return
-        # Through the table that owns method → payload, then narrowed by type:
-        # a notice this build has no model for is `None`, which is a daemon
-        # newer than this client and a row to drop rather than a crash. Events
-        # first, because they are the hot one and an `isinstance` *hit* on the
-        # exact type takes a fast path a miss does not.
+        # The frame goes through the table that owns the mapping from method to
+        # payload, and is then narrowed by type. A notice for which this build
+        # has no model is `None`. That means a daemon newer than this client,
+        # and a row to drop, not a crash. Events are tested first, because they
+        # are the hot path, and an `isinstance` *hit* on the exact type takes a
+        # fast path that a miss does not.
         notice = notice_of(method, params)
         if not isinstance(notice, SessionEventNotice):
             if isinstance(notice, SessionStatusNotice):
                 self.on_status(notice)
             return
         event = notice.event
-        at = as_int(event.get("seq"), -1)
-        if at < 0:
-            # The one reader here whose input never passed `freeze_json_value`:
-            # `SessionEventNotice.event` is carried by reference off the socket
-            # and nothing in this process validates its contents. A junk `seq`
-            # used to raise out of this call and `Peer._watch` logged it as "a
-            # notification this end could not read"; reading it as a default
-            # silently drops the frame instead, in a module where every other
-            # drop explains itself. Say so, once per frame, and keep the drop.
+        at = _seq_of(event)
+        if at is None:
+            # This is the one reader here whose input never passed
+            # `freeze_json_value`. `SessionEventNotice.event` is carried by
+            # reference from the socket, and nothing in this process validates
+            # its contents. A junk `seq` used to raise out of this call, and
+            # `Peer._watch` logged it as "a notification this end could not
+            # read". A read with a default drops the frame silently instead, in
+            # a module where every other drop explains itself. So this logs a
+            # warning, one time for each frame, and keeps the drop.
             log.warning("ph_app.daemon.follow: a session event arrived with no readable seq")
             return
-        if at <= self.seen:
-            # Already shown by a snapshot page. Dropped by `seq` rather than by
-            # remembering which frames were buffered, which is what makes the two
-            # sources idempotent against each other.
+        if self.seen is not None and at <= self.seen:
+            # A snapshot page already showed it. The drop is by `seq`, and not by
+            # a record of which frames were buffered. That makes the two sources
+            # idempotent against each other.
             return
         self.seen = at
         self.on_events([(event, notice.presentation)], True)
 
     def seed(self, attached: AttachReply) -> None:
-        """Deliver the attach reply as this feed's first status.
+        """Deliver the attach reply as the first status of this feed.
 
-        The reply is `root.describe()` plus the footer — the *same shape*
-        `session.status` sends, which the server says in as many words — so it goes
-        to the same sink rather than to a caller-side special case.
+        The reply is `root.describe()` plus the footer. That is the *same shape*
+        that `session.status` sends, as the server states explicitly. So it goes
+        to the same sink, and not to a special case on the caller side.
 
-        **Delivered now rather than held until `live()`, because status has no
-        catch-up phase to wait for.** `session/snapshot` pages *events*; the reply
-        is already the whole of the status history, so there is nothing for it to
-        arrive out of order with. That is also what lets a front end draw its
-        footer while a long log is still paging, and it makes the busy and
-        already-idle cases print in one order instead of two — the difference that
-        used to be settled by which side of a race a host landed on.
+        **It is delivered now and not held until `live()`, because status has no
+        catch-up phase to wait for.** `session/snapshot` pages *events*. The
+        reply is already the whole status history, so it cannot arrive out of
+        order with anything. This also lets a front end draw its footer while a
+        long log is still paging. And the busy case and the already-idle case
+        now print in one order and not in two. Which side of a race a host
+        landed on used to decide that difference.
         """
         self.on_status(attached.facts())
 
@@ -178,24 +200,26 @@ class Followed:
             self(method, params)
 
     async def catch_up(self, client: DaemonClient, cursor: Cursor | None) -> int:
-        """Page from `cursor` to the head, one sink call per page.
+        """Page from `cursor` to the head, with one sink call for each page.
 
-        Paged because `session/snapshot` is the only mechanism that catches up
-        (`session/attach` deliberately does not replay: streaming a gap of unknown
-        size into a bounded outbox fails at exactly the moment it matters), and a
-        page at a time is one write at a time, which is what keeps a resumed
-        root's whole log from being rendered event by event.
+        The catch-up is paged because `session/snapshot` is the only mechanism
+        that catches up. `session/attach` deliberately does not replay: a stream
+        of a gap of unknown size into a bounded outbox fails at exactly the
+        moment when it matters. One page at a time is also one write at a time,
+        so the whole log of a resumed root is not rendered event by event.
 
-        **Returns the seq the daemon actually started from**, which is the reply's
-        own `from`. A cursor names a position *in one incarnation of the log*;
-        `resume_at` answers a cursor from another incarnation with "you have seen
-        nothing of this one" and pages from 0 — the safe reading, but a silent one
-        unless the caller can see that it happened. Read rather than inferred from
-        the first event's seq, which is what `resume_at`'s docstring already
-        promised and what an empty page cannot answer at all. `seen` is advanced
-        from what arrives rather than pre-set from what was asked, so a fallback to
-        0 is *shown* instead of having its first `since` events dropped as already
-        seen.
+        **Returns the seq from which the daemon actually started**, which is the
+        `from` of the reply itself. A cursor names a position *in one
+        incarnation of the log*. `resume_at` honors a cursor from an earlier
+        incarnation only as far as every resume since then kept. It answers a
+        cursor from another log with "you have seen nothing of this one" and
+        pages from 0. These are the safe readings, but they are silent unless
+        the caller can see that they happened. The value is read from the reply
+        and not inferred from the seq of the first event. The docstring of
+        `resume_at` already promised that, and an empty page cannot answer it at
+        all. `seen` is advanced from what arrives and is not set in advance from
+        what was asked. A fallback to 0 is therefore *shown*, and its first
+        `since` events are not dropped as already seen.
         """
         started: int | None = None
         while True:
@@ -205,12 +229,14 @@ class Followed:
             )
             if started is None:
                 started = page.started_at
-            # Sparse and keyed by seq, which is how the daemon sends it: a page
-            # is 2048 events and a turn contributes a handful of cards.
+            # The cards are sparse and keyed by seq, which is how the daemon sends
+            # them: a page is 2048 events and a turn contributes a few cards.
             views = page.presentations
             self.on_events([(one, views.get(str(one.get("seq")))) for one in page.events], False)
             for event in page.events:
-                self.seen = max(self.seen, as_int(event.get("seq"), self.seen))
+                at = _seq_of(event)
+                if at is not None and (self.seen is None or at > self.seen):
+                    self.seen = at
             if not page.more:
                 return started
             cursor = page.cursor

@@ -1,24 +1,28 @@
-"""`$PH_RUNTIME/daemon.sock` — the supervisor's front door (P5-01).
+"""`$PH_RUNTIME/daemon.sock`: the socket where clients reach the supervisor (P5-01).
 
-A unix socket rather than stdio, which is the whole point: stdio has exactly one
-peer and dies with it, and a daemon exists to be reconnected to. The method names
-extend `--mode rpc`'s shape rather than starting a second vocabulary.
+The daemon listens on a unix socket and not on stdio. Stdio has exactly one peer
+and ends with that peer, and a daemon exists so that clients can reconnect to
+it. The method names extend the names of `--mode rpc`. They do not start a
+second vocabulary.
 
-**The socket is state, and stale state is a lie.** A path left behind by a crashed
-daemon makes every client hang on a connect that will never be answered, so
-binding removes an unresponsive one first and **refuses a responsive one** — the
-second is another daemon, which is P5-03's lease to arbitrate rather than this
-row's to overwrite.
+**The socket is state, and stale state misleads clients.** A crashed daemon
+leaves its path behind, and every client then hangs on a connect that is never
+answered. Binding therefore removes a socket that does not respond, and
+**refuses a socket that responds**. A socket that responds is another daemon.
+The lease of P5-03 decides between two daemons, and this row must not overwrite
+the other daemon.
 
-The same sentence read the other way is P5-11: a path that stopped being *this*
-daemon's socket is a lie about this daemon. `$PH_RUNTIME` sits under
-`$XDG_RUNTIME_DIR`, which logind reaps at logout for a user who is not lingering,
-so the door can be removed while the process behind it keeps running — and every
-later client is told "no daemon socket" and to start one, which the leases the
-first is still holding will refuse. `keep_watching` compares the socket's inode
-against the one bound here, whenever the kernel says its entry moved, and says so
-in each root's own log, because by then the surfaces that could carry the news are
-exactly the ones that went away.
+P5-11 is the same rule from the other side: a path that is no longer the socket
+of *this* daemon misleads clients about this daemon. `$PH_RUNTIME` is under
+`$XDG_RUNTIME_DIR`, and logind removes that directory at logout for a user who
+is not lingering. The socket file can therefore be removed while the process
+behind it keeps running. Every later client is then told "no daemon socket" and
+told to start a daemon, and the leases that the first daemon still holds refuse
+that start. `keep_watching` runs whenever the kernel reports that the entry of
+the socket moved. It compares the inode of the socket with the inode that was
+bound here (`check_reachable`), and it records a change in the log of each
+root. It uses the logs because, by then, the surfaces that could carry the news
+are exactly the ones that are gone.
 
 @module ph_app.daemon.server
 """
@@ -185,57 +189,62 @@ log = logging.getLogger("ph_app.daemon")
 class Mutation[P: MutationParams, R: WireModel]:
     """One method that changes a root: what it takes, how to validate it, how to do it.
 
-    Two halves rather than one body, and the seam is the idempotence key. The
-    daemon claims the key *between* them — after `prepare` has had its chance to
-    refuse, before `act` has had its chance to do anything — so a refusal never
-    consumes a retry and a crash never loses one. Both halves receive the
-    connection, the root and the **parsed** params; `prepare` hands `act`
-    whatever it resolved, so a seam is looked up once and a refusal happens
-    before any record is written.
+    The method has two halves and not one body, and the idempotence key is
+    claimed *between* them. The daemon claims the key after `prepare` has had
+    its chance to refuse, and before `act` has had its chance to do anything. A
+    refusal therefore never uses up a retry, and a crash never loses one. Both
+    halves receive the connection, the root and the **parsed** params. `prepare`
+    passes to `act` whatever it resolved, so a seam is looked up one time and a
+    refusal happens before any record is written.
 
-    The `Verb` is the row's identity: it carries the name, the params model the
-    wire dict is checked against, and the reply. The check is the wrapper's
-    first move — before `start` resolves a root — so a malformed call never
-    mounts anything. Generic in both so each half is typed against its own
-    method: `_act_prompt` reads `.prompt` and `.attachments`, and a half that
-    read a field its method does not carry is a type error rather than a
-    `KeyError` at the first real call.
+    The `Verb` is the identity of the row. It carries the name, the params model
+    that the wire dict is checked against, and the reply. The wrapper makes that
+    check first, before `start` resolves a root, so a malformed call never
+    mounts anything. The class is generic in both types so that each half is
+    typed against its own method: `_prepare_prompt` reads `.attachments` and
+    `_act_prompt` reads `.prompt`. A half that reads a field that its method
+    does not carry is a type error, and not a `KeyError` at the first real call.
 
-    **`act` returns the verb's reply and no longer `Any`** (issue 74). It was
-    `Awaitable[Any]` because "a verb answers with whatever its reply's type is —
-    a model where the reply has one, a dict where it is a per-method shape", and
-    the dicts are gone: every reply is a model, so the return is checkable and
-    an `act` that answered with another verb's model is now a type error here
-    rather than a client's `ValidationError` at the first real call.
+    **`act` returns the reply of the verb, and no longer `Any`** (issue 74). It
+    was `Awaitable[Any]` because a verb answered with whatever the type of its
+    reply was: a model where the reply had one, and a dict where the reply was a
+    per-method shape. The dicts are gone and every reply is a model, so the
+    return type can be checked. An `act` that answers with the model of another
+    verb is now a type error here, and not a `ValidationError` in a client at
+    the first real call.
     """
 
     verb: Verb[P, R]
     prepare: Callable[[_Connection, Root, P], Awaitable[Any]]
-    """`Any` is the *plan*, not the reply: what `prepare` resolved and hands to
-    `act`. Each pair agrees on it by being written together, and no third party
-    ever sees it."""
+    """`Any` is the *plan*, not the reply: it is what `prepare` resolved and passes
+    to `act`. The two halves of a pair agree on it because they are written
+    together, and no other code ever sees it."""
     act: Callable[[_Connection, Root, P, Any], Awaitable[R]]
     after: Callable[[_Connection, Root, R | None], Awaitable[R | None]] | None = None
-    """What the act leaves for once it is on disk, and what it makes of the reply.
+    """A step that the act leaves until it is on disk. The step also decides the
+    reply.
 
-    Run after `_mutate`'s flush — so a step that unwinds the root (a restart) never
-    races the act's own records, the key and its settle — and **on the error path
-    too**, with no reply, so a request the act made before it failed is not left
-    lying on the root for an unrelated mutation to find. Answers the reply to send,
-    or `None` to send the act's own. `session/command` is the one that has one: a
-    command that moved the root's environment past what a live mount can follow
-    (`/profile use`) asks for the root to start again from its log."""
+    The step runs after the flush that `_mutate` makes. A step that unwinds the
+    root (a restart) therefore never races the records of the act, the key and
+    the settle of the key. The step runs **on the error path too**, with no
+    reply, so that a request that the act made before it failed does not stay on
+    the root for an unrelated mutation to find. The step returns the reply to
+    send, or `None` to send the reply of the act. Only `session/command` has
+    this step. A command that moved the environment of the root past what a live
+    mount can follow (`/profile use`) asks for the root to start again from its
+    log."""
 
 
 @dataclass(frozen=True, slots=True)
 class Method[P: WireModel, R: WireModel]:
-    """One method that reads, or acts without an idempotence key.
+    """One method that reads, or that acts without an idempotence key.
 
-    The same shape as `Mutation` minus the two-halves discipline, for the same
-    reason: a row names its verb beside its handler, so the handler is typed
-    against both what the wire may carry and what it must answer with, and the
-    *set* of methods is a value a test can hold against the vocabulary — the
-    argument `tui/adapter.py`'s `HANDLERS` makes about event types.
+    It has the shape of `Mutation` without the two halves, and for the same
+    reason. A row names its verb beside its handler, so the handler is typed
+    against both what the wire may carry and what the handler must answer with.
+    The *set* of methods is also a value that a test can compare with the
+    vocabulary. `HANDLERS` in `tui/adapter.py` makes the same argument about
+    event types.
     """
 
     verb: Verb[P, R]
@@ -244,20 +253,22 @@ class Method[P: WireModel, R: WireModel]:
 
 @dataclass(frozen=True, slots=True)
 class Announced[P: WireModel]:
-    """One method that answers **nothing**: `shutdown`, and only ever it.
+    """One method that answers **nothing**. `shutdown` is the only such method.
 
-    A sibling of `Method` rather than a `Method` whose `R` is some unread
-    model, because that model was the problem: `ShutdownAck` existed to give
-    the verb a reply type and the handler something to return, for a frame
-    `respond` computes and then drops because the id is `None`.
+    This is a sibling of `Method`, and not a `Method` whose `R` is a model that
+    nobody reads, because that model was the problem. `ShutdownAck` existed to
+    give the verb a reply type and the handler something to return. `respond`
+    computed a frame from it and then dropped the frame, because the id is
+    `None`.
 
-    Its handler returns `None`, and `respond` sends nothing — which is what
-    lets the *type* carry the contract that "stop" is not a question. See
+    The handler returns `None`, and `respond` sends nothing. The *type* can
+    therefore carry the contract that "stop" is not a question. See
     `ph_app.protocol.Notify`.
 
-    Rows of this shape sit in `METHODS` beside the others rather than in a
-    third table: `_dispatch` reads `.verb.parse` and `.handle` off either, so
-    one lookup still answers "is this a method the daemon knows".
+    Rows of this shape are in `METHODS` beside the others, and not in a third
+    table. `_dispatch` reads `.verb.parse` and `.handle` from either row type,
+    so one lookup still answers the question "is this a method that the daemon
+    knows".
     """
 
     verb: Notify[P]
@@ -265,27 +276,29 @@ class Announced[P: WireModel]:
 
 
 type _Row = Method[Any, Any] | Announced[Any]
-"""A `METHODS` value: a method that answers, or the one that does not.
+"""A `METHODS` value: a method that answers, or the one method that does not.
 
-A union rather than a base class both satisfy. `_dispatch` reads `.verb.parse`
-and `.handle` off either, which structural attribute access on a union gives
-for free — where a shared base would have to declare a `handle` returning
-`Awaitable[Any]`, putting back the `Any` the row types exist to remove.
+This is a union, and not a base class that both satisfy. `_dispatch` reads
+`.verb.parse` and `.handle` from either, and structural attribute access on a
+union allows that with no more code. A shared base would have to declare a
+`handle` that returns `Awaitable[Any]`, which puts back the `Any` that the row
+types exist to remove.
 """
 
 
 def _repeat_outcome(prior: Prior) -> RepeatOutcome:
-    """`settled` only for a verb its act saw finish: one still acting in this process,
-    or one repair or a raising act closed, is `unknown` in so many words."""
+    """`settled` only for a verb whose act was seen to finish. A verb that is still
+    acting in this process is `unknown`, and so is a verb that repair or a
+    raising act closed. The reply says `unknown` explicitly."""
     return "settled" if prior.outcome == "done" else "unknown"
 
 
 def _command_key(params: MutationParams) -> str:
-    """A client's idempotence key, joined at the wire edge and only here.
+    """The idempotence key of a client, joined at the wire edge and only here.
 
-    Two mutating methods take one now — `session/prompt` and `session/command` —
-    and the f-string was written in both, which is what a comment three lines
-    above one of them already claimed was not the case."""
+    Every method in `MUTATIONS` takes one. Earlier the f-string was written in
+    two handlers, `session/prompt` and `session/command`, although a comment
+    three lines above one of them claimed that this was not the case."""
     return f"{params.client_id}:{params.command_id}" if params.command_id else ""
 
 
@@ -302,24 +315,31 @@ CAPABILITIES = (
     "staging",
     "shell",
 )
-"""What this transport adds to the two both of them have.
+"""The capabilities that this transport adds to the two that both transports have
+(`sessions` and `streaming`).
 
-A constant because two callers say it now — `initialize`, and the `daemon/status`
-a client runs when it wants to know what it is talking to — and a capability
-block that disagreed with itself depending on which method you asked would be
-worse than having none.
+This is a constant because two callers now use it: `initialize`, and the
+`daemon/status` that a client runs when it wants to know what it is talking to.
+A capability block that gave a different answer to each method would be worse
+than no block.
 """
 
 
 class DaemonUnavailable(Refusal):
-    """This daemon cannot take its socket, and the reason is worth a sentence.
+    """This daemon cannot take its socket. The message gives the reason.
 
-    One type over both startup preconditions — a socket another daemon is
-    listening on, and one the kernel will not bind (a `$PH_RUNTIME` past
-    `AF_UNIX`'s 107-byte path limit, a directory this user cannot write). The
-    CLI caught `(RuntimeError, OSError)` for them, which is two builtins wide
-    enough to swallow a `typer.Exit` — `typer.Exit` subclasses `RuntimeError`,
-    and `cli.py` already carries a comment about being bitten by exactly that.
+    One type covers every startup precondition:
+
+    - A socket that another daemon is listening on.
+    - A socket that the kernel does not bind: a `$PH_RUNTIME` longer than the
+      107-byte path limit of `AF_UNIX`, or a directory that this user cannot
+      write.
+    - A probe address that cannot be bound (`--probe-bind`).
+
+    Earlier the CLI caught `(RuntimeError, OSError)` for the two socket cases.
+    Those two builtins are wide enough to catch a `typer.Exit`, because
+    `typer.Exit` subclasses `RuntimeError`. `cli.py` already has a comment about
+    exactly that bug.
     """
 
     code = "daemon_unavailable"
@@ -328,23 +348,24 @@ class DaemonUnavailable(Refusal):
 class AttachmentTooLarge(Refusal):
     """One frame cannot carry this file.
 
-    Its own refusal because the caller's next move is specific and knowable: this
-    is not "too big to attach", it is "too big to attach *in one frame*", and the
-    limit is named so a client can say so rather than guessing. Chunked upload is
-    the fix and it is not built (§5 rule 6) — a browser dropping a 40 MB video
-    gets a sentence, not a truncated blob.
+    This is a separate refusal because the next step of the caller is specific
+    and known. The refusal does not mean "too big to attach". It means "too big
+    to attach *in one frame*". The message names the limit, so a client can
+    report it and does not have to guess. The fix is chunked upload, which is
+    not built (§5 rule 6). A browser that drops a 40 MB video gets a sentence,
+    and not a truncated blob.
     """
 
     code = "attachment_too_large"
 
 
 class AttachmentUnknown(Refusal):
-    """A prompt referenced an attachment this deployment has never stored.
+    """A prompt referenced an attachment that this deployment has never stored.
 
-    Refused rather than dropped, because the alternative is the silent failure
-    P7-01 exists to end: a person attaches a diagram, the reference is stale or
-    from another machine, and the turn goes out as plain text with nothing saying
-    the picture was never sent.
+    The prompt is refused, and the reference is not dropped. To drop it is the
+    silent failure that P7-01 exists to end: a user attaches a diagram, the
+    reference is stale or comes from another machine, and the turn goes out as
+    plain text with nothing to say that the picture was never sent.
     """
 
     code = "attachment_unknown"
@@ -353,68 +374,71 @@ class AttachmentUnknown(Refusal):
 class UntrustedProject(Refusal):
     """This `cwd` has not been trusted, and mounting it would read its config.
 
-    Its own type because the client's next move is specific: *ask*. A front end
-    catching this shows the trust modal and retries with `trust`; one that has
-    no person to ask — `phern agents send` naming a new session in a checkout
-    nobody has vouched for — stops, which is the point.
+    This is a separate type because the next step of the client is specific:
+    *ask*. A front end that catches this shows the trust modal and retries with
+    `trust`. A client that has no user to ask stops, which is the purpose. An
+    example is `phern agents send` when it names a new session in a checkout
+    that nobody has vouched for.
     """
 
     code = "untrusted_project"
 
 
 class NoSuchSession(Refusal):
-    """No root is running under that id — which is not the same as it being
-    busy, and a client that wants to start one branches differently."""
+    """No root is running under that id. That is not the same as a busy root, and
+    a client that wants to start a root takes a different branch."""
 
     code = "no_such_session"
 
 
 @dataclass(slots=True, eq=False)
 class _Connection:
-    """One client, and the roots it is watching.
+    """One client, and the roots that it watches.
 
-    `eq=False` so identity is identity: a connection goes into the ask desk's set
-    of front ends, and a dataclass's generated `__eq__` takes `__hash__` away with
-    it. Two clients are never the same client, whatever their fields hold.
+    `eq=False` keeps identity as identity. A connection goes into the set of
+    front ends of the ask desk, and the `__eq__` that a dataclass generates
+    removes `__hash__`. Two clients are never the same client, whatever their
+    fields hold.
 
     The framing, the pending table, the write ordering and the in-flight bound
-    all live in `Peer`, which the *client* is built from too — see
-    `duplex.py` for why one object rather than two.
+    are all in `Peer`. The *client* is built from `Peer` too. See `duplex.py`
+    for the reason why there is one object and not two.
     """
 
     stream: ByteStream
     server: DaemonServer
     attached: set[str] = field(default_factory=set)
     declared: frozenset[str] = frozenset()
-    """What this *client* said it can do, at `initialize`.
+    """What this *client* said that it can do, at `initialize`.
 
-    Capabilities go both ways for the same reason they go one way: a client
-    reads the server's block rather than inferring from which socket it opened,
-    and the server reads this rather than inferring from which method arrived.
-    `asks` is the name in both directions — the daemon offering to ask, and a
-    client offering to answer — because it is one feature, and half of it is
-    useless without the other half."""
+    Capabilities go in both directions for the same reason that they go in one
+    direction. A client reads the block of the server and does not infer from
+    which socket it opened. The server reads this field and does not infer from
+    which method arrived. `asks` is the name in both directions: the daemon
+    offers to ask, and a client offers to answer. It is one feature, and each
+    half is useless without the other half."""
     spoke: bool = False
-    """Whether this connection has ever sent a frame — a client, not a knock.
+    """Whether this connection has ever sent a frame. A connection that has sent
+    one is a client. A connection that has not is only a knock.
 
-    `ph.framing.listening()` is a connect and an immediate close, and every spawn,
-    every stale-socket check and every `_await_socket` poll runs it. Nothing at
-    the socket layer tells that apart from a front end, so the first frame is
-    what does.
+    `ph.framing.listening()` connects and closes at once. Every spawn, every
+    stale-socket check and every `_await_socket` poll runs it. Nothing at the
+    socket layer can tell such a knock from a front end, so the first frame
+    does.
 
-    One job: **the keep-alive window is armed by a client leaving, not by a probe**.
-    A knock re-arming it would hold a daemon open for another full keep-alive every
-    time something checked whether it was there. The *exit* asks
-    `DaemonServer.served` instead, which is the same question about the process
-    rather than about one socket, and so covers the lifetime clock and a finishing
-    turn as well as this teardown."""
+    The field has one job: **a client that leaves arms the keep-alive window,
+    and a knock does not**. If a knock armed the window again, each check for
+    the daemon would hold the daemon open for another full keep-alive. The
+    *exit* asks `DaemonServer.served` instead. That is the same question about
+    the process and not about one socket, so it also covers the lifetime clock
+    and a turn that finishes, as well as this teardown."""
     peer: Peer = field(init=False)
 
     def __post_init__(self) -> None:
-        # Eagerly: `_Connection` is only ever built inside `serve`'s accept loop,
-        # which is already in a running event loop — which is what `anyio.Event`
-        # needs. A lazy property bought nothing and left `peer` reachable in a
-        # half-built state.
+        # `peer` is built eagerly. `_Connection` is only ever built inside the
+        # accept loop of `serve`, which already runs in an event loop, and a
+        # running event loop is what `anyio.Event` needs. A lazy property gave
+        # no benefit and left `peer` reachable in a half-built state.
         self.peer = Peer(
             stream=self.stream,
             dispatch=self._dispatch,
@@ -423,18 +447,18 @@ class _Connection:
         )
 
     def notify(self, method: str, params: dict[str, Any]) -> None:
-        """Queue a notification, or *raise* so the root drops this watcher.
+        """Queue a notification, or *raise* so that the root drops this watcher.
 
-        Raising is the point: catching `WouldBlock` here and logging "dropped"
-        drops nothing, and the watcher that cannot keep up re-pays the whole
-        fan-out for every later event. The subscriber list belongs to the root,
-        so the root is what removes from it; this only has to fail loudly enough
-        to be noticed.
+        Raising is the purpose. Code that catches `WouldBlock` here and logs
+        "dropped" drops nothing, and a watcher that cannot keep up costs the
+        whole fan-out again for every later event. The subscriber list belongs
+        to the root, so the root removes the watcher from it. This method only
+        has to fail loudly enough to be noticed.
         """
         self.peer.tell(method, params)
 
     async def ask(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Put a question to this client and wait for the person behind it."""
+        """Put a question to this client and wait for the user behind it."""
         return await self.peer.ask(method, params)
 
     async def serve(self) -> None:
@@ -445,38 +469,45 @@ class _Connection:
                 self._part(root_id)
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> MethodResult:
-        """The daemon's half of the vocabulary — dsh's names (P5-02).
+        """The daemon half of the vocabulary, under the names of dsh (P5-02).
 
-        `session/*` rather than P5-01's `root/*`: a supervised root *is* a
-        session here, and the dsh client already ships against these names. The
-        supervisory additions (`daemon/hello`, `session/attach`) are declared in
-        the capability block rather than inferred from which socket answered.
+        The names are `session/*` and not the `root/*` of P5-01. A supervised
+        root *is* a session here, and the dsh client already ships against these
+        names. The supervisory additions (`daemon/hello`, `session/attach`) are
+        declared in the capability block. A client does not infer them from
+        which socket answered.
 
-        **Two tables, not a chain (P8-07).** Every method is a row naming its
-        `Verb` and its handler — `MUTATIONS` for the ones that change a root
-        under an idempotence key, `METHODS` for everything else — so an
-        unknown method is a missed lookup rather than the last `else`, the
-        vocabulary is a value `test_daemon_methods` holds against the verbs it
-        is derived from, and each handler receives its own parsed type. That
-        last point is what makes the handlers typeable at all: one function
-        reading `params["sessionId"]` under twenty-one `if`s could not give
-        each branch a different static type without a cast per branch, which is
-        a dict with extra steps.
+        **Two tables, not a chain (P8-07).** Every method is a row that names its
+        `Verb` and its handler. `MUTATIONS` holds the methods that change a root
+        under an idempotence key, and `METHODS` holds everything else. This has
+        three results:
+
+        - An unknown method is a missed lookup, and not the last `else`.
+        - The vocabulary is a value, which `test_daemon_methods` compares with
+          the verbs that it is derived from.
+        - Each handler receives its own parsed type.
+
+        The last result is what makes it possible to type the handlers. One
+        function that read `params["sessionId"]` under twenty-one `if`s could
+        not give each branch a different static type without a cast in each
+        branch, and that is no better than a plain dict.
         """
         await self.server.check_unwatched()
         if not self.spoke:
             self.spoke = True
             self.server.served = True
-            # A client is here, so any window armed by the last one to leave is
-            # over: the keep-alive means "since you left", not "since the daemon
-            # started". Here rather than on the accept, because a knock that
-            # reset the window would hold a daemon open for another full keep-alive
-            # every time something checked whether it was there.
+            # A client is here, so any window that the last client armed when
+            # it left is over. The keep-alive means "since you left", not
+            # "since the daemon started". This is done here and not on the
+            # accept. A knock that reset the window would hold a daemon open
+            # for another full keep-alive each time something checked for the
+            # daemon.
             self.server.keep_alive_until = None
-            # And the terminal already attached learns it is no longer alone —
-            # `clients` moved, which is what turns its `exits on detach` into
-            # `held · client`. The arrival is a lifetime transition like the
-            # departure in `_handle`, and was the only one not announced.
+            # The terminal that is already attached also learns that it is no
+            # longer alone. `clients` moved, and that turns its `exits on
+            # detach` into `held · client`. The arrival is a lifetime transition
+            # like the departure in `_handle`, and it was the only transition
+            # that was not announced.
             self.server.check_lifetime()
             # Both clock terms just moved: the keep-alive is disarmed and the spawn
             # window is closed.
@@ -496,10 +527,11 @@ class _Connection:
     ) -> MethodResult:
         """Every method that changes a root goes through this one wrapper.
 
-        Parse, resolve the root (through `start`, so acting on a passivated one
-        brings it back), validate, claim the idempotence key, act. The parse is
-        first so a malformed call is refused before a root is mounted for it.
-        See `MUTATIONS` for why the key is claimed here and nowhere else.
+        The steps are: parse, resolve the root, validate, claim the idempotence
+        key, act. The root is resolved through `start`, so an act on a
+        passivated root brings it back. The parse is first, so a malformed call
+        is refused before a root is mounted for it. See `MUTATIONS` for the
+        reason why the key is claimed here and nowhere else.
         """
         parsed = mutation.verb.parse(params)
         root = await self.server.supervisor.start(parsed.session_id)
@@ -517,44 +549,48 @@ class _Connection:
     async def _acted(
         self, mutation: Mutation[Any, WireModel], root: Root, parsed: MutationParams, plan: object
     ) -> WireModel:
-        """The act under its idempotence key, and on disk before anyone is told."""
+        """Run the act under its idempotence key, and put it on disk before any
+        client is told."""
         key = _command_key(parsed)
         if not key:
-            # No identity offered, so no deduplication wanted: it always acts.
+            # The client offered no identity, so it wants no deduplication.
+            # The act always runs.
             reply = await mutation.act(self, root, parsed, plan)
         else:
             journal = intents_of(root.ctx)
-            # The key is claimed between the halves (`Mutation` says why), and an
-            # act that raises is settled `unknown` by `claim` rather than leaving
-            # a key that refuses the retry with no word that nothing finished.
+            # The key is claimed between the halves (`Mutation` gives the
+            # reason). When an act raises, `claim_once` settles the key
+            # `unknown`. Otherwise the key would refuse the retry, with nothing
+            # to say that the act did not finish.
             async with journal.claim_once(root.session, CLIENT_COMMAND, {"command": key}) as held:
                 if isinstance(held, Prior):
-                    # The retry a reconnecting client cannot avoid sending: it
-                    # does not know whether the first one landed. Answering "yes,
-                    # that one — and here is whether it finished" is what makes
-                    # asking twice safe.
+                    # A client that reconnects cannot avoid this retry, because
+                    # it does not know whether the first request landed. The
+                    # answer says "yes, that one", and whether it finished.
+                    # That answer is what makes it safe to ask twice.
                     return MutationRepeated(
                         **root.describe().model_dump(), outcome=_repeat_outcome(held)
                     )
                 reply = await mutation.act(self, root, parsed, plan)
                 journal.settle(root.session, held, command_settled(key))
         # **Durable before the client is told** (F7). A client that has its reply
-        # never re-sends, so a reply sent while the key and the act's own record
-        # were still in memory made a crash lose the act outright — and
-        # `session/prompt`'s "the message is logged" meant logged in a buffer.
-        # After the act, which is why `CLIENT_COMMAND` is `buffered`: a key made
-        # durable first would turn a crash before the act into a refused retry
-        # for work that never began. An act that records its own start before an
-        # effect it cannot take back (`!!`, `run_shell`) carries the key to disk
-        # with that record, and a crash then leaves an open key repair settles
-        # `unknown` — which the retry is told. One flush of the root, which
-        # carries the key, the act and its settle.
+        # never sends the request again. When the reply went out while the key
+        # and the record of the act were still in memory, a crash lost the act
+        # completely, and "the message is logged" for `session/prompt` meant
+        # logged in a buffer. The flush comes after the act, which is the reason
+        # why `CLIENT_COMMAND` is `buffered`. A key that was made durable first
+        # would turn a crash before the act into a refused retry for work that
+        # never began. An act that records its own start before an effect that
+        # it cannot take back (`!!`, `run_shell`) carries the key to disk with
+        # that record. A crash then leaves an open key, repair settles it
+        # `unknown`, and the retry is told so. One flush of the root carries the
+        # key, the act and its settle.
         #
-        # `written`, not `flush`: the act has happened by now, so a write that
-        # fails does not make it not have happened, and answering the verb with
-        # an error would tell the client the one thing that is false. A disk that
-        # refuses writes is the root's own flushes failing next, which is the
-        # retry ladder's to report (`supervisor/failed`).
+        # This is `written`, not `flush`. The act has happened by now, and a
+        # write that fails does not undo it. An error answer to the verb would
+        # tell the client the one thing that is false. A disk that refuses
+        # writes makes the flushes of the root itself fail next, and the retry
+        # ladder reports that (`supervisor/failed`).
         # A failure marks the root unwritten through the store (P13-08).
         await session_written(root.ctx, root.session)
         return reply
@@ -565,15 +601,15 @@ class _Connection:
     # their row.
 
     async def _initialize(self, params: InitializeParams) -> CapabilityBlock:
-        # A property of the *client*, so it is said once here rather than
-        # per-attach: whether a UI can put a modal in front of a person does
-        # not vary by which session it is watching, and a per-attach flag let
-        # the same client claim it for one root and not another — two answers
-        # to a question with one true answer.
+        # This is a property of the *client*, so the client declares it one time
+        # here and not at each attach. Whether a UI can put a modal in front of
+        # a user does not depend on which session it is watching. A per-attach
+        # flag let the same client claim the capability for one root and not for
+        # another, which is two answers to a question that has one true answer.
         self.declared = frozenset(params.capabilities)
-        # Named, because the failure is otherwise invisible: a client that
-        # declares `"ask"` is never joined to any desk, and every question
-        # its person should have answered is simply never asked.
+        # Unknown names are logged, because the failure is invisible otherwise.
+        # A client that declares `"ask"` is never joined to any desk, and every
+        # question that its user should have answered is never asked.
         unknown = self.declared - set(CAPABILITIES)
         if unknown:
             log.warning(
@@ -588,20 +624,22 @@ class _Connection:
         return RootListing(sessions=self.server.supervisor.describe())
 
     async def _new_session(self, params: NewSessionParams) -> NewSessionReply:
-        # `cwd` is the client's, and the daemon is the one that mounts — so
-        # it is said here rather than assumed from the daemon's own process,
-        # which is somewhere neither the person nor their files are. `or None`
-        # because a client that has no directory to name sends `""` or omits it,
-        # and both mean the same thing.
+        # `cwd` belongs to the client, and the daemon is what mounts. The client
+        # therefore states it here. The daemon does not assume it from its own
+        # process, which runs in a place where neither the user nor the files of
+        # the user are. `or None` is used because a client that has no directory
+        # to name sends `""` or omits the field, and both mean the same thing.
         cwd = params.cwd or None
-        # The daemon mounts, so the daemon enforces — `ph_app.trust` says
-        # why. On every `session/new`: named by id, a session the daemon would
-        # create and one it would resume look the same until it is open.
+        # The daemon mounts, so the daemon enforces trust. `ph_app.trust` gives
+        # the reason. The check runs on every `session/new`: when a session is
+        # named by id, one that the daemon would create and one that it would
+        # resume look the same until the session is open.
         self._check_trust(cwd, params.trust)
         supervisor = self.server.supervisor
-        # `asks`: a front end that can answer for a person asked for this start, so a
-        # root whose person's own named profile moved is held for them (S6). No id
-        # is a new session, which the supervisor names as it opens (protocol 8).
+        # `asks`: a front end that can answer for a user asked for this start.
+        # When the named profile of that user moved, the root is therefore held
+        # for the user (S6). A request with no id is a new session, and the
+        # supervisor names it as it opens (protocol 8).
         root = await supervisor.start(
             params.session_id,
             cwd=cwd,
@@ -610,12 +648,13 @@ class _Connection:
             asks="asks" in self.declared,
         )
         if not params.choice.is_default:
-            # A root that was already running — another terminal's — is on its
-            # own route, so the choice moves it. One that just mounted on it is
-            # left alone.
+            # A root that was already running (for another terminal) is on its
+            # own route, so the choice moves it. A root that just mounted on
+            # the chosen route is left alone.
             chosen = model_for(root.ctx, params.choice)
-            # The route and its call settings, and not the key: a route the list did
-            # not hold is keyed only once it is chosen (`route_key`).
+            # Compare the route and its call settings, and not the key. A route
+            # that the list did not hold gets its key only when it is chosen
+            # (`route_key`).
             running_on = replace(root.agent.options, model_key=chosen.key)
             if chosen.options() != running_on:
                 await supervisor.set_model(root, chosen, source="cli", command=params.choice.flags)
@@ -626,47 +665,48 @@ class _Connection:
         return NewSessionReply(**root.describe().model_dump(), header=root.session.header)
 
     async def _cancel(self, params: SessionParams) -> RootDescription:
-        # Not a `MUTATIONS` row: cancel is idempotent by construction, and a
-        # key would make an honest retry answer `repeated` and leave the turn
-        # running. `_root`, not `start`: nothing to stop on a passivated one.
+        # Cancel is not a `MUTATIONS` row. It is idempotent by construction, and
+        # with a key a genuine retry would be answered `repeated` while the turn
+        # kept running. It uses `_root` and not `start`, because a passivated
+        # root has nothing to stop.
         root = self._root(params.session_id)
         root.agent.cancel(AgentCancelCause(kind="user"), keep_inbox=True)
         return root.describe()
 
     async def _sessions_browse(self, params: BrowseParams) -> SessionBrowse:
-        # Daemon-level, not a `PROJECTIONS` row: it is not about one root.
-        # Every root mounts the same profile and so the same store, and which
-        # roots are held is the supervisor's own answer.
+        # This is daemon-level and not a `_projection` row, because it is not
+        # about one root. The supervisor names the directory of the store
+        # (`sessions_directory`), and it knows which roots are held.
         return SessionBrowse(sessions=browse_of(self.server.supervisor, cwd=params.cwd))
 
     async def _daemon_config(self, _params: NoParams) -> DaemonConfigReply:
-        # The composed profile, which is a property of the *daemon* and not
-        # of any root: every root mounts the same composition.
+        # The composed profile of the *daemon*: what a new root starts on when
+        # `session/new` names no profile. A root can be on another profile
+        # (S5), so these rows are the default and not the rows of every root.
         return DaemonConfigReply(rows=list(self.server.supervisor.profile.dump()))
 
     async def _credentials_held(self, params: SessionParams) -> CredentialsHeldReply:
-        # `credentials/held` and `credentials/store`, not `session/credential`
-        # and `session/credentials`: those were two names one letter apart for
-        # opposite kinds, and the one that writes a secret is the last method
-        # that should be easy to reach by typo.
+        # The names are `credentials/held` and `credentials/store`, and not
+        # `session/credential` and `session/credentials`. Those were two names
+        # one letter apart for opposite kinds of method, and the method that
+        # writes a secret must be the hardest one to reach by a typo.
         #
-        # No `names`: the daemon composes the profile, so it knows which
-        # credentials this deployment names — see `credentials_of`. Asking the
-        # client to supply them is what made the whole composed configuration
-        # something a front end had to be sent.
+        # There is no `names` param. The daemon composes the profile of the
+        # root, so it knows which credentials that profile names (see
+        # `credentials_of`). When the client had to supply the names, a front
+        # end had to be sent the whole composed configuration.
         root = self._root(params.session_id)
-        return CredentialsHeldReply(
-            session_id=root.id, held=credentials_of(root, self.server.supervisor)
-        )
+        return CredentialsHeldReply(session_id=root.id, held=credentials_of(root))
 
     # The schedule seam over the wire (P5-06, P5-10). Create and cancel go
-    # through the supervisor rather than the seam directly: both need the
-    # root mounted and the append flushed, and a schedule that lives only in
-    # a buffer is one a restart forgets.
+    # through the supervisor and not directly through the seam. Both need the
+    # root mounted and the append flushed, and a restart forgets a schedule
+    # that is only in a buffer.
 
     async def _schedule_create(self, params: CreateScheduleParams) -> Schedule:
-        # The `schedule` hold moves on the log, not here: `_watch_schedules` hears
-        # the record and rechecks, whichever path wrote it.
+        # The `schedule` hold moves when the log does, not here.
+        # `_watch_schedules` receives the record and rechecks, whichever path
+        # wrote it.
         return await self.server.supervisor.schedule(params.session_id, params.to_schedule())
 
     async def _schedule_cancel(self, params: CancelScheduleParams) -> ScheduleCanceled:
@@ -687,14 +727,15 @@ class _Connection:
         return self.server.status()
 
     async def _sessions_owed(self, params: OwedParams) -> OwedListing:
-        # Daemon-level, like `sessions/browse`: the index is one file under this
-        # daemon's `$PH_HOME`, and which of its roots are mounted is the
-        # supervisor's own answer.
+        # Daemon-level, like `sessions/browse`. The index is one file under the
+        # `$PH_HOME` of this daemon, and the supervisor itself knows which of
+        # its roots are mounted.
         return await self.server.supervisor.owed(rebuild=params.rebuild)
 
     async def _sessions_resume(self, params: ResumeParams) -> ResumeReport:
-        # Unkeyed, like `session/new`: `start` is idempotent by id, so a pass sent
-        # twice mounts each root once and says `mounted` the second time.
+        # Unkeyed, like `session/new`. `start` is idempotent by id, so a pass
+        # that is sent twice mounts each root one time, and answers `mounted`
+        # the second time.
         return await self.server.supervisor.resume_owed(
             params.sessions, all_owed=params.all_owed, force=params.force
         )
@@ -706,34 +747,36 @@ class _Connection:
         return self.server.lifetime()
 
     async def _shutdown(self, _params: NoParams) -> None:
-        # Actually stops it, and takes no id by contract: a client awaiting
-        # a reply would be waiting on a frame the daemon is concurrently
-        # losing the ability to write. "Stop" is not a question.
+        # This stops the daemon, and by contract it takes no id. A client that
+        # awaited a reply would wait for a frame that the daemon is losing the
+        # ability to write at the same moment. "Stop" is not a question.
         self.server.stop.set()
 
     async def _put(self, params: PutAttachmentParams) -> AttachmentStored:
-        """Store bytes a client read, and answer with the reference to them.
+        """Store bytes that a client read, and answer with the reference to them.
 
-        **The client reads the file, not the daemon** — I-9's human door. A person
-        may attach anything they can already open, and their permissions are the
-        only ones that should decide; it is also the only path a browser has,
-        since the bytes reach the page before they reach anything else. The
-        daemon never learns a path, which is the property that makes this the
-        same method for a terminal on this machine and a tab on another.
+        **The client reads the file, not the daemon.** This is the human route
+        of I-9. A user may attach anything that the user can already open, and
+        only the permissions of the user decide. It is also the only path that
+        a browser has, because the bytes reach the page before they reach
+        anything else. The daemon never learns a path. For that reason this is
+        the same method for a terminal on this machine and for a tab on another
+        machine.
 
-        Content-addressed, so putting a file twice stores it once and the second
-        put is a cheap way to *learn* the reference.
+        The store is content-addressed. A file that is put twice is stored one
+        time, and the second put is a cheap way to *learn* the reference.
 
-        Not a `MUTATIONS` row on purpose: content-addressed, so a retry is
-        already a no-op — and its reply *is* the reference the client came
-        for, which a `repeated` envelope would withhold.
+        This is not a `MUTATIONS` row, on purpose. A retry is already a no-op,
+        and the reply *is* the reference that the client came for. A `repeated`
+        envelope would withhold it.
         """
         root = self._root(params.session_id)
         store = self._store(root)
         encoded = params.content_b64
-        # Checked before decoding, on the encoded length: base64 is 4/3 of the
-        # bytes, so decoding first to measure would be the allocation this
-        # refusal exists to avoid. Off by the two padding bytes, immaterial here.
+        # The size is checked before decoding, on the encoded length. Base64 is
+        # 4/3 of the bytes, so decoding first to measure would make the
+        # allocation that this refusal exists to avoid. The estimate is off by
+        # the two padding bytes, which does not matter here.
         if len(encoded) * 3 // 4 > MAX_ATTACHMENT_BYTES:
             raise AttachmentTooLarge(
                 f"an attachment must be at most {MAX_ATTACHMENT_SIZE} "
@@ -747,18 +790,20 @@ class _Connection:
         ref = await store.save_bytes(
             content=content,
             # A client that sent no `mime` still sent a name, and `mime_for` is
-            # the one ladder both doors climb — an octet-stream default here made
-            # a `.png` a document while `--attach` called it an image.
+            # the one rule that both routes use. With an octet-stream default
+            # here, a `.png` was a document, while `--attach` called it an
+            # image.
             mime=mime_for(params.mime or "", name or ""),
             name=name,
         )
         return AttachmentStored(session_id=root.id, attachment=ref)
 
     # --- the mutation halves --------------------------------------------------
-    # `prepare` validates and may refuse; nothing it does is an effect. `act` is
-    # the effect. The wrapper claims the idempotence key between them, which is
-    # what makes a refusal *not* consume a retry: a prompt refused for an unknown
-    # attachment, re-sent with a known one under the same key, must act.
+    # `prepare` validates and may refuse. Nothing that it does is an effect.
+    # `act` is the effect. The wrapper claims the idempotence key between them,
+    # so a refusal does *not* use up a retry. A prompt that is refused for an
+    # unknown attachment, and sent again with a known one under the same key,
+    # must act.
 
     async def _prepare_prompt(self, root: Root, params: PromptParams) -> list[AttachmentRef]:
         return self._attachments(root, params.attachments)
@@ -775,12 +820,13 @@ class _Connection:
     async def _act_stage(
         self, root: Root, params: StageParams, ref: AttachmentRef
     ) -> SessionStagedNotice:
-        """Put an attachment in the composer's tray, for every attached UI.
+        """Put an attachment in the tray of the composer, for every attached UI.
 
-        Not appended: un-submitted intent is not an act in the session, which is
-        the same rule that keeps a half-typed prompt off the log. Broadcast,
-        because the tray is shared — a chip only the uploader can see is a
-        composer nobody else can reason about.
+        Nothing is appended. Intent that is not submitted is not an act in the
+        session, which is the same rule that keeps a half-typed prompt out of
+        the log. The notice is broadcast because the tray is shared. If only
+        the uploader could see a chip, nobody else could reason about the
+        composer.
         """
         notice = SessionStagedNotice(session_id=root.id, staged=list(root.staged.stage(ref)))
         root.publish(notice)
@@ -795,12 +841,12 @@ class _Connection:
     async def _act_command(
         self, root: Root, params: CommandParams, registry: CommandRegistry
     ) -> CommandShown:
-        """Run one `/name argument` line in the root's own context.
+        """Run one `/name argument` line in the context of the root.
 
-        **In the daemon, not the client**, because a command body reaches for
-        seams that only exist where the profile is mounted — and because the
-        record of having run it belongs in this session's log, where every other
-        attached UI will see it.
+        **In the daemon, not the client.** A command body uses seams that exist
+        only where the profile is mounted. The record that the command ran also
+        belongs in the log of this session, where every other attached UI sees
+        it.
         """
         shown = await registry.dispatch(
             params.line,
@@ -808,22 +854,22 @@ class _Connection:
             session=root.session,
             agent=root.agent,
         )
-        # A command can move a reading without moving the agent — `/sandbox` is
-        # the one that does — and nothing else would re-read them. See
-        # `_refresh_readings`; it costs one fold, and only when somebody is
-        # attached to see it.
+        # A command can move a reading without moving the agent, and `/sandbox`
+        # is the command that does. Nothing else would read the readings again.
+        # See `_refresh_readings`. It costs one fold, and only when a client is
+        # attached to see the result.
         _refresh_readings(root)
         return CommandShown(session_id=root.id, shown=shown)
 
     async def _after_command(self, root: Root, reply: CommandShown | None) -> CommandShown | None:
-        """A command that moved the root past what a live mount follows starts it again.
+        """Start the root again after a command moved it past what a live mount follows.
 
-        `/profile use`, or a `/profile clear` of an override that turned a row on or
-        off, asks with `Root.restart_wanted`; the request is consumed here, once the
-        command is on disk, and the root starts again from its log. When that start
-        had to withdraw the version it was given (`runtime.mount_session`), the reply
-        says so (`Root.withdrew`) — the person who asked is listening here, before any
-        attach reads it.
+        `/profile use` asks for this with `Root.restart_wanted`. So does a
+        `/profile clear` of an override that turned a row on or off. This step
+        consumes the request after the command is on disk, and the root starts
+        again from its log. When that start had to withdraw the version that it
+        was given (`runtime.mount_session`), the reply says so (`Root.withdrew`).
+        The user who asked is listening here, before any attach reads it.
         """
         if not root.restart_wanted:
             return None
@@ -837,10 +883,10 @@ class _Connection:
     async def _prepare_shell(self, root: Root, params: ShellParams) -> tuple[ShellService, str]:
         """Resolve the seam and the command **before** the key is claimed.
 
-        The seam check used to happen inside `act`, which is after `once()` has
-        recorded the request — so a `!!` sent to a deployment with no shell burnt
-        the client's retry on a refusal. That is precisely what the two halves
-        are for.
+        Earlier the seam check was inside `act`, which ran after `once()` had
+        recorded the request. A `!!` that was sent to a deployment with no shell
+        therefore used up the retry of the client on a refusal. The two halves
+        exist to prevent exactly that.
         """
         command = params.command.strip()
         if not command:
@@ -850,12 +896,12 @@ class _Connection:
     async def _act_shell(
         self, root: Root, params: ShellParams, prepared: tuple[ShellService, str]
     ) -> ShellReply:
-        """`!!<command>` — the person's own shell, in the session's workspace.
+        """`!!<command>`: the shell of the user, in the workspace of the session.
 
-        The reply is the exit code; the *output* arrives as `shell/command` and
-        `shell/result` events, so every attached UI reads it by the one route
-        they all already watch and the person who typed it reads it back off the
-        same event as everybody else.
+        The reply is the exit code. The *output* arrives as `shell/command` and
+        `shell/result` events. Every attached UI therefore reads it by the one
+        route that they all already watch, and the user who typed the command
+        reads it from the same event as every other client.
         """
         shell, command = prepared
         return await self.server.supervisor.shell(root.id, shell, command, surface=params.surface)
@@ -874,47 +920,49 @@ class _Connection:
         return PresetApplied(session_id=root.id, preset=applied.name)
 
     async def _prepare_model(self, root: Root, params: ModelParams) -> ModelEntry:
-        """Resolve the choice **before** the key is claimed, `_prepare_shell`'s rule:
-        a key this profile does not list, or a provider nothing here serves, is a
-        refusal that must not burn the client's retry."""
+        """Resolve the choice **before** the key is claimed, by the rule of
+        `_prepare_shell`. A key that this profile does not list, or a provider
+        that nothing here serves, is a refusal, and a refusal must not use up
+        the retry of the client."""
         return model_for(root.ctx, params.choice)
 
     async def _act_model(
         self, root: Root, params: ModelParams, chosen: ModelEntry
     ) -> RootDescription:
-        """The root as it now stands — the reply a repeat of this key gets too."""
+        """The root as it now stands. A repeat of this key gets that reply too."""
         await self.server.supervisor.set_model(
             root, chosen, source="verb", command=f"/model {params.choice.spelled}"
         )
         return root.describe()
 
     async def _credentials_store(self, params: StoreCredentialParams) -> CredentialStored:
-        """Hand a root a credential's value, which it uses and does not keep.
+        """Give a root the value of a credential. The root uses it and does not keep it.
 
-        **Unkeyed** (T5). Storing one value twice stores it once, so a retry needs no
-        key; and a key would outlive what it named — the value lives in this
-        process's memory, so after a restart a re-send is the only way it comes back.
-        `start` rather than `_root`: the value belongs to a mounted root's seam.
+        **Unkeyed** (T5). One value that is stored twice is stored one time, so a
+        retry needs no key. A key would also outlive what it named: the value is
+        in the memory of this process, so after a restart the only way to bring
+        it back is to send it again. This uses `start` and not `_root`, because
+        the value belongs to the seam of a mounted root.
         """
         root = await self.server.supervisor.start(params.session_id)
         service = root.ctx.get(CREDENTIALS)
         if service is None:
             raise SeamAbsent("this deployment stores no credentials")
         # **The value is used and not kept.** It is never logged, never echoed
-        # in the reply, and never reaches `describe()` — the reply is the name
-        # and a boolean, which is everything a UI needs to redraw.
+        # in the reply, and never reaches `describe()`. The reply is the name
+        # and a boolean, which is everything that a UI needs to redraw.
         service.provide_value(params.name, params.value)
-        # And whatever was waiting on it goes (T5): the root, if its route named
-        # this, and every child held for it.
+        # Whatever was waiting for the value now proceeds (T5): the root, if
+        # its route named this credential, and every child that was held for it.
         await self.server.supervisor.credential_supplied(root)
         return CredentialStored(session_id=root.id, name=params.name)
 
     def _attachments(self, root: Root, refs: list[AttachmentRef]) -> list[AttachmentRef]:
-        """The refs a prompt named, checked against what this deployment holds.
+        """The refs that a prompt named, checked against what this deployment holds.
 
-        Refused rather than dropped: a reference from another machine, or to a
-        blob a `gc` took, would otherwise send the turn as plain text with
-        nothing saying the picture never went.
+        An unknown ref is refused and not dropped. A reference from another
+        machine, or to a blob that a `gc` removed, would otherwise send the turn
+        as plain text with nothing to say that the picture was never sent.
         """
         if not refs:
             return []
@@ -924,10 +972,10 @@ class _Connection:
     def _store(self, root: Root) -> AttachmentStore:
         """The attachment store, or the one refusal for its absence.
 
-        One resolution for the three methods that need it, so "this deployment
-        stores no attachments" has one author — the two that grew separately had
-        opposite rules for a missing store, one staging anything and one refusing
-        everything.
+        The three methods that need the store all resolve it here, so the
+        message "this deployment stores no attachments" is written in one place.
+        The two resolutions that grew separately had opposite rules for a
+        missing store: one staged anything and one refused everything.
         """
         store = root.ctx.get(ATTACHMENTS)
         if store is None:
@@ -935,42 +983,46 @@ class _Connection:
         return store
 
     def _known(self, store: AttachmentStore, ref: AttachmentRef) -> AttachmentRef:
-        """A reference the client sent, checked against what this deployment holds.
+        """A reference that the client sent, checked against what this deployment
+        holds.
 
-        Presence only: the *shape* was the params model's to check, which is why
-        a malformed reference is `invalid_params` and this refusal is reserved
-        for a well-formed one nobody stored here.
+        This checks presence only. The params model checked the *shape*, so a
+        malformed reference is `invalid_params`. This refusal is reserved for a
+        well-formed reference that nobody stored here.
         """
         if not store.exists(ref):
             raise AttachmentUnknown(f"no attachment {ref.attachment_id} is stored here")
         return ref
 
     def _check_trust(self, cwd: str | None, answer: TrustAnswer) -> None:
-        """Refuse a `cwd` nobody has vouched for. `ph_app.trust` says why.
+        """Refuse a `cwd` that nobody has vouched for. `ph_app.trust` gives the reason.
 
-        `"once"` mounts without recording; `"always"` is recorded by the caller,
-        after the mount has actually succeeded.
+        `"once"` mounts and records nothing. For `"always"`, the caller records
+        the answer after the mount has succeeded.
         """
         if cwd is None or answer == "once":
             return
         store = TrustStore(path=trust_path())
         project = Path(cwd)
         if answer == "always":
-            # Recorded by the *caller*, once the mount has actually succeeded:
-            # writing here would vouch for a directory whose profile then failed
-            # to compose, and the next client would walk straight in.
+            # The *caller* records this answer, after the mount has succeeded.
+            # A write here would vouch for a directory whose profile then
+            # failed to compose, and the next client would be let in without a
+            # question.
             return
         if not store.trusted(project):
             raise UntrustedProject(f"{cwd} has not been trusted; ask, then send trust")
 
     async def _adopt(self, params: AdoptParams) -> RootDescription:
-        """Accept a named profile's version for a root this daemon holds (S6).
+        """Accept the version of a named profile for a root that this daemon holds (S6).
 
-        `phern profiles adopt` writes a stored session's log itself, under its lease;
-        a session a daemon holds is held by the lease, so the daemon writes it. Not
-        through `start`: a root that is not mounted here is the caller's to write,
-        and mounting it to record a version would start what the record says to
-        start later. The version is the one the person was shown, carried whole.
+        `phern profiles adopt` writes the log of a stored session itself, under
+        the lease of that session. A daemon that holds a session holds its
+        lease, so the daemon writes that log. This does not go through `start`.
+        A root that is not mounted here is for the caller to write, and to mount
+        it in order to record a version would start what the record says to
+        start later. The version is the one that the user was shown, and it is
+        carried whole.
         """
         root = self._root(params.session_id)
         await self.server.supervisor.adopt(root, ProfileBase.of(params.version))
@@ -985,28 +1037,30 @@ class _Connection:
     async def _attach(self, params: SessionParams) -> AttachReply:
         """Subscribe to what happens *next*, and say where that starts.
 
-        **Attach does not replay.** Streaming the gap here — one `session.event` frame per
-        event into a fixed-size outbox with no await point — makes a client reattaching to
-        a root that has moved on get a `WouldBlock` out of its own attach, *after* the
-        subscription has been made.
+        **Attach does not replay.** A replay here would stream the gap as one
+        `session.event` frame for each event, into a fixed-size outbox with no
+        await point. A client that attached again to a root that had moved on
+        would then get a `WouldBlock` from its own attach, *after* the
+        subscription was made.
 
-        So catch-up has one mechanism, and it is the paged one: the reply says where the
-        live stream begins, and the client reads `session/snapshot` from its cursor up to
-        that point. That also makes the 512 KiB-class bound apply to replay.
+        Catch-up therefore has one mechanism, and it is the paged one. The reply
+        says where the live stream begins, and the client reads
+        `session/snapshot` from its cursor up to that point. The 512 KiB-class
+        bound then applies to replay too.
         """
-        # Through `start`, so attaching to a *passivated* root brings it back
-        # rather than reporting it gone (P5-05). `start` returns the live root
-        # untouched when there is one, and resumes from the log when there is
-        # not — the same path `session/prompt` takes, which is what keeps
-        # rehydration one mechanism instead of two. There is no cursor to read:
-        # attach does not replay, so it does not take one — `SnapshotParams`
-        # says why the field was removed rather than accepted and ignored.
+        # The root comes through `start`, so an attach to a *passivated* root
+        # brings it back and does not report it gone (P5-05). `start` returns
+        # the live root untouched when there is one, and resumes from the log
+        # when there is not. `session/prompt` takes the same path, which keeps
+        # rehydration as one mechanism and not two. There is no cursor to read:
+        # attach does not replay, so it does not take one. `SnapshotParams`
+        # says why the field was removed and not accepted and ignored.
         root = await self.server.supervisor.start(params.session_id, asks="asks" in self.declared)
         self._join(root)
-        # The footer, with the status it belongs to — the same pairing
-        # `session.status` makes, so a client that has just attached draws a
-        # complete one without a second call and without assembling a frame
-        # shape no wire message has.
+        # The footer comes with the status that it belongs to, which is the
+        # same pairing that `session.status` makes. A client that has just
+        # attached can then draw a complete footer without a second call, and
+        # without assembling a frame shape that no wire message has.
         return AttachReply(**root.describe().model_dump(), readings=readings_of(root))
 
     async def _snapshot(self, params: SnapshotParams) -> SnapshotPage:
@@ -1016,12 +1070,12 @@ class _Connection:
         page = root.session.events_from(start, SNAPSHOT_EVENTS)
         tools = root.ctx.get(TOOLS)
         events = [event.to_wire(thaw=False) for event in page]
-        # **The same sidecar the relay attaches**, because a client must not see
-        # one transcript live and a different one on replay. Keyed by seq and
-        # **sparse**, because a page is 2048 events and a turn contributes a
-        # handful of cards: the positional list this replaced serialized two
-        # thousand `null`s — twelve kilobytes of nothing — on every attach,
-        # reconnect and page-forward.
+        # **The same sidecar that the relay attaches**, because a client must
+        # not see one transcript live and a different one on replay. It is keyed
+        # by seq and **sparse**, because a page is 2048 events and a turn
+        # contributes only a few cards. The positional list that this replaced
+        # serialized two thousand `null`s (twelve kilobytes of nothing) on every
+        # attach, reconnect and page-forward.
         presentations = {
             str(event.seq): view
             for event in page
@@ -1032,24 +1086,26 @@ class _Connection:
             session_id=root.id,
             events=events,
             presentations=presentations,
-            # Where the read actually began, which is not always where the cursor
-            # asked: `resume_at` answers a cursor from another incarnation of the
-            # log with 0. Sent rather than left to be inferred from the first
-            # event's seq — that inference is `None` for an empty page, and
-            # `resume_at`'s own docstring already promises the client will be told.
+            # Where the read actually began. That is not always where the cursor
+            # asked: `resume_at` answers a cursor from another log with 0, and
+            # can move a cursor from an earlier incarnation of this log back.
+            # The value is sent, and the client does not have to infer it from
+            # the seq of the first event. That inference gives `None` for an
+            # empty page, and the docstring of `resume_at` already promises
+            # that the client is told.
             started_at=start,
             cursor=cursor_of(root.session, start + len(events)),
             more=start + len(events) < root.session.seq,
         )
 
     async def _status(self, params: SessionParams) -> RootStatusReply:
-        """One root in detail — what `sessions/list` says, and why it says it.
+        """One root in detail: what `sessions/list` says, and the reason for it.
 
-        The listing carries what a table needs for every root; this carries what
-        a person asks about *one*. The retry ladder is the reason it exists:
-        `status` collapses to `"retrying"` or `"failed"`, and the two questions
-        that follow — how many attempts, and what is still going to fire — have
-        no other way to be asked.
+        The listing carries what a table needs for every root. This reply carries
+        what a user asks about *one* root. It exists because of the retry
+        ladder. `status` collapses to `"retrying"` or `"failed"`, and two
+        questions follow: how many attempts were made, and what will still
+        fire. No other method can ask them.
         """
         root = self._root(params.session_id)
         return RootStatusReply(
@@ -1057,15 +1113,17 @@ class _Connection:
         )
 
     def _join(self, root: Root) -> None:
-        """Start watching this root, and answering for it if we may.
+        """Start watching this root, and answer for it if this client may.
 
-        Watching and answering are different claims, and the second is the
-        client's `asks` capability rather than anything about the attach: a
-        follower like `phern agents attach` watches without ever declaring it and
-        is never asked. See `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
+        Watching and answering are different claims. The second claim is the
+        `asks` capability of the client, and is not a property of the attach. A
+        follower such as `phern agents attach` watches, never declares `asks`,
+        and is never asked. See
+        `test_a_watcher_that_is_not_a_front_end_is_never_asked`.
 
-        **Subscribed on every attach** (D3), into the audience of the root's id,
-        which every mount of that id shares (`Audience`). A set add needs no guard.
+        **Subscribed on every attach** (D3). The subscription goes into the
+        audience of the id of the root, which every mount of that id shares
+        (`Audience`). A set add needs no guard.
         """
         self.attached.add(root.id)
         root.subscribe(self.notify)
@@ -1073,19 +1131,21 @@ class _Connection:
             root.desk.join(self)
 
     def _part(self, root_id: str) -> bool:
-        """Stop watching and stop being asked. Reports whether we were attached.
+        """Stop watching and stop being asked. Returns whether this client was
+        attached.
 
-        **One pair, three callers** (E5). Attaching does three things and there
-        were three places that undid some of them: `_detach` unsubscribed and
-        kept the desk seat, so a client that detached and stayed connected went
-        on being put in front of a person — an approval modal for a session it
-        has said it is no longer watching, which it therefore never answers. Only
-        `serve`'s teardown had the whole triple, and only because the TUI closes
-        the socket right after detaching.
+        **One pair, three callers** (E5). Attaching does three things, and three
+        places each undid some of them. `_detach` unsubscribed and kept the desk
+        seat. A client that detached and stayed connected was therefore still
+        put in front of a user: it got an approval modal for a session that it
+        had said it no longer watched, and so it never answered. Only the
+        teardown in `serve` undid all three, and only because the TUI closes the
+        socket right after it detaches.
 
-        By id, as it attached (`Supervisor.part`, D8): the audience is the id's, so a
-        detach lands whether a root is mounted under it or a restart is between
-        unmounting one and mounting the next.
+        The detach is by id, as the attach was (`Supervisor.part`, D8). The
+        audience belongs to the id. A detach therefore takes effect whether a
+        root is mounted under the id, or a restart is between the unmount of one
+        root and the mount of the next.
         """
         was_attached = root_id in self.attached
         self.attached.discard(root_id)
@@ -1094,28 +1154,30 @@ class _Connection:
 
     async def _detach(self, params: SessionParams) -> SessionDetached:
         was_attached = self._part(params.session_id)
-        # Deliberately *not* an error when nothing was attached: detach is what a
-        # client does while tidying up, often twice, and a teardown path that
-        # raises is one nobody can write correctly.
+        # It is deliberately *not* an error when nothing was attached. A client
+        # detaches while it tidies up, often twice, and nobody can write a
+        # teardown path correctly if that path raises.
         return SessionDetached(session_id=params.session_id, detached=was_attached)
 
 
 def _refresh_readings(root: Root) -> None:
-    """Re-read the footer and push it, for a change the *agent* did not make.
+    """Read the footer again and push it, for a change that the *agent* did not make.
 
-    Readings ride `session.status`, and the supervisor sends one when the agent
-    moves — which is right for a budget or a token count, and wrong for the two
-    postures. A preset switch and `/sandbox` change what the footer says without
-    the agent doing anything at all, so nothing re-read them: the client redrew
-    from the list it was holding and repainted the posture it already had.
+    Readings are carried by `session.status`, and the supervisor sends one when
+    the agent moves. That is right for a budget or a token count, and wrong for
+    the two postures. A preset switch and `/sandbox` change what the footer says
+    while the agent does nothing, so nothing read the readings again. The
+    client redrew from the list that it held and painted the posture that it
+    already had.
 
-    Status left empty on purpose. `StatusFacts` is "as much of it as changed",
-    and a reader keeps every field a frame does not state — so this says the
-    readings moved and claims nothing about where the agent is.
+    The status is left empty on purpose. `StatusFacts` is "as much of it as
+    changed", and a reader keeps every field that a frame does not state. This
+    frame therefore says that the readings moved, and claims nothing about
+    where the agent is.
 
-    Guarded like `Supervisor.announce`'s own publish, and for its reason: a
-    reading is a fold over the log, and folding for nobody is the work the
-    check exists to skip.
+    The publish has the same guard as the publish in the `announce` of the
+    supervisor, and for the same reason. A reading is a fold over the log, and
+    the guard exists to skip a fold that nobody reads.
     """
     if root.subscribers:
         root.publish(SessionStatusNotice(session_id=root.id, readings=readings_of(root)))
@@ -1124,32 +1186,35 @@ def _refresh_readings(root: Root) -> None:
 def _projection[N: SessionNotice](
     verb: Verb[SessionParams, N], key: str, fold: Callable[[Root], list[Any]]
 ) -> tuple[str, _Row]:
-    """One `METHODS` row answering a projection with its verb's reply model.
+    """One `METHODS` row that answers a projection with the reply model of its verb.
 
-    Returns the row rather than the handler, so each projection names its verb
-    **once**: wrapped in `_reading(...)` at the table it appeared twice on one
-    line, which is the shape `_unkeyed`/`_mutating` exist to remove.
+    This returns the row and not the handler, so each projection names its verb
+    **one time**. When the handler was wrapped in `_reading(...)` at the table,
+    the verb appeared twice on one line, which is the shape that `_unkeyed` and
+    `_mutating` exist to remove.
 
-    A factory rather than four near-identical handlers because the four differ
-    only in a model, a key and a fold — and the closure holds exactly those,
-    nothing of the request. (`Method.handle` receives no method name, so a
-    single table-reading handler would have to add that parameter to all 22
-    handlers in order to serve four.)
+    This is a factory, and not eight nearly identical handlers, because the
+    eight differ only in a model, a key and a fold. The closure holds exactly
+    those, and nothing of the request. (`Method.handle` receives no method
+    name. A single handler that read a table would therefore have to add that
+    parameter to every other handler in order to serve these eight.)
 
-    The reply models are the *same types* the notifications use for two of the
-    four: a client validates `commands/list`'s reply as a `SessionCommandsNotice`
-    because the reply and the notification are one shape. The server was the only
-    party that did not say so, and dumped rows by hand at this return.
+    For three of the eight, the reply model is the *same type* that the
+    notification uses. A client validates the reply of `commands/list` as a
+    `SessionCommandsNotice`, because the reply and the notification are one
+    shape. The server was the only party that did not say so, and it dumped
+    rows by hand at this return.
     """
 
     async def handle(connection: _Connection, params: SessionParams) -> N:
         root = connection._root(params.session_id)
-        # Through the verb, so the model is named once: the row that routes this
-        # handler and the handler itself cannot disagree about what it answers.
-        # `read` rather than `reply(session_id=…, **{key: …})` because the field
-        # name is a parameter here, so a keyword spread is untypeable — and
-        # validating is what checks that the fold's rows match the model's
-        # declared element type, which is the whole reason the model is named.
+        # The reply is built through the verb, so the model is named one time.
+        # The row that routes this handler and the handler itself cannot
+        # disagree about what it answers. `read` is used and not
+        # `reply(session_id=…, **{key: …})`: the field name is a parameter here,
+        # so a keyword spread cannot be typed. Validation also checks that the
+        # rows of the fold match the declared element type of the model, which
+        # is the reason why the model is named.
         return verb.read({"session_id": root.id, key: fold(root)})
 
     return _unkeyed(verb, handle)
@@ -1162,16 +1227,17 @@ def _mutating[P: MutationParams, R: WireModel](
     *,
     after: Callable[[_Connection, Root, R | None], Awaitable[R | None]] | None = None,
 ) -> tuple[str, Mutation[Any, Any]]:
-    """One `MUTATIONS` row, keyed by its verb's name and **checked against it**.
+    """One `MUTATIONS` row, keyed by the name of its verb and **checked against it**.
 
-    A function rather than `{verb.name: Mutation(verb, ...)}` written inline,
-    and the reason is worth stating because the inline form looks identical and
-    checks nothing: the table's own annotation is the expected type of each
-    value, so `dict[str, Mutation[Any, Any]]` solves `P` and `R` to `Any` and
-    every handler fits every verb. Sabotage-checked — pairing `session/status`
-    with `_sessions_list` passed `mypy --strict` silently. Here the return type
-    names no type variable, so `P` and `R` can only come from the verb, and the
-    two halves are checked against it.
+    This is a function, and not `{verb.name: Mutation(verb, ...)}` written
+    inline. The inline form looks identical and checks nothing, so the reason
+    is stated here. The annotation of the table is the expected type of each
+    value. `dict[str, Mutation[Any, Any]]` therefore solves `P` and `R` to
+    `Any`, and every handler fits every verb. A sabotage check confirmed this:
+    a row that paired `session/status` with `_sessions_list` passed
+    `mypy --strict` with no error. Here the return type names no type variable,
+    so `P` and `R` can come only from the verb, and the two halves are checked
+    against it.
     """
     return verb.name, Mutation(verb, prepare, act, after)
 
@@ -1179,11 +1245,12 @@ def _mutating[P: MutationParams, R: WireModel](
 def _unkeyed[P: WireModel, R: WireModel](
     verb: Verb[P, R], handle: Callable[[_Connection, P], Awaitable[R]]
 ) -> tuple[str, _Row]:
-    """One `METHODS` row, checked against its verb. `_mutating` says why.
+    """One `METHODS` row, checked against its verb. `_mutating` gives the reason.
 
-    Named for the absence of an idempotence key rather than for reading:
-    `session/new`, `session/cancel`, `attachment/put` and both schedule verbs
-    all write. `verbs.UNKEYED` carries the same correction.
+    The name says that the row has no idempotence key. It does not say that the
+    row reads: `session/new`, `session/cancel`, `attachment/put`,
+    `schedule/create` and `schedule/cancel` all write. `verbs.UNKEYED` carries
+    the same correction.
     """
     return verb.name, Method(verb, handle)
 
@@ -1191,8 +1258,8 @@ def _unkeyed[P: WireModel, R: WireModel](
 def _announcing[P: WireModel](
     verb: Notify[P], handle: Callable[[_Connection, P], Awaitable[None]]
 ) -> tuple[str, _Row]:
-    """One `METHODS` row for a method with no reply. `_mutating` says why a
-    builder and not a literal; `Announced` says why a separate row type."""
+    """One `METHODS` row for a method with no reply. `_mutating` says why this is
+    a builder and not a literal. `Announced` says why it is a separate row type."""
     return verb.name, Announced(verb, handle)
 
 
@@ -1211,23 +1278,26 @@ MUTATIONS: dict[str, Mutation[Any, Any]] = dict(
         _mutating(verbs.SESSION_MODEL, _Connection._prepare_model, _Connection._act_model),
     )
 )
-"""Every method that changes a root, and the one place their idempotence lives.
+"""Every method that changes a root, and the one place that makes them idempotent.
 
-A client's `clientId`/`commandId` names a request; a reconnecting client that
-cannot know whether its last one landed re-sends it, and the same key must not
-run the effect twice. That rule used to be applied per handler by memory — two
-handlers spelled it, the third forgot — so it is applied here by construction:
-a method in this table gets the write-ahead guard whether its author thought of
-it or not, and one that is not in it cannot claim to be idempotent by key.
+The `clientId` and `commandId` of a client name a request. A client that
+reconnects cannot know whether its last request landed, so it sends the request
+again, and the same key must not run the effect twice. Each handler used to
+apply that rule from memory: two handlers wrote it and the third forgot. The
+rule is now applied here by construction. A method in this table gets the
+write-ahead guard whether or not its author thought of it, and a method that is
+not in the table cannot claim to be idempotent by key.
 
-The repeat reply has one shape — `MutationRepeated`, a description carrying
-`repeated: true` and whether the first attempt finished (`outcome`) — so a client
-branches on one field for every verb. The keys and their outcomes are the
-journal's (`CLIENT_COMMAND`, P10-10).
-Deliberately absent: `attachment/put`
-(content-addressed, so a retry is a no-op already, and its reply *is* the
-reference a repeat must still return) and `session/new` (`start` is idempotent
-by id).
+The repeat reply has one shape: `MutationRepeated`, a description that carries
+`repeated: true` and whether the first attempt finished (`outcome`). A client
+therefore branches on one field for every verb. The keys and their outcomes
+belong to the journal (`CLIENT_COMMAND`, P10-10).
+
+Two methods are absent on purpose:
+
+- `attachment/put` is content-addressed, so a retry is already a no-op, and its
+  reply *is* the reference that a repeat must still return.
+- `session/new` goes through `start`, which is idempotent by id.
 """
 
 METHODS: dict[str, _Row] = dict(
@@ -1246,12 +1316,13 @@ METHODS: dict[str, _Row] = dict(
         _unkeyed(verbs.CREDENTIALS_HELD, _Connection._credentials_held),
         _unkeyed(verbs.CREDENTIALS_STORE, _Connection._credentials_store),
         _unkeyed(verbs.SESSION_ADOPT, _Connection._adopt),
-        # The read-only projections (P5-14). What a front end used to read straight
-        # off `ctx`; each is a fold computed now, so a reconnecting client gets
-        # today's answer rather than one cached when somebody last wrote it down.
-        # See `projections.py`. Rows rather than a third table spliced in: they are
-        # `METHODS` rows like any other, and the table they came from was read
-        # exactly once, to build this one.
+        # The read-only projections (P5-14). A front end used to read these
+        # directly from `ctx`. Each is a fold that is computed now, so a client
+        # that reconnects gets the current answer, and not one that was cached
+        # when somebody last wrote it down. See `projections.py`. They are rows
+        # here, and not a third table that is spliced in. They are `METHODS`
+        # rows like any other, and the table that they came from was read
+        # exactly one time, to build this one.
         _projection(verbs.SESSION_READINGS, "readings", readings_of),
         _projection(verbs.COMMANDS_LIST, "commands", commands_of),
         _projection(verbs.SCREENS_LIST, "screens", screens_of),
@@ -1274,13 +1345,13 @@ METHODS: dict[str, _Row] = dict(
 )
 """Every method that is not a mutation: what it takes, and what answers it.
 
-Disjoint from `MUTATIONS` by construction — a name in both would be dispatched as
-a mutation and the row here never reached — and the two together are the
-daemon's whole vocabulary, which `test_daemon_methods` holds against
-`verbs.VOCABULARY`: that set is derived from the verb declarations, so what the
-check catches is a verb declared and never routed. `initialize` and
-`daemon/hello` are two names for one handler because the dsh SDK says the first
-and P5-01 said the second.
+The table is disjoint from `MUTATIONS` by construction. A name in both would be
+dispatched as a mutation, and the row here would never be reached. The two
+tables together are the whole vocabulary of the daemon. `test_daemon_methods`
+compares them with `verbs.VOCABULARY`. That set is derived from the verb
+declarations, so the check catches a verb that is declared and never routed.
+`initialize` and `daemon/hello` are two names for one handler, because the dsh
+SDK uses the first name and P5-01 used the second.
 """
 
 
@@ -1291,130 +1362,141 @@ class DaemonServer:
     supervisor: Supervisor
     stop: anyio.Event
     path: Path
-    """The socket this is answering on, so `daemon/status` can say so.
+    """The socket that this server answers on, so that `daemon/status` can report it.
 
-    A client resolves the same path to connect, but "which socket am I actually
-    talking to" is the first question anyone debugging two daemons asks, and an
-    answer derived a second time on the client side would agree with the server
-    by assumption rather than by evidence."""
+    A client resolves the same path to connect. But "which socket am I actually
+    talking to" is the first question of anyone who debugs two daemons. An
+    answer that the client derived a second time would agree with the server by
+    assumption and not by evidence."""
     ephemeral: bool = False
-    """Whether this daemon should exit once nothing needs it (P7-08).
+    """Whether this daemon exits when nothing needs it any more (P7-08).
 
-    **Decided by who started it, and that is the whole rule.** `phern daemon` typed
-    at a prompt is a service: somebody chose to run a supervisor, and a service
-    that exits when idle is a service that is not there when the next client
-    arrives. One a UI spawned because the socket was absent was nobody's
-    decision, and leaving a process resident on a person's machine after they
-    closed the thing that started it is the kind of accretion nobody attributes
-    to the right cause a week later.
+    **Whoever started the daemon decides, and that is the complete rule.** A
+    `phern daemon` that is typed at a prompt is a service. Somebody chose to run
+    a supervisor, and a service that exits when it is idle is not there when the
+    next client arrives. Nobody decided to start a daemon that a UI spawned
+    because the socket was absent. If that process stayed resident on the
+    machine of a user after the user closed the UI that started it, nobody
+    would connect the leftover process with its cause a week later.
 
-    A flag rather than a subclass or a second `serve`: every other behavior is
-    identical, and the difference is one predicate (`spent`)."""
+    This is a flag, and not a subclass or a second `serve`. Every other
+    behavior is identical, and the difference is one predicate (`spent`)."""
     connections: set[_Connection] = field(default_factory=set)
-    """The clients connected right now — *connected*, not attached.
+    """The clients that are connected right now. *Connected* does not mean attached.
 
-    The distinction is deliberate: a `phern agents doctor` mid-call has no
-    subscription and no root, so an attachment-based count would hang up on it
-    between the request and the reply.
+    The distinction is deliberate. A `phern agents doctor` in the middle of a
+    call has no subscription and no root, so a count of attachments would
+    disconnect it between the request and the reply.
 
-    A set rather than the count it used to be, because two questions are asked of
-    it now: whether anything is connected, and **who to tell** when the lifetime
-    changes (P9-07)."""
+    This is a set, and not the count that it used to be, because it now answers
+    two questions: whether anything is connected, and **whom to tell** when the
+    lifetime changes (P9-07)."""
     keep_alive: float = 0.0
-    """Seconds to stay up after the last client leaves, when nothing else holds it.
+    """Seconds to stay up after the last client leaves, when nothing else holds
+    the daemon.
 
-    Zero — leave at once — is the default, and the flag is what a person types
-    when flipping between two terminals should not pay for a re-mount. It is the
-    *client's* preference reaching the daemon through the argv the client
-    composed, which is the only route there is: a daemon may not read a front
-    end's `tui.json`, and after P5-14 it may not even share a filesystem with it."""
+    The default is zero, which means leave at once. A user sets the flag when a
+    switch between two terminals must not cost a new mount. It is the
+    preference of the *client*, and it reaches the daemon through the argv that
+    the client composed. That is the only route. A daemon may not read the
+    `tui.json` of a front end, and after P5-14 it may not even share a
+    filesystem with the front end."""
     keep_alive_until: int | None = None
     """When the armed keep-alive expires, or `None` when none is armed.
 
-    Armed when the last client leaves and cleared by the next one's first frame,
-    so the window is "since you left" rather than "since the daemon started"."""
+    The last client arms it when it leaves, and the first frame of the next
+    client clears it. The window is therefore "since you left" and not "since
+    the daemon started"."""
     resumed: bool = True
-    """Whether the first resume pass has finished (P13-03) — true from the start
-    when none was asked for. `serve(resume_owed=True)` builds the server without it
-    and the pass sets it, and readiness is no in between: an orchestrator that sends
-    work to a daemon still mounting what the last one owed would race the mounts."""
+    """Whether the first resume pass has finished (P13-03). It is true from the
+    start when no pass was asked for. `serve(resume_owed=True)` builds the server
+    with `False`, and the pass sets it. Readiness is no until then: an
+    orchestrator that sends work to a daemon that is still mounting what the
+    last daemon owed would race the mounts."""
     served: bool = False
     """Whether any client has ever spoken to this daemon (P9-06).
 
-    **The spawn window, closed where every caller inherits it.** A fresh
-    ephemeral daemon holds nothing — no connection, no turn, no appointment — so
-    it is spent from its first instant, and the only thing between it and the
-    exit is that nothing happens to ask during the moment between `serve()`
-    binding the socket and the UI that spawned it sending a frame. Three callers
-    can ask in that moment: the knock's own disconnect, the lifetime clock's first
-    pass, and a scheduled root finishing a turn. Guarding one of them left the
-    other two.
+    **This closes the spawn window in a place that every caller inherits.** A
+    fresh ephemeral daemon holds nothing: no connection, no turn, no
+    appointment. It is therefore spent from its first instant. It does not exit
+    only because nothing asks, in the moment between `serve()` binding the
+    socket and the UI that spawned it sending a frame. Three callers can ask in
+    that moment: the disconnect of the knock, the first pass of the lifetime
+    clock, and a scheduled root that finishes a turn. A guard on one of them
+    left the other two.
 
-    So `spent()` reads this instead, and the answer is bounded rather than
-    latched: a daemon nobody has spoken to may not exit until
-    `launch.SPAWN_TIMEOUT` has passed, which is the same number the launcher
-    waits — after it, the launcher has given up, so there is nobody left to
-    protect. One constant for both halves rather than two that have to agree.
+    `spent()` therefore reads this field, and the answer is bounded and not
+    latched. A daemon that nobody has spoken to may not exit until
+    `launch.SPAWN_TIMEOUT` has passed, which is the same number that the
+    launcher waits. After that time the launcher has given up, so nobody is
+    left to protect. One constant serves both halves, and not two constants
+    that must agree.
 
-    Not on the wire and deliberately: it is never true when anybody is watching,
-    since the frame that makes it true is the watcher's own."""
+    The field is deliberately not on the wire. It is never false when anybody is
+    watching, because the frame that makes it true is the frame of the watcher."""
 
     announced: DaemonLifetime | None = None
-    """The last lifetime frame sent, so an unchanged answer is not sent again.
+    """The last lifetime frame that was sent, so that an unchanged answer is not
+    sent again.
 
-    A remembered value rather than a dirty flag: the thing being compared is the
+    This is a remembered value and not a dirty flag. The comparison is over the
     whole frame, and a flag would have to be set by every writer of every field
-    that goes into one."""
+    that goes into a frame."""
     watching: Mechanism | None = None
-    """How the socket's entry is watched (P5-11, P12-05), or `None` when it is not:
-    refused (`watch_refused`), or a server built by hand. Set by `serve`."""
+    """How the entry of the socket is watched (P5-11, P12-05), or `None` when it is
+    not watched: the watch was refused (`watch_refused`), or the server was built
+    by hand. `serve` sets it."""
     watch_refused: str | None = None
-    """Why the watch could not be armed, or `None`. Then nothing hears the socket
-    move, and `check_unwatched` asks at each client request instead."""
+    """Why the watch could not be armed, or why it stopped, or `None`. When this is
+    set, nothing hears the socket move, and `check_unwatched` checks at each
+    client request instead."""
     lifetime_clock: Planner = field(init=False)
-    """The daemon's own two deadlines (P7-08, P12-02): an armed keep-alive expiring,
-    and an auto-started daemon nobody has spoken to reaching `SPAWN_TIMEOUT`
-    (`lifetime_deadline`). Every other change to what holds the process arrives as
-    an event, and `check_lifetime` runs on each. These two end on a clock, with
-    nobody left in the process to notice, so this sleeps until the sooner and asks
-    then.
+    """The two deadlines of the daemon itself (P7-08, P12-02): the expiry of an armed
+    keep-alive, and the moment when an auto-started daemon that nobody has spoken
+    to reaches `SPAWN_TIMEOUT` (`lifetime_deadline`). Every other change to what
+    holds the process arrives as an event, and `check_lifetime` runs on each.
+    These two end on a clock, when nobody is left in the process to notice. The
+    planner therefore sleeps until the sooner of the two and asks then.
 
-    Told where either deadline moves: a connection's first frame (which disarms the
-    keep-alive and closes the spawn window) and a connection closing (which may arm
-    the keep-alive)."""
+    The planner is told wherever either deadline moves: at the first frame of a
+    connection (which disarms the keep-alive and closes the spawn window) and
+    when a connection closes (which may arm the keep-alive)."""
     started: int = field(default_factory=now_ms)
     """When this daemon came up, for the uptime a status reply carries."""
     identity: tuple[int, int] | None = None
-    """`(st_dev, st_ino)` of the socket at bind time — what `watch` compares against.
+    """`(st_dev, st_ino)` of the socket at bind time. `check_reachable` compares
+    against it.
 
-    Captured by `serve` rather than read here, because "the socket I bound" is a
-    fact about a moment and this object outlives it: reading the path on first
-    use would adopt whatever is there by then, which is the exact substitution
-    the watch exists to catch."""
+    `serve` captures it, and this object does not read it. "The socket that I
+    bound" is a fact about one moment, and this object outlives that moment. A
+    read of the path on first use would adopt whatever is there by then, which
+    is the exact substitution that the watch exists to catch."""
     serving: bool = False
-    """Whether the unix listener is accepting (P13-12): the `startup` probe's whole
-    answer, set by `serve` beside `ready`."""
+    """Whether the unix listener is accepting (P13-12). It is the complete answer
+    of the `startup` probe. `serve` sets it beside `ready`."""
     heartbeat_at: int = field(default_factory=now_ms)
-    """When the event loop last stamped the clock (`keep_heartbeat`), epoch ms — what
-    `live` measures a stuck loop by."""
+    """When the event loop last stamped the clock (`keep_heartbeat`), in epoch ms.
+    `live` measures a stuck loop by it."""
     probe_address: str = ""
     """`host:port` the probes answer on, or `""` when not bound (`--probe-bind`)."""
     _leases: Path | None = field(default=None, init=False)
-    """The lease directory, resolved and made by the first `ready` probe, so each
-    later one asks the kernel one question rather than resolving the roots again."""
+    """The lease directory. The first `ready` probe resolves and makes it, so each
+    later probe asks the kernel one question and does not resolve the roots
+    again."""
     unreachable_since: int | None = None
-    """When the socket stopped being this daemon's, or `None` while it still is.
+    """When the socket stopped being the socket of this daemon, or `None` while it
+    still is.
 
-    A latch, not a sample. The transition is one-way by construction — an
-    unlinked socket's inode does not come back, and a path re-created by anyone
-    else is somebody else's — so this is set once, announced once, and read
-    thereafter by `status` for whoever eventually gets to ask."""
+    This is a latch, not a sample. The transition is one-way by construction: the
+    inode of an unlinked socket does not come back, and a path that anyone else
+    created again belongs to them. The field is therefore set one time and
+    announced one time. After that, `status` reads it for whoever asks later."""
 
     def __post_init__(self) -> None:
-        # Wired here rather than passed in, because the two hold each other: the
-        # server needs the supervisor to ask what is running, and the supervisor
-        # needs the server to say that the answer moved. Here rather than in
-        # `serve`, so no server is ever built half-wired.
+        # The two are wired here and not passed in, because they hold each
+        # other. The server needs the supervisor to ask what is running, and the
+        # supervisor needs the server to say that the answer moved. The wiring
+        # is here and not in `serve`, so no server is ever built half-wired.
         self.supervisor.recheck_lifetime = self.check_lifetime
         self.lifetime_clock = Planner(
             "the lifetime check", run=self._lifetime_pass, plan=self.lifetime_deadline
@@ -1424,10 +1506,11 @@ class DaemonServer:
         self.check_lifetime()
 
     def lifetime_deadline(self, now: int) -> int | None:
-        """The sooner of the two clock terms still ahead of `now`, epoch ms, or `None`.
+        """The sooner of the two clock terms that are still ahead of `now`, in epoch
+        ms, or `None`.
 
-        Only moments still ahead: one already past was asked about by the pass that
-        just ran, and only a notice moves it again."""
+        Only moments that are still ahead count. The pass that just ran already
+        asked about a moment that is past, and only a notice moves it again."""
         moments: list[int] = []
         if self.keep_alive_until is not None:
             moments.append(self.keep_alive_until)
@@ -1437,10 +1520,11 @@ class DaemonServer:
 
     @property
     def spawn_window_ends(self) -> int:
-        """When a daemon nobody has spoken to may leave, epoch ms (`served` says why).
+        """When a daemon that nobody has spoken to may leave, in epoch ms (`served`
+        gives the reason).
 
-        One expression for the clock that wakes at it and the predicate that asks
-        past it (`spent`), so the two cannot disagree."""
+        The clock that wakes at this moment and the predicate that asks after it
+        (`spent`) use this one expression, so the two cannot disagree."""
         return self.started + int(SPAWN_TIMEOUT * 1000)
 
     @property
@@ -1451,25 +1535,25 @@ class DaemonServer:
         return "off" if self.watch_refused is None else f"unavailable: {self.watch_refused}"
 
     async def check_unwatched(self) -> None:
-        """Check the socket, when nothing is watching it, as a client's request
-        arrives (`_Connection._dispatch`).
+        """Check the socket as a client request arrives, when nothing watches it
+        (`_Connection._dispatch`).
 
-        A watch that could not be armed must not quietly become a cadence (§12
-        decision 4). A request is the moment that can still be acted on: a daemon
-        that lost its path is unreachable to new clients, the doctor included, so
-        the clients that can be told are the ones already connected, and they are
-        the ones sending requests."""
+        A watch that could not be armed must not silently become a cadence (§12
+        decision 4). A request is the moment that can still be acted on. A
+        daemon that lost its path cannot be reached by new clients, the doctor
+        included. The clients that can be told are therefore the ones that are
+        already connected, and those clients send the requests."""
         if self.watch_refused is not None:
             await self.check_reachable()
 
     def status(self) -> DaemonStatusReply:
         """What this daemon is, for `phern agents doctor`.
 
-        Everything here is read from the running process rather than re-derived
-        by the client: the socket it bound, the policy it was started with, the
-        jobs it is actually running. A doctor that reported what the *client*
-        would have chosen would agree with a daemon started differently and say
-        nothing at all.
+        Everything here is read from the running process, and the client does
+        not derive it again: the socket that the daemon bound, the policy that
+        it was started with, the jobs that it is running. A doctor that reported
+        what the *client* would have chosen would agree with a daemon that was
+        started differently, and would tell the user nothing.
         """
         supervisor = self.supervisor
         return DaemonStatusReply(
@@ -1488,12 +1572,13 @@ class DaemonServer:
             unreachable_since=self.unreachable_since,
             unwritten=sorted(set(supervisor.unwritten.values())),
             probe=self.probe_address,
-            # `report()`'s shape as models — a list of sections, each a title
-            # and `(label, value)` rows — carrying one built-in section today
-            # (P5-11's socket lifetime). One encoding of one fact, so nothing on
-            # the wire can disagree with itself and the client needs no bespoke
-            # decoder; P5-12 fills the same envelope from the daemon's *mounted*
-            # registry with no client change.
+            # The shape of `report()` as models: a list of sections, each a
+            # title and `(label, value)` rows. It carries the built-in sections
+            # of `DaemonServer.report`, of which the socket lifetime of P5-11
+            # was the first. Each fact has one encoding, so nothing on the wire
+            # can disagree with itself, and the client needs no special
+            # decoder. P5-12 fills the same envelope from the *mounted*
+            # registry of the daemon with no client change.
             sections=[
                 DiagnosticSection(
                     title=title,
@@ -1504,16 +1589,20 @@ class DaemonServer:
         )
 
     def probe(self, name: ProbeName) -> ProbeReply:
-        """One of the three orchestrator questions, decided here for both doors
-        (P13-12): the TCP responder and `daemon/probe` call this and nothing else.
+        """Answer one of the three orchestrator questions. Both routes get their
+        answer here (P13-12): the TCP responder and `daemon/probe` call this and
+        nothing else.
 
-        *startup* is the unix listener serving. *ready* is startup, the socket still
-        this daemon's, no root the daemon could not write, the lease directory
-        writable, and the first resume pass finished when one was asked for
-        (P13-03). *live* is a heartbeat the
-        event loop stamped within `STALE_HEARTBEATS` intervals, the socket still
-        this daemon's, and the scheduler no later than `SCHEDULER_GRACE_SECONDS`
-        past its own plan. Each reason is a sentence an operator reads off a 503.
+        - *startup*: the unix listener is serving.
+        - *ready*: startup, the socket is still the socket of this daemon, there
+          is no root that the daemon could not write, the lease directory is
+          writable, and the first resume pass has finished when one was asked
+          for (P13-03).
+        - *live*: the event loop stamped a heartbeat within `STALE_HEARTBEATS`
+          intervals, the socket is still the socket of this daemon, and the
+          scheduler is no later than `SCHEDULER_GRACE_SECONDS` past its own plan.
+
+        Each reason is a sentence that an operator reads from a 503.
         """
         now = now_ms()
         reasons: list[str] = []
@@ -1560,20 +1649,20 @@ class DaemonServer:
         return ""
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
-        """The daemon's own diagnostic sections, in `report()`'s shape.
+        """The diagnostic sections of the daemon itself, in the shape of `report()`.
 
-        A list because there is already more than one, and P5-12's arrival is
-        what the shape was built for: `sections` reached the client through one
-        loop, so the isolation section cost a tuple entry here and nothing at
-        all on the other side.
+        This is a list because there is already more than one section, and the
+        shape was built for the arrival of P5-12. `sections` reached the client
+        through one loop, so the isolation section cost one tuple entry here
+        and nothing on the client side.
         """
         life = self.lifetime()
         return [
-            # Named for the *process*, beside the socket's own section rather
-            # than merged with it: one says whether this daemon intends to stay,
-            # the other whether the door it bound survives a logout, and a
-            # person reading "lifetime" wants to be told which they are looking
-            # at.
+            # This section is named for the *process*. It is beside the section
+            # of the socket and not merged with it. One says whether this
+            # daemon intends to stay, and the other says whether the socket
+            # that it bound survives a logout. A user who reads "lifetime"
+            # needs to know which of the two it is.
             (
                 "daemon lifetime",
                 [
@@ -1583,49 +1672,54 @@ class DaemonServer:
                 ],
             ),
             ("socket lifetime", self.socket_lifetime().describe()),
-            # What is held for a credential, by name (T5) — the question a person
-            # asks when a child resumed after a restart and is not moving.
+            # What is held for a credential, by name (T5). A user asks this
+            # when a child resumed after a restart and does not move.
             ("credentials awaited", self.supervisor.awaited() or [("held", "nothing")]),
-            # Roots whose named profile moved since they started, and which of them
-            # wait on a person (S6) — `sessions/list` gives the same count per root.
+            # The roots whose named profile moved since they started, and which
+            # of them wait for a user (S6). `sessions/list` gives the same
+            # count for each root.
             ("session profiles", self.supervisor.behind() or [("behind", "nothing")]),
-            # The daemon's own non-guarantees (N5, I-2), printed by the command a
-            # person runs to ask what this daemon is. Rule 6 wants them beside
-            # where they would be assumed, and this reply *is* that place: it
-            # says "roots: 7" two rows up, which is the sentence that invites
-            # every assumption these rows correct.
+            # The non-guarantees of the daemon itself (N5, I-2). The command
+            # that a user runs to ask what this daemon is prints them. Rule 6
+            # wants them beside the place where they would be assumed, and this
+            # reply *is* that place. Two rows up it says "roots: 7", and that
+            # sentence invites every assumption that these rows correct.
             ("isolation", list(NON_GUARANTEES)),
         ]
 
     def socket_lifetime(self) -> RuntimeLifetime:
-        """Whether *this* socket survives logout — asked of the path it bound.
+        """Whether *this* socket survives logout, asked of the path that it bound.
 
-        `serve()` takes an explicit path, so the socket a daemon is answering on
-        and the one `resolve_roots()` derives are not always the same file. A
-        daemon that reported the lifetime of a directory it is not using would
-        be the client-side re-derivation `daemon/status` exists to prevent,
-        moved inside the server.
+        `serve()` takes an explicit path, so the socket that a daemon answers
+        on and the socket that `resolve_roots()` derives are not always the
+        same file. A daemon that reported the lifetime of a directory that it
+        does not use would repeat, inside the server, the client-side
+        derivation that `daemon/status` exists to prevent.
 
-        Read per call rather than captured at start: lingering can be enabled
-        while a daemon runs, and a doctor that answered from a snapshot taken at
-        boot would keep telling a person to run the command they just ran.
+        The value is read at each call and not captured at start. Lingering can
+        be enabled while a daemon runs. A doctor that answered from a snapshot
+        taken at boot would keep telling a user to run the command that the
+        user just ran.
         """
         return lifetime(self.path)
 
     async def check_reachable(self) -> str:
         """Is the socket at our path still ours? (P5-11)
 
-        `""` when it is. Two shapes of no, wanting the same record and not the same
-        sentence: `removed` is logout reaping `$XDG_RUNTIME_DIR` out from under a daemon
-        that keeps running, and `replaced` is what happens next — the person logs back in,
-        `phern daemon` binds a *new* socket at the same path, and two supervisors now believe
-        they own this user's roots. An existence check reads the second as a recovery,
-        which is why the identity is a `(dev, inode)` pair rather than a boolean.
+        Returns `""` when it is. There are two kinds of no. They need the same
+        record and not the same sentence. `removed` is a logout that removes
+        `$XDG_RUNTIME_DIR` from under a daemon that keeps running. `replaced` is
+        what happens next: the user logs back in, `phern daemon` binds a *new*
+        socket at the same path, and two supervisors now believe that they own
+        the roots of this user. An existence check reads the second case as a
+        recovery, which is the reason why the identity is a `(dev, inode)` pair
+        and not a boolean.
 
-        **Deliberately not a shutdown.** The roots keep working — their tasks hold no
-        reference to a connection, which is P5-01's whole inversion — and ending an hour
-        of in-flight work over a socket problem would be this row's own failure mode
-        arriving from the other side.
+        **Deliberately not a shutdown.** The roots keep working, because their
+        tasks hold no reference to a connection. That is the inversion that
+        P5-01 makes. If a socket problem ended an hour of work in flight, that
+        would be the failure that this row guards against, arriving from the
+        other side.
         """
         if self.identity is None or self.unreachable_since is not None:
             # Nothing to compare against (a caller that built this by hand), or
@@ -1641,19 +1735,20 @@ class DaemonServer:
             "reason": reason,
             "socket": str(self.path),
             # Which daemon, and which incident. Ten roots get ten records with
-            # ten `Session`-assigned timestamps, and without these the only way
-            # to ask "were these two sessions in the same incident" afterwards is
-            # to correlate on clock times and a payload that happens to be equal.
+            # ten timestamps that `Session` assigned. Without these fields, the
+            # only way to ask later "were these two sessions in the same
+            # incident" is to correlate clock times and a payload that happens
+            # to be equal.
             "pid": os.getpid(),
             "since": self.unreachable_since,
             "tier": life.tier,
             "linger": life.linger,
             "advice": life.advice,
         }
-        # `error`, not `warning`: for a daemon started from a terminal this line
-        # is the only place the news lands at the moment it happens, and it is
-        # the difference between "the agents stopped answering" and a sentence
-        # naming the command that prevents it next time.
+        # `error`, not `warning`. For a daemon that was started from a terminal,
+        # this line is the only place where the news arrives at the moment it
+        # happens. It is the difference between "the agents stopped answering"
+        # and a sentence that names the command that prevents it next time.
         log.error(
             "ph_app.daemon: %s is no longer this daemon's socket (%s) — "
             "clients cannot reach %d root(s); %s",
@@ -1666,13 +1761,14 @@ class DaemonServer:
         return reason
 
     async def keep_watching(self, watch: EntryWatch) -> None:
-        """The socket watch (P5-11, P12-05): `check_reachable` whenever the kernel
-        says the socket's entry may have moved, and never on a clock.
+        """The socket watch (P5-11, P12-05): run `check_reachable` whenever the kernel
+        reports that the entry of the socket may have moved, and never on a clock.
 
-        Once at the start, for the moment between `serve` taking `identity` and
-        arming `watch`. It ends when the answer is no (the latch is one-way, so
-        there is nothing further to hear) or when the watched directory is gone,
-        after the check that finds it so. `serve` owns the watch and closes it.
+        The check runs one time at the start, for the moment between `serve`
+        taking `identity` and arming `watch`. The watch ends when the answer is
+        no, because the latch is one-way and there is nothing more to hear. It
+        also ends when the watched directory is gone, after the check that finds
+        this. `serve` owns the watch and closes it.
         """
         if await self._asked():
             return
@@ -1681,17 +1777,19 @@ class DaemonServer:
                 if await self._asked():
                     return
         except OSError:
-            # The watch broke under us (its descriptor, the kernel): said once, and
-            # the socket is then checked at each request instead.
+            # The watch itself broke (its descriptor, or the kernel). This is
+            # logged one time, and the socket is then checked at each request
+            # instead.
             log.exception("ph_app.daemon: the socket watch failed; checking on requests instead")
             self.watch_refused = "the watch failed"
             self.watching = None
 
     async def _asked(self) -> bool:
-        """`check_reachable`, contained: whether it found the socket gone.
+        """`check_reachable`, contained: returns whether it found the socket gone.
 
-        A failing check is logged and the watch goes on, as a failing planner pass
-        does: raised, it would take the task group, and every root, with it."""
+        A check that fails is logged and the watch continues, as with a planner
+        pass that fails. If the failure were raised, it would end the task group
+        and every root with it."""
         try:
             return bool(await self.check_reachable())
         except Exception:
@@ -1699,34 +1797,36 @@ class DaemonServer:
             return False
 
     def holds(self, *, now: int | None = None) -> list[Hold]:
-        """Why this daemon is still up — every reason, in the order asked.
+        """Why this daemon is still up: every reason, in the order asked.
 
-        **The reasons rather than a yes/no**, because the same four facts answer
-        two questions: whether to stop, and what to *tell* a person about why it
-        has not (P9-07). Computed once, so the sidebar and the exit cannot
-        disagree about a daemon's own life.
+        **The reasons, and not a yes or no**, because the same four facts answer
+        two questions: whether to stop, and what to *tell* a user about why the
+        daemon has not stopped (P9-07). They are computed one time, so the
+        sidebar and the exit cannot disagree about the life of a daemon.
 
-        `client` is *connected*, not attached — see `connections`. `task` and
-        `schedule` are the supervisor's to answer. `keep-alive` is this object's, and
-        it is last because it is the only one that expires on its own.
+        `client` means *connected*, not attached. See `connections`. The
+        supervisor answers `task` and `schedule`. This object answers
+        `keep-alive`, which is last because it is the only reason that expires
+        with no event.
 
-        Empty means nothing wants it. For a **service** daemon that is still not a
-        reason to leave: somebody chose to run a supervisor, and `spent` is where
-        that is decided.
+        An empty list means that nothing wants the daemon. For a **service**
+        daemon that is still not a reason to leave: somebody chose to run a
+        supervisor. `spent` decides that.
 
-        A `now`, for the reason `passivatable` takes one: a test asks the question
-        rather than waiting out a cadence.
+        `now` is a parameter for the reason that `passivatable` takes one: a
+        test asks the question and does not wait for a cadence.
 
         **Every term has an event behind it** (§5 rule 6). `client`, `task` and
-        `schedule` are announced as they move: a connection's first and last frame,
-        an `agent/status` transition, a `schedule/create` or `schedule/cancel`, and
-        `Root.recheck` for the status changes the agent does not announce (a root
-        parking on a person, the ladder ending). A `keep-alive` expiring ends on a
-        clock, and `lifetime_clock` wakes at that moment to ask (P12-02).
+        `schedule` are announced as they move: the first frame of a connection
+        and its close, an `agent/status` transition, a `schedule/create` or
+        `schedule/cancel`, and `Root.recheck` for the status changes that the
+        agent does not announce (a root that parks on a user, the end of the
+        ladder). An expiring `keep-alive` ends on a clock, and `lifetime_clock`
+        wakes at that moment to ask (P12-02).
 
-        `list[Hold]` rather than `list[str]`: the vocabulary is closed and the
-        sidebar spends it, so a fifth reason is a type error here rather than a
-        blank row in somebody's terminal.
+        The type is `list[Hold]` and not `list[str]`. The vocabulary is closed
+        and the sidebar uses it, so a fifth reason is a type error here, and not
+        a blank row in the terminal of a user.
         """
         stamp = now if now is not None else now_ms()
         reasons: list[Hold] = []
@@ -1741,30 +1841,31 @@ class DaemonServer:
         return reasons
 
     def spent(self, *, now: int | None = None, holds: Sequence[Hold] | None = None) -> bool:
-        """Whether there is anything left for this daemon to be up for (P7-08).
+        """Whether nothing is left for this daemon to stay up for (P7-08).
 
-        Auto-started, and nothing holds it. **`EPHEMERAL_QUIET` is no longer part
-        of this**: asking P5-05's `passivatable` whole meant the exit inherited a
-        sixty-second log-quiet window, which is the right window for releasing a
-        root and the wrong one for ending a process — it is what put a minute
-        between closing the last terminal and the daemon leaving. The quiet window
-        keeps its job on the root half, where it belongs.
+        The daemon is spent when it was auto-started and nothing holds it.
+        **`EPHEMERAL_QUIET` is no longer part of this.** When this asked the
+        whole `passivatable` of P5-05, the exit inherited a sixty-second
+        log-quiet window. That window is right for the release of a root and
+        wrong for the end of a process: it put a minute between the close of the
+        last terminal and the exit of the daemon. The quiet window keeps its job
+        on the root side, where it belongs.
 
-        **`served` is the other half of the answer**, and it is here rather than
-        in `holds()` on purpose: a daemon still waiting for the client that
-        spawned it is not *held* by anything — nobody could name a reason — it
-        simply may not leave yet. Putting it among the reasons would have put a
-        `starting` on the wire and `held · starting` in a sidebar for the first
-        thirty seconds of every session, which is a word about the daemon's
-        plumbing in the row that answers a person's question.
+        **`served` is the other half of the answer**, and it is here and not in
+        `holds()` on purpose. A daemon that still waits for the client that
+        spawned it is not *held* by anything, because nobody could name a
+        reason. It only may not leave yet. As one of the reasons, it would have
+        put a `starting` on the wire and `held · starting` in a sidebar for the
+        first thirty seconds of every session. That is a word about the
+        internals of the daemon, in the row that answers the question of a user.
 
-        `holds` is the caller's own already-computed answer, for the one caller
-        that has one: `check_lifetime` needs it for the announcement anyway, and
-        asking twice is both a second trip to the schedule index and — worse —
-        a second *sample*, so a turn ending between them would announce one
-        answer and act on another. A parameter rather than the caller inlining
-        `ephemeral and not holds`, so this stays the only place the rule is
-        written down.
+        `holds` is the answer that the caller has already computed, for the one
+        caller that has one. `check_lifetime` needs it for the announcement in
+        any case. A second call would be a second trip to the schedule index
+        and, worse, a second *sample*: a turn that ended between the two would
+        announce one answer and act on another. It is a parameter, and the
+        caller does not inline `ephemeral and not holds`, so that the rule is
+        written only here.
         """
         if not self.ephemeral:
             return False
@@ -1779,11 +1880,12 @@ class DaemonServer:
         return "ephemeral" if self.ephemeral else "service"
 
     def lifetime(self) -> DaemonLifetime:
-        """Why this daemon is still here, as the frame both doors carry.
+        """Why this daemon is still here, as the frame that the verb and the
+        notification both carry.
 
-        One builder for the verb, the notification and the doctor's section, so
-        the three cannot describe the same process differently — which is
-        `holds()`' own argument one layer up.
+        One builder serves the verb, the notification and the section of the
+        doctor, so the three cannot describe the same process differently. That
+        is the argument of `holds()`, one layer up.
         """
         return DaemonLifetime(
             mode=self.mode,
@@ -1793,26 +1895,27 @@ class DaemonServer:
         )
 
     def check_lifetime(self) -> None:
-        """Say what holds this daemon, and stop if nothing does.
+        """Announce what holds this daemon, and stop if nothing does.
 
-        **On the event, never on a cadence.** A connection opening or closing, a
-        turn starting or ending, and `Root.recheck` are the moments the answer can
-        change, and each calls this — so closing the last terminal ends an
-        auto-started daemon at once, and the sidebar of the terminal *beside* it
-        learns a turn is holding the process while it is still running.
-        `lifetime_clock` calls it at the two moments that end on a clock: a
-        keep-alive expiring, and the spawn window closing.
+        **On the event, never on a cadence.** The answer can change at these
+        moments, and each of them calls this: the first frame of a connection,
+        a connection closing, a turn starting or ending, and `Root.recheck`.
+        The close of the last terminal therefore ends an auto-started daemon at
+        once. The sidebar of the terminal *beside* it also learns that a turn
+        holds the process while the turn is still running. `lifetime_clock`
+        calls this at the two moments that end on a clock: the expiry of a
+        keep-alive, and the close of the spawn window.
 
-        The announcement comes first and runs even when the answer is "nothing",
-        because that frame is the one a front end most needs: it is what turns
-        `daemon exits on detach` into the sentence the person acts on.
+        The announcement comes first and runs even when the answer is
+        "nothing". A front end needs that frame most: it turns `daemon exits on
+        detach` into the sentence that the user acts on.
 
         **One sample, two uses.** The announcement and the exit read the same
-        `DaemonLifetime` rather than asking twice — which is what `holds()`
-        promises ("computed once, so the sidebar and the exit cannot disagree")
-        and what a second call would quietly have broken. It is the cheaper half
-        too: `holds()` reaches `booked()`, which touches the schedule index, and
-        this runs on every turn transition.
+        `DaemonLifetime` and do not ask twice. `holds()` promises this: its
+        reasons are computed one time, so that the sidebar and the exit cannot
+        disagree. A second call would have silently broken that promise. One
+        sample is also cheaper: `holds()` reaches `booked()`, which touches the
+        schedule index, and this runs on every turn transition.
         """
         current = self.lifetime()
         self._announce_lifetime(current)
@@ -1823,15 +1926,16 @@ class DaemonServer:
     def _announce_lifetime(self, current: DaemonLifetime) -> None:
         """Tell every connected client, when the answer has moved.
 
-        **On change**, because this runs on every turn transition and a daemon
-        with four terminals open would otherwise write four identical frames per
-        prompt — the fan-out `SessionEventNotice` is careful about, for a fact
-        that moves a hundred times less often.
+        **On change**, because this runs on every turn transition. Without the
+        check, a daemon with four terminals open would write four identical
+        frames for each prompt. That is the fan-out that `SessionEventNotice` is
+        careful about, for a fact that moves a hundred times less often.
 
-        To `connections` rather than to a root's subscribers: this is a fact
-        about the process, so the audience is everyone attached to it, including
-        a client watching some other session. That is the second question the
-        connection *set* exists to answer.
+        The frame goes to `connections` and not to the subscribers of a root.
+        It is a fact about the process, so the audience is every client that is
+        connected to the process, including a client that watches another
+        session. That is the second question that the connection *set* exists
+        to answer.
         """
         if current == self.announced:
             return
@@ -1841,11 +1945,11 @@ class DaemonServer:
             try:
                 connection.notify(DaemonLifetime.METHOD, wire)
             except Exception:
-                # A client that cannot keep up is the root's problem to drop, not
-                # the lifetime's: `notify` raises so the *subscriber* list sheds
-                # it, and this list is membership of the socket rather than of a
-                # feed. Losing one lifetime frame costs a stale sidebar line; the
-                # next change sends another.
+                # A client that cannot keep up is for the root to drop, and not
+                # for this method. `notify` raises so that the *subscriber*
+                # list removes the client, and this list is membership of the
+                # socket and not of a feed. One lost lifetime frame costs a
+                # stale sidebar line, and the next change sends another frame.
                 log.debug("ph_app.daemon: a client did not take the lifetime frame")
 
     async def _handle(self, stream: ByteStream) -> None:
@@ -1855,16 +1959,16 @@ class DaemonServer:
             async with stream:
                 await connection.serve()
         finally:
-            # In `finally`, because membership is a claim on the *process*: a
-            # connection that ended by crashing and was never removed would keep
-            # an ephemeral daemon resident forever, and the symptom — a daemon
-            # that will not leave — points nowhere near here.
+            # This is in `finally`, because membership is a claim on the
+            # *process*. A connection that ended in a crash and was never
+            # removed would keep an ephemeral daemon resident forever. The
+            # symptom, a daemon that does not leave, points nowhere near here.
             self.connections.discard(connection)
-            # **A knock is not a departure** — see `_Connection.spoke` — so it
+            # **A knock is not a departure** (see `_Connection.spoke`), so it
             # arms no window. The *check* is unconditional, because `spent()`
-            # now knows about the spawn window itself: a knock that outlived the
-            # last real client used to leave the exit to a sweep, and asking here
-            # is both correct and immediate.
+            # now knows about the spawn window itself. A knock that outlived
+            # the last real client used to leave the exit to a sweep. A check
+            # here is both correct and immediate.
             if connection.spoke and not self.connections and self.keep_alive > 0:
                 self.keep_alive_until = now_ms() + int(self.keep_alive * 1000)
                 self.lifetime_clock.notice()
@@ -1874,26 +1978,29 @@ class DaemonServer:
 async def _stop_on_signals(
     server: DaemonServer, *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
 ) -> None:
-    """`SIGTERM` or `SIGINT` asks for the stop a `shutdown` frame asks for.
+    """`SIGTERM` or `SIGINT` asks for the same stop that a `shutdown` frame asks for.
 
-    Without this the default action ends the process at once, which is `SIGKILL`
-    with a politer name: no flush of what the roots' logs still owe, no leases
-    given back on the ordinary path, the socket left for the next daemon's
-    `_clear_stale`. `kill`, `systemctl stop`, `launchctl` and a Ctrl-C in a
-    foreground `phern daemon` all arrive this way. Asked once, the teardown runs
-    under its own budget (`GRACE_SECONDS`, in `serve`'s `finally`), and every
-    root's children are suspended in their own logs as it goes. Asked **again**
-    while that runs, or once a `shutdown` frame has already started it, the person
-    wants out now.
+    Without this, the default action ends the process at once, with the effect
+    of a `SIGKILL`: what the logs of the roots still owe is not flushed, no
+    lease is given back on the ordinary path, and the socket is left for the
+    `_clear_stale` of the next daemon. `kill`, `systemctl stop`, `launchctl`
+    and a Ctrl-C in a foreground `phern daemon` all arrive this way. On the
+    first signal, the teardown runs under its own budget (`GRACE_SECONDS`, in
+    the `finally` of `serve`), and the children of every root are suspended in
+    their own logs as it runs. A **second** signal while the teardown runs, or
+    a signal after a `shutdown` frame has already started it, means that the
+    user wants the process to leave now.
 
-    **The shared rule** (`ph.resources.stop_on_signals`): leaving at once kills what
-    this process still has in the orphan journal before it goes, and so does the
-    hard stop the first signal arms. That stop fires if the teardown has not ended
-    within `SHUTDOWN_SECONDS`, so a teardown that will not end cannot become a
-    process that will not either, nor leave a shell command running behind it.
+    **The shared rule** (`ph.resources.stop_on_signals`): to leave at once kills
+    what this process still has in the orphan journal before the process goes.
+    The hard stop that the first signal arms does the same. That stop fires if
+    the teardown has not ended within `SHUTDOWN_SECONDS`. A teardown that does
+    not end therefore cannot become a process that does not end, and cannot
+    leave a shell command running behind it.
 
-    Started as a task in `serve`'s group, so it is alive for the whole teardown
-    and canceled with the listener at the end, which is what disarms the hard stop.
+    This is started as a task in the group of `serve`. It is therefore alive for
+    the whole teardown. It is canceled with the listener at the end, and that
+    cancel disarms the hard stop.
     """
 
     def stopping(signum: int) -> bool:
@@ -1908,23 +2015,25 @@ async def _stop_on_signals(
 
 @asynccontextmanager
 async def _cancel_is_a_stop(stop: anyio.Event) -> AsyncIterator[None]:
-    """Run the block shielded from a cancel meant for `serve`, and turn that cancel
-    into `stop`: the orderly teardown, then the cancel carried on to the caller.
+    """Run the block shielded from a cancel that is meant for `serve`, and turn that
+    cancel into `stop`: the orderly teardown first, then the cancel passed on to
+    the caller.
 
-    **A cancel reached every task at once.** A root's turn was cancelled before
-    `serve`'s `finally` began, so it closed `aborted` and by the person, and the
-    shutdown's note on the live-roots index found a root owing nothing: the next
-    daemon never resumed work nobody had stopped. The listener, the planners and
-    any mount in flight went the same way, ahead of the teardown written to end
-    them in order. Shielded, they see only `stop`, which the teardown answers as it
+    **A cancel reached every task at once.** The turn of a root was canceled
+    before the `finally` of `serve` began, so the turn closed as `aborted` and
+    as stopped by the user. The note of the shutdown on the live-roots index
+    then found a root that owed nothing, and the next daemon never resumed work
+    that nobody had stopped. The listener, the planners and any mount in flight
+    ended the same way, before the teardown that was written to end them in
+    order. Shielded, they see only `stop`. The teardown answers `stop` as it
     answers a `shutdown` frame, under `GRACE_SECONDS`.
 
-    **The relay sits outside the shield**, the one task the cancel still reaches.
-    It is *started* rather than spawned, so a cancel before it runs fails `serve`
-    here instead of leaving a shielded daemon nothing can end. Nothing else bounds
-    the teardown but its own deadline, as after a `shutdown` frame: what it waits
-    on is shielded in its own right (`aclose`, `Context.dispose`), so a clock here
-    would reach none of it.
+    **The relay is outside the shield**, and it is the one task that the cancel
+    still reaches. It is *started* and not spawned, so a cancel before it runs
+    fails `serve` here, and does not leave a shielded daemon that nothing can
+    end. Nothing bounds the teardown except its own deadline, as after a
+    `shutdown` frame. What the teardown waits on is shielded itself (`aclose`,
+    `Context.dispose`), so a clock here would reach none of it.
     """
 
     async def relay(*, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED) -> None:
@@ -1939,19 +2048,20 @@ async def _cancel_is_a_stop(stop: anyio.Event) -> AsyncIterator[None]:
         with anyio.CancelScope(shield=True):
             yield
         relaying.cancel_scope.cancel()
-    # The group swallows its own cancel and leaves with no checkpoint, so the
-    # caller's would end here unsaid and `serve` would return to a call abandoned.
+    # The group absorbs its own cancel and exits with no checkpoint. The cancel
+    # of the caller would therefore end here unreported, and `serve` would
+    # return into a call that was abandoned.
     await anyio.lowlevel.checkpoint_if_cancelled()
 
 
 async def _clear_stale(path: Path) -> None:
-    """Remove a socket nobody is listening on; refuse one somebody is.
+    """Remove a socket that nobody listens on. Refuse one that somebody listens on.
 
-    A stale path is the ordinary aftermath of a crash and makes every client
-    hang on a connect that is never answered. A *live* one is another daemon,
-    and taking its socket would leave two supervisors both believing they own
-    this user's roots — which is I-5's question and P5-03's to answer, so here
-    it is a refusal rather than a race.
+    A stale path is the ordinary result of a crash, and it makes every client
+    hang on a connect that is never answered. A *live* path is another daemon.
+    To take its socket would leave two supervisors that both believe they own
+    the roots of this user. That is the question of I-5, and P5-03 answers it,
+    so here it is a refusal and not a race.
     """
     if not path.exists():
         return
@@ -1978,53 +2088,58 @@ async def serve(
     resume_owed: bool = False,
     continue_interrupted: bool = False,
 ) -> int:
-    """Run the supervisor until `shutdown`. Returns how many session logs could not
-    be written when it stopped (P13-08) — the exit status `phern daemon` reports.
+    """Run the supervisor until `shutdown`. Returns the number of session logs that
+    could not be written when it stopped (P13-08), which is the exit status that
+    `phern daemon` reports.
 
-    `probe` is a `host:port` to answer the startup, readiness and liveness probes on
-    over TCP (P13-12, `ph_app.daemon.probes`); `None` answers them on the unix
-    socket only.
+    `probe` is a `host:port` on which to answer the startup, readiness and
+    liveness probes over TCP (P13-12, `ph_app.daemon.probes`). With `None`, they
+    are answered only on the unix socket.
 
-    `resume_owed` runs `Supervisor.resume_owed` over every owed root once the
-    socket is accepting (P13-03), with readiness no until the pass ends — the pass
-    `phern agents resume --all` would run, for a unit with no `ExecStartPost`.
-    `continue_interrupted` is `Supervisor.continue_interrupted` (P13-04).
+    `resume_owed` runs `Supervisor.resume_owed` over every owed root after the
+    socket is accepting (P13-03). Readiness is no until the pass ends. It is the
+    pass that `phern agents resume --all` would run, for a unit that has no
+    `ExecStartPost`. `continue_interrupted` is `Supervisor.continue_interrupted`
+    (P13-04).
 
-    `ready` is an `anyio.Event` set once the socket is accepting, so a caller —
-    a test, or `phern agents` starting a daemon on demand — can wait for the door
-    to open rather than poll for the file to appear. The file exists before it
-    is listening, which is exactly the window a poll would land in.
+    `ready` is an `anyio.Event` that is set when the socket is accepting. A
+    caller (a test, or `phern agents` when it starts a daemon on demand) can
+    wait for the socket to open and does not have to poll for the file to
+    appear. The file exists before the socket is listening, and a poll would
+    land in exactly that window.
 
-    `signals` makes `SIGTERM` and `SIGINT` the same stop a `shutdown` frame is
-    (`_stop_on_signals`). Off by default and on for `phern daemon` only: a
-    process-wide handler belongs to the process that *is* the daemon, not to a
-    test or an embedding host that runs `serve` inside something else.
+    `signals` makes `SIGTERM` and `SIGINT` the same stop as a `shutdown` frame
+    (`_stop_on_signals`). It is off by default and on only for `phern daemon`.
+    A process-wide handler belongs to the process that *is* the daemon, and not
+    to a test or an embedding host that runs `serve` inside something else.
 
-    **A cancel is that stop too** (`_cancel_is_a_stop`), for the host that runs
-    `serve` and ends it the way it ends any task. The call still ends cancelled,
-    once the daemon has stopped.
+    **A cancel is that stop too** (`_cancel_is_a_stop`), for a host that runs
+    `serve` and ends it as it ends any task. The call still ends canceled, after
+    the daemon has stopped.
     """
     socket_path = path or resolve_roots().ensure().daemon_socket()
     await _clear_stale(socket_path)
-    # Bound *before* the task group, beside the stale check it belongs with:
-    # binding is a precondition, and a precondition that fails inside a group
-    # comes back wrapped in an `ExceptionGroup` that `phern daemon`'s `except`
-    # cannot see. A `$PH_RUNTIME` deep enough to exceed `AF_UNIX`'s 107-byte
-    # path limit printed a full traceback for exactly that reason. Nothing has
-    # been built yet at this point, so there is nothing for the teardown below
-    # to have cleaned up either.
+    # The socket is bound *before* the task group, beside the stale check that
+    # it belongs with. Binding is a precondition. A precondition that fails
+    # inside a group comes back wrapped in an `ExceptionGroup`, which the
+    # `except` of `phern daemon` cannot see. For exactly that reason, a
+    # `$PH_RUNTIME` deep enough to exceed the 107-byte path limit of `AF_UNIX`
+    # printed a full traceback. Nothing has been built at this point, so the
+    # teardown below would have had nothing to clean up either.
     try:
         listener = await anyio.create_unix_listener(socket_path)
-        # The socket carries every command this user's agents will take, so it
-        # is theirs alone — the same reasoning `$PH_RUNTIME` is 0o700 for.
+        # The socket carries every command that the agents of this user take,
+        # so only this user may use it. `$PH_RUNTIME` is 0o700 for the same
+        # reason.
         os.chmod(socket_path, 0o600)
     except OSError as error:
         raise DaemonUnavailable(f"cannot listen on {socket_path}: {error}") from error
-    # Taken here, immediately after the bind and before anything can have
-    # replaced it — the one moment at which "the socket at this path" and "the
-    # socket this daemon is listening on" are the same file by construction
-    # rather than by assumption (P5-11). A local as well as a field because the
-    # teardown below needs it whether or not the server was ever built.
+    # The identity is taken here, immediately after the bind and before
+    # anything can have replaced the socket. This is the one moment at which
+    # "the socket at this path" and "the socket this daemon is listening on"
+    # are the same file by construction and not by assumption (P5-11). It is a
+    # local as well as a field, because the teardown below needs it whether or
+    # not the server was ever built.
     identity = socket_identity(socket_path)
     probes = None
     if probe is not None:
@@ -2032,13 +2147,14 @@ async def serve(
             host, port = parse_bind(probe)
             probes = await anyio.create_tcp_listener(local_host=host, local_port=port)
         except (OSError, ValueError) as error:
-            # The door this daemon just bound goes with the refusal, so the next
-            # start finds no socket rather than a stale one to clear.
+            # The socket that this daemon just bound is removed with the
+            # refusal, so the next start finds no socket, and not a stale one
+            # to clear.
             await listener.aclose()
             socket_path.unlink(missing_ok=True)
             raise DaemonUnavailable(f"cannot listen for probes on {probe}: {error}") from error
-    # Armed the instant after, for the same reason: a change between the two would
-    # be one nothing heard (P12-05).
+    # The watch is armed right after, for the same reason: nothing would hear a
+    # change between the two (P12-05).
     watch: EntryWatch | None = None
     refused: str | None = None
     try:
@@ -2051,14 +2167,16 @@ async def serve(
             socket_path,
             error,
         )
-    # Its own scope, so teardown can end the watch before it unlinks the socket:
-    # that unlink is this daemon closing its own door, not losing it.
+    # The watch has its own scope, so that teardown can end the watch before it
+    # unlinks the socket. That unlink is this daemon closing its own socket,
+    # not losing it.
     watching = anyio.CancelScope()
     stop = anyio.Event()
     async with _cancel_is_a_stop(stop), anyio.create_task_group() as tasks:
-        # Built inside the group so `tasks` is a required field rather than an
-        # Optional with a "not serving" guard: a supervisor that cannot start a
-        # root is a state that should not be representable.
+        # The supervisor is built inside the group, so that `tasks` is a
+        # required field and not an Optional with a "not serving" guard. A
+        # supervisor that cannot start a root is a state that must not be
+        # representable.
         supervisor = Supervisor(
             profile=profile,
             tasks=tasks,
@@ -2081,11 +2199,12 @@ async def serve(
                 probe_address=_bound_address(probes) if probes is not None else "",
                 resumed=not resume_owed,
             )
-            # The jobs that end on a clock, each its own task and asleep until its
-            # next moment rather than polling (`ph_app.daemon.planner`). Release,
-            # the invariant check and the lifetime clock are always started: with
-            # nothing to plan for — passivation off, the check off, a service daemon
-            # with no keep-alive — each sleeps until told, which costs nothing.
+            # The jobs that end on a clock. Each is its own task, and it sleeps
+            # until its next moment and does not poll (`ph_app.daemon.planner`).
+            # Release, the invariant check and the lifetime clock are always
+            # started. When one has nothing to plan for (passivation off, the
+            # check off, a service daemon with no keep-alive), it sleeps until
+            # it is told, which costs nothing.
             tasks.start_soon(supervisor.releaser.keep, server.stop)
             tasks.start_soon(supervisor.verifier.keep, server.stop)
             tasks.start_soon(server.lifetime_clock.keep, server.stop)
@@ -2108,23 +2227,25 @@ async def serve(
                 tasks.start_soon(_keep_probing, server, probes)
             tasks.start_soon(keep_heartbeat, server, server.stop)
             if started is not None:
-                # Handed out rather than reachable through the socket: a test
-                # whose subject is the supervisor's own concurrency has no wire
-                # question to ask, and reaching it through a client would be
-                # testing the transport to get at something behind it.
+                # The server is handed out here, and is not reached through the
+                # socket. A test whose subject is the concurrency of the
+                # supervisor has no wire question to ask. To reach the
+                # supervisor through a client would test the transport in order
+                # to get at something behind it.
                 started(server)
-            # The accept loop has a group of its own, ended at the stop and waited
-            # for before the door closes: closed under the loop, a client
-            # connecting just then woke `accept` on a closed socket and failed
-            # the daemon's group. Its handlers run in `tasks`, so ending the loop
-            # ends no exchange in flight — the `shutdown` request among them.
+            # The accept loop has its own group. The group is ended at the stop
+            # and waited for before the listener closes. When the listener was
+            # closed under the loop, a client that connected at that moment
+            # woke `accept` on a closed socket and failed the group of the
+            # daemon. The handlers run in `tasks`, so the end of the loop ends
+            # no exchange in flight, and that includes the `shutdown` request.
             async with listener, anyio.create_task_group() as accepting:
                 accepting.start_soon(partial(listener.serve, server._handle, task_group=tasks))
                 server.serving = True
                 if resume_owed:
-                    # After the door is open, so a client that attaches mid-pass
-                    # shares the mount rather than waiting for the pass; readiness
-                    # says no until it ends.
+                    # The pass starts after the socket is open. A client that
+                    # attaches during the pass then shares the mount and does
+                    # not wait for the pass. Readiness says no until it ends.
                     tasks.start_soon(_resume_at_boot, server)
                 if ready is not None:
                     ready.set()
@@ -2132,53 +2253,58 @@ async def serve(
                 accepting.cancel_scope.cancel()
         finally:
             notify("STOPPING=1")
-            # **The watch ends before anything below touches the socket**: the
-            # unlink is this daemon closing its own door, and a watch still running
-            # would hear it as the door being taken and say so in every root.
-            # Cancelled before the first await below, so it cannot run in between.
+            # **The watch ends before anything below touches the socket.** The
+            # unlink is this daemon closing its own socket. A watch that still
+            # ran would hear it as the socket being taken, and would say so in
+            # every root. The watch is canceled before the first await below,
+            # so it cannot run in between.
             watching.cancel()
             # **The socket goes first, and only if it is still ours** (E2).
             #
             # *Only if ours*, because `check_reachable` latches `replaced` for a
-            # reason: the person logged back in, a second `phern daemon` bound a
-            # new socket at this path, and the file here is now **its** door. An
-            # unconditional unlink made this daemon's exit take the live one's
-            # socket with it, and the roots it was serving became unreachable
-            # for no reason anybody could see from either process.
+            # reason: the user logged back in, a second `phern daemon` bound a
+            # new socket at this path, and the file here is now the socket of
+            # **that** daemon. With an unconditional unlink, the exit of this
+            # daemon removed the socket of the live one. The roots that the
+            # live daemon served became unreachable, for no reason that anybody
+            # could see from either process.
             #
-            # *First*, because the drain below is allowed to take `GRACE_SECONDS`
-            # and the listener has already stopped accepting. A file that exists
-            # but refuses is the one state a client cannot act on: it spawns a
-            # daemon, the new one binds this same path, and the old teardown
-            # then deleted the newcomer's socket. Removing it up front turns that
-            # window into a plain "no daemon", which is a state the client
-            # already knows how to handle.
+            # *First*, because the drain below may take `GRACE_SECONDS` and the
+            # listener has already stopped accepting. A file that exists but
+            # refuses is the one state that a client cannot act on. The client
+            # spawns a daemon, the new daemon binds this same path, and the old
+            # teardown then deleted the socket of the new daemon. Removing the
+            # file first turns that window into a plain "no daemon", which is a
+            # state that the client already handles.
             if identity is not None and socket_identity(socket_path) == identity:
                 socket_path.unlink(missing_ok=True)
-            # Shielded, and bounded. A cancel from whoever started `serve()` stops
-            # at `_cancel_is_a_stop`, but the group cancels itself when one of its
-            # tasks fails, and an unwinding cut short here loses everything
-            # teardown is for: sessions unflushed,
-            # worktrees unreclaimed (F6), and P5-03's leases never released, so
-            # the next daemon refuses a session whose holder is already gone.
-            # **Both halves, and they do different jobs.** The scope shields
-            # `aclose`'s own work — the flushes, the channel closes, the loop
-            # between roots — which an outer cancellation would otherwise cut,
-            # leaving a lease held and the next daemon refusing the session.
-            # The *deadline* is what bounds the roots: `Context.dispose` shields
-            # itself, so a deadline out here could never reach inside one, and
-            # each root would have started a fresh `GRACE_SECONDS` of its own —
-            # ten roots, ten budgets, from a line that says ten seconds.
+            # Shielded, and bounded. A cancel from whoever started `serve()`
+            # stops at `_cancel_is_a_stop`. But the group cancels itself when
+            # one of its tasks fails, and an unwind that is cut short here
+            # loses everything that teardown is for: sessions are not flushed,
+            # worktrees are not reclaimed (F6), and the leases of P5-03 are
+            # never released, so the next daemon refuses a session whose holder
+            # is already gone.
+            # **Both halves, and they do different jobs.** The scope shields the
+            # work of `aclose` itself: the flushes, the channel closes, the loop
+            # between roots. An outer cancellation would otherwise cut that
+            # work, leave a lease held, and make the next daemon refuse the
+            # session. The *deadline* is what bounds the roots.
+            # `Context.dispose` shields itself, so a deadline out here could
+            # never reach inside one, and each root would have started a fresh
+            # `GRACE_SECONDS` of its own: ten roots, ten budgets, from a line
+            # that says ten seconds.
             #
-            # One instant for both, so they end together: a root that will not
-            # unwind must not become a process that will not exit, and two
-            # constants for one tunable is how a budget stops being the one that
-            # fires.
+            # Both use one instant, so they end together. A root that does not
+            # unwind must not become a process that does not exit. With two
+            # constants for one tunable, the budget that was set stops being
+            # the budget that fires.
             until = anyio.current_time() + GRACE_SECONDS
             with anyio.CancelScope(deadline=until, shield=True):
                 await supervisor.aclose(deadline=until)
-            # Last: whatever still runs — the planners, a connection still open,
-            # and a turn its root's release already wrote the log of.
+            # Last, cancel whatever still runs: the planners, a connection that
+            # is still open, and a turn whose log the release of its root has
+            # already written.
             tasks.cancel_scope.cancel()
             if watch is not None:
                 watch.close()
@@ -2188,9 +2314,10 @@ async def serve(
 
 
 async def _resume_at_boot(server: DaemonServer) -> None:
-    """`--resume-owed`: the pass over every owed root, once, with readiness no until
-    it ends. Whatever it finds is said in the daemon's log, one line per root, the
-    way `phern agents resume` prints it — nobody is attached to be told otherwise."""
+    """`--resume-owed`: one pass over every owed root, with readiness no until the
+    pass ends. Whatever the pass finds is written to the log of the daemon, one
+    line for each root, in the way that `phern agents resume` prints it. No
+    client is attached to be told in another way."""
     try:
         report = await server.supervisor.resume_owed(all_owed=True)
     except Exception:
@@ -2215,15 +2342,17 @@ async def _resume_at_boot(server: DaemonServer) -> None:
 
 
 async def _keep_probing(server: DaemonServer, probes: MultiListener[SocketStream]) -> None:
-    """Answer probes until the listener is closed under the accept loop, which is how
-    teardown ends it — a closed listener is the end of the job, not a failure."""
+    """Answer probes until the listener is closed under the accept loop. Teardown
+    ends the job that way, so a closed listener is the end of the job and not a
+    failure."""
     with suppress(anyio.ClosedResourceError):
         await probes.serve(partial(answer_probe, server))
 
 
 def _bound_address(probes: MultiListener[SocketStream]) -> str:
-    """`host:port` a TCP listener actually bound — port 0 asks the kernel, and the
-    first of the per-family listeners is the one a loopback bind made."""
+    """The `host:port` that a TCP listener actually bound. Port 0 asks the kernel
+    for a port, and the first of the per-family listeners is the one that a
+    loopback bind made."""
     try:
         address = probes.listeners[0].extra(SocketAttribute.local_address)
     except LookupError:

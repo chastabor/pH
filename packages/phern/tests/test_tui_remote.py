@@ -320,6 +320,34 @@ async def test_an_event_arriving_on_both_routes_is_folded_once() -> None:
     assert folded == [1, 2], "seq 2 came down both routes and was folded once"
 
 
+async def test_a_feed_that_has_shown_nothing_shows_the_first_event() -> None:
+    """The first event of a log is seq 0, and a new feed must show it.
+
+    `Followed.seen` is `None` until an event is shown. When it started at `0`,
+    "nothing shown" and "seq 0 shown" were the same value, and the opening event
+    of every new session was dropped as already seen.
+
+    Sabotage: start `seen` at `0`, and the opening event is not shown.
+    """
+    shown: list[int] = []
+    feed = Followed(
+        session_id="s",
+        on_events=lambda pairs, _live: shown.extend(as_int(one.get("seq"), -1) for one, _ in pairs),
+        on_status=lambda _facts: None,
+    )
+    assert feed.seen is None, "a new feed has shown nothing"
+    feed.live()
+
+    opening = {"sessionId": "s", "event": {"seq": 0, "type": "session/start"}}
+    feed("session.event", opening)
+    feed("session.event", opening)
+    # An event with no readable seq is dropped, and it does not move the mark.
+    feed("session.event", {"sessionId": "s", "event": {"type": "turn/end"}})
+
+    assert shown == [0], "seq 0 is shown one time"
+    assert feed.seen == 0
+
+
 async def test_a_caught_up_page_is_folded_as_history_and_a_frame_as_live(
     tmp_path: Path,
 ) -> None:

@@ -1,26 +1,32 @@
-"""`/profile` — what a session runs on, how its named profile moved, and changing both.
+"""`/profile`: show what a session runs on and how its named profile moved, and change both.
 
-The person's half of session profiles (S7). A session's environment is its base and
-the overrides logged since; this command reads that from the session's own log and
-changes it only through `ph.session_profile`'s doors, so the log says every change
-before the mount makes it.
+This command is the user's half of session profiles (S7). The environment of a
+session is its base and the overrides logged since. The command reads the
+environment from the log of the session. It changes the environment only through
+the functions of `ph.session_profile`, so the log records every change before
+the mount makes it.
 
-* `show [--full]` — the base, the overrides in the order they apply, and each
-  setting the session runs with that its base does not say; `--full` prints every
-  environment row as it runs.
-* `diff` — the named profile as it composes now against the version this session
-  runs on (S6's listing).
-* `save <name> [--replace]` — the base merged with the overrides, written as the
-  sparse named profile `name` (decision 5), and a `profile/saved` record.
-* `use <name> [--clear]` — another named profile as the base, the overrides kept
-  over it or cleared (decision 11). A base changes rows a live mount cannot follow,
-  so the root starts again from its log once the command is durable
-  (`Root.restart_wanted`). `use` of the base's own name takes its current version.
-* `clear [row]` — one override, or all of them, no longer applied.
+The verbs:
 
-**Registered by the supervisor, not by a row**, as the ask desk is: saving, switching
-and restarting are this host's — its named-profile store and its roots — and not
-something a profile contributes. It unwinds with the root that registered it.
+- `show [--full]` prints the base, the overrides in the order in which they
+  apply, and each setting that the session runs with and that its base does not
+  state. `--full` prints every environment row as it runs.
+- `diff` compares the named profile as it composes now with the version that
+  this session runs on (the listing of S6).
+- `save <name> [--replace]` merges the base with the overrides, writes the
+  result as the sparse named profile `name` (decision 5), and appends a
+  `profile/saved` record.
+- `use <name> [--clear]` makes another named profile the base. The overrides are
+  kept over it or cleared (decision 11). A base changes rows that a live mount
+  cannot follow, so the root starts again from its log after the command is
+  durable (`Root.restart_wanted`). `use` with the name of the current base takes
+  the current version of that profile.
+- `clear [row]` stops applying one override, or all of them.
+
+**The supervisor registers this command, and a row does not.** The ask desk is
+registered the same way. Saving, switching and restarting belong to this host,
+which has the named-profile store and the roots. A profile does not contribute
+them. The command unwinds with the root that registered it.
 
 @module ph_app.daemon.profile_command
 """
@@ -55,8 +61,8 @@ from ..console import detail
 from ..profiles import SaveRefused, named_version, save_session
 
 if TYPE_CHECKING:
-    # `supervisor` imports this module to register the command, so the edge only
-    # runs the other way for the checker.
+    # `supervisor` imports this module to register the command. The import in
+    # the other direction is therefore for the type checker only.
     from .supervisor import Root
 
 __all__ = ["profile_command"]
@@ -69,14 +75,15 @@ HINT = USAGE.removeprefix("usage: /profile ")
 
 
 class _Refused(Exception):
-    """A `/profile` line that changes nothing, and the sentence that says why."""
+    """A `/profile` line that changes nothing. Its message says why."""
 
 
 def profile_command(root: Root) -> CommandDefinition:
-    """`/profile` for one root, bound to it: what it reads and what it restarts."""
+    """Build `/profile` for one root. The command reads and restarts that root."""
 
     def named(rest: str) -> str:
-        """The profile a verb acts on — the word after it — or the usage line, refused."""
+        """Return the profile that a verb acts on, which is the word after the
+        verb. Refuse with the usage line when there is no such word."""
         if not rest:
             raise _Refused(USAGE)
         return rest.split()[0]
@@ -151,13 +158,14 @@ async def _save(root: Root, name: str, line: str, *, replace: bool) -> str:
 
 
 async def _use(root: Root, name: str, *, clear: bool) -> str:
-    """Adopt `name`'s current version, then have the root start again on it.
+    """Adopt the current version of `name`, then have the root start again on it.
 
-    **An adoption, as every base change after the first is** — a "yes" to a moved
-    profile, `phern profiles adopt` — so the start that applies it is where the base
-    changes, and a version that will not mount is withdrawn there rather than left to
-    strand the session (`runtime.mount_session`). The overrides go with it or apply over
-    it, as the person chose (decision 11).
+    **This is an adoption, as every base change after the first is.** It is the
+    same as a "yes" to a moved profile, or as `phern profiles adopt`. The start
+    that applies the adoption is therefore where the base changes. A version that
+    will not mount is withdrawn there, and does not strand the session
+    (`runtime.mount_session`). The overrides are cleared with the old base or
+    apply over the new base, as the user chose (decision 11).
     """
     if root.held_on_profile:
         raise _Refused("This session is waiting on its profile question; answer that first.")
@@ -187,14 +195,16 @@ async def _clear(root: Root, row: str | None, line: str) -> str:
         return f"No override of {row} in this session." if row else "This session has no overrides."
     said = f"Cleared {count_of(len(cleared), 'override')}: {', '.join(cleared)}."
     if left:
-        # A row an override turned on or off, or added: a live mount cannot follow.
+        # An override turned a row on or off, or added a row. A live mount
+        # cannot follow that change.
         root.restart_wanted = True
         return f"{said} Starting the session again, since {', '.join(left)} cannot change live."
     return f"{said} The session runs on its base for them now."
 
 
 def _version(name: str) -> ProfileBase:
-    """`name` as a session's base would record it now, or the sentence why not."""
+    """Return `name` as the base of a session would record it now. Refuse with
+    the reason when the profile does not resolve or does not compose."""
     try:
         return named_version(name)
     except ValidationError as error:

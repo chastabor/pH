@@ -1,31 +1,39 @@
-"""One loop for every job the daemon does at a moment rather than on an event (Phase 12).
+"""One loop for every job that the daemon does at a moment and not on an event (Phase 12).
 
-Three jobs end on a clock. Firing what is scheduled (`Supervisor.scheduler`),
-releasing a root that has been quiet long enough (`Supervisor.releaser`), and the
-daemon's own keep-alive and spawn window (`DaemonServer.lifetime_clock`). Each used
-to run on a cadence, waking every few seconds or every minute to ask whether
-anything had come due. A `Planner` asks instead *when* the next thing comes due,
-sleeps until then on the wall clock (`ph.wall_clock.Alarm`), and is woken early by
-a notice from whatever can move that moment.
+Four jobs end on a clock:
 
-The rules the three would otherwise each carry, held once:
+- firing what is scheduled (`Supervisor.scheduler`)
+- releasing a root that has been quiet long enough (`Supervisor.releaser`)
+- checking the invariants of a root that has settled (`Supervisor.verifier`)
+- the keep-alive and spawn window of the daemon itself
+  (`DaemonServer.lifetime_clock`)
 
-* **A fresh `moved` before the pass**, so a change the pass makes or meets wakes
-  the next sleep instead of being swallowed by this one.
-* **A failing pass is logged and the loop goes on.** A housekeeping pass that
-  raised would otherwise take the daemon's task group, and every root, with it.
-  **So is a failing plan**, which sleeps until told: a job that cannot say when it
-  is next due waits for the next notice rather than ending the process.
-* **`stop` is read before the alarm**, so a daemon stopping at the moment
-  something came due stops, instead of counting a due wake.
+Each job used to run on a cadence: it woke every few seconds or every minute to
+ask whether anything had come due. A `Planner` asks *when* the next thing comes
+due. It sleeps until then on the wall clock (`ph.wall_clock.Alarm`), and a
+notice from whatever can move that moment wakes it early.
 
-What each job keeps is its own `plan`: which moments count, and how soon after a
-pass the next may come.
+A `Planner` holds, in one place, the rules that each of the four jobs would
+otherwise carry:
 
-**The notices are the risk.** A change that can make something due sooner, with no
-notice behind it, waits for an unrelated wake, and on a quiet daemon that may be
-never. So each job's notices are listed where they are wired, and each has a test
-that changes only that one thing.
+- **A fresh `moved` before the pass.** A change that the pass makes or meets
+  then wakes the next sleep, and this sleep does not swallow it.
+- **A failing pass is logged and the loop continues.** Otherwise a housekeeping
+  pass that raised would end the task group of the daemon, and every root with
+  it. **A failing plan is handled the same way**, and the loop then sleeps until
+  told. A job that cannot say when it is next due waits for the next notice and
+  does not end the process.
+- **`stop` is read before the alarm.** A daemon that stops at the moment when
+  something came due stops, and does not count a due wake.
+
+Each job keeps its own `plan`: which moments count, and how soon after a pass
+the next pass may come.
+
+**The notices are the risk.** A change can make something due sooner. If no
+notice follows that change, it waits for an unrelated wake, and on a quiet
+daemon that wake may never come. The notices of each job are therefore listed
+where they are wired, and each notice has a test that changes only that one
+thing.
 
 @module ph_app.daemon.planner
 """
@@ -49,20 +57,21 @@ log = logging.getLogger("ph_app.daemon")
 
 @dataclass(slots=True)
 class Planner:
-    """A pass, then sleep until the next moment it has work, or until told."""
+    """Run a pass, then sleep until the next moment that has work, or until told."""
 
     what: str
     """Named in the log when a pass fails."""
     run: Callable[[], Awaitable[object]]
     """The pass. Idempotent, so a wake with nothing to do costs one pass."""
     plan: Callable[[int], int | None]
-    """When the next pass has work, epoch ms, given now; `None` sleeps until told."""
+    """When the next pass has work, in epoch ms, given the current time. `None`
+    means sleep until told."""
     rang: int = 0
-    """How many times the clock, rather than a notice, ended the sleep. The scheduler
-    counts these as reasons a failed index rebuild may now succeed."""
+    """How many times the clock, and not a notice, ended the sleep. The scheduler
+    counts these as reasons why a failed index rebuild may now succeed."""
     planned: int | None = None
-    """When this means to wake next, or `None` while it sleeps until told. Read by
-    `phern agents doctor` rather than worked out again."""
+    """When this planner means to wake next, or `None` while it sleeps until told.
+    `phern agents doctor` reads this value and does not work it out again."""
     _moved: anyio.Event = field(default_factory=anyio.Event)
 
     def notice(self) -> None:
@@ -70,7 +79,7 @@ class Planner:
         self._moved.set()
 
     async def keep(self, stop: anyio.Event) -> None:
-        """Run until `stop`. The first pass is at once."""
+        """Run until `stop`. The first pass runs immediately."""
         while True:
             self._moved = moved = anyio.Event()
             try:

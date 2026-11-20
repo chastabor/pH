@@ -1,33 +1,35 @@
-"""Rendering a tool card for a front end that cannot ask the tool (P5-14).
+"""Render a tool card for a front end that cannot ask the tool (P5-14).
 
-A `ToolCard` gets its title, its kind and its one-line summary from the tool's
-own `present_call`/`present_result` — Python callables held in the registry the
-harness mounted. The adapter reaches for `ctx.tools` for that and for nothing
-else. Over a socket there is no `ctx.tools` to reach, and the two ways out are
-both worse than this one: ship a client that renders every card as
-`generic`/`bash --version`, or teach the client to guess from tool names, which
-puts the daemon's tool set in the client's source.
+A `ToolCard` gets its title, its kind and its one-line summary from the
+`present_call`/`present_result` of the tool itself. Those are Python callables,
+held in the registry that the harness mounted. The adapter uses `ctx.tools` for
+that and for nothing else. Over a socket there is no `ctx.tools` to use. The two
+alternatives are both worse than this module. One is to ship a client that
+renders every card as `generic`/`bash --version`. The other is to teach the
+client to guess from tool names, which puts the tool set of the daemon in the
+source of the client.
 
-So the daemon renders and sends the **view**, beside the event and never inside
-it. Beside, because the view is *derived* — recomputed from the definitions
-mounted right now — and an event is what the log said. Putting it in `data`
-would make a presentation choice look like a fact somebody appended, and
-`_EventWire` forbids the extra key precisely so that cannot happen by accident.
+The daemon therefore renders the **view** and sends it beside the event, never
+inside it. The view goes beside the event because it is *derived*: it is
+recomputed from the definitions that are mounted now, and an event is what the
+log recorded. A view in `data` would make a presentation choice look like a fact
+that somebody appended. `_EventWire` forbids the extra key so that this cannot
+happen by accident.
 
-**The rendering itself is not here**: `ph.tools.presentation` owns it, because
-the terminal renders the same views in process and a second copy of "which hook,
-which scope, what a raised hook means" would reopen the very split the sidecar
-exists to close. What is left is the part that is genuinely daemon-side —
-following the log's own link to find a result's call.
+**The rendering itself is not here.** `ph.tools.presentation` owns it, because
+the terminal renders the same views in process. A second copy of "which hook,
+which scope, what a raised hook means" would reopen the split that the sidecar
+exists to close. This module keeps the part that belongs to the daemon: it
+follows the link in the log to find the call of a result.
 
-**Where the arguments come from is the only subtle part.** `present_result`
-takes the call's arguments, and a `tool/result` event does not carry them —
+**The only subtle part is where the arguments come from.** `present_result`
+takes the arguments of the call, and a `tool/result` event does not carry them.
 `tool/call` recorded them before the body ran (B4), and two copies of one fact
-are two that can disagree. The link is already in the log: `batch.py` appends the
-result with `source_event_seqs = (call_seq,)`, so the call is one lookup away
-rather than a scan. A result whose link is missing — a repair closer for a call
-that was never recorded — renders without a view, which is the same "best
-available, not exact" contract `render_call_view` already states.
+can disagree. The link is already in the log: `batch.py` appends the result with
+`source_event_seqs = (call_seq,)`, so one lookup finds the call and no scan is
+needed. A result can have no link: a repair closer for a call that was never
+recorded. Such a result renders without a view. That is the same "best
+available, not exact" contract that `render_call_view` already states.
 
 @module ph_app.daemon.cards
 """
@@ -47,12 +49,13 @@ from ..wire import result_block
 __all__ = ["CARD_EVENTS", "presentation_of"]
 
 CARD_EVENTS = frozenset(CARD_VIEWS)
-"""The event types that carry a view — derived from the one table that says which.
+"""The event types that carry a view, derived from the one table that names them.
 
-**Checked by the callers**, not only in here: the relay runs once per appended
-event — every streamed assistant chunk included — and an argument is evaluated
-before the function that would reject it, so gating inside would still pay a
-service lookup per chunk to reach a `return None`."""
+**The callers check this set, and `presentation_of` does not.** The relay runs
+one time for each appended event, and that includes every streamed assistant
+chunk. An argument is evaluated before the function that would reject it. A gate
+inside the function would therefore still pay a service lookup for each chunk to
+reach a `return None`."""
 
 
 def presentation_of(
@@ -60,12 +63,12 @@ def presentation_of(
     session: Session,
     event: SessionEvent,
 ) -> dict[str, Any] | None:
-    """The rendered view for one event, or `None` when there is nothing to say.
+    """Return the rendered view for one event, or `None` when there is none.
 
-    `None` covers every ordinary absence — a tool this deployment no longer
-    mounts, a definition with no presentation hooks — and the client then renders
-    exactly what it renders today without a daemon: the generic card built from
-    the log alone.
+    `None` covers every ordinary absence: a tool that this deployment no longer
+    mounts, or a definition with no presentation hooks. The client then renders
+    what it renders today without a daemon: the generic card built from the log
+    alone.
     """
     if event.type == "tool/call":
         view = render_call_view(
@@ -89,7 +92,8 @@ def presentation_of(
 
 
 def _call_of(session: Session, event: SessionEvent) -> SessionEvent | None:
-    """The `tool/call` this result settles, through the link the log already keeps."""
+    """Return the `tool/call` that this result settles, through the link that the
+    log already keeps."""
     for seq in event.source_event_seqs or ():
         found = session.at(seq)
         if found is not None and found.type == "tool/call":

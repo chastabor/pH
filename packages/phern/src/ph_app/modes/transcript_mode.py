@@ -1,9 +1,10 @@
-"""`--mode transcript` — what a person saw, not what the model sees.
+"""`--mode transcript`: what the user saw, not what the model sees.
 
-Reads `session.transcript()`, so a compacted conversation still shows the turns
-the human actually had. Using `derive_messages()` here would erase them the
-moment compaction lands (Phase 4) — the model surface deliberately shadows
-replaced ranges, and that is the wrong projection for a reader.
+The mode reads `session.transcript()`, so a compacted conversation still shows
+the turns that the human actually had. `derive_messages()` here would erase
+those turns as soon as a compaction replaces them (Phase 4). The model surface
+deliberately shadows replaced ranges, and that is the wrong projection for a
+reader.
 
 @module ph_app.modes.transcript_mode
 """
@@ -47,9 +48,9 @@ _SPEAKER: dict[Literal["system", "user", "assistant"], str] = {
     "assistant": "pH",
     "system": "system",
 }
-"""Keyed on `Message.role`'s own union, so the checker enforces that the table
-covers it. A `.get(role, role)` default here could never fire — the same dead
-defense this round removed one line below."""
+"""Keyed on the union of `Message.role` itself, so the type checker enforces that
+the table covers it. A `.get(role, role)` default here could never fire. It is
+the same dead defense that this round removed one line below."""
 
 
 def render_transcript(messages: tuple[Message, ...]) -> str:

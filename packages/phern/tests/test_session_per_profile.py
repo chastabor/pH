@@ -20,7 +20,7 @@ from daemon_helpers import row_disabled, running
 from typer.testing import CliRunner
 
 from ph.json import as_obj, as_seq
-from ph.keys import SESSIONS
+from ph.keys import SESSION_PERSISTENCE, SESSIONS
 from ph.paths import resolve_roots
 from ph.session import SessionEvent, SessionHeader, now_ms
 from ph.session_profile import BASE, ProfileBase
@@ -56,6 +56,39 @@ async def test_two_roots_on_two_profiles_share_one_daemon(tmp_path: Path) -> Non
         assert (plain["profile"], posed["profile"]) == ("headless", "tui")
         assert row_disabled(daemon.held("plain"), "tool-ask-user")
         assert not row_disabled(daemon.held("posed"), "tool-ask-user"), "tui arms it"
+
+
+async def test_two_roots_on_two_profiles_mount_one_store(tmp_path: Path) -> None:
+    """The supervisor lets the store of one live root answer for the daemon
+    (`Supervisor._store`). That is correct only while a profile cannot move the
+    store of its own roots.
+
+    The store is a deployment row, and a named profile sets environment rows
+    only. The loader therefore refuses a profile that names another store, and
+    `session/new` passes the refusal on.
+
+    Sabotage: compose the named profile in `profile_documents` with no `sets`,
+    and the root on `elsewhere` mounts a store of its own.
+    """
+    elsewhere = (
+        "extends: headless\nrows:\n  - id: session-persistence\n    config:\n"
+        f"      root: {tmp_path / 'private-store'}\n"
+    )
+    async with running(tmp_path) as daemon:
+        write_profile("elsewhere", elsewhere)
+        client = await daemon.client()
+        await client.call("session/new", sessionId="plain", profile="headless")
+        await client.call("session/new", sessionId="posed", profile="tui")
+
+        stores = {
+            daemon.held(name).ctx.require(SESSION_PERSISTENCE).directory()
+            for name in ("plain", "posed")
+        }
+        assert len(stores) == 1, "two profiles gave two stores"
+        assert daemon.running.supervisor.sessions_directory() in stores
+        with pytest.raises(DaemonError, match="is deployment, and this layer sets environment"):
+            await client.call("session/new", sessionId="moved", profile="elsewhere")
+        assert not (tmp_path / "private-store").exists()
 
 
 async def test_a_root_comes_back_on_the_profile_its_log_records(tmp_path: Path) -> None:

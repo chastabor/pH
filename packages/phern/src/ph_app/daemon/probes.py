@@ -1,26 +1,28 @@
 """Startup, readiness and liveness over TCP, for whatever supervises the daemon (P13-12).
 
-**phern never restarts itself.** An orchestrator that already exists — systemd,
-launchd, Kubernetes — owns the process, its environment and its backoff, and what
-it needs from the daemon is three answers it can poll without a client library:
-has it come up, may it be sent work, is it still alive. Kubernetes asks over HTTP;
-this is the smallest responder that speaks enough of it. The same three answers
-are a verb on the unix socket (`daemon/probe`) for a host with no port to spare,
-and `DaemonServer.probe` is the one place each is decided, so the two doors cannot
-disagree.
+**phern never restarts itself.** An orchestrator that already exists (systemd,
+launchd, Kubernetes) owns the process, its environment and its backoff. The
+orchestrator needs three answers from the daemon, and it must be able to poll
+them without a client library: has the daemon started, may it be sent work, is it
+still alive. Kubernetes asks over HTTP, and this module is the smallest responder
+that speaks enough HTTP. The same three answers are a verb on the unix socket
+(`daemon/probe`), for a host with no port to spare. `DaemonServer.probe` is the
+one place that decides each answer, so the TCP responder and the socket verb
+cannot disagree.
 
-**Loopback by default, read only, nothing secret.** A body is a `ProbeReply` or the
-daemon status, neither of which names a credential or a prompt. `/status` is the
-whole `daemon/status` reply, for a person or a dashboard; poll the three probes,
-which read only what the process holds. Binding beyond
-loopback is the operator's choice in `--probe-bind`, and nothing here authenticates:
-the answers are the same ones `phern agents doctor` prints to anyone at the socket.
+**Loopback by default, read only, nothing secret.** A body is a `ProbeReply` or
+the daemon status, and neither names a credential or a prompt. `/status` is the
+whole `daemon/status` reply, for a person or a dashboard. For polling, use the
+three probes, which read only what the process holds. A bind beyond loopback is
+the choice of the operator in `--probe-bind`. Nothing here authenticates: the
+answers are the same ones that `phern agents doctor` prints to anyone at the
+socket.
 
-**A heartbeat is what makes liveness mean anything.** `keep_heartbeat` stamps the
-clock from the event loop on a short interval; a probe answered from a loop that
-has not moved in three intervals is a daemon that is up and not working, which is
-the one state a `tcpSocket` probe cannot see. The same task feeds systemd's watchdog
-when a unit asked for one.
+**A heartbeat gives liveness its meaning.** `keep_heartbeat` stamps the clock
+from the event loop on a short interval. A probe that is answered from a loop
+that has not moved in three intervals shows a daemon that is up and not working.
+That is the one state that a `tcpSocket` probe cannot see. The same task feeds
+the watchdog of systemd when a unit asked for one.
 
 @module ph_app.daemon.probes
 """
@@ -63,27 +65,29 @@ HEARTBEAT_SECONDS = 5.0
 """How often the event loop stamps `DaemonServer.heartbeat_at`."""
 
 STALE_HEARTBEATS = 3
-"""How many heartbeats may be missed before `live` is no: a loop that has not run
+"""How many heartbeats may be missed before `live` is no. A loop that has not run
 in fifteen seconds is not merely busy."""
 
 SCHEDULER_GRACE_SECONDS = 60.0
-"""How late the scheduler's planned pass may be before `live` says it is stuck. A
-pass is a mount, which can take seconds; a minute past its own plan is a task that
-is not coming back."""
+"""How late the planned pass of the scheduler may be before `live` reports that
+it is stuck. A pass is a mount, which can take seconds. A pass that is a minute
+behind its own plan is a task that will not come back."""
 
 _REQUEST_BYTES = 4096
-"""The most of a request this reads: a probe is one line and a few headers."""
+"""The most of a request that is read. A probe is one line and a few headers."""
 
 _REQUEST_SECONDS = 2.0
-"""How long a connection may take to say what it wants."""
+"""How long a connection may take to send its request."""
 
 _PROBE_NAMES: Mapping[str, ProbeName] = literal_lookup(ProbeName)
-"""The path a request names, read back as a probe or nothing."""
+"""Maps the path that a request names to a probe. A path with no entry is not a
+probe."""
 
 
 def parse_bind(spec: str) -> tuple[str, int]:
-    """`host:port` to its halves. `[::1]:8080` and `:8080` are allowed; a port alone
-    binds loopback — the web door's (`DEFAULT_HOST`), so the two cannot disagree."""
+    """Split `host:port` into its halves. `[::1]:8080` and `:8080` are allowed. A
+    port alone binds loopback. The loopback address is the one that the web front
+    end uses (`DEFAULT_HOST`), so the two cannot disagree."""
     host, _, port_text = spec.rpartition(":")
     host = host.strip("[]") or DEFAULT_HOST
     try:
@@ -99,8 +103,8 @@ async def answer_probe(server: DaemonServer, stream: SocketStream) -> None:
     """One HTTP exchange: read the request line, answer, close."""
     async with stream:
         request = b""
-        # The whole head is read, so nothing is left unread when the socket closes;
-        # only its first line decides anything.
+        # The whole head is read, so that nothing is left unread when the socket
+        # closes. Only the first line of the head decides anything.
         with (
             anyio.move_on_after(_REQUEST_SECONDS),
             suppress(anyio.EndOfStream, anyio.DelimiterNotFound, anyio.IncompleteRead),
@@ -142,11 +146,12 @@ async def answer_probe(server: DaemonServer, stream: SocketStream) -> None:
 
 
 async def keep_heartbeat(server: DaemonServer, stop: anyio.Event) -> None:
-    """Stamp the clock from the event loop until `stop`; feed systemd meanwhile.
+    """Stamp the clock from the event loop until `stop`, and feed systemd meanwhile.
 
-    `READY=1` goes out once, the first time readiness is yes; `WATCHDOG=1` on every
-    beat while liveness is yes, so a daemon that knows it is stuck stops feeding the
-    watchdog rather than lying to it.
+    `READY=1` is sent one time, the first time that readiness is yes.
+    `WATCHDOG=1` is sent on every beat while liveness is yes. A daemon that knows
+    it is stuck therefore stops feeding the watchdog and does not give it a false
+    answer.
     """
     watchdog = watchdog_interval()
     interval = HEARTBEAT_SECONDS if watchdog is None else min(HEARTBEAT_SECONDS, watchdog)

@@ -37,7 +37,14 @@ from ph.seams.commands import CommandDefinition
 from ph.seams.skills import Skill
 from ph.seams.tui_status import StatusField, StatusReading
 from ph.session import SessionEvent
-from ph.testing import RecordedStep, ReplayAdapter, simple_tool, text_chunks, tool_call_chunks
+from ph.testing import (
+    RecordedStep,
+    ReplayAdapter,
+    simple_tool,
+    text_chunks,
+    tool_call_chunks,
+    write_profile,
+)
 from ph.tools import ToolCallView, ToolResultView
 from ph_app.daemon.projections import credentials_named
 from ph_app.daemon.supervisor import Root
@@ -299,6 +306,36 @@ async def test_a_credential_held_but_named_in_no_row_is_still_listed(tmp_path: P
 
         assert after["held"]["PH_TYPED_BY_HAND"] is True
         assert "s3cret" not in json.dumps(after), "the value must never cross the socket"
+
+
+async def test_a_root_lists_the_credentials_of_its_own_profile(tmp_path: Path) -> None:
+    """Two roots on two profiles share one daemon (S5), and each root is asked
+    about the credentials that its own profile names.
+
+    `credentials_of` used to read the default profile of the daemon. A root on
+    another profile then got the names of the default, and the credential that
+    its own adapter needs was missing from the picker.
+
+    Sabotage: read `supervisor.profile` in `credentials_of`, and the root on
+    `work` no longer lists `WORK_ONLY_KEY`.
+    """
+    work = (
+        "extends: headless\nrows:\n  - insert:\n"
+        "      - id: llm-anthropic\n        name: llm-anthropic\n        config:\n"
+        "          provider: anthropic\n          apiKeyEnv: WORK_ONLY_KEY\n"
+        "          contextWindow: 200000\n          defaultMaxTokens: 8192\n"
+    )
+    async with running(tmp_path) as daemon:
+        write_profile("work", work)
+        client = await daemon.client()
+        await client.call("session/new", sessionId="default")
+        await client.call("session/new", sessionId="working", profile="work")
+
+        default = await client.call("credentials/held", sessionId="default")
+        working = await client.call("credentials/held", sessionId="working")
+
+        assert working["held"] == {"WORK_ONLY_KEY": False}
+        assert "WORK_ONLY_KEY" not in default["held"], "the default profile does not name it"
 
 
 # ------------------------------------------------------------ acting on it --

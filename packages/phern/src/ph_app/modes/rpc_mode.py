@@ -1,12 +1,13 @@
-"""`--mode rpc` — JSON-RPC over stdio, in the dsh SDK's shape (D13, I-7).
+"""`--mode rpc`: JSON-RPC over stdio, in the shape of the dsh SDK (D13, I-7).
 
-Deliberately dsh's method names and payload shapes (`initialize`,
-`session/prompt`, `session.event`, `session.status`) rather than a pH-specific
-protocol: dsh already ships a Python client for this, and Phase 5's daemon
-extends the same surface rather than inventing a second one.
+The mode deliberately uses the method names and payload shapes of dsh
+(`initialize`, `session/prompt`, `session.event`, `session.status`) and not a
+protocol specific to pH. dsh already ships a Python client for this protocol,
+and the daemon of Phase 5 extends the same surface and does not invent a second
+one.
 
-Notifications are the log's own envelopes, camelCase, so an RPC client and a log
-reader parse one format.
+Notifications are the envelopes of the log itself, in camelCase, so an RPC
+client and a log reader parse one format.
 
 @module ph_app.modes.rpc_mode
 """
@@ -62,18 +63,21 @@ __all__ = ["RpcServer", "run_rpc"]
 log = logging.getLogger("ph_app.modes.rpc")
 
 
-# The stdio transport's own params (P8-07) — the two whose contract differs from
-# the daemon's: here `session/prompt` may omit the id and names the route, because
-# there is no supervisor holding one. A shared model would have to make that
-# optional for the daemon too, which is the daemon's `invalid_params` refusal
-# quietly given away. `session/new` may omit the id on both since protocol 8 — the
-# door names a new session, on either transport — but the daemon's also carries the
-# client's directory and trust, which stdio has no use for.
+# The params of the stdio transport itself (P8-07). These are the two whose
+# contract differs from the contract of the daemon. Here `session/prompt` may
+# omit the id, and it names the route, because there is no supervisor that holds
+# one. A shared model would have to make that optional for the daemon too, and
+# the daemon would then silently lose its `invalid_params` refusal.
+# `session/new` may omit the id on both transports since protocol 8, because
+# the server names a new session on either transport. But the `session/new` of
+# the daemon also carries the directory and trust of the client, which stdio
+# does not need.
 #
-# The shapes both transports need are the protocol's, not a copy here:
-# `NoParams` and `SessionParams` come from `..protocol` beside `Cursor`, for
-# `Cursor`'s stated reason. "Each server owns its method table" is about the
-# table, not about re-declaring an empty model per server.
+# The shapes that both transports need belong to the protocol and are not
+# copied here. `NoParams` and `SessionParams` come from `..protocol` beside
+# `Cursor`, for the reason that `Cursor` states. "Each server owns its method
+# table" is about the table. It does not mean that each server declares an
+# empty model again.
 
 
 class _NewParams(WireModel):
@@ -89,57 +93,65 @@ class _PromptParams(WireModel):
 
 @dataclass(slots=True)
 class _Served:
-    """One session this server serves: its own mount, and its agent once prompted."""
+    """One session that this server serves: its own mount, and its agent after
+    the first prompt."""
 
     ctx: Context
     start: RecordedStart
-    """What it is opened with (`open_root`): its start as read before the mount, and
-    once it is open, its own id and family."""
+    """What the session is opened with (`open_root`): its start as read before
+    the mount and, after it is open, its own id and family."""
     exits: AsyncExitStack
-    """This mount's own unwind, on the server's (`RpcServer.exits`): its own so a new
-    session's mount that opened nothing can go at once (`RpcServer._open`)."""
+    """The unwind of this mount, pushed on the unwind of the server
+    (`RpcServer.exits`). The mount has its own unwind so that the mount of a new
+    session that opened nothing can be removed immediately (`RpcServer._open`)."""
     agent: AgentDriver | None = None
     driving: anyio.Lock = field(default_factory=anyio.Lock)
-    """Held while this server drives the agent (`RpcServer._drive`): a prompt and a
-    wake take turns, so one waits out the other's `run()` rather than meeting
-    "already has active work"."""
+    """Held while this server drives the agent (`RpcServer._drive`). A prompt and
+    a wake take turns: one waits for the `run()` of the other to finish, and does
+    not meet "already has active work"."""
 
 
 @dataclass(slots=True)
 class RpcServer:
-    """One stdio JSON-RPC endpoint, each session it serves on a mount of its own (S5).
+    """One stdio JSON-RPC endpoint. Each session that it serves has its own mount (S5).
 
-    One mount per session, as the daemon has one per root: a session's overrides are
-    realized on its mount, so a shared one made one session's `/model` or allowance
-    the next session's too, with nothing in the second's log to say so. Each is
-    mounted from its own log's environment (`mount_session`), `profile` being what a
-    new one starts on; all of them unwind with `exits`.
+    There is one mount for each session, as the daemon has one for each root.
+    The overrides of a session are realized on its mount. A shared mount
+    therefore made the `/model` or allowance of one session apply to the next
+    session too, with nothing in the log of the second session to record it.
+    Each session is mounted from the environment in its own log
+    (`mount_session`), and `profile` is what a new session starts on. All the
+    mounts unwind with `exits`.
     """
 
     profile: Profile
     exits: AsyncExitStack
     out: TextIO
     choice: ModelChoice = field(default_factory=ModelChoice)
-    """What `phern --mode rpc --provider/--model` asked for; empty is the profile default."""
+    """What `phern --mode rpc --provider/--model` asked for. Empty means the
+    profile default."""
     tasks: TaskGroup | None = None
-    """Where a turn nobody prompted runs — a parent woken by a child's ending notice
-    between prompts (P13-05). `None`, as a test builds one, runs none."""
+    """Where a turn that nobody prompted runs: a parent that the ending notice of
+    a child woke between prompts (P13-05). When this is `None`, as in a server
+    that a test builds, no such turn runs."""
     ended: bool = False
-    """Whether the peer is done (`end`): nothing is written to it after."""
+    """Whether the peer is done (`end`). Nothing is written to the peer after that."""
     _served: dict[str, _Served] = field(default_factory=dict)
     _deployment: Context | None = None
 
     async def _mount(self, session_id: str | None) -> _Served:
-        """The session's own mount, mounted the first time it is asked for. `None` is a
-        session about to be made, which has no log to read an environment from and is
-        filed under its id once it opens (`_open`)."""
+        """Return the mount of the session, which is mounted the first time it is
+        asked for. `None` means a session that is about to be made. It has no log
+        to read an environment from, and its mount is filed under its id after it
+        opens (`_open`)."""
         served = self._served.get(session_id) if session_id else None
         if served is None:
             start = await read_start(session_id)
             own = AsyncExitStack()
             try:
-                # An adopted version the loader refuses is taken back there, as the
-                # daemon's roots and `phern -p` do; its log says why.
+                # An adopted version that the loader refuses is withdrawn in
+                # `mount_session`, as it is for the roots of the daemon and for
+                # `phern -p`. The log of the session records the reason.
                 ctx, _ = await mount_session(own, start, self.profile)
             except BaseException:
                 with releasing():
@@ -152,14 +164,17 @@ class RpcServer:
         return served
 
     async def _open(self, served: _Served) -> Session:
-        """Open a session on its mount, and file the mount under its id. A session about
-        to be made gets its id from `open_session`, which does not search the store for
-        an id it made, as `phern -p`'s does.
+        """Open a session on its mount, and file the mount under the id of the session.
 
-        **A new session's mount that opened nothing goes now** (Holdings rule 2): it
-        is filed under the id it opens with, so nothing would find it again, and it
-        stayed mounted — rows, plugins, a profile's worth — until the server ended.
-        A named one stays, filed, for the next request to open."""
+        A session that is about to be made gets its id from `open_session`, as a
+        new session of `phern -p` does. `open_session` does not search the store
+        for an id that it made.
+
+        **The mount of a new session that opened nothing is removed now**
+        (Holdings rule 2). The mount is filed under the id that the session opens
+        with, so nothing would find it again. It stayed mounted (rows, plugins,
+        everything that a profile mounts) until the server ended. The mount of a
+        named session stays, filed, for the next request to open."""
         try:
             session = await open_root(served.ctx, served.start)
         except BaseException:
@@ -173,8 +188,9 @@ class RpcServer:
         return session
 
     def unwritten(self) -> dict[str, str]:
-        """What the last write of each session's mount could not write, by session id,
-        with why (`unwritten_at_unwind`): read once the mounts are down."""
+        """What the last write of the mount of each session could not write, by
+        session id, with the reason (`unwritten_at_unwind`). It is read after the
+        mounts are down."""
         return {
             session_id: reason
             for served in self._served.values()
@@ -182,17 +198,19 @@ class RpcServer:
         }
 
     async def _listing(self) -> Context:
-        """The profile itself, mounted once, for what the deployment offers before any
-        session exists — `tools/list`."""
+        """Return the profile itself, mounted one time. It serves what the
+        deployment offers before any session exists: `tools/list`."""
         if self._deployment is None:
             self._deployment = await self.exits.enter_async_context(mounted(self.profile))
         return self._deployment
 
     def end(self) -> None:
-        """The peer is done — it said `shutdown`, or its end of stdin closed: nothing
-        more is written to it, and a turn a child's notice woke ends with the server's
-        tasks. Said first, since a turn canceled here still says `idle` on its way
-        out, a frame after the end to a peer that may have closed the pipe."""
+        """Record that the peer is done: it sent `shutdown`, or its end of stdin closed.
+
+        Nothing more is written to the peer, and a turn that the notice of a child
+        woke ends with the tasks of the server. `ended` is set first, because a
+        turn that is canceled here still reports `idle` on its way out. That frame
+        would come after the end, to a peer that may have closed the pipe."""
         self.ended = True
         if self.tasks is not None:
             self.tasks.cancel_scope.cancel()
@@ -204,12 +222,12 @@ class RpcServer:
         self.out.flush()
 
     def _notify(self, notice: SessionNotice) -> None:
-        """One notification, under the name its payload declares.
+        """Send one notification, under the name that its payload declares.
 
-        The same two shapes the daemon sends — a client reading this transport
-        and one reading the socket parse the frame the same way, which is what
-        "they are the same protocol" has to mean at the payload as well as at
-        the envelope.
+        These are the same two shapes that the daemon sends. A client that reads
+        this transport and a client that reads the socket parse the frame in the
+        same way. "They are the same protocol" must mean that at the payload as
+        well as at the envelope.
         """
         self._write(notification(notice.METHOD, notice.to_wire()))
 
@@ -220,25 +238,26 @@ class RpcServer:
 
     async def _dispatch(self, method: str, params: dict[str, Any]) -> MethodResult:
         if method in ("initialize", "daemon/hello"):
-            # The same block the daemon answers with, minus what stdio cannot
-            # do: one process, one peer, no supervision. The params are parsed
-            # and discarded: a client's capability block means nothing to a
-            # transport that will never ask it anything, but a stray field is
-            # still a stray field.
+            # This is the same block that the daemon answers with, minus what
+            # stdio cannot do: one process, one peer, no supervision. The params
+            # are parsed and discarded. The capability block of a client means
+            # nothing to a transport that will never ask the client anything,
+            # but a stray field is still a stray field.
             #
-            # **Through the verb, because `NoParams` contradicted that comment.**
-            # `WireModel` is `extra="forbid"`, so parsing against `NoParams`
-            # refused the `capabilities` list every client sends — including
-            # `DaemonClient.initialize`'s own frame — which made `initialize`
-            # two contracts under one name while `protocol.py` says "they are
-            # the same protocol". Verified: `parse_params("initialize",
-            # NoParams, {"capabilities": []})` came back `invalid_params:
-            # capabilities: Extra inputs are not permitted`.
+            # **The parse goes through the verb, because `NoParams` contradicted
+            # that comment.** `WireModel` is `extra="forbid"`, so a parse
+            # against `NoParams` refused the `capabilities` list that every
+            # client sends, including the frame of `DaemonClient.initialize`
+            # itself. `initialize` was then two contracts under one name, while
+            # `protocol.py` says "they are the same protocol". Verified:
+            # `parse_params("initialize", NoParams, {"capabilities": []})` came
+            # back `invalid_params: capabilities: Extra inputs are not
+            # permitted`.
             verbs.INITIALIZE.parse(params)
             return capabilities("tools")
         if method == "session/new":
-            # Open, not create: a peer naming a stored id resumes it, and one
-            # another process holds is refused by name (P5-03).
+            # Open, not create. A peer that names a stored id resumes it. An id
+            # that another process holds is refused by name (P5-03).
             opened = parse_params(method, _NewParams, params)
             session = await self._open(await self._mount(opened.session_id))
             return {"sessionId": session.id}
@@ -246,8 +265,8 @@ class RpcServer:
             return await self._prompt(parse_params(method, _PromptParams, params))
         if method == "session/events":
             asked = parse_params(method, SessionParams, params)
-            # A session is only ever opened on its own mount, so one without one
-            # here is one this server never opened.
+            # A session is only ever opened on its own mount. A session with no
+            # mount here is therefore one that this server never opened.
             served = self._served.get(asked.session_id)
             if served is None:
                 raise SessionForkError(
@@ -263,10 +282,10 @@ class RpcServer:
             return {"tools": [schema.to_wire() for schema in schemas]}
         if method == "shutdown":
             verbs.SHUTDOWN.parse(params)
-            # Nothing, like the daemon's. `shutdown` is a `Notify`, so there is
-            # no reply model to build and `respond` sends no frame — which was
-            # the whole argument for the `{"ok": True}` literal this replaced
-            # being pointless rather than merely duplicated.
+            # Return nothing, like the daemon. `shutdown` is a `Notify`, so
+            # there is no reply model to build and `respond` sends no frame.
+            # The `{"ok": True}` literal that this replaced was therefore
+            # pointless, and not merely duplicated.
             return None
         raise UnknownMethod(f'unknown method "{method}"')
 
@@ -279,26 +298,30 @@ class RpcServer:
         ctx.on("session/event", emit)
 
     def _woken(self, served: _Served, agent: object) -> None:
-        """A waking message reached a served agent's inbox (P13-05): the daemon's
-        ring, for a transport that drives the agent itself. Between prompts the
-        agent is idle and nothing else would run it — a readmitted child's result
-        sat there until the peer's next prompt ran both as one turn."""
+        """A waking message reached the inbox of a served agent (P13-05).
+
+        This is the ring of the daemon, for a transport that drives the agent
+        itself. Between prompts the agent is idle and nothing else would run it.
+        Before this listener, the result of a readmitted child stayed in the
+        inbox until the next prompt of the peer ran both as one turn."""
         if agent is served.agent and self.tasks is not None:
             self.tasks.start_soon(self._run_woken, served)
 
     async def _run_woken(self, served: _Served) -> None:
-        """`_drive` on the server's own task, where a raise would end the server: a
-        failure is logged, and the next wake or prompt drives again."""
+        """Run `_drive` on a task of the server itself, where a raise would end the
+        server. A failure is logged, and the next wake or prompt drives again."""
         try:
             await self._drive(served)
         except Exception:
             log.exception("ph_app.modes.rpc: a woken turn failed")
 
     async def _drive(self, served: _Served) -> None:
-        """Run the served agent until its inbox is empty, telling the peer — what a
-        prompt and a wake both do, one at a time (`_Served.driving`). Nothing pending
-        runs nothing: a wake whose message a turn in flight already took, or a prompt
-        a woken turn already answered."""
+        """Run the served agent until its inbox is empty, and tell the peer.
+
+        A prompt and a wake both do this, one at a time (`_Served.driving`). When
+        nothing is pending, nothing runs. That is the case for a wake whose
+        message a turn in flight already took, or for a prompt that a woken turn
+        already answered."""
         async with served.driving:
             agent = served.agent
             if agent is None or agent.session is None or not agent.inbox.has_pending:
@@ -319,12 +342,14 @@ class RpcServer:
             session = await self._open(served)
         agent = served.agent
         if agent is None:
-            # A prompt that names a route asks for it the way the flags do, and
-            # one that names neither takes the server's — through the one rule.
+            # A prompt that names a route asks for it in the same way as the
+            # flags. A prompt that names neither takes the route of the server.
+            # Both go through the one rule.
             named = bool(params.provider or params.model)
             asked = ModelChoice.from_flags(params.provider, params.model) if named else self.choice
-            # An override of the session's model where it differs (S4): the prompt's
-            # own route is a verb's, the server's flags a start option.
+            # This is an override of the model of the session where it differs
+            # (S4). The route of the prompt itself comes from a verb, and the
+            # flags of the server are a start option.
             entry = await start_on(
                 ctx,
                 session,
@@ -334,24 +359,27 @@ class RpcServer:
             )
             agents = ctx.require(AGENTS)
             agent = agents.create(session, entry.options())
-            # Before the sweep, which may deliver a readmitted child's notice itself;
-            # the listener reads `served.agent`, so a ring before it is set runs
-            # nothing and the notice waits in the inbox for this prompt's drive.
+            # The listener is attached before the sweep, because the sweep may
+            # itself deliver the notice of a readmitted child. The listener reads
+            # `served.agent`, so a ring before that is set runs nothing, and the
+            # notice waits in the inbox for the drive of this prompt.
             unheard = ctx.on("agent/woken", partial(self._woken, served))
             try:
                 await resume_children(ctx, agent)
             except BaseException:
-                # Served only once swept (D9, Holdings rule 2): recorded first, a
-                # sweep that raised was never run again, since every later prompt
-                # found an agent and skipped both. Ended here instead, so the next
-                # prompt makes it again and sweeps.
+                # The agent is served only after it is swept (D9, Holdings rule
+                # 2). When it was recorded first, a sweep that raised was never
+                # run again, because every later prompt found an agent and
+                # skipped both steps. The agent is ended here instead, so the
+                # next prompt makes it again and sweeps.
                 unheard()
                 with releasing():
                     await agents.dispose(agent.id)
                 raise
             served.agent = agent
-        # Delivered, then driven through the one path a wake also takes, so a woken
-        # turn in flight takes this prompt too rather than racing it.
+        # The prompt is delivered, and then driven through the one path that a
+        # wake also takes. A woken turn in flight therefore takes this prompt
+        # too, and does not race it.
         agent.followup(user_text(params.prompt))
         await self._drive(served)
         return {"sessionId": session.id, "events": len(session.events)}
@@ -364,7 +392,7 @@ async def run_rpc(
     stdin: TextIO | None = None,
     out: TextIO | None = None,
 ) -> Mapping[str, str]:
-    """Serve JSON-RPC until stdin closes, then answer `RpcServer.unwritten`."""
+    """Serve JSON-RPC until stdin closes, then return `RpcServer.unwritten`."""
     source = stdin if stdin is not None else sys.stdin
     sink = out if out is not None else sys.stdout
     async with AsyncExitStack() as exits, anyio.create_task_group() as tasks:
@@ -372,8 +400,9 @@ async def run_rpc(
         try:
             await _serve_lines(server, source)
         finally:
-            # A turn a child's notice woke (P13-05) ends with the peer: cancelled
-            # before the group waits for it, and the mounts unwind after.
+            # A turn that the notice of a child woke (P13-05) ends with the
+            # peer. It is canceled before the group waits for it, and the mounts
+            # unwind after.
             server.end()
     return server.unwritten()
 
@@ -381,10 +410,10 @@ async def run_rpc(
 async def _serve_lines(server: RpcServer, source: TextIO) -> None:
     """Answer each line of `source` until it closes or says `shutdown`."""
     while True:
-        # Abandoned on cancel, so a signal stops a server waiting for its peer's
-        # next line rather than waiting for it as well. The thread stays blocked
-        # in `readline`, and the host leaving through the signal is what ends it
-        # (`ph.resources.run_until_signaled`).
+        # The read is abandoned on cancel. A signal then stops a server that
+        # waits for the next line of its peer, and does not also wait for that
+        # line. The thread stays blocked in `readline`, and it ends when the
+        # host exits through the signal (`ph.resources.run_until_signaled`).
         line = await anyio.to_thread.run_sync(source.readline, abandon_on_cancel=True)
         if not line:
             return

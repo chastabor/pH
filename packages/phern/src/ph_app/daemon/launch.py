@@ -1,25 +1,28 @@
-"""Getting a daemon, from a UI that would rather not know there is one (P7-08).
+"""Get a daemon for a UI, so that the user does not have to start one (P7-08).
 
-The harness runs in the daemon now, so every interactive front end needs one to
-exist. Requiring a person to start it first would make the ordinary case — open a
-terminal, type a prompt — two commands, and the second one would be the kind
-nobody remembers until the first fails. So a UI starts one itself when the socket
-is absent; `DaemonServer.ephemeral` says why the one it starts is not a service.
+The harness now runs in the daemon, so every interactive front end needs a
+daemon to exist. If the user had to start the daemon first, the ordinary case
+(open a terminal, type a prompt) would take two commands. Nobody would remember
+the second command until the first one failed. A UI therefore starts a daemon
+itself when no daemon answers on the socket. `DaemonServer.ephemeral` explains
+why the daemon that a UI starts is not a service.
 
-**Absent is not the same as unresponsive, and the distinction is the whole of the
-error handling here.** No socket means no daemon was ever started, or the one
-that was has left — start one. A socket that exists and refuses is the aftermath
-of a crash, or a logout that reaped the door out from under a process still
-holding every session lease it took (P5-11) — and starting a second daemon there
-is precisely the wrong move. This module's job ends at "there is now something
-listening"; the connect that follows raises through the diagnosis `phern agents`
-already has.
+**This module asks whether a daemon answers. It does not ask why none does.**
+When nothing answers on the socket, the module starts a daemon. That is correct
+when no daemon was ever started, when the daemon has exited, and when a crash
+left a socket file behind: `_clear_stale` in the new daemon removes that file.
+One case is different. A logout can remove the socket while the process behind
+it still holds every session lease that it took (P5-11). A second daemon is the
+wrong answer there, but this module does not diagnose that case. The job of
+this module ends when something is listening. The connect that follows raises
+through the diagnosis that `phern agents` already has.
 
-**Two UIs opening at once must start one daemon, not two.** Both find no socket,
-both spawn, and the loser's `serve` hits `_clear_stale`, finds a *live* socket and
-refuses — leaving a person who opened two terminals looking at a traceback from
-the second. The lock makes the check-and-spawn one step, and the re-check *inside*
-it is what turns the loser into a client instead of a casualty.
+**Two UIs that open at the same time must start one daemon, not two.** Without
+a lock, both find no socket and both spawn. The `serve` of the loser reaches
+`_clear_stale`, finds a *live* socket, and refuses. The user who opened two
+terminals then sees a traceback from the second terminal. The lock makes the
+check and the spawn one step. The second check *inside* the lock makes the
+loser a client and not a failure.
 
 @module ph_app.daemon.launch
 """
@@ -48,49 +51,53 @@ __all__ = ["DaemonAbsent", "Started", "ensure_daemon", "phern_argv"]
 log = logging.getLogger("ph_app.daemon.launch")
 
 SPAWN_TIMEOUT = 30.0
-"""How long to wait for a daemon we started to answer on its socket.
+"""How long to wait for a daemon that this module started to answer on its socket.
 
-Measured at ~0.24 s on a warm cache; generous because the cost of being wrong is
-asymmetric — a timeout that fires early tells a person their daemon failed to
-start while it is still starting, and they cannot tell that from the truth.
+A start was measured at about 0.24 s on a warm cache. The timeout is generous
+because the two possible errors do not cost the same. A timeout that fires early
+tells the user that their daemon failed to start while it is still starting, and
+the user cannot tell that message from a true one.
 """
 
 LOCK_TIMEOUT = SPAWN_TIMEOUT + 5.0
-"""How long the loser of a race waits for the winner's spawn — longer than the
-spawn it is serializing against, so one slow start is not two failures."""
+"""How long the loser of a race waits for the spawn of the winner. The wait is
+longer than the spawn that it serializes against, so that one slow start does
+not become two failures."""
 
 TAIL_LINES = 12
-"""How many of a daemon's last stderr lines go into the refusal when it exits before
-it listens: enough for a usage error or the end of a traceback, few enough to read
-in a modal."""
+"""How many of the last stderr lines of a daemon go into the refusal when the
+daemon exits before it listens. The number is enough for a usage error or the end
+of a traceback, and small enough to read in a modal."""
 
 DETACHED = "PH_DAEMON_DETACHED"
-"""Set in the environment of a daemon `_detach` starts: its stderr is the launcher's
-file, read only until the socket answers. `phern daemon` reads it to keep its
-warnings out of that file once it is up (`configure_daemon_logging(to_stderr=…)`),
-because the rotating log already holds every one and this file does not rotate."""
+"""Set in the environment of a daemon that `_detach` starts. The stderr of that
+daemon is the file of the launcher, which is read only until the socket answers.
+`phern daemon` reads this variable and keeps its warnings out of that file after
+it is up (`configure_daemon_logging(to_stderr=…)`). The rotating log already
+holds every warning, and this file does not rotate."""
 
 
 def phern_argv(*args: str) -> list[str]:
-    """How pH starts pH: the argv for another process of this one, given its words.
+    """Return the argv that starts another process of this pH, given its words.
 
-    `sys.executable -m ph_app` rather than a bare `phern`: the caller may be running
-    from a virtualenv that is not on `PATH`, or from a checkout with no console
-    script installed at all, and a pH started from a *different* pH is one whose
-    profile, event vocabulary and wire version nobody chose. One spelling, here,
-    for the three callers that start one — the daemon a UI spawns, the terminal a
-    browser tab runs (`ph_app.cli.reinvoke`), and the daemon `phern service` starts.
+    The argv is `sys.executable -m ph_app` and not a bare `phern`. The caller may
+    run from a virtualenv that is not on `PATH`, or from a checkout with no
+    console script installed. A pH that a *different* pH started has a profile,
+    an event vocabulary and a wire version that nobody chose. The spelling is
+    written one time, here, for the three callers that start a process: the
+    daemon that a UI spawns and the terminal that a browser tab runs (both
+    through `ph_app.cli.reinvoke`), and the daemon that `phern service` starts.
     """
     return [sys.executable, "-m", "ph_app", *args]
 
 
 class DaemonAbsent(Refusal):
-    """There is no daemon and this caller will not, or could not, start one.
+    """There is no daemon, and this caller will not start one or could not.
 
-    Its own type because the caller's next step is a command they can type, and
-    because `--no-spawn` is a deliberate posture rather than a failure: a person
-    running a daemon under systemd wants to know their UI did not quietly start a
-    second one beside it.
+    The refusal has its own type for two reasons. The next step of the caller is
+    a command that they can type. Also, `--no-spawn` is a deliberate choice and
+    not a failure: a user who runs a daemon under systemd wants to know that
+    their UI did not quietly start a second daemon beside it.
     """
 
     code = "daemon_absent"
@@ -98,8 +105,8 @@ class DaemonAbsent(Refusal):
 
 @dataclass(frozen=True, slots=True)
 class Started:
-    """What `ensure_daemon` did, so a UI can say "starting a supervisor…" rather
-    than looking hung for the seconds a spawn takes."""
+    """What `ensure_daemon` did. A UI can then show "starting a supervisor…" and
+    does not look hung for the seconds that a spawn takes."""
 
     path: Path
     spawned: bool
@@ -108,16 +115,16 @@ class Started:
 async def ensure_daemon(
     *, argv: Sequence[str], roots: PathRoots | None = None, spawn: bool = True
 ) -> Started:
-    """Make sure a daemon is listening, starting one with `argv` if not.
+    """Make sure that a daemon is listening. Start one with `argv` if none is.
 
-    Returns without doing anything when one already answers, which is the
-    common case and must stay cheap: a second terminal, a browser tab, a
-    `phern agents` call. `argv` is the caller's — this module knows nothing about
-    profiles or providers; `ph_app.cli.spawn_command` spells the command whose
-    options those are.
+    The function returns without other work when a daemon already answers. That
+    is the common case and must stay cheap: a second terminal, a browser tab, a
+    `phern agents` call. The caller supplies `argv`. This module knows nothing
+    about profiles or providers. `ph_app.cli.spawn_command` builds the command
+    that has those options.
 
-    `spawn=False` is `--no-spawn`: refuse rather than start one, for a deployment
-    that runs `phern daemon` under an init system.
+    `spawn=False` is `--no-spawn`: refuse and do not start a daemon. It is for a
+    deployment that runs `phern daemon` under an init system.
     """
     resolved = roots if roots is not None else resolve_roots(create=True)
     path = resolved.daemon_socket()
@@ -126,26 +133,27 @@ async def ensure_daemon(
     if not spawn:
         raise DaemonAbsent(f"no daemon at {path}; start one with `phern daemon`")
 
-    # Acquired on a worker thread because it blocks, which is exactly why
-    # `ph.locks` owns `thread_local=False`: the release below happens on the event
-    # loop, where a thread-local counter would be zero and releasing would
-    # silently do nothing.
+    # The lock is acquired on a worker thread because the acquire blocks. That is
+    # the reason why `ph.locks` sets `thread_local=False`: the release below runs
+    # on the event loop, where a thread-local counter would be zero and the
+    # release would silently do nothing.
     lock_path = resolved.runtime / "daemon.lock"
     try:
         release = await anyio.to_thread.run_sync(
             partial(acquire_file_lock, lock_path, timeout=LOCK_TIMEOUT, what="the daemon launcher")
         )
     except LockBusy as busy:
-        # A live holder inside the lock longer than a spawn can take. Not a
-        # reason to spawn anyway — that is the race the lock exists to stop.
+        # A live holder has been inside the lock for longer than a spawn can
+        # take. That is not a reason to spawn anyway: the lock exists to stop
+        # that race.
         raise DaemonAbsent(
             f"another launcher has held {lock_path} for {LOCK_TIMEOUT:g}s; "
             "run `phern daemon` to see why"
         ) from busy
     try:
-        # **Inside the lock**, and this is the line that makes the race benign:
-        # the loser of two simultaneous launches gets here after the winner's
-        # daemon is already answering, sees it, and becomes a client.
+        # This check is **inside the lock**, and it makes the race harmless. The
+        # loser of two simultaneous launches arrives here after the daemon of
+        # the winner already answers. The loser sees it and becomes a client.
         if await listening(path):
             return Started(path=path, spawned=False)
         log.info("ph_app.daemon: no daemon at %s; starting one", path)
@@ -160,27 +168,28 @@ async def ensure_daemon(
 def _detach(argv: list[str], stderr: Path) -> subprocess.Popen[bytes]:
     """Start the daemon as a process that outlives this one.
 
-    The whole point of a daemon is that closing the terminal does not end the
-    session, so it must not be a child that dies with its parent's process group
-    on a Ctrl-C. `start_new_session` puts it in one of its own — the portable
-    half of the double-fork idiom, and enough here because pH's daemon needs no
-    controlling terminal.
+    The purpose of a daemon is that closing the terminal does not end the
+    session. The daemon must therefore not be a child that dies with the process
+    group of its parent on a Ctrl-C. `start_new_session` puts the daemon in a
+    process group of its own. That is the portable half of the double-fork idiom,
+    and it is enough here because the daemon of pH needs no controlling terminal.
 
-    Output is not inherited: the daemon prints its socket path and its linger
-    warning on the way up, and those landing in the middle of a Textual screen
-    would corrupt the UI that started it. Stdout goes to the null device. **Stderr
-    goes to `stderr`, truncated first**, because a daemon that exits before it
-    listens says why on exactly that stream — and with it on the null device the
-    only thing a UI could report was the exit status, with advice to run the
-    command again somewhere its words could be seen. `_await_socket` reads the
-    file back into its refusal. Once the daemon is up its warnings go to its own
-    rotating log alone (`DETACHED`), so this file keeps its startup and, should it
-    crash, its last words.
+    The daemon does not inherit the output streams. It prints its socket path and
+    its linger warning during startup, and those lines in the middle of a Textual
+    screen would corrupt the UI that started it. Stdout goes to the null device.
+    **Stderr goes to `stderr`, which is truncated first.** A daemon that exits
+    before it listens writes the reason to that stream. When the stream went to
+    the null device, a UI could report only the exit status, with advice to run
+    the command again in a place where the output could be seen. `_await_socket`
+    reads the file back into its refusal. After the daemon is up, its warnings go
+    only to its own rotating log (`DETACHED`). This file therefore keeps the
+    startup output of the daemon and, if the daemon crashes, its last output.
     """
     stderr.parent.mkdir(parents=True, exist_ok=True)
-    # argv is built by the caller's `spawn_command`, never from anything typed.
+    # The caller builds argv. A UI builds it with `spawn_command`, and
+    # `phern service start` appends the daemon options that the user typed.
     with stderr.open("wb") as captured:
-        # Popen keeps a descriptor of its own; this handle closes with the block.
+        # Popen keeps its own descriptor. This handle closes with the block.
         return subprocess.Popen(
             argv,
             stdin=subprocess.DEVNULL,
@@ -192,20 +201,22 @@ def _detach(argv: list[str], stderr: Path) -> subprocess.Popen[bytes]:
 
 
 async def _await_socket(path: Path, process: subprocess.Popen[bytes], stderr: Path) -> None:
-    """Wait for something to answer, or say what we waited for and gave up on.
+    """Wait until a daemon answers. If none does, report what the wait was for.
 
-    Polls the *connect* rather than the file, because the file exists before
-    `serve()` is listening — exactly the window a `path.exists()` poll lands in,
-    and the reason `serve` takes a `ready` event for callers in the same process.
-    A spawned daemon is in another one, so this is the honest test.
+    The loop polls the *connect* and not the file, because the file exists before
+    `serve()` listens. A `path.exists()` poll would succeed in that window. The
+    same window is the reason why `serve` takes a `ready` event for callers in
+    the same process. A spawned daemon is in another process, so the connect is
+    the correct test.
 
-    A daemon that exits before it listens — a profile that does not compose, a
-    flag it does not take, a socket it cannot bind — is said at once rather than
-    after the whole wait, and **in its own words**: `_detach` pointed its stderr at
-    `stderr`, so the refusal it printed is read back here and put in the sentence.
-    Before that the words went to the null device with the rest of its output, and
-    a person was handed an exit status and told to run the command again in a
-    terminal to read what it had already said once.
+    A daemon can exit before it listens: a profile that does not compose, a flag
+    that it does not take, a socket that it cannot bind. The exit is reported
+    immediately and not after the full wait, and **in the words of the daemon**.
+    `_detach` pointed the stderr of the daemon at `stderr`, so this function
+    reads back the refusal that the daemon printed and puts it in the message.
+    Before that change, the refusal went to the null device with the rest of the
+    output. The user got an exit status and advice to run the command again in a
+    terminal, to read what the daemon had already printed one time.
     """
     with anyio.move_on_after(SPAWN_TIMEOUT):
         while not await listening(path):
@@ -228,10 +239,11 @@ async def _await_socket(path: Path, process: subprocess.Popen[bytes], stderr: Pa
 
 
 def _refusal(what: str, stderr: Path) -> str:
-    """`what`, followed by the daemon's last `TAIL_LINES` non-blank lines when it left any.
+    """Return `what`, then the last `TAIL_LINES` non-blank lines of the daemon if any.
 
-    Read whole: the file was truncated at this spawn and holds only what the daemon
-    said on its way up. The tail, because a traceback's reason is its last line.
+    The function reads the whole file. The file was truncated at this spawn, so
+    it holds only what the daemon wrote during startup. The function takes the
+    tail because the reason in a traceback is on its last line.
     """
     try:
         text = stderr.read_text(encoding="utf-8", errors="replace")

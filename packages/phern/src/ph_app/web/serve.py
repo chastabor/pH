@@ -1,70 +1,75 @@
-"""`phern --mode web` — the same terminal, in a browser tab (P7-05).
+"""`phern --mode web`: the same terminal, in a browser tab (P7-05).
 
 **One layout, not two.** `textual-serve` runs a real `PHTuiApp` as a subprocess
-and streams its frames to a canvas over a websocket, so the browser shows the
-terminal — the same widgets, the same fold, the same verbs — and layout parity is
-by construction rather than by two implementations kept in step. A native HTML
-renderer on the same view model is P7-07; this is what makes a browser useful
-before that exists.
+and streams its frames to a canvas over a websocket. The browser therefore shows
+the terminal: the same widgets, the same fold, the same verbs. Layout parity
+comes from the construction, and not from two implementations that must be kept
+in step. A native HTML renderer on the same view model is P7-07. This module
+makes a browser useful before that renderer exists.
 
-Each tab is its own subprocess and so its own front end — and **every tab of one
-launch is on one session**, which is the multiplex the plan's decision 2
-describes: several UIs on one conversation, each with a private composer, a
-submitted prompt visible to all. That is not a preference; upstream fixes the
-command at construction and varies nothing per request, so a session id here is
-necessarily every tab's. Rather than leave it unset — which would make each tab a
-*different* new session and leave an upload with no session to stage into — the
-launch mints one and says so. `--session` names an existing one instead, and the
-picker still moves a tab to another conversation.
+Each tab is its own subprocess and so its own front end. **Every tab of one
+launch is on one session.** That is the multiplex that decision 2 of the plan
+describes: several UIs on one conversation, each with a private composer, and a
+submitted prompt that all of them see. This is not a preference. Upstream fixes
+the command at construction and varies nothing for each request, so a session id
+here necessarily belongs to every tab. If the id were left unset, each tab would
+be a *different* new session, and an upload would have no session to stage into.
+The launch therefore mints one id and reports it. `--session` names an existing
+session instead, and the picker still moves a tab to another conversation.
 
 A browser tab therefore differs from a second terminal, which does start a new
-session. The difference is honest: two terminals are two programs a person ran,
-and two tabs are two windows onto one server they opened.
+session. The difference matches what the user did: two terminals are two
+programs that the user ran, and two tabs are two windows onto one server that
+the user opened.
 
-**We compose the aiohttp app rather than calling `Server.serve()`.** Upstream
-builds its own `web.Application` inside `serve()` with no hook to add a route or
-a middleware, and this needs both: a token gate and an upload endpoint
-(P7-06). What it does expose is the three handlers, the two lifecycle hooks and
-the two asset paths, so this module is `_make_app` re-stated with our additions —
-and `test_textual_serve_still_exposes_what_we_compose` fails at test time if a
-release renames any of them, rather than at `phern --mode web` in front of a person.
-Overriding the private `_make_app` from a subclass would fail the other way: a
-rename there leaves the override uncalled and the app built *without the gate*,
-which is a security hole that comes up green.
+**This module composes the aiohttp app and does not call `Server.serve()`.**
+Upstream builds its own `web.Application` inside `serve()` with no hook to add a
+route or a middleware, and this module needs both: a token gate and an upload
+endpoint (P7-06). Upstream does expose the three handlers, the two lifecycle
+hooks and the two asset paths. This module is therefore `_make_app` written
+again with the additions of pH. `test_textual_serve_still_exposes_what_we_compose`
+fails at test time if a release renames any of them, and not at
+`phern --mode web` in front of the user. An override of the private `_make_app`
+from a subclass would fail in the other direction: a rename there leaves the
+override uncalled and the app built *without the gate*. That is a security hole
+that passes every test.
 
-Three details of that re-statement are load-bearing, and all three are upstream's
-requirements rather than choices:
+Three details of that copy are necessary. All three are requirements of upstream
+and not choices:
 
-* `aiohttp_jinja2.setup` with upstream's own template loader, because
+- `aiohttp_jinja2.setup` with the template loader of upstream itself, because
   `handle_index` is decorated with `@aiohttp_jinja2.template("app_index.html")`
-  and renders nothing without it;
-* the route **names** `websocket` and `static`, because `handle_index` builds the
-  page's websocket URL and asset prefix by looking them up in the router;
-* upstream's `statics_path`/`templates_path`, which it resolves relative to its
-  own `server.py` — so they are read off the `Server` instance rather than
-  guessed.
+  and renders nothing without it.
+- The route **names** `websocket` and `static`, because `handle_index` builds
+  the websocket URL and the asset prefix of the page by looking them up in the
+  router.
+- The `statics_path`/`templates_path` of upstream, which upstream resolves
+  relative to its own `server.py`. They are therefore read from the `Server`
+  instance and not guessed.
 
-Every import here is at module scope, and that is the point: this module is only
-reached from the `--mode web` branch, which wraps the import in the one `try`
-that turns a missing extra into an install line. A lazily-imported
-`textual_serve` would slip past that `try` and fail later, in front of a person
-who had already been told the server was starting.
+Every import here is at module scope, on purpose. This module is reached only
+from the `--mode web` branch, which wraps the import in the one `try` that turns
+a missing extra into an install line. A lazily imported `textual_serve` would
+pass that `try` and fail later, in front of a user who had already been told
+that the server was starting.
 
 **An upload is the browser's half of the human door (I-9).** `/attach` reads the
-filesystem the *front end* is on, which for a tab is the server's — useless for a
-file on the person's laptop. So the page takes bytes and this posts them to the
-daemon: `attachment/put` stores the blob content-addressed, `session/stage` puts
-it on the root's shared tray, and `session.staged` makes the chip appear in every
-attached UI including the terminal on the server. The next prompt from any of
-them carries it. The model never learns a path, and nothing here reads a file.
+filesystem that the *front end* is on. For a tab, that is the filesystem of the
+server, which is useless for a file on the laptop of the user. The page
+therefore takes bytes, and this module posts them to the daemon.
+`attachment/put` stores the blob content-addressed. `session/stage` puts it on
+the shared tray of the root. `session.staged` makes the chip appear in every
+attached UI, including the terminal on the server. The next prompt from any of
+them carries the blob. The model never learns a path, and nothing here reads a
+file.
 
-**Exposure is a token, and that is all it is** (§5 rule 6). No TLS, no users, no
-revocation: one secret minted per launch, carried in the URL, exchanged for a
-cookie so the page's own websocket and asset URLs — which upstream builds, and
-which cannot carry a query parameter this module chose — are authorized too.
-Anyone holding it has whatever authority the terminal has, which includes
-approving tool calls and running `!!` shell commands. `notices()` is where that
-is said; the command prints it.
+**Exposure is a token, and nothing more** (§5 rule 6). There is no TLS, no users
+and no revocation. One secret is minted for each launch and carried in the URL.
+It is exchanged for a cookie, so that the websocket and asset URLs of the page
+are authorized too. Upstream builds those URLs, and they cannot carry a query
+parameter that this module chose. Anyone who holds the token has whatever
+authority the terminal has, which includes approving tool calls and running `!!`
+shell commands. `notices()` states that, and the command prints it.
 
 @module ph_app.web.serve
 """
@@ -103,7 +108,7 @@ __all__ = ["CLOSING_BODY", "COOKIE", "TOKEN_QUERY", "WebServer", "run_web"]
 log = logging.getLogger("ph_app.web")
 
 CLOSING_BODY = "</body>"
-"""Where the drop zone is inserted into a page this module does not own."""
+"""Where the drop zone is inserted into a page that this module does not own."""
 
 _DROP_ZONE = """
 <div id="ph-drop"><span>drop a file to attach it</span></div>
@@ -139,57 +144,60 @@ _DROP_ZONE = """
 })();
 </script>
 """
-"""The drop zone, inline rather than a static file.
+"""The drop zone, inline and not a static file.
 
-Upstream owns `/static`, and adding a file to a directory it ships would put pH's
-asset inside the package's own tree — so this travels with the page it is
-inserted into. It posts to `/api/attachments` same-origin, which is what lets it
-carry the token cookie without ever seeing the token."""
+Upstream owns `/static`. A file added to a directory that upstream ships would
+put an asset of pH inside the tree of that package. The drop zone therefore
+travels with the page that it is inserted into. It posts to `/api/attachments`
+same-origin, so it carries the token cookie and never sees the token."""
 
 EXPECTED = "pH: an upload is one multipart part named 'file'\n"
-"""What the route takes, said the one way, to whoever got it wrong."""
+"""What the route accepts, in one wording, for a caller that sent something else."""
 
 TITLE = "pH"
-"""What the browser calls the app.
+"""The name that the browser shows for the app.
 
-Not a knob, which is why it is not a field: upstream falls back to
-`title or command`, so leaving it unset would put the whole `python -m ph_app
---mode tui …` line in the page's own intro dialog."""
+This is not a setting, so it is not a field. Upstream falls back to
+`title or command`, so an unset title would put the whole `python -m ph_app
+--mode tui …` line in the intro dialog of the page."""
 
 NO_SESSION = "no_such_session"
-"""The daemon's own name for the one refusal that has a next step.
+"""The name that the daemon itself gives to the one refusal that has a next step.
 
-`DaemonError.reason` is `Refusal.code` after a round trip, so this is the wire's
-vocabulary rather than a second one invented at the HTTP edge — matching on the
-message text is the contract nobody writes down and every rewording breaks.
-Advice is attached to this reason alone: telling somebody to open a tab is help
-when there is no session and noise when their file was simply too big."""
+`DaemonError.reason` is `Refusal.code` after a round trip. This is therefore the
+vocabulary of the wire, and not a second vocabulary invented at the HTTP edge. A
+match on the message text is a contract that nobody writes down and that every
+rewording breaks. Advice is attached to this reason alone. Telling somebody to
+open a tab helps when there is no session, and is noise when their file was
+only too big."""
 
 TOKEN_QUERY = "token"
-"""The query parameter the launch URL carries the secret in."""
+"""The query parameter in which the launch URL carries the secret."""
 
 COOKIE = "ph_web_token"
-"""The cookie the first authorized request sets.
+"""The cookie that the first authorized request sets.
 
-The page's websocket and static URLs are built by upstream's own template from
-the router, so they cannot carry a query parameter — a query-only gate would
-serve the shell and then refuse the socket it opens. So the token is exchanged
-once, on any request that presents it, and every later one presents the cookie.
+The template of upstream builds the websocket and static URLs of the page from
+the router, so they cannot carry a query parameter. A gate that accepted only
+the query would serve the shell and then refuse the socket that the shell opens.
+The token is therefore exchanged for the cookie on any request that presents it
+in the query, and every later request presents the cookie.
 """
 
 FAVICON = "/favicon.ico"
-"""The one path served without a token.
+"""The one path that is served without a token.
 
-Upstream's page declares no icon, so browsers ask for this unprompted; refusing
-it would put a line in the log on every page load and protect nothing.
+The page of upstream declares no icon, so browsers request this path without
+being asked. A refusal would put a line in the log on every page load and would
+protect nothing.
 """
 
 TOKEN: web.AppKey[str] = web.AppKey("ph_web_token")
-"""This launch's secret, read by the gate off the request's own app.
+"""The secret of this launch, which the gate reads from the app of the request.
 
-On the app rather than captured in a closure, so the middleware is a plain module
-function: one that closed over a `WebServer` would hold the whole server for the
-process's life to read one string.
+It is on the app and not captured in a closure, so the middleware is a plain
+module function. A middleware that closed over a `WebServer` would hold the
+whole server for the life of the process to read one string.
 """
 
 
@@ -199,21 +207,22 @@ async def _refuse_untokened(
 ) -> web.StreamResponse:
     """Refuse anything that does not present the launch token.
 
-    A middleware rather than a check per handler: the handlers are upstream's and
-    cannot be edited, and a gate that had to be remembered at each route is one
-    that will be forgotten at the next.
+    This is a middleware and not a check in each handler. The handlers belong to
+    upstream and cannot be edited, and a gate that must be remembered at each
+    route will be forgotten at the next route.
 
     The refusal is logged at `debug`, not `warning`. On a non-loopback bind this
-    is the one per-request cost an unauthenticated caller controls, and a scanner
-    probing the port should not be able to make pH format and write a line per
-    probe on the event loop thread.
+    is the one per-request cost that an unauthenticated caller controls. A
+    scanner that probes the port should not be able to make pH format and write
+    a line for each probe on the event loop thread.
     """
     if request.path == FAVICON:
         return await handler(request)
     token = request.app[TOKEN]
     offered = request.query.get(TOKEN_QUERY) or request.cookies.get(COOKIE, "")
-    # `compare_digest`, because a token is a secret and `==` returns early on the
-    # first differing byte — a prefix oracle for anyone who can measure.
+    # `compare_digest` is used because a token is a secret. `==` returns early
+    # at the first differing byte, which is a prefix oracle for anyone who can
+    # measure.
     if not secrets.compare_digest(offered, token):
         log.debug("ph_app.web: refused %s %s — no token", request.method, request.path)
         raise web.HTTPForbidden(text="pH: this page needs the token from its launch URL\n")
@@ -228,37 +237,40 @@ class WebServer:
     """The composed application, its token, and where it is listening."""
 
     command: str
-    """What `textual-serve` runs per tab — one `phern --mode tui`, one subprocess."""
+    """What `textual-serve` runs for each tab: one `phern --mode tui`, in one
+    subprocess."""
     session: str
-    """The session every tab of this launch is on, and where an upload stages.
-    The module docstring says why it cannot be a tab's own."""
+    """The session that every tab of this launch is on, and where an upload is
+    staged. The module docstring explains why it cannot be the session of one
+    tab."""
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     token: str = field(default_factory=lambda: secrets.token_urlsafe(32), init=False)
-    """Minted per launch, so closing the process ends the grant — there is no
-    session store to revoke one in."""
+    """Minted for each launch, so the grant ends when the process closes. There
+    is no session store in which to revoke a grant."""
 
     @property
     def url(self) -> str:
-        """The address a person opens, token included."""
+        """The address that the user opens, with the token included."""
         return f"http://{self.host}:{self.port}/?{TOKEN_QUERY}={self.token}"
 
     def notices(self) -> Iterator[str]:
-        """What a person needs to be told before this starts serving.
+        """What the user must be told before this starts serving.
 
-        Sentences rather than prints, so the *command* does the printing — the
-        shape `phern daemon` already uses for its socket path and its linger
-        warning, where `ph.lingering` owns the words and `cli.py` owns the
-        console.
+        The method yields sentences and does not print, so the *command* does
+        the printing. `phern daemon` already uses this arrangement for its
+        socket path and its linger warning: `ph.lingering` owns the words and
+        `cli.py` owns the console.
 
-        Upstream prints a banner of its own from `on_startup`, naming the command
-        it runs per tab and the public URL **without** the token — which is the
-        half that does not work. These are the halves that do.
+        Upstream prints its own banner from `on_startup`. The banner names the
+        command that it runs for each tab and the public URL **without** the
+        token, and that URL does not work. These notices give the parts that do
+        work.
         """
         yield f"[bold]open[/bold] {self.url}"
-        # Said out loud because it is the surprise: a second *terminal* is a new
+        # This is stated because it is the surprise: a second *terminal* is a new
         # session and a second *tab* is not. It is also the id for `phern agents
-        # attach` and for reopening the conversation after this process ends.
+        # attach`, and for reopening the conversation after this process ends.
         yield f"[dim]every tab lands on session {self.session}[/dim]"
         yield (
             "[dim]anyone with that URL has this terminal's authority: approvals, "
@@ -271,47 +283,49 @@ class WebServer:
             )
 
     async def _index(self, server: Server, request: web.Request) -> web.StreamResponse:
-        """Upstream's page with a drop zone inserted into it.
+        """Return the page of upstream with a drop zone inserted into it.
 
-        **Inserted, not templated.** `app_index.html` is upstream's and has no
-        jinja blocks to extend, so the choices were to fork the template — which
-        is half of a client protocol whose other half ships in the wheel — or to
-        add to what it rendered. Insertion keeps upstream's page authoritative:
-        a release that changes it changes what a person sees, and the only thing
-        that can break here is the `</body>` this looks for, which is checked.
+        **Inserted, not templated.** `app_index.html` belongs to upstream and
+        has no jinja blocks to extend. One choice was to fork the template,
+        which is half of a client protocol whose other half ships in the wheel.
+        The other choice was to add to what the template rendered. Insertion
+        keeps the page of upstream authoritative: a release that changes the
+        page changes what the user sees. The only thing that can break here is
+        the `</body>` that this method looks for, and that is checked.
         """
-        # A `Response`, not a `StreamResponse`: the `aiohttp_jinja2.template`
-        # decorator is what turns upstream's context dict into one, which is also
-        # why its body can be read back and rewritten.
+        # This is a `Response`, not a `StreamResponse`. The
+        # `aiohttp_jinja2.template` decorator turns the context dict of upstream
+        # into one, and that is also why its body can be read back and rewritten.
         rendered = cast("web.Response", await server.handle_index(request))
         body = rendered.text or ""
         if CLOSING_BODY not in body:
-            # Upstream's page changed shape. Serving it unmodified is the right
-            # failure: the terminal still works, and a person who cannot drop a
-            # file can still use `/attach`. Said out loud because nothing else
-            # would say it — a `replace` that matches nothing is silent.
+            # The page of upstream changed shape. To serve it unmodified is the
+            # right failure: the terminal still works, and a user who cannot
+            # drop a file can still use `/attach`. The warning is logged because
+            # nothing else would report it: a `replace` that matches nothing is
+            # silent.
             log.warning("ph_app.web: no %s in the page; no drop zone added", CLOSING_BODY)
             return rendered
         rendered.text = body.replace(CLOSING_BODY, _DROP_ZONE + CLOSING_BODY)
         return rendered
 
     async def _upload(self, request: web.Request) -> web.StreamResponse:
-        """Bytes from the browser onto this session's tray.
+        """Put bytes from the browser onto the tray of this session.
 
-        **A malformed body is answered, not raised through.** The only producer
-        is the drop zone above, so the first part is taken rather than scanned
-        for — but the caller might also be a person with `curl`, and
-        `request.multipart()` *asserts* on a body that is not multipart, which
-        would reach them as a 500 and an `AssertionError`. The same class of
-        defect as a daemon refusal arriving as one: an authorized person getting
-        it slightly wrong is not a server error.
+        **A malformed body gets an answer, and does not raise through.** The
+        only producer is the drop zone above, so the first part is taken and not
+        searched for. But the caller might also be a person with `curl`, and
+        `request.multipart()` *asserts* on a body that is not multipart. That
+        would reach the caller as a 500 and an `AssertionError`. It is the same
+        class of defect as a daemon refusal that arrives as a 500: an authorized
+        person who gets the request slightly wrong is not a server error.
 
-        **Two ceilings, and both are load-bearing.** `Content-Length` is refused
-        before a byte of the body is read, which is what stops a 40 MB drop
-        crossing the wire to be thrown away; the chunk loop is the backstop for a
-        chunked body, which has no length to check. Nothing else applies the
-        limit here — aiohttp consults `client_max_size` in `read()` and `post()`
-        and never in `read_chunk`, the only reader on this path.
+        **There are two ceilings, and both are necessary.** `Content-Length` is
+        refused before a byte of the body is read, which stops a 40 MB drop from
+        crossing the wire only to be discarded. The chunk loop is the backstop
+        for a chunked body, which has no length to check. Nothing else applies
+        the limit here: aiohttp consults `client_max_size` in `read()` and
+        `post()` and never in `read_chunk`, the only reader on this path.
         """
         if not request.content_type.startswith("multipart/"):
             raise web.HTTPUnsupportedMediaType(text=EXPECTED)
@@ -322,17 +336,17 @@ class WebServer:
             raise web.HTTPBadRequest(text=EXPECTED)
         name = part.filename or "upload"
         content = bytearray()
-        # 64 KiB rather than the 8 KiB default: a 5 MiB drop is 80 awaits on the
-        # loop that is streaming every open tab's terminal, not 640.
+        # 64 KiB and not the 8 KiB default: a 5 MiB drop is then 80 awaits, not
+        # 640, on the loop that streams the terminal of every open tab.
         while chunk := await part.read_chunk(1 << 16):
             content += chunk
             if len(content) > MAX_ATTACHMENT_BYTES:
                 raise self._too_large(name, len(content))
 
-        # The browser knows what it picked up and pH is guessing from a name, so
-        # a declared type wins — except the one that declares nothing, which is
-        # what a browser sends for an extension it does not know. `mime_for` is
-        # that rule, and `--attach` climbs the same ladder.
+        # The browser knows what it picked up, and pH guesses from a name, so a
+        # declared type wins. The exception is the type that declares nothing,
+        # which a browser sends for an extension that it does not know.
+        # `mime_for` is that rule, and `--attach` follows the same rule.
         mime = mime_for(part.headers.get("Content-Type"), name)
         try:
             reference = await self._stage(name, mime, content)
@@ -342,13 +356,14 @@ class WebServer:
             ) from gone
         except DaemonError as refused:
             raise self._refused(refused, name, len(content)) from refused
-        # The reference's own wire form, not a subset of it: a browser and the
-        # log then describe one blob the same way, down to the field names.
+        # Return the wire form of the reference itself, not a subset of it. A
+        # browser and the log then describe one blob in the same way, down to
+        # the field names.
         return web.json_response(reference.to_wire(), status=201)
 
     @staticmethod
     def _too_large(what: str, size: int) -> web.HTTPRequestEntityTooLarge:
-        """One sentence for the limit, wherever it is noticed."""
+        """Build the one message for the limit, for each place that detects it."""
         return web.HTTPRequestEntityTooLarge(
             max_size=MAX_ATTACHMENT_BYTES,
             actual_size=size,
@@ -356,17 +371,18 @@ class WebServer:
         )
 
     async def _stage(self, name: str, mime: str, content: bytes | bytearray) -> AttachmentRef:
-        """Put the blob on the daemon and on this session's tray, or say why not.
+        """Put the blob on the daemon and on the tray of this session, or raise
+        the refusal.
 
-        **A fresh connection per request, not a held one**: an upload is rare and
-        already costs a file read, a unix connect is sub-millisecond, and a client
-        kept for the process's life is one that goes stale when the daemon
-        passivates or an ephemeral one exits — a staleness this route would then
-        have to detect and repair for no gain.
+        **Each request uses a fresh connection, not a held one.** An upload is
+        rare and already costs a file read, and a unix connect takes less than a
+        millisecond. A client kept for the life of the process goes stale when
+        the daemon passivates or when an ephemeral daemon exits. This route
+        would then have to detect and repair that staleness for no gain.
 
-        **Raises what the daemon refused**, plainly: `connected` unwraps its own
-        task group, so a caller is no longer the place that has to know a frame
-        crossed one. `_refused` is what turns that into an answer.
+        **The method raises what the daemon refused, directly.** `connected`
+        unwraps its own task group, so a caller no longer has to know that a
+        frame crossed one. `_refused` turns the refusal into an answer.
         """
 
         async def stage(client: DaemonClient) -> AttachmentRef:
@@ -375,16 +391,17 @@ class WebServer:
         return await connected(resolve_roots().daemon_socket(), stage)
 
     def _refused(self, refused: DaemonError, name: str, size: int) -> web.HTTPException:
-        """The daemon's "no", as the answer a browser understands.
+        """Turn the "no" of the daemon into an answer that a browser understands.
 
-        **Its own sentence, and its own status.** Uploading before opening a tab
-        is the ordinary state between launching and using it, and it first
-        arrived as a 500 with an `ExceptionGroup` traceback; answering *every*
-        refusal with one status and one sentence was the next version of the same
-        mistake. A file of exactly `MAX_ATTACHMENT_BYTES` reaches
-        `attachment_too_large` here — this route's ceiling is on the raw bytes
-        and the daemon's is on their base64 expansion, which is a hair larger —
-        and "open a tab first" is advice about the wrong problem.
+        **Each refusal gets its own sentence and its own status.** An upload
+        before a tab is opened is the ordinary state between launch and use. It
+        first arrived as a 500 with an `ExceptionGroup` traceback. To answer
+        *every* refusal with one status and one sentence was the next version of
+        the same mistake. A file of exactly `MAX_ATTACHMENT_BYTES` reaches
+        `attachment_too_large` here: the ceiling of this route is on the raw
+        bytes, and the ceiling of the daemon is on their base64 expansion, which
+        is slightly larger. For that file, "open a tab first" is advice about
+        the wrong problem.
         """
         if refused.reason == "attachment_too_large":
             return self._too_large(name, size)
@@ -392,19 +409,21 @@ class WebServer:
         return web.HTTPServiceUnavailable(text=f"pH: {refused}{advice}\n")
 
     def application(self) -> web.Application:
-        """`Server._make_app`, re-stated with our gate. See the module docstring."""
+        """`Server._make_app`, written again with the gate of pH. See the module
+        docstring."""
         server = Server(command=self.command, host=self.host, port=self.port, title=TITLE)
-        # A backstop, not the gate: aiohttp applies `client_max_size` to
-        # `read()`/`post()` and never to the `read_chunk` loop `_upload` uses, so
-        # the refusal a person sees is that loop's. One number rather than two,
-        # because a second budget is how the first silently becomes dead code.
+        # This is a backstop, not the gate. aiohttp applies `client_max_size` to
+        # `read()`/`post()` and never to the `read_chunk` loop that `_upload`
+        # uses, so the refusal that the user sees comes from that loop. There is
+        # one number and not two, because a second budget is how the first
+        # silently becomes dead code.
         app = web.Application(middlewares=[_refuse_untokened], client_max_size=MAX_ATTACHMENT_BYTES)
         app[TOKEN] = self.token
         aiohttp_jinja2.setup(app, loader=jinja2.FileSystemLoader(server.templates_path))
         app.add_routes(
             [
-                # Names matter: `handle_index` resolves `websocket` and `static`
-                # out of the router to build the page.
+                # The names matter: `handle_index` looks up `websocket` and
+                # `static` in the router to build the page.
                 web.get("/", partial(self._index, server), name="index"),
                 web.post("/api/attachments", self._upload, name="attachments"),
                 web.get("/ws", server.handle_websocket, name="websocket"),
@@ -412,10 +431,10 @@ class WebServer:
                 web.static("/static", server.statics_path, show_index=True, name="static"),
             ]
         )
-        # Upstream's hooks are kept even though `on_startup` is only a banner and
-        # `on_shutdown` is empty *today*: a release that moved subprocess cleanup
-        # into either would otherwise leak a process per tab, and that is not a
-        # bet worth taking to save two lines.
+        # The hooks of upstream are kept, although `on_startup` is only a banner
+        # and `on_shutdown` is empty *today*. A release that moved subprocess
+        # cleanup into either hook would otherwise leak a process for each tab.
+        # That risk is not worth the two lines saved.
         app.on_startup.append(server.on_startup)
         app.on_shutdown.append(server.on_shutdown)
         return app
@@ -424,13 +443,14 @@ class WebServer:
 async def run_web(server: WebServer, *, open_browser: bool = False) -> None:
     """Serve the terminal over HTTP until canceled.
 
-    Under anyio, like every other mode: `cli.py` has one shape for "go do the
-    thing", and `web.run_app` would be a second — it installs its own signal
-    handlers and owns the loop.
+    The server runs under anyio, like every other mode. `cli.py` has one shape
+    for "go do the thing", and `web.run_app` would be a second shape: it installs
+    its own signal handlers and owns the loop.
 
-    `GRACE_SECONDS` and not aiohttp's own 60, by the rule `application()` states:
-    a second budget is how the first becomes dead code. A hung tab must not hold
-    this process six times longer than every other pH teardown allows.
+    The shutdown timeout is `GRACE_SECONDS` and not the 60 of aiohttp, by the
+    rule that `application()` states: a second budget is how the first becomes
+    dead code. A hung tab must not hold this process six times longer than every
+    other pH teardown allows.
     """
     runner = web.AppRunner(server.application(), shutdown_timeout=GRACE_SECONDS)
     await runner.setup()
@@ -438,13 +458,14 @@ async def run_web(server: WebServer, *, open_browser: bool = False) -> None:
     try:
         if open_browser:
             # **After the bind, and off this thread.** `webbrowser.open` scans
-            # `PATH` for every known browser before launching one, and a
-            # `$BROWSER` naming a plain command makes it *wait for that process
-            # to exit* — either of which, done first, hands out a URL the socket
-            # is not answering on yet, or never starts the server at all.
+            # `PATH` for every known browser before it launches one. A
+            # `$BROWSER` that names a plain command makes it *wait for that
+            # process to exit*. If either happened first, the user would get a
+            # URL that the socket does not answer on yet, or the server would
+            # never start.
             threading.Thread(target=webbrowser.open, args=(server.url,), daemon=True).start()
         await anyio.sleep_forever()
     finally:
-        # Runs `on_shutdown`, which is where upstream will put per-tab cleanup if
-        # it ever does.
+        # This runs `on_shutdown`, which is where upstream will put per-tab
+        # cleanup if it ever adds any.
         await runner.cleanup()

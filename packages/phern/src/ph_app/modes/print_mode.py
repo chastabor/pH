@@ -1,9 +1,9 @@
-"""`phern -p "…"` — one-shot question, printed answer, inspectable JSONL.
+"""`phern -p "…"`: a one-shot question, a printed answer, and a JSONL log to inspect.
 
-The smallest complete pH run: compose a profile, create a session, drive one
-turn, print the assistant text. It is deliberately built on exactly the same
-seams the TUI will use, so "does the harness work" and "does the front-end work"
-stay separate questions.
+This is the smallest complete pH run: compose a profile, create a session, drive
+one turn, print the assistant text. It is deliberately built on the same seams
+that the TUI uses, so "does the harness work" and "does the front end work" stay
+separate questions.
 
 @module ph_app.modes.print_mode
 """
@@ -34,27 +34,30 @@ class PrintResult:
     log_path: Path | None
     events: int
     ended: str
-    """How the turn this run drove finished — the caller's exit code (C5).
+    """How the turn that this run drove finished. It gives the caller its exit
+    code (C5).
 
-    A `-p` run whose turn ended in `error` printed whatever text had arrived and
-    exited 0, so a script driving pH could not tell an answer from a provider
-    outage: the failure was in the log and nowhere a caller could reach it. The
-    kind rather than a boolean, because `blocked` and `max-tokens` are not
-    failures and a caller may still want to know which one it got.
+    Before this field, a `-p` run whose turn ended in `error` printed whatever
+    text had arrived and exited 0. A script that drove pH could not tell an
+    answer from a provider outage: the failure was in the log, where a caller
+    could not reach it. The field holds the kind and not a boolean, because
+    `blocked` and `max-tokens` are not failures and a caller may still want to
+    know which one it got.
 
-    A plain `str` and not the `TurnEndReason` Literal, for the reason the TUI's
-    reader and `Supervisor.last_turn` are both plain strings: this comes off
-    a log, so it is whatever a past build wrote there, and a type claiming
-    otherwise would be a claim about every file on disk. Empty when the log has
-    no `turn/end` at all.
+    The type is a plain `str` and not the `Literal` of `TurnEndReason.kind`, for
+    the same reason that the reader of the TUI and `Root.last_turn` both use
+    plain strings. The value comes from a log, so it is whatever a past build
+    wrote there, and a type that claimed otherwise would be a claim about every
+    file on disk. The value is empty when the log has no `turn/end` at all.
     """
 
     failure: str
-    """The provider's own words, when `ended` is `error` — and empty otherwise."""
+    """The message of the provider when `ended` is `error`. Empty otherwise."""
 
     unwritten: Mapping[str, str]
-    """What the mount's last write could not write, by session id, with why
-    (`unwritten_at_unwind`): read once the mount is down, after everything above."""
+    """What the last write of the mount could not write, by session id, with the
+    reason (`unwritten_at_unwind`). It is read after the mount is down, after
+    everything above."""
 
 
 async def run_print(
@@ -66,11 +69,11 @@ async def run_print(
     attachments: Sequence[Path] = (),
 ) -> PrintResult:
     """Run one prompt to completion and return what the model said."""
-    # Where this run's own events start. `prompted` resumes a session that is
-    # already on disk, and the transcript is the *whole* conversation — so
-    # `phern -p --session x` printed every answer the session had ever given,
-    # the new one last, growing by one paragraph per run. What a one-shot run
-    # prints is what it produced.
+    # `opened` is where the events of this run start. `prompted` resumes a
+    # session that is already on disk, and the transcript is the *whole*
+    # conversation. `phern -p --session x` therefore printed every answer that
+    # the session had ever given, with the new one last, and grew by one
+    # paragraph for each run. A one-shot run prints only what it produced.
     opened = 0
 
     def mark(_ctx: Context, session: Session) -> None:
@@ -85,23 +88,23 @@ async def run_print(
         attachments=attachments,
         before=mark,
     ) as (ctx, session):
-        # The human transcript, not the model surface: what the user was shown,
-        # compaction or not.
+        # This is the human transcript, not the model surface: what the user
+        # was shown, with or without compaction.
         text = "\n".join(
             text_of(message.content)
             for message in derive_transcript(session.events_from(opened))
             if message.role == "assistant" and text_of(message.content)
         )
         persistence = ctx.get(SESSION_PERSISTENCE)
-        # `locate`, so a backend with no per-session file reports none rather
-        # than a path nobody could open.
+        # `locate` is used so that a backend with no per-session file reports
+        # none, and not a path that nobody could open.
         log_path = None if persistence is None else persistence.locate(session.id)
         events = len(session.events)
-        # Off the log rather than out of a listener, because that is where the
-        # driver writes it and a `finally` is what guarantees it is written: a
-        # turn killed by a cancellation still records how it ended, and a
-        # listener that had to survive the same cancellation to hear it would be
-        # the more fragile of the two.
+        # The reason is read from the log and not from a listener. The log is
+        # where the driver writes it, and a `finally` guarantees that it is
+        # written: a turn that a cancellation killed still records how it
+        # ended. A listener would have to survive the same cancellation to hear
+        # it, so the listener would be the more fragile of the two.
         end = session.latest("turn/end")
         reason = as_obj(end.data.get("reason")) if end is not None else {}
     return PrintResult(

@@ -1,4 +1,4 @@
-"""Output modes: print, json, transcript, rpc. The TUI lands in Phase 2."""
+"""Output modes: print, json, transcript, rpc. The TUI is in `ph_app.tui`."""
 
 from __future__ import annotations
 
