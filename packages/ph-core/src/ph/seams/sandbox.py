@@ -1,41 +1,45 @@
-"""`ctx.sandbox` — confinement, and the refusal to pretend.
+"""`ctx.sandbox`: confinement, and the refusal to pretend.
 
-The one rule that makes this seam worth having: **`confine()` never passes
-through**. A caller asking to confine an argv is asking for a guarantee; a
-policy-only provider that returned the argv unchanged would hand back an
-unconfined command that *looks* confined, and every layer above would then be
-reasoning about a boundary that does not exist.
+One rule gives this seam its value: **`confine()` never passes through**. A
+caller that asks to confine an argv asks for a guarantee. A policy-only
+provider that returned the argv unchanged would return an unconfined command
+that *looks* confined. Every layer above would then reason about a boundary
+that does not exist.
 
-So the Phase 1 provider is honest and useless: it resolves and records policy,
-and raises `SANDBOX_UNAVAILABLE` when asked to actually confine (dsh's fail-
-closed posture). `sandbox-local` landed in P6-04 with `bwrap`, and P6-40 verified
-Seatbelt (Landlock still owed) — that is the *only* tier that bounds an
+So the `sandbox-policy` row in this module is policy-only. It resolves and
+records the policy, and the seam raises `SANDBOX_UNAVAILABLE` when a caller
+asks it to confine (the fail-closed posture of dsh). `sandbox-local` is the
+backend. It arrived in P6-04 with `bwrap`, and P6-40 verified Seatbelt.
+Landlock is not written yet. `sandbox-local` is the *only* tier that bounds an
 absolute-path write (N2, E13).
 
-Mode resolution is explicit > last logged `sandbox/mode` event > deployment
-default, so a per-call decision wins, a session-level change persists in the
-log, and neither is guessed.
+The mode is resolved in this order: an explicit mode, then the last logged
+`sandbox/mode` event, then the default of the deployment. So a per-call
+decision wins, a session-level change persists in the log, and neither is
+guessed.
 
-**What a confined command may reach beyond its workspace is the deployment's to
-say, and it is said once** (P6-38). `Allowances` — directories writable beyond the
-workspace, and the network hosts reachable through the egress proxy — are
-registered by the `sandbox-allow` row and merged into every policy *here*, in
-`confine`, so the shell, the probe and whatever confines next all get one
-boundary, and a change to the row reaches the next command without anything
-restarting. Without the row the seam fails closed: no extra directory, no network.
+**The deployment decides what a confined command may reach beyond its
+workspace, and it states that in one place** (P6-38). `Allowances` holds the
+directories that are writable beyond the workspace, and the network hosts that
+are reachable through the egress proxy. The `sandbox-allow` row registers the
+value, and this module merges it into every policy in `confine`. So the shell,
+the code kernel and whatever confines next all get one boundary, and a change
+to the row reaches the next command with no restart. Without the row the seam
+fails closed: no extra directory and no network.
 
-**Network is three states, not a bool.** `off` is `--unshare-net` and nothing
-else; `full` is the host's network unfiltered; `allowlist` is the namespace kept
-and a single door punched through it — a filtering proxy on the host, reached from
-inside over a unix socket (`ph.seams.sandbox_egress`). A command that ignores the
-proxy variables finds nothing to connect to, which is the direction a filter must
-fail in: the namespace is the enforcement, the proxy only decides what it lets
-through.
+**The network has three states, not two.** `off` is `--unshare-net` and nothing
+else. `full` is the network of the host, unfiltered. `allowlist` keeps the
+namespace and adds one way out: a filtering proxy on the host, which a command
+reaches from inside over a unix socket (`ph.seams.sandbox_egress`). A command
+that ignores the proxy variables finds nothing to connect to. That is the
+direction in which a filter must fail: the namespace enforces, and the proxy
+only decides what it lets through.
 
 A boundary that refuses in silence teaches nobody anything, so a refusal is a
-**record**: `sandbox/denied` in the agent's session, from the proxy when it
-refused a host and from the command's own output when the kernel refused a
-write. The TUI renders it with the `/sandbox` line that lifts it.
+**record**: `sandbox/denied` in the session of the agent. The record comes from
+the proxy when the proxy refused a host, and from the output of the command
+when the kernel refused a write. The TUI renders it with the `/sandbox` line
+that lifts the refusal.
 
 @module ph.seams.sandbox
 """
@@ -117,33 +121,36 @@ _MODE_READINGS: dict[str, StatusReading] = {
     mode: StatusReading(text=f"sandbox {mode}")
     for mode in ("read-only", "workspace-write", "danger-full-access")
 }
-"""One reading per mode, built once: there are three of them and the field is
-read on every footer refresh."""
+"""One reading for each mode, built one time. There are three modes, and the
+footer reads the field on every refresh."""
 
 _MODE_RANK: Mapping[SandboxMode, int] = {
     "read-only": 0,
     "workspace-write": 1,
     "danger-full-access": 2,
 }
-"""How much each mode permits, so two of them can be compared (N1).
+"""How much each mode permits, so that two modes can be compared (N1).
 
-Written out rather than derived from `SandboxMode`'s order, because a `Literal`'s
-order is a declaration detail and this is a claim about what the kernel allows.
-`literal_lookup` below keeps the two exhaustive over the same alias."""
+The ranks are written out and are not derived from the order of `SandboxMode`.
+The order of a `Literal` is a detail of its declaration, and this table is a
+statement about what the kernel allows. The key type is `SandboxMode`, so mypy
+refuses a key that is not a mode, and `SANDBOX_MODES` below is built from the
+same alias."""
 
 
 def narrower(requested: SandboxMode | None, resolved: SandboxMode) -> SandboxMode:
     """The more restrictive of what a caller asked for and what the session has.
 
-    **A request can only ever narrow** — `SandboxPolicy.refuse_network` already
-    states that rule for the network, and this is the same rule for the mode. It
-    was not being kept: `effective` read the session's posture and *replaced* the
-    caller's with it, so a logged `danger-full-access` widened a policy that said
-    `read-only`. That is the one direction a confinement seam must never be
-    wrong in, and nothing but the callers' own uniformity was stopping it.
+    **A request can only narrow.** `SandboxPolicy.refuse_network` states that
+    rule for the network, and this function is the same rule for the mode. The
+    rule was not kept before. `effective` read the posture of the session and
+    *replaced* the mode of the caller with it, so a logged `danger-full-access`
+    widened a policy that said `read-only`. Widening is the one direction in
+    which a confinement seam must never be wrong, and only the uniformity of the
+    callers prevented it.
 
-    `None` is a caller with no opinion, which takes the posture whole. See
-    `SandboxPolicy.mode`.
+    `None` means that the caller has no opinion. The caller then takes the
+    posture of the session unchanged. See `SandboxPolicy.mode`.
     """
     if requested is None:
         return resolved
@@ -151,14 +158,16 @@ def narrower(requested: SandboxMode | None, resolved: SandboxMode) -> SandboxMod
 
 
 SANDBOX_MODES: Mapping[str, SandboxMode] = literal_lookup(SandboxMode)
-"""Every `SandboxMode` by its own spelling — the read-side check for a value
-that arrived as a `str`. See `literal_lookup`."""
+"""Every `SandboxMode`, keyed by its own spelling. This is the read-side check
+for a value that arrived as a `str`. See `literal_lookup`."""
 
 NETWORK_MODES: Mapping[str, NetworkMode] = literal_lookup(NetworkMode)
-"""Every `NetworkMode` by its own spelling, and the same read-side check.
+"""Every `NetworkMode`, keyed by its own spelling. It is the same read-side
+check.
 
-Its own docstring rather than one shared with `SANDBOX_MODES` above: a string
-literal following two assignments documents only the second of them."""
+It has its own docstring and does not share one with `SANDBOX_MODES` above,
+because a string literal that follows two assignments documents only the second
+assignment."""
 
 DENIED = "sandbox/denied"
 """The session event a refused boundary leaves behind. See `Denial`."""
@@ -191,25 +200,26 @@ DEFAULT_HOSTS: tuple[str, ...] = (
 )
 """What a confined command may reach when a deployment has not said otherwise.
 
-Package indexes and the places their documentation lives — an agent that cannot
-`uv add` or read `docs.rs` is one somebody switches the sandbox off for, and a
-sandbox switched off bounds nothing. **A starting point, not a judgement**: the
-row it seeds is the user's to trim or extend, from the profile or from `/sandbox`,
-and `phern doctor` prints what is in force.
+The list holds package indexes and the sites that host their documentation. If
+an agent cannot run `uv add` or read `docs.rs`, somebody switches the sandbox
+off for it, and a sandbox that is switched off bounds nothing. **The list is a
+starting point, not a judgment.** It seeds the `sandbox-allow` row. The user can
+trim or extend that row from the profile or from `/sandbox`, and `phern doctor`
+prints what is in force.
 
-Exact hosts, with one wildcard. `*.githubusercontent.com` is the one because
-GitHub serves raw files, release assets and avatars from a family of
-subdomains that changes; every other entry is a single host, because a wildcard
-is a widening somebody should have to write on purpose. See `host_allowed` for
-the two spellings.
+The entries are exact hosts, with one wildcard. `*.githubusercontent.com` is the
+wildcard, because GitHub serves raw files, release assets and avatars from a
+family of subdomains that changes. Every other entry is a single host, because
+a wildcard widens the list, and somebody should have to write that on purpose.
+See `host_allowed` for the two spellings.
 """
 
 
 class SandboxError(HarnessError):
     """Confinement was requested and could not be provided.
 
-    A denial, not a failure: the *policy* said this must be confined, and pH
-    refuses rather than running unconfined.
+    This is a denial and not a failure. The *policy* said that the command must
+    be confined, and pH refuses to run it unconfined.
     """
 
     failure_kind: FailureKind = "denied"
@@ -222,109 +232,114 @@ class SandboxError(HarnessError):
 
 
 class Egress(WireModel):
-    """The one door out of a confined command's network, to the proxy.
+    """The egress bridge: the one route from a confined command to the proxy.
 
-    Two roles, one value. The backend row **registers** one on the seam once its
-    probe has shown a confined command can reach the proxy; `SandboxSeam.effective`
-    then hands a **copy carrying the agent** to each policy it merges. A separate
-    `EgressBridge` type held the same two fields for the registration half and was
-    copied into this one at three sites.
+    One value has two roles. The backend row **registers** an `Egress` on the
+    seam after its probe has shown that a confined command can reach the proxy.
+    `SandboxSeam.effective` then gives a **copy that carries the agent** to each
+    policy that it merges. Before, a separate `EgressBridge` type held the same
+    two fields for the registration, and three sites copied it into this type.
 
-    A value rather than the proxy object, because these are the only facts a
-    backend needs and it must not be able to reach the listener from a policy
-    merge. A caller has nothing to say about any of it: the proxy's socket is a
-    fact about the deployment, not about one command.
+    It is a value and not the proxy object. These are the only facts that a
+    backend needs, and a backend must not be able to reach the listener from a
+    policy merge. A caller sets none of it: the socket of the proxy is a fact
+    about the deployment, not about one command.
     """
 
     socket: str
-    """The proxy's unix socket on the host, reachable inside through the read-only
-    bind of `/` — no extra mount, and nothing writable. The `shim` door's target;
-    the `loopback` door does not use it."""
+    """The unix socket of the proxy on the host. A confined command reaches it
+    through the read-only bind of `/`, so it needs no extra mount and nothing
+    writable. The `socat` shim of `bwrap` connects to it. Seatbelt reaches the
+    proxy on the loopback of the host and does not use it."""
     port: int
-    """Where the command dials on `127.0.0.1`, and what `proxy_url` names. Under a
-    network namespace it is the shim's fixed port inside, private to that sandbox;
-    under Seatbelt, which shares the host's loopback, it is the proxy's own
-    listener there — see `sandbox_local.Door`."""
+    """The port that the command dials on `127.0.0.1`, and the port that
+    `proxy_url` names. Under a network namespace it is the fixed port of the
+    shim inside the sandbox, which is private to that sandbox. Seatbelt shares
+    the loopback of the host, so there it is the port of the proxy's own
+    listener. See `needs_loopback` on the backends in `sandbox_local`."""
     agent: str | None = None
-    """Who this command runs for, carried to the proxy as the proxy URL's user, so a
-    refusal is recorded in the right session."""
+    """The agent that this command runs for. It is carried to the proxy as the
+    user of the proxy URL, so that a refusal is recorded in the right session."""
 
 
 class SandboxPolicy(WireModel):
     """The complete per-call confinement request."""
 
     mode: SandboxMode | None = None
-    """The caller's ceiling, or `None` for whatever the session resolved.
+    """The ceiling of the caller, or `None` for the mode that the session resolved.
 
-    **Two facts in one field, and `effective` is where they meet.** On the way in
-    this is what the caller will accept at most; on the way out it is what the
-    backend enforces, because `effective` replaces it with `narrower(mode,
-    resolve_mode(session))`. A request can only narrow, which is
-    `refuse_network`'s rule two fields down.
+    **This field holds two facts, and `effective` is where they meet.** On the
+    way in, it is the most that the caller accepts. On the way out, it is what
+    the backend enforces, because `effective` replaces it with `narrower(mode,
+    resolve_mode(session))`. A request can only narrow. That is the rule of
+    `refuse_network`, two fields below.
 
-    `None` rather than a default of `read-only`, because "no opinion" and "the
-    tightest opinion" are not the same answer and a default made them one.
-    `workspace_policy` is the caller with no opinion, and that is the shape of
-    N1: it used to guess `workspace-write`, which capped a person who typed
-    `/sandbox danger-full-access` at workspace-write *and* floored a deployment
-    that set `defaultMode: read-only` at workspace-write — wrong in both
-    directions from one guess, with the footer reporting the posture that was
-    not in force.
+    The default is `None` and not `read-only`, because "no opinion" and "the
+    tightest opinion" are different answers, and a default of `read-only` made
+    them one answer. `workspace_policy` is the caller with no opinion, and N1 is
+    the reason. It used to guess `workspace-write`. That capped a session that
+    logged `danger-full-access` at workspace-write, *and* it raised a deployment
+    that set `defaultMode: read-only` to workspace-write. One guess was wrong in
+    both directions, and the footer reported a posture that was not in force.
 
     A policy that reaches a backend without passing through the seam keeps
-    `None`, and `writable_paths` answers it with the extras alone — the closed
-    direction, for `network`'s reason."""
+    `None`. `writable_paths` then returns the extras alone. That is the closed
+    direction, for the same reason as the default of `network`."""
     workspace_root: str | None = None
     """The one writable root under `workspace-write`."""
     writable_extra: list[str] | None = None
     refuse_network: bool = False
-    """The caller's veto: this command has no business online, whatever the
+    """The veto of the caller: this command must not go online, whatever the
     deployment permits.
 
-    **A request can only ever narrow.** There is deliberately no way to spell "give
-    me the network" — §6.5 caps a caller at what the deployment allows, so an
-    asking field would have exactly one reachable behavior (no effect) and a
-    docstring claiming otherwise. What a caller *can* do is want less, which is
-    this.
+    **A request can only narrow.** On purpose, a caller has no way to ask for
+    the network. §6.5 caps a caller at what the deployment allows. So a field
+    that asked would have exactly one reachable behavior (no effect), and its
+    docstring would claim otherwise. A caller *can* want less, and this field
+    says so.
 
-    Read by `SandboxSeam.effective` and nowhere else; `network` below is what a
-    backend reads."""
+    Only `SandboxSeam.effective` reads this field. A backend reads `network`
+    below."""
     network: bool = False
-    """Whether this command has the host's network, **resolved**.
+    """Whether this command has the network of the host, **resolved**.
 
-    Set by `SandboxSeam.effective` from the deployment's `Allowances`, and read by
-    the backend. `False` by default, so a policy handed straight to a backend
-    without passing through the seam — as the backend's own tests do — is closed
-    rather than open.
+    `SandboxSeam.effective` sets it from the `Allowances` of the deployment, and
+    the backend reads it. The default is `False`. So a policy that goes straight
+    to a backend without passing through the seam, as the tests of the backend
+    do, is closed and not open.
 
-    This and `refuse_network` are two fields because they are two facts: what the
-    caller asked of the seam, and what the seam resolved for the backend. They were
-    one tri-state field, and its documented third state was unreachable —
-    `True` and `None` took the same branch everywhere."""
+    This field and `refuse_network` are two fields because they are two facts:
+    what the caller asked of the seam, and what the seam resolved for the
+    backend. They were one tri-state field before, and its documented third
+    state was unreachable: `True` and `None` took the same branch everywhere."""
     egress: Egress | None = None
-    """The proxy door, when the effective network mode is `allowlist`. See `Egress`:
-    the seam sets this; a caller never does."""
+    """The egress bridge, when the effective network mode is `allowlist`. See
+    `Egress`. The seam sets this field, and a caller never does."""
 
 
 def writable_paths(policy: SandboxPolicy) -> list[str]:
-    """Every path this policy permits writing, in the order a backend binds them.
+    """Every path that this policy permits writing, in the order in which a
+    backend binds them.
 
-    **On the seam, beside the value it describes**: two backends need this set and a
-    third arrives with Landlock, so a rule private to one of them is a rule the next
-    one copies. `writable_roots` answers the same question of a `Workspace`; this
-    answers it of the policy that workspace produced.
+    **The rule is on the seam, beside the value that it describes.** Two
+    backends need this set, and Landlock will be a third. A rule that is private
+    to one backend is a rule that the next backend copies. `writable_roots`
+    answers the same question for a `Workspace`. This function answers it for
+    the policy that the workspace produced.
 
-    Exhaustive over `SandboxMode` rather than an `if`, so a fourth mode fails to
-    compile rather than silently inheriting "workspace and extras".
+    The `match` is exhaustive over `SandboxMode` and is not an `if`. So a fourth
+    mode fails the type check, and does not silently inherit "workspace and
+    extras".
 
-    `read-only` names no workspace root and **no implicit `/tmp`**: a temp directory
-    the caller did not ask for is a writable hole nobody declared, and
-    `redirection_env` already points the toolchain's scratch at one that was.
-    `danger-full-access` returns nothing here because it is not a *set* of writable
-    paths — it is "everything", which each backend spells its own way.
+    `read-only` names no workspace root and **no implicit `/tmp`**. A temp
+    directory that the caller did not ask for is a writable hole that nobody
+    declared, and `redirection_env` already points the scratch files of the
+    toolchain at a directory that was declared. `danger-full-access` returns
+    nothing here because it is not a *set* of writable paths. It means
+    "everything", and each backend expresses that in its own way.
 
     `None` is a policy that never passed through `effective`, which resolves the
-    mode; it answers with the extras alone for the same reason `read-only` does.
+    mode. It returns the extras alone, for the same reason as `read-only`.
     """
     extra = list(policy.writable_extra or ())
     match policy.mode:
@@ -339,74 +354,85 @@ def writable_paths(policy: SandboxPolicy) -> list[str]:
 
 
 class NetworkAllowance(WireModel):
-    """Which network a confined command gets, and through which door."""
+    """Which network a confined command gets, and by which route."""
 
     mode: NetworkMode = "allowlist"
-    """`off`: none. `allowlist`: the hosts below, through the egress proxy. `full`:
-    the host's network, unfiltered — the mode `danger-full-access` implies."""
+    """The network mode. `off` gives no network. `allowlist` gives the hosts
+    below, through the egress proxy. `full` gives the network of the host,
+    unfiltered, which is the mode that `danger-full-access` implies."""
     hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_HOSTS))
-    """What `allowlist` lets through. Two spellings — see `host_allowed`."""
+    """The hosts that `allowlist` lets through. An entry has one of two
+    spellings: see `host_allowed`."""
 
 
 class Allowances(WireModel):
-    """What a confined command may reach beyond its workspace and scratch.
+    """What a confined command may reach beyond its workspace and its scratch
+    directory.
 
-    The deployment's statement, registered once by `sandbox-allow` and merged into
-    every policy by `SandboxSeam.effective`. The defaults are the row's *shipped*
-    posture; a profile that spells the row's config replaces the whole of it
-    (`ph.cordis.loader`'s patch rule), so a deployment that wants one more host
-    writes the list it wants rather than a delta.
+    This is the statement of the deployment. The `sandbox-allow` row registers
+    it one time, and `SandboxSeam.effective` merges it into every policy. The
+    defaults are the posture that the row *ships* with. A profile that sets the
+    config of the row replaces the whole config (the patch rule of
+    `ph.cordis.loader`). So a deployment that wants one more host writes the
+    whole list that it wants, and not a delta.
     """
 
     paths: list[str] = Field(default_factory=list)
-    """Directories writable beyond the workspace and its scratch, `~` allowed.
+    """Directories that are writable beyond the workspace and its scratch
+    directory. `~` is allowed.
 
-    Empty by default on purpose. `redirection_env` already points the toolchain's
-    caches inside the agent's scratch, so the ordinary build needs nothing here;
-    what belongs here is a directory a deployment *shares* across agents and
-    accepts the consequences of — a package cache, a model store. Never `/`: that
-    is `danger-full-access` spelled to look like an allowlist, and the command
-    refuses it."""
+    The list is empty by default on purpose. `redirection_env` already points
+    the caches of the toolchain inside the scratch directory of the agent, so an
+    ordinary build needs nothing here. This list is for a directory that a
+    deployment *shares* across agents and accepts the consequences of, such as a
+    package cache or a model store. Never list `/`: that is `danger-full-access`
+    written to look like an allowlist, and the `/sandbox` command refuses it."""
     network: NetworkAllowance = Field(default_factory=NetworkAllowance)
 
 
 NOTHING = Allowances(paths=[], network=NetworkAllowance(mode="off", hosts=[]))
 """What a deployment gets when no `sandbox-allow` row is mounted: no extra
-directory and no network. The closed direction, stated as a value so `effective`
-has no `if allowances is None` branch to get wrong."""
+directory and no network. This is the closed direction. It is a value so that
+`effective` has no `if allowances is None` branch that could be wrong."""
 
 
 def allowance_path(entry: str) -> str:
-    """A directory as `sandbox-allow` names it, spelled as the kernel will match it:
-    `~` expanded and every symlink resolved (`canonical`). The one spelling for the
-    deployment's directories and for a child's narrower list of them."""
+    """A directory as `sandbox-allow` names it, spelled as the kernel will match
+    it: `~` is expanded and every symlink is resolved (`canonical`). The
+    directories of the deployment and the narrower list of a child both use this
+    one spelling."""
     return str(canonical(Path(entry).expanduser()))
 
 
 def held_under(path: str, roots: Sequence[str]) -> bool:
-    """Whether canonical `path` is one of `roots` or inside one — what a narrowed
-    child's directory must be of its parent's, at admission and at every bind."""
+    """Whether the canonical `path` is one of `roots` or is inside one. A
+    directory of a narrowed child must be held under the directories of its
+    parent, at admission and at every bind."""
     return any(is_under(Path(path), Path(root)) for root in roots)
 
 
 def grants_apart(workspace_root: str, grants: Sequence[str]) -> tuple[list[str], list[str]]:
-    """A caller's writable grants, split into those honored and those refused.
+    """The writable grants of a caller, split into the grants that are honored
+    and the grants that are refused.
 
-    **Read-only is a barrier for the workspace, not for a tool's working state.**
-    A grant is honored under every mode (`writable_paths` returns the extras under
-    `read-only` too), which is what lets a tool that changes no file of a
-    repository still build an index of it. The other half of that rule is here: a
-    grant that *is* the workspace root, is inside it, or contains it is refused,
-    because honoring it would make the repository writable in a session whose
-    person said it is not — a manual would only have to name the tree.
+    **Read-only is a barrier for the workspace, not for the working state of a
+    tool.** A grant is honored under every mode (`writable_paths` returns the
+    extras under `read-only` too). That is what lets a tool that changes no file
+    of a repository still build an index of it. This function holds the other
+    half of the rule. A grant that *is* the workspace root, is inside it, or
+    contains it is refused. To honor it would make the repository writable in a
+    session whose user said that it is not: a manual would only have to name the
+    tree.
 
-    Refused whatever the mode. Under `workspace-write` the root is writable
-    already, so nothing is lost by it; and a rule that depended on the mode would
-    be one a change of posture mid-session silently widened.
+    Such a grant is refused whatever the mode. Under `workspace-write` the root
+    is already writable, so the refusal loses nothing. And a rule that depended
+    on the mode would silently widen when the posture changes in the middle of
+    a session.
 
-    Each grant is spelled as the kernel will match it (`allowance_path`) before it
-    is compared, and the honored ones are returned in that spelling. The workspace
-    root is taken as given: the workspace seam hands out canonical roots.
+    Each grant is spelled as the kernel will match it (`allowance_path`) before
+    it is compared, and the honored grants are returned in that spelling. The
+    workspace root is taken as given, because the workspace seam hands out
+    canonical roots.
     """
     root = Path(workspace_root)
     honored: list[str] = []
@@ -419,16 +445,17 @@ def grants_apart(workspace_root: str, grants: Sequence[str]) -> tuple[list[str],
 
 
 def host_allowed(hosts: Sequence[str], host: str, port: int) -> bool:
-    """Whether `host:port` is named by `hosts`.
+    """Whether `hosts` names `host:port`.
 
-    **Two spellings, and neither implies the other.** `example.com` allows that one
-    host; `*.example.com` allows every host *under* it and not the apex, because a
-    wildcard that quietly covered its apex is a widening nobody wrote down. A
-    deployment that wants both lists both, as `DEFAULT_HOSTS` does for GitHub.
+    **There are two spellings, and neither implies the other.** `example.com`
+    allows that one host. `*.example.com` allows every host *under* it and not
+    the apex, because a wildcard that silently covered its apex would widen the
+    list in a way that nobody wrote down. A deployment that wants both lists
+    both.
 
-    An entry may carry `:port`, and then allows only that port; without one it
-    allows any. Matching is case-insensitive and ignores a trailing dot, which is
-    the same host to DNS.
+    An entry may carry `:port`, and then it allows only that port. Without a
+    port it allows any port. Matching is case-insensitive and ignores a trailing
+    dot, because DNS treats a name with a trailing dot as the same host.
     """
     wanted = host.lower().rstrip(".")
     for entry in hosts:
@@ -444,7 +471,8 @@ def host_allowed(hosts: Sequence[str], host: str, port: int) -> bool:
 
 
 def _split_entry(entry: str) -> tuple[str, int | None]:
-    """`host[:port]` → the host and the port, if one was written."""
+    """Split `host[:port]` into the host and the port. The port is `None` when
+    the entry has none."""
     text = entry.strip().lower()
     name, separator, port = text.rpartition(":")
     if separator and port.isdigit():
@@ -461,13 +489,13 @@ DenialSource: TypeAlias = Literal["proxy", "output"]
 
 @dataclass(frozen=True, slots=True)
 class Denial:
-    """One refused boundary, with the sentence a person reads about it.
+    """One refused boundary, with the sentence that a user reads about it.
 
-    `via` says how it is known. `proxy` is certain: the proxy refused a host and
-    knows which. `output` is read from what a confined command printed — the kernel
-    refuses in silence, so `Read-only file system` in stderr is the only account
-    there is — and the sentence says "reported" rather than "blocked" for that
-    reason.
+    `via` says how the refusal is known. `proxy` is certain: the proxy refused a
+    host and knows which host. `output` is read from what a confined command
+    printed. The kernel refuses in silence, so `Read-only file system` in stderr
+    is the only account of the refusal. For that reason the sentence says
+    "reported" and not "blocked".
     """
 
     kind: DenialKind
@@ -477,7 +505,8 @@ class Denial:
     evidence: str | None = None
 
     def message(self) -> str:
-        """What the TUI shows and the log keeps — one sentence, with the way out."""
+        """What the TUI shows and the log keeps: one sentence that also says how
+        to lift the refusal."""
         if self.kind == "network" and self.via == "proxy":
             return (
                 f"Sandbox blocked network access to {self.host}:{self.port}. "
@@ -495,8 +524,9 @@ class Denial:
         )
 
     def record(self, agent: str | None) -> dict[str, JsonValue]:
-        """The `sandbox/denied` payload. Carries the sentence, so every reader —
-        the TUI, the trajectory, `phern agents attach` — prints one account."""
+        """The `sandbox/denied` payload. It carries the sentence, so every
+        reader (the TUI, the trajectory, `phern agents attach`) prints the same
+        account."""
         data: dict[str, JsonValue] = {
             "kind": self.kind,
             "via": self.via,
@@ -515,20 +545,21 @@ class Denial:
 
 @runtime_checkable
 class DenialReader(Protocol):
-    """A backend that can recognize its own kernel's refusals in a command's output.
+    """A backend that can recognize the refusals of its own kernel in the output
+    of a command.
 
-    **Optional, and the backend's rather than the seam's**, because every string
-    such a reader matches is a fact about one platform: `bwrap` on Linux leaves
-    `Read-only file system` and `Network is unreachable`, and Seatbelt on macOS
-    says `Operation not permitted` for both boundaries and leaves the path on the
-    line to tell them apart. A table of Linux sentences living in this module would
-    be the seam asserting one kernel's dialect on every backend's behalf —
-    `DescribingProvider` next door exists for exactly this shape, and for the same
-    reason.
+    **The capability is optional, and it belongs to the backend and not to the
+    seam**, because every string that such a reader matches is a fact about one
+    platform. `bwrap` on Linux leaves `Read-only file system` and `Network is
+    unreachable`. Seatbelt on macOS says `Operation not permitted` for both
+    boundaries, and the path on the line tells them apart. A table of Linux
+    sentences in this module would be the seam stating the wording of one kernel
+    for every backend. `DescribingProvider` in `ph.seams.containment` exists for
+    the same case, and for the same reason.
 
-    A backend that has not been measured implements nothing and the seam records
-    nothing, which is the honest answer: the kernel refuses in silence, and a
-    guess about *how* it phrases that is not evidence.
+    A backend that has not been measured implements nothing, and the seam
+    records nothing. That is the correct answer: the kernel refuses in silence,
+    and a guess about *how* it words a refusal is not evidence.
     """
 
     def read_denial(self, output: str, *, network: bool) -> Denial | None: ...
@@ -539,11 +570,12 @@ class DenialReader(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ConfinedArgv:
-    """An argv wrapped by a real backend, and how much it actually enforces.
+    """An argv that a real backend wrapped, and how much the backend actually
+    enforces.
 
-    `enforcement: "partial"` is reported rather than smoothed over: under
-    `containment.strict` (Phase 4) a partial backend is a refusal to start, not
-    a downgrade to accept quietly.
+    `enforcement: "partial"` is reported and not hidden. Under
+    `containment.strict`, a partial backend is a refusal to start, not a
+    downgrade to accept quietly.
     """
 
     argv: tuple[str, ...]
@@ -552,26 +584,28 @@ class ConfinedArgv:
     forwards_signals: bool = True
     """Whether a signal sent to this argv reaches the command inside it.
 
-    **Declared, because it cannot be discovered by trying.** `bwrap` does not
-    forward: it dies of `SIGINT` itself and, having unshared the PID namespace,
-    takes everything inside down with it — so a caller that signals a confined
-    child to *interrupt* it destroys it instead. `sandbox-exec` execs its target
-    and adds no namespace, so signals land normally.
+    **It is declared, because a caller cannot discover it by trying.** `bwrap`
+    does not forward signals. It dies of `SIGINT` itself, and because it has
+    unshared the PID namespace, everything inside dies with it. So a caller that
+    signals a confined child to *interrupt* it destroys it. `sandbox-exec` execs
+    its target and adds no namespace, so signals arrive normally.
 
-    A caller with a cooperative stop of its own (the RLM kernel's `cancel` frame)
-    reads this to decide whether the signal is a second route or a demolition, and
-    `spawn_spec` hands it to the spawn, which kills such a child rather than asking
-    it to stop. It
-    is `enforcement`'s shape and for `enforcement`'s stated reason: a property only
-    discoverable by confining something and seeing what happens is not one a caller
-    can act on beforehand.
+    A caller that has its own cooperative stop (the `cancel` frame of the RLM
+    kernel) reads this field to decide whether the signal is a second route or
+    would destroy the child. `spawn_spec` gives the field to the spawn, and the
+    spawn kills such a child and does not ask it to stop. The field has the
+    shape of `enforcement`, for the reason that `enforcement` states: a caller
+    cannot act beforehand on a property that it can discover only by confining
+    something and watching the result.
 
-    Defaults to `True` — the unwrapped truth — so a backend that adds no process
-    between the caller and its child says nothing."""
+    The default is `True`, which is the truth for an unwrapped argv. So a
+    backend that adds no process between the caller and its child declares
+    nothing."""
     policy: SandboxPolicy | None = None
-    """The *effective* policy the backend enforced — the caller's request with the
-    deployment's allowances merged in. Stamped by the seam, so a caller reading the
-    result back knows what was actually bounded rather than what it asked for."""
+    """The *effective* policy that the backend enforced: the request of the
+    caller with the allowances of the deployment merged in. The seam stamps it,
+    so a caller that reads the result knows what was actually bounded, and not
+    only what it asked for."""
 
     def spawn_spec(
         self,
@@ -581,9 +615,10 @@ class ConfinedArgv:
         timeout_ms: int | None = None,
         on_stderr_line: Callable[[str], None] | None = None,
     ) -> SubprocessSpawnSpec:
-        """This argv as a spawn, carrying `forwards_signals` with it: the one door
-        from a confined argv to a child, so no spawn of one can drop the flag that
-        decides how it is stopped (`SubprocessSpawnSpec.forwards_signals`)."""
+        """This argv as a spawn, with `forwards_signals` carried along. This
+        method is the one path from a confined argv to a spawn through
+        `ctx.subprocess`, so no such spawn can drop the flag that decides how the
+        child is stopped (`SubprocessSpawnSpec.forwards_signals`)."""
         return SubprocessSpawnSpec(
             argv=self.argv,
             cwd=cwd,
@@ -598,17 +633,17 @@ class ConfinedArgv:
 class SandboxProvider(Protocol):
     """A confinement backend.
 
-    `enforcement` is a *descriptor*, readable before any call, because
-    `containment.strict` has to decide at startup whether this deployment is
-    actually confined — and a property only discoverable by confining something
-    would make that check "run a command and see", which is not a thing a
-    refusal-to-start can do. `partial` is a refusal under strict, not a
+    `enforcement` is a *descriptor* that can be read before any call.
+    `containment.strict` must decide at startup whether this deployment is
+    actually confined. If the property could be discovered only by confining
+    something, that check would be "run a command and see", and a refusal to
+    start cannot do that. Under strict, `partial` is a refusal and not a
     downgrade (E8).
 
-    Typed rather than duck-typed for the reason `WorkspaceProvider` is: a
-    backend whose method drifted would fail inside a caller's `except` and be
-    reported as *unconfined*, which is the one direction this seam must never
-    fail in silently.
+    The Protocol is typed and not duck-typed, for the same reason as
+    `WorkspaceProvider`. A backend whose method drifted would fail inside the
+    `except` of a caller and be reported as *unconfined*. That is the one
+    direction in which this seam must never fail silently.
     """
 
     @property
@@ -616,18 +651,18 @@ class SandboxProvider(Protocol):
 
     @property
     def backend(self) -> str:
-        """What this backend is called — `bwrap`, `sandbox-exec`.
+        """The name of this backend: `bwrap`, `sandbox-exec`.
 
-        A *declared* name, beside `enforcement` and readable for the same
-        reason: a consumer that wants to tell a person what is confining them
-        had only `type(provider).__name__`, which is a Python class name derived
-        rather than stated, and which no seam contract promises.
-        `ConfinedArgv.backend` is this field rather than a literal each
+        The name is *declared*, beside `enforcement`, and it is readable for the
+        same reason. A consumer that wanted to tell a user what confines them
+        had only `type(provider).__name__`. That is a Python class name, which
+        is derived and not stated, and no seam contract promises it.
+        `ConfinedArgv.backend` is this field, and not a literal that each
         `confine` repeats.
 
-        Both are properties rather than attributes — `CodeRuntime` says why —
-        because both backends expose them as read-only, which a settable
-        Protocol member refuses.
+        Both are properties and not attributes, because both backends expose
+        them as read-only, and a settable Protocol member refuses that.
+        `CodeRuntime` explains the reason.
         """
         ...
 
@@ -645,30 +680,32 @@ class SandboxSeam:
     """Who registered the backend (P6-29). See `ph.seams.compaction`."""
     allowances: Allowances | None = None
     allowances_by: Running | None = None
-    """What the deployment lets a confined command reach, and who said so. `None`
-    reads as `NOTHING` — see `effective`."""
+    """What the deployment lets a confined command reach, and the row that
+    registered it. `None` reads as `NOTHING`: see `allowed`."""
     egress: Egress | None = None
     egress_by: Running | None = None
-    """The proxy door, once the backend row has proved a confined command can reach
-    it. `None` with `allowlist` in force means no network at all, and
-    `network_posture` says so."""
+    """The egress bridge, after the backend row has proved that a confined
+    command can reach the proxy. `None` with `allowlist` in force means no
+    network at all, and `network_posture` says so."""
     _path_limits: ScopedEntries[tuple[str, ...]] = field(default_factory=ScopedEntries)
-    """The writable directories a narrowed child keeps (`restrict_paths`), by the scope
-    each binds (`ScopedEntries`, as `ctx.skills` keeps its filters): a command reads
-    only the ones along its agent's `isolation_chain()`."""
+    """The writable directories that a narrowed child keeps (`restrict_paths`),
+    keyed by the scope that each limit binds (`ScopedEntries`, as `ctx.skills`
+    keeps its filters). A command reads only the limits along the
+    `isolation_chain()` of its agent."""
 
     @property
     def allowed(self) -> Allowances:
         """What this deployment permits, with the unmounted case already answered.
 
-        The one spelling of `allowances or NOTHING`, which is what `NOTHING` is for:
-        it was stated as a value so no reader would have an `is None` branch to get
-        wrong, and then three readers each wrote one anyway. A pydantic model is
-        always truthy, so `or` is safe here.
+        This is the one place that answers a missing `allowances` with
+        `NOTHING`, which is the purpose of `NOTHING`. `NOTHING` was made a value
+        so that no reader would have an `is None` branch that could be wrong,
+        and then three readers each wrote one anyway.
 
-        `network_posture` keeps its own `None` branch deliberately — "no
+        `network_posture` keeps its own `None` branch on purpose. "no
         sandbox-allow row is mounted" is a different sentence from "the row says
-        off", and a person reading `phern doctor` needs to be able to tell them apart.
+        off", and a user who reads `phern doctor` must be able to tell them
+        apart.
         """
         return self.allowances if self.allowances is not None else NOTHING
 
@@ -686,18 +723,20 @@ class SandboxSeam:
     def register_allowances(
         self, allowances: Allowances, *, scope: Context | None = None
     ) -> Disposer:
-        """Say what confined commands may reach. One slot: two statements of one
-        boundary is a contradiction, and re-applying the row is how it changes.
+        """Say what confined commands may reach. There is one slot: two
+        statements of one boundary would contradict each other, and the boundary
+        changes when the row is applied again.
 
-        **The paths are canonicalized here, because this is where they are minted.**
-        A deployment writes `~/.cache/uv`; the kernel matches the path it resolves,
-        and so must the prompt boundary `permissions-fs` draws from the same set
-        (E6). Doing it here rather than in `allowed_paths` is the difference between
-        once per mount and once per confined command *and* per gated write — the
-        cost the memoized helper this replaced was written to avoid, and it belongs
-        at the mint, not behind a cache. `expanduser` comes with it: `~` is a
-        spelling too, and a consumer comparing against a literal `~` compares
-        against nothing.
+        **The paths are made canonical here, because this is where they enter
+        the seam.** A deployment writes `~/.cache/uv`. The kernel matches the
+        path that it resolves, and so must the prompt boundary that
+        `permissions-fs` draws from the same set (E6). Done here, the work
+        happens one time per mount. Done in `allowed_paths`, it would happen for
+        every confined command *and* for every gated write. The memoized helper
+        that this replaced was written to avoid that cost, and the work belongs
+        where the paths enter, not behind a cache. `expanduser` is applied here
+        too: `~` is a spelling, and a consumer that compares against a literal
+        `~` matches nothing.
         """
         return claim_slot(
             self.ctx.running_for(scope),
@@ -714,19 +753,23 @@ class SandboxSeam:
         )
 
     def logged_mode(self, session: Session | None) -> SandboxMode | None:
-        """The posture this session recorded, or `None` if it never set one.
+        """The posture that this session recorded, or `None` if it never set one.
 
-        Separate from `resolve_mode` because the *absence* is what `effective`
-        needs: a caller's policy states a mode, and only a posture somebody
-        actually chose may overrule it. Collapsed into the default, "nobody said"
-        and "the deployment says workspace-write" are the same answer, and
-        `effective` would overwrite every caller's mode with the default.
+        It is separate from `resolve_mode` so that the *absence* of a record can
+        be read. `None` means that nobody chose a posture, which is a different
+        answer from "the deployment says workspace-write". `effective` used to
+        read this method, and it let the logged mode replace the mode of the
+        caller. It now reads `resolve_mode` through `mode_for`, because the
+        default of the deployment is a posture too (N1). `resolve_mode` is the
+        only caller of this method.
 
-        **Who wrote it is this seam** (T6, closing F12): `sandbox/mode` is written
-        only through this module's writer, which is the one `WRITERS` grants it, so a
-        third-party row that tries to write one is refused at the write. Not enforced:
-        a module that imports this one's writer, or reaches past it to
-        `Session._append` — deliberate acts `test_log_writers.py` fails on.
+        **Who wrote it is this seam** (T6, closing F12). `sandbox/mode` is
+        written only through the writer of this module, which is the writer that
+        `WRITERS` grants the type to. So a third-party row that tries to write
+        one is refused at the write. Two bypasses are not prevented at run time:
+        a module that imports the writer of this module, and a module that calls
+        `Session._append` directly. Both are deliberate acts, and
+        `test_log_writers.py` fails on them.
         """
         if session is None:
             return None
@@ -738,27 +781,32 @@ class SandboxSeam:
     def resolve_mode(
         self, session: Session | None = None, *, explicit: SandboxMode | None = None
     ) -> SandboxMode:
-        """Explicit beats the log; the log beats the deployment default."""
+        """An explicit mode wins over the log, and the log wins over the default
+        of the deployment."""
         return explicit or self.logged_mode(session) or self.default_mode
 
     def mode_for(self, agent: str | None) -> SandboxMode:
-        """The posture `agent`'s session runs in — the deployment's without one."""
+        """The posture that the session of `agent` runs in. Without a session,
+        it is the posture of the deployment."""
         return self.resolve_mode(self._session_of(agent))
 
     def set_mode(self, log: Session | SessionBatch, mode: SandboxMode) -> None:
-        """Record a posture change — into a batch, where it is one of several (S14)."""
+        """Record a posture change. Pass a batch when the change is one of
+        several records (S14)."""
         _LOG.append(log, "sandbox/mode", {"mode": mode})
 
     def mode_reading(self, session: Session) -> StatusReading:
-        """`sandbox workspace-write` — what a confined command may write.
+        """`sandbox workspace-write`: what a confined command may write.
 
-        Labeled, because the preset beside it is *named* for this and the two
-        are different questions: a preset says what runs without anybody being
-        asked, this says what the kernel will let through at all.
+        The reading is labeled, because the preset beside it is *named* for the
+        sandbox mode, and the two answer different questions. A preset says what
+        runs without anybody being asked. This reading says what the kernel lets
+        through at all.
 
-        A bound method rather than a lambda over the seam, so the `StatusField`
-        this lives on holds one reference to this object rather than a closure
-        cell over whatever else was in scope when the row mounted.
+        It is a bound method and not a lambda over the seam. So the
+        `StatusField` that holds it keeps one reference to this object, and not
+        a closure cell over everything else that was in scope when the row
+        mounted.
         """
         return _MODE_READINGS[self.resolve_mode(session)]
 
@@ -768,38 +816,45 @@ class SandboxSeam:
 
     @property
     def enforcement(self) -> Enforcement | None:
-        """How much the mounted backend actually enforces, or `None` for none.
+        """How much the mounted backend actually enforces, or `None` when there
+        is no backend.
 
-        Read at startup by `containment.strict`, which refuses on anything but
-        `full` — including on `None`, since "no backend" and "a backend that
-        bounds some of it" are both "not confined" to a deployment that asked to
-        be sure.
+        `containment.strict` reads it at startup and refuses on anything except
+        `full`. That includes `None`: "no backend" and "a backend that bounds
+        some of it" are both "not confined" to a deployment that asked to be
+        sure.
         """
         return None if self.provider is None else self.provider.enforcement
 
     # ------------------------------------------------------------ allowances --
 
     def restrict_paths(self, paths: Sequence[str], *, scope: Context) -> Disposer:
-        """Bind only `paths` of the extra writable directories for what runs in `scope`
-        and every scope inside it — a child an assigned profile narrowed (S7b).
+        """Bind only `paths` of the extra writable directories for what runs in
+        `scope` and in every scope inside it. This is for a child that an
+        assigned profile narrowed (S7b).
 
-        Canonical (`allowance_path`), as the deployment's are, and within them:
-        `sandbox-allow`'s narrower checks that at admission, and `writable_for` keeps
-        a limit to what its parent's own reach still holds, so a directory the
-        deployment stops allowing is not kept by a child that was once given it.
-        Lifted with `scope`, as `ctx.skills.restrict` is.
+        The paths are canonical (`allowance_path`), as the paths of the
+        deployment are, and they are within the paths of the deployment. The
+        `narrows` function of `sandbox-allow` checks that at admission.
+        `writable_for` keeps a limit to what the reach of its parent still
+        holds, so a child does not keep a directory that the deployment has
+        stopped allowing. The limit is lifted with `scope`, as
+        `ctx.skills.restrict` is.
         """
-        # The table empties with its last limit, which is what keeps `_limits_of`'s
-        # fast path for every command once the narrowed children are gone.
+        # The table becomes empty when its last limit is removed. That keeps the
+        # fast path of `_limits_of` for every command after the narrowed children
+        # are gone.
         by = self.ctx.running_for(scope)
         return self._path_limits.add(by, tuple(paths), label="sandbox.path-limit")
 
     def writable_for(self, agent: str | None = None) -> tuple[str, ...]:
-        """The extra writable directories `agent` may use, canonical, whether or not
-        they exist: the deployment's, less what a narrowing along its scope keeps back.
+        """The extra writable directories that `agent` may use, canonical,
+        whether or not they exist. These are the directories of the deployment,
+        less what a narrowing along the scope of the agent holds back.
 
-        Each limit is read outermost first and keeps only what the one before left, so
-        a grandchild holds no more than its parent does *now*.
+        The limits are read outermost first, and each keeps only what the limit
+        before it left. So a grandchild holds no more than its parent holds
+        *now*.
         """
         paths = tuple(self.allowed.paths)
         for limit in self._limits_of(agent):
@@ -807,10 +862,10 @@ class SandboxSeam:
         return paths
 
     def _limits_of(self, agent: str | None) -> list[tuple[str, ...]]:
-        """The path limits along `agent`'s scope, outermost first."""
+        """The path limits along the scope of `agent`, outermost first."""
         if not self._path_limits or not agent:
-            # The common case, answered before the lookup: this runs inside
-            # `effective`, on every confined command and gated write.
+            # The common case, answered before the lookup. This runs on every
+            # confined command (inside `effective`) and on every gated write.
             return []
         found = self._agent(agent)
         if found is None:
@@ -818,19 +873,20 @@ class SandboxSeam:
         return self._path_limits.gathered(reversed(found.ctx.isolation_chain()))
 
     def allowed_paths(self, agent: str | None = None) -> tuple[Path, ...]:
-        """The extra writable directories `agent` may use (`writable_for`) — only
-        the ones that exist.
+        """The extra writable directories that `agent` may use (`writable_for`),
+        but only the directories that exist.
 
-        A missing directory is skipped rather than bound, because `bwrap` refuses
-        to start when a bind source is absent and every confined command would
-        fail with it. Skipping is the closed direction — less is writable, not
-        more — and `sandbox-allow`'s diagnostic marks the entry `missing` so the
-        omission is visible rather than silent.
+        A missing directory is skipped and not bound, because `bwrap` refuses to
+        start when a bind source is absent, and every confined command would
+        then fail. To skip is the closed direction: less is writable, not more.
+        The diagnostic of `sandbox-allow` marks the entry `missing`, so the
+        omission is visible.
         """
-        # Already canonical and expanded — `register_allowances` did it once, at the
-        # mint. This is a filter and nothing more: it runs inside `effective`, so on
-        # every confined command and every gated write, and a `realpath` here would
-        # be a syscall per configured directory per command.
+        # The paths are already canonical and expanded: `register_allowances`
+        # did that one time, when it took them. This is only a filter. It runs
+        # on every confined command (inside `effective`) and on every gated
+        # write, and a `realpath` here would be a syscall per configured
+        # directory per command.
         found = [Path(entry) for entry in self.writable_for(agent)]
         existing = tuple(path for path in found if path.is_dir())
         for path in found:
@@ -839,11 +895,12 @@ class SandboxSeam:
         return existing
 
     def permits(self, host: str, port: int) -> bool:
-        """What the egress proxy asks, per connection, against the allowances *now*.
+        """What the egress proxy asks for each connection, answered from the
+        allowances as they are *now*.
 
-        Read live rather than captured when the proxy started, which is what lets
-        `/sandbox allow host` take effect on the next request without the proxy —
-        and the tunnels it is carrying — being restarted.
+        The allowances are read live and are not captured when the proxy starts.
+        So `/sandbox allow host` takes effect on the next request, and neither
+        the proxy nor the tunnels that it carries are restarted.
         """
         network = self.allowed.network
         match network.mode:
@@ -855,8 +912,9 @@ class SandboxSeam:
                 return host_allowed(network.hosts, host, port)
 
     def network_posture(self) -> str:
-        """One sentence on what confined commands can reach, for `phern doctor` and
-        `/sandbox` — written once so the two cannot disagree."""
+        """One sentence on what confined commands can reach, for `phern doctor`
+        and `/sandbox`. It is written in one place so that the two cannot
+        disagree."""
         if self.allowances is None:
             return "off — no sandbox-allow row is mounted, so a confined command has no network"
         network = self.allowances.network
@@ -878,43 +936,50 @@ class SandboxSeam:
                 )
 
     def effective(self, policy: SandboxPolicy, *, agent: str | None = None) -> SandboxPolicy:
-        """The caller's request with the deployment's allowances merged in.
+        """The request of the caller with the allowances of the deployment merged in.
 
-        **The one place the two meet.** A backend enforces what it is handed and
-        knows nothing about rows; a caller states what its command needs and knows
-        nothing about the deployment. Merging here means `ctx.shell`, the probe and
-        the next confiner cannot drift from one another about what is allowed.
+        **This is the one place where the two meet.** A backend enforces what it
+        is given and knows nothing about rows. A caller states what its command
+        needs and knows nothing about the deployment. Because the merge is here,
+        `ctx.shell`, the code kernel and the next confiner cannot drift from one
+        another about what is allowed.
 
-        Extra directories are not added under `read-only`: that mode is the
-        session saying *nothing* is writable, and a deployment's cache directory
-        is not an exception to a posture a person chose for one session.
+        The extra directories of the deployment are not added under `read-only`.
+        That mode is the session saying that *nothing* is writable, and the
+        cache directory of a deployment is not an exception to a posture that a
+        user chose for one session.
 
-        **Network and its door are decided in one chain**, each case stated once.
-        They were two passes — an `if/elif/else` for the network, then a four-clause
-        guard for the door that re-tested two of the same conditions plus `not
-        network`, which encoded the `danger-full-access` case while looking like it
-        said something else. The cases: the mode that means no confinement gets the
-        host's network; a caller that refused gets nothing; then the deployment
-        decides, and `allowlist` opens the door only when a bridge is actually
-        mounted — `allowlist` without one is no network, which is the closed
-        direction and what `network_posture` reports.
+        **The network and the egress bridge are decided in one chain**, and each
+        case is stated one time. Before, there were two passes: an
+        `if/elif/else` for the network, then a four-clause guard for the bridge.
+        The guard tested two of the same conditions again, plus `not network`,
+        which encoded the `danger-full-access` case while it looked like it said
+        something else. The cases, in order:
+
+        - The mode that means no confinement gets the network of the host.
+        - A caller that refused the network gets nothing.
+        - Otherwise the deployment decides. `allowlist` gives the bridge only
+          when a bridge is actually mounted. `allowlist` without a bridge is no
+          network, which is the closed direction and what `network_posture`
+          reports.
         """
-        # **The posture the session chose, applied here** (J2). `apply_preset`
-        # logs `sandbox/mode` and nothing read it back: `workspace_policy`
-        # hard-coded `workspace-write`, both confinement callers passed that
-        # through unchanged, and `resolve_mode`'s only reader was the footer. So
-        # `read-only` and `danger-full-access` were reported as in force by the
-        # status bar while the backend was handed `workspace-write` either way —
-        # the two halves of a preset disagreeing, with the visible half wrong.
+        # **The posture that the session chose is applied here** (J2).
+        # `apply_preset` logs `sandbox/mode`, and before this nothing read it
+        # back. `workspace_policy` hard-coded `workspace-write`, both
+        # confinement callers passed that through unchanged, and the only reader
+        # of `resolve_mode` was the footer. So the status bar reported
+        # `read-only` and `danger-full-access` as in force while the backend was
+        # given `workspace-write` in both cases. The two halves of a preset
+        # disagreed, and the visible half was wrong.
         #
-        # **Bounded, not replaced** (N1). Replacing it was wrong in the widening
-        # direction — a logged `danger-full-access` overruled a policy that said
-        # `read-only` — and it is `resolve_mode` rather than `logged_mode`
-        # because the deployment's own default is a posture too: J2's
-        # disagreement survived for `defaultMode: read-only` with no preset
-        # chosen, where the footer said `read-only` and the backend got
+        # **The mode is bounded, not replaced** (N1). To replace it was wrong in
+        # the widening direction: a logged `danger-full-access` overruled a
+        # policy that said `read-only`. The bound is `resolve_mode` and not
+        # `logged_mode`, because the default of the deployment is a posture too.
+        # The disagreement of J2 survived for `defaultMode: read-only` with no
+        # preset chosen: the footer said `read-only` and the backend got
         # `workspace-write`. A caller that states nothing takes the posture
-        # whole; a caller that states something can only ask for less.
+        # unchanged. A caller that states something can only ask for less.
         mode = narrower(policy.mode, self.mode_for(agent))
         extra = list(policy.writable_extra or ())
         if mode != "read-only":
@@ -943,14 +1008,16 @@ class SandboxSeam:
     def confine(
         self, argv: tuple[str, ...], policy: SandboxPolicy, *, agent: str | None = None
     ) -> ConfinedArgv:
-        """Wrap `argv` so the kernel enforces `policy`, plus the deployment's allowances.
+        """Wrap `argv` so that the kernel enforces `policy`, plus the allowances
+        of the deployment.
 
-        `agent` is who the command runs for — carried to the proxy so a refused host
-        is recorded in that agent's session rather than nowhere.
+        `agent` is the agent that the command runs for. It is carried to the
+        proxy so that a refused host is recorded in the session of that agent,
+        and is not lost.
 
-        :raises SandboxError: when no backend can. Never returns `argv`
-            unchanged — a caller must not be able to mistake absence for
-            confinement.
+        :raises SandboxError: when no backend can confine. This method never
+            returns `argv` unchanged, because a caller must not be able to
+            mistake absence for confinement.
         """
         if self.provider is None:
             raise SandboxError(
@@ -959,8 +1026,9 @@ class SandboxSeam:
                 "bounds relative writes only"
             )
         effective = self.effective(policy, agent=agent)
-        # As the row that registered the provider (P6-29); the layer is the
-        # registration's, for the reason `CompactionSeam.register` states.
+        # Run as the row that registered the provider (P6-29). The layer is that
+        # of the registration, for the reason that `CompactionSeam.engine_by`
+        # states.
         with running(self.provider_by):
             confined = self.provider.confine(argv, effective)
         if not isinstance(confined, ConfinedArgv):  # pragma: no cover - provider bug
@@ -972,20 +1040,24 @@ class SandboxSeam:
     def report_denial(
         self, confined: ConfinedArgv, streams: Sequence[str], agent: str | None
     ) -> None:
-        """Read what a confined command's own words say was refused, and record it.
+        """Read what the output of a confined command says was refused, and
+        record it.
 
-        **The seam's rule, in the seam.** This module's docstring states that a
-        refusal is a record rather than a silence, and `ctx.shell` had the only
-        implementation — so when the RLM kernel became the second thing confined it
-        adopted the boundary and not the rule: a cell refused by the kernel produced
-        a traceback with no `/sandbox allow path` line, while the identical refusal
-        from `tool-bash` produced one. One statement, both callers.
+        **The rule of the seam is implemented in the seam.** The docstring of
+        this module says that a refusal is a record and not a silence, and
+        `ctx.shell` had the only implementation. So when the RLM kernel became
+        the second thing that is confined, it adopted the boundary and not the
+        rule. A cell that the operating-system kernel refused produced a
+        traceback with no `/sandbox allow path` line, while the identical
+        refusal from `tool-bash` produced one. Now there is one statement, and
+        both callers use it.
 
-        `streams` are tried in order and the first refusal wins; pass stderr before
-        stdout, which is where these sentences come from. **Only pass the output of
-        a command that actually failed** — the signatures match nothing an ordinary
-        command prints on success, so a `grep` that finds "Read-only file system"
-        and exits 0 has not been refused anything.
+        `streams` are tried in order, and the first refusal wins. Pass stderr
+        before stdout, because stderr is where these sentences come from. **Pass
+        only the output of a command that actually failed.** The signatures
+        match nothing that an ordinary command prints on success, so a `grep`
+        that finds "Read-only file system" and exits 0 has not been refused
+        anything.
         """
         network = bool(confined.policy.network) if confined.policy is not None else False
         for stream in streams:
@@ -995,12 +1067,14 @@ class SandboxSeam:
                 return
 
     def read_denial(self, output: str, *, network: bool) -> Denial | None:
-        """What the mounted backend recognizes in a confined command's output.
+        """What the mounted backend recognizes in the output of a confined
+        command.
 
-        `None` when no backend is mounted or the one that is has not been measured
-        on this platform — see `DenialReader`. Asked here rather than by the caller
-        so a consumer never learns which backend answered (I5), and run as the row
-        that registered it (P6-29), like every other provider body.
+        Returns `None` when no backend is mounted, or when the mounted backend
+        has not been measured on this platform: see `DenialReader`. The seam
+        asks, and not the caller, so that a consumer never learns which backend
+        answered (I5). The call runs as the row that registered the backend
+        (P6-29), like every other provider body.
         """
         if not isinstance(self.provider, DenialReader):
             return None
@@ -1008,12 +1082,15 @@ class SandboxSeam:
             return self.provider.read_denial(output, network=network)
 
     def record_denial(self, denial: Denial, *, agent: str | None) -> None:
-        """Put a refused boundary in the agent's log, where the TUI will find it.
+        """Put a refused boundary in the log of the agent, where the TUI will
+        find it.
 
-        The agent's *session*, looked up through `ctx.agents`, because that is the
-        transcript the person is reading. A denial with no agent to charge it to —
-        a connection that arrived without the proxy user, an agent already gone —
-        is logged rather than dropped, so the fact is somewhere.
+        The record goes to the *session* of the agent, looked up through
+        `ctx.agents`, because that is the transcript that the user reads. A
+        denial may have no agent to assign it to: a connection that arrived
+        without the proxy user, or an agent that is already gone. Such a denial
+        is written to the process log and not dropped, so that the fact is
+        recorded somewhere.
         """
         session = self._session_of(agent)
         if session is None:
@@ -1026,23 +1103,24 @@ class SandboxSeam:
         _LOG.append(session, DENIED, denial.record(agent))
 
     def _session_of(self, agent: str | None) -> Session | None:
-        """The session an agent's records and posture belong to.
+        """The session that the records and the posture of an agent belong to.
 
-        Two readers: `report_denial`, which records where a person will look for
-        it, and `mode_for`, which reads the mode that session chose (J2) for
-        `effective` and for a child's `sandbox-policy`. The second is why the
-        lookup is here rather than threaded through every caller — `confine`
-        already takes the agent id, because a denial has to land in that agent's
-        transcript, and the mode is a fact about the same session. A `session=`
-        parameter would have to be added to `ShellService.run`, to the kernel's
-        confiner and to everything that builds one, to carry something the seam
-        can already ask for.
+        It has two readers. `record_denial` records a denial where a user will
+        look for it. `mode_for` reads the mode that the session chose (J2), for
+        `effective` and for the `sandbox-policy` of a child. The second reader
+        is why the lookup is here and is not passed through every caller.
+        `confine` already takes the agent id, because a denial must land in the
+        transcript of that agent, and the mode is a fact about the same session.
+        A `session=` parameter would have to be added to `ShellService.run`, to
+        the confiner of the kernel and to everything that builds one, to carry
+        something that the seam can already ask for.
         """
         found = self._agent(agent)
         return found.session if found is not None else None
 
     def _agent(self, agent: str | None) -> AgentHandle | None:
-        """The live agent by id — whose session and scope a command runs for."""
+        """The live agent by id. A command runs for the session and the scope of
+        this agent."""
         agents = self.ctx.get(AGENTS)
         if agents is None or not agent:
             return None
@@ -1050,29 +1128,31 @@ class SandboxSeam:
 
 
 def enforcement_of(ctx: Context) -> Enforcement | None:
-    """How much confinement this deployment actually has. `None` is none at all.
+    """How much confinement this deployment actually has. `None` means none at all.
 
-    Asked of a seam that may not be mounted, the way `workspace_of` is — and
-    written once because the copies had begun to *disagree*: `permissions-fs`
-    read "a backend exists" while `containment` read "a backend that says
-    `full`", so a `partial` backend would have had E9's reach sentence telling
-    an operator a sandbox bounds their code cells while E8's refusal told them a
-    partial boundary is not confinement at all. Two operator-facing statements
-    about one fact, in two packages, is the drift this seam exists to prevent.
+    The question is asked of a seam that may not be mounted, as `workspace_of`
+    asks its question. It is written one time because the copies had begun to
+    *disagree*. `permissions-fs` read "a backend exists", while `containment`
+    read "a backend that says `full`". So with a `partial` backend, the reach
+    sentence of E9 would have told an operator that a sandbox bounds their code
+    cells, while the refusal of E8 told them that a partial boundary is not
+    confinement at all. Two statements to the operator about one fact, in two
+    packages, is the drift that this seam exists to prevent.
     """
     seam = ctx.get(SANDBOX)
     return None if seam is None else seam.enforcement
 
 
 def allowed_paths_of(ctx: Context, agent: str | None = None) -> tuple[Path, ...]:
-    """The extra writable directories `agent` may use, asked of a seam that may not
-    be mounted.
+    """The extra writable directories that `agent` may use, asked of a seam that
+    may not be mounted.
 
-    For `permissions-fs`, whose `outside-workspace` rule prompts about what the
-    backend would refuse — and must therefore stop prompting about what the
-    backend now allows, or the prompt boundary and the enforced one describe two
-    different sets (E6). Per agent for the same reason: a child narrowed to fewer
-    directories is asked about the ones it lost.
+    This is for `permissions-fs`. Its `outside-workspace` rule prompts about
+    what the backend would refuse. So it must stop prompting about what the
+    backend now allows, or the prompt boundary and the enforced boundary
+    describe two different sets (E6). The answer is per agent for the same
+    reason: a child that is narrowed to fewer directories is asked about the
+    directories that it lost.
     """
     seam = ctx.get(SANDBOX)
     return () if seam is None else seam.allowed_paths(agent)
@@ -1085,9 +1165,10 @@ class Config(WireModel):
 
 
 def narrows(_mounted: Config, asked: Config, reach: ChildReach) -> ChildLimit:
-    """A child's `sandbox-policy` row may start it in a narrower posture than its
-    parent runs in and never a wider one (S7b). `read-only` is the one a child holds on
-    its own: `SubagentService.resolve_profile` refuses it write."""
+    """The `sandbox-policy` row of a child may start the child in a narrower
+    posture than its parent runs in, and never in a wider one (S7b). `read-only`
+    is the posture that a child holds on its own:
+    `SubagentService.resolve_profile` refuses it `write` access."""
     seam = reach.ctx.get(SANDBOX)
     parent = seam.mode_for(reach.agent) if seam is not None else "danger-full-access"
     mode = asked.default_mode
@@ -1103,15 +1184,17 @@ async def apply(ctx: Context, config: Config) -> None:
     """Mount the sandbox seam with policy resolution and no backend."""
     seam = SandboxSeam(ctx=ctx, default_mode=config.default_mode)
     ctx.provide(SANDBOX, seam)
-    # The posture, as a reading rather than as a field on every status frame.
-    # Only this row can answer it — the mode is this config's default until the
-    # log overrides it, and `resolve_mode` is where that precedence lives — and
-    # a front end that had to be *told* it needed a wire field of its own, plus
-    # a projection, plus a reader, for a string this row already has.
+    # The posture is published as a reading, not as a field on every status
+    # frame. Only this row can answer it: the mode is the default of this config
+    # until the log overrides it, and `resolve_mode` holds that precedence. A
+    # front end that had to be *told* the posture needed a wire field of its
+    # own, plus a projection, plus a reader, for a string that this row already
+    # has.
     #
-    # `sandbox-mode`, because `ph.commands.sandbox` already holds `sandbox` for
-    # the refusal *count* — two facts about one seam, and the registry refuses
-    # a second claim on one id rather than letting them overwrite each other.
+    # The id is `sandbox-mode`, because `ph.commands.sandbox` already holds
+    # `sandbox` for the refusal *count*. These are two facts about one seam, and
+    # the registry refuses a second claim on one id. It does not let one claim
+    # overwrite the other.
     contribute_item(
         ctx,
         TUI_STATUS,

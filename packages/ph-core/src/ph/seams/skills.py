@@ -1,19 +1,21 @@
-"""`ctx.skills` — the capability layer, and the boundary it must not cross.
+"""`ctx.skills`: the capability layer, and the boundary that it must not cross.
 
-A skill is a package a *distribution or a user* installed. The model cannot
-install one, and `/refine` cannot mint one: that is invariant I7, and the reason
-skills and the Continual Harness share a word but not a mechanism — the knowledge
-layer writes *procedure*, never *capability* (Q13).
+A skill is a package that a *distribution or a user* installed. The model cannot
+install one, and `/refine` cannot create one. That is invariant I7. It is also
+the reason that skills and the Continual Harness share a word but not a
+mechanism: the knowledge layer writes *procedure*, never *capability* (Q13).
 
-Progressive disclosure is G9 and lives here too, as the `skills-progressive` row
-at the bottom of this file: the catalog goes in the prompt, the body stays on disk
-until the model asks for it by name. One module, because "what a skill is" — the
-format on disk, the limits, the registry, and what the model is told about it — is
-one question.
+Progressive disclosure is G9, and it is implemented here too, as the
+`skills-progressive` row at the bottom of this file. The catalog goes in the
+prompt. The body stays on disk until the model asks for it by name. All of this
+is one module because "what a skill is" is one question: the format on disk,
+the limits, the registry, and what the model is told about the skill.
 
-**Nothing is scanned by default.** A deployment names its directories; a
-well-known path scanned at every start would make "install a skill" mean "drop a
-file in a directory", which is the capability boundary I7 draws.
+**`skills-progressive` scans nothing by default.** A deployment names its
+directories. A well-known path that was scanned at every start would make
+"install a skill" mean "drop a file in a directory", and I7 draws the capability
+boundary between those two. A row that ships skills with its package installs
+them on purpose, with `offer_skills`.
 
 @module ph.seams.skills
 """
@@ -99,11 +101,13 @@ log = logging.getLogger("ph.seams.skills")
 _LOG = log_writer(__name__)
 
 READ = "skill/read"
-"""A skill's body read at runtime, for the audit (session profiles, S8, decision 12):
-the skill, its version, and the hash of exactly what was read — by the `skill` tool,
-or into a child's prompt at a spawn that names it (`via`). Ignorable: it never blocks
-a task and never makes a restart ask, since skills are meant to keep being refined;
-a session's base records only the directories they are found in."""
+"""The body of a skill was read at runtime. The event exists for the audit
+(session profiles, S8, decision 12). It records the skill, its version, and the
+hash of exactly what was read. `via` says how the body was read: by the `skill`
+tool, or into the prompt of a child at a spawn that names the skill. The event
+is ignorable. It never blocks a task and never makes a restart ask, because
+skills are meant to keep being refined. The base of a session records only the
+directories that skills are found in."""
 
 
 def read_summary(data: Mapping[str, JsonValue]) -> str:
@@ -114,15 +118,17 @@ def read_summary(data: Mapping[str, JsonValue]) -> str:
 
 
 SkillReadVia: TypeAlias = Literal["tool", "brief"]
-"""How a skill's body reached an agent: the `skill` tool, or a spawn's brief."""
+"""How the body of a skill reached an agent: the `skill` tool, or the brief of a
+spawn."""
 
 
 def record_read(session: Session | None, skill: Skill, body: str, *, via: SkillReadVia) -> None:
-    """Say that `body` — `skill`'s, as read just now — reached an agent.
+    """Record that `body` reached an agent. `body` is the body of `skill` as it
+    was read just now.
 
-    Hashed as read, so two runs of a session can say whether they followed the same
-    text even when the author never touched `version`. Nothing for an agent with no
-    session to log to.
+    The body is hashed as read. Two runs of a session can then tell whether
+    they followed the same text, even when the author never changed `version`.
+    Nothing is recorded for an agent that has no session to log to.
     """
     if session is None:
         return
@@ -142,69 +148,77 @@ def record_read(session: Session | None, skill: Skill, body: str, *, via: SkillR
 NAME_MAX = 64
 DESCRIPTION_MAX = 1_024
 HINT_MAX = 256
-"""A hint is one clause after a description, and it reaches every prompt the
-same way — so it is bounded for the reason the description is, at the length a
-clause actually needs."""
+"""A hint is one clause after a description, and it reaches every prompt in the
+same way as the description. So it is bounded for the same reason, at the length
+that a clause needs."""
 SKILL_FILE = "SKILL.md"
 MAX_SKILL_BYTES = 10 * 1024 * 1024
-"""G9's third limit, enforced in two places for two different reasons: the
-scanner refuses a file this large so a catalog cannot be poisoned by one, and
-`SkillService.body` refuses to *return* one so a skill that grew after discovery
-cannot arrive in a context window."""
+"""The third limit of G9. Two places enforce it, for two different reasons. The
+scanner refuses a file this large, so that one file cannot poison a catalog.
+`SkillService.body` refuses to *return* one, so that a skill that grew after
+discovery cannot arrive in a context window."""
 FRONTMATTER_MAX = 64 * 1024
-"""How much of a `SKILL.md` validation reads. The fields it needs are capped at
-about a kilobyte, and the body — up to 10 MiB — stays on disk by design, so
-reading it here would pull in exactly the bytes this row exists to defer."""
+"""How much of a `SKILL.md` validation reads. The frontmatter that validation
+needs is small: `name` and `description` are capped at about a kilobyte
+together, and each list has a cap on its entries. The body, up to 10 MiB, stays
+on disk by design, so reading it here would pull in exactly the bytes that this
+row exists to defer."""
 
 MAX_ALLOWED_TOOLS = 32
-"""How many tools one skill may name. Bounded for the reason every other
-model-adjacent list is: it reaches a prompt, and a skill naming two hundred is
-one that has not decided what it does."""
+"""How many tools one skill may name. The list is bounded for the same reason as
+every other list that reaches the model: it reaches a prompt. A skill that names
+two hundred tools has not decided what it does."""
 
 ARGUMENT_HINT_MAX = 200
-"""How long `argument-hint` may be. It rides the catalog, which is in the prompt
-every turn — a paragraph here is paid for by every request in the session.
+"""How long `argument-hint` may be. The hint is part of the catalog, and the
+catalog is in the prompt every turn. So every request in the session pays for a
+paragraph here.
 
-Its own name, not `HINT_MAX`: that one is 40 lines up and bounds `Skill.hint`,
-the clause a *registrar* adds. Redefining it here silently retightened an
-unrelated rule — `SkillService.register` began refusing a 201-character hint it
-had always accepted — which is what a second constant with one name buys."""
+The constant has its own name and does not reuse `HINT_MAX`. `HINT_MAX` is
+defined above and bounds `Skill.hint`, the clause that a *registrar* adds. An
+earlier version redefined `HINT_MAX` here, and that silently tightened an
+unrelated rule: `SkillService.register` began to refuse a 201-character hint
+that it had always accepted. That is the cost of a second constant with the same
+name."""
 
 MAX_STEPS = 32
 """How many steps one skill may declare. A procedure longer than this is two
-procedures, and every step is an entry the model cannot delete — so the cap is
-also a bound on how much of somebody's plan a skill may commandeer."""
+procedures. Every step is also an entry that the model cannot delete, so the cap
+also bounds how much of someone's plan a skill may take over."""
 
 MAX_ACCEPTS = 16
-"""The most media patterns one skill may state it hands its child (`accepts`)."""
+"""The largest number of media patterns that one skill may state it hands to its
+child (`accepts`)."""
 
 MEDIA_PATTERN = re.compile(r"[a-z]+/(\*|[a-z0-9][a-z0-9.+-]*)")
-"""A media type a skill states, `image/png`, or a whole family of them, `image/*`."""
+"""A media type that a skill states (`image/png`), or a whole family of them
+(`image/*`)."""
 
 MAX_PARAMETERS = 16
-"""How many inputs one skill may declare. A procedure needing more than this has
-not decided what it is for, and every one of them is a name the model must get
+"""How many inputs one skill may declare. A procedure that needs more than this
+has not decided what it is for. The model must also get the name of every input
 right from one line of `argument-hint`."""
 
 PLACEHOLDER = re.compile(r"\{\{\s*parameters\.([A-Za-z0-9_-]+)\s*\}\}")
-"""What an interpolated input looks like in a body: `{{parameters.version}}`.
+"""The form of an interpolated input in a body: `{{parameters.version}}`.
 
-Deliberately narrow. A skill body is prose *and* code samples, and code is full
-of braces — so only this one prefix is touched, and anything else the author
-wrote survives verbatim. The alternative, a general template language, would make
-a `SKILL.md` unable to contain an example of itself."""
+The pattern is narrow on purpose. A skill body is prose *and* code samples, and
+code is full of braces. So only this one prefix is replaced, and everything else
+that the author wrote stays verbatim. The alternative is a general template
+language, and with one a `SKILL.md` could not contain an example of itself."""
 
 PARAMETER_TYPES = {"string": "string", "number": "number", "boolean": "boolean"}
-"""What an author may declare, mapped to JSON Schema's own words.
+"""The types that an author may declare, mapped to the words of JSON Schema.
 
-Three, because a skill's input is something a model types into a tool call: a
-list or an object is a shape the `argument-hint` cannot describe in one line, and
-an author who needs one is describing a procedure, not an input."""
+There are three, because the input of a skill is something that a model types
+into a tool call. The `argument-hint` cannot describe a list or an object in one
+line, and an author who needs one is describing a procedure, not an input."""
 
 VERSION_PATTERN = re.compile(r"\A[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}\Z")
-"""What a `version` may look like. Deliberately looser than semver: pH does not
-compare versions, it *reports* the one that won a shadowing contest, and refusing
-`2024-01-a` would be this seam having an opinion it cannot act on."""
+"""The form that a `version` may have. It is looser than semver on purpose. pH
+does not compare versions. It *reports* the version of the skill that won a
+shadowing contest. If this seam refused `2024-01-a`, it would hold an opinion
+that it cannot act on."""
 
 events.declare(
     "skills/read",
@@ -221,20 +235,25 @@ ORDER_SKILLS = ORDER_TOOL_GUIDANCE + 50
 
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.S)
 NAME_PATTERN = slug_pattern(NAME_MAX)
-"""The one format of a skill name, at this seam's own bound.
+"""The one format of a skill name, at the bound of this seam.
 
-Exported because two readers of `SKILL.md` share it (`rlm-skills-python` now,
-`skills-progressive` in Phase 4) and a catalog whose names another reader
-refuses would be two definitions of "valid skill" drifting apart — and because
-one of them *tests* rather than raises, warning past a bad frontmatter block
-instead of refusing the whole scan. The format itself is `_names`', shared with
-the screen ids that are the same kind of token."""
+`read_skill` *tests* a name against the pattern and does not raise. For a bad
+frontmatter block it logs a warning and skips that skill, and the scan
+continues. `SkillService.register` raises for the same name (`require_slug`).
+Every reader of `SKILL.md` goes through `read_skill`: `skills-progressive`,
+`rlm-skills-python` and `offer_skills`, all through `discover_skills`. So the
+pattern is a second holder of the rule, and a test holds it equal to what
+`register` enforces. If the two differed, a catalog would hold names that
+another reader refuses, and there would be two definitions of "valid skill" that
+drift apart. The format itself belongs to `_names`, which shares it with the
+screen ids, the same kind of token."""
 
 MODEL_KEY = slug_pattern(KEY_MAX)
-"""What a `model:` may name: a key of a profile's `models` list, by that list's own
-rule (`ph.seams.models.Config`), so a key no list could hold is refused at discovery
-rather than at the spawn that reads it. An `effort:` is held to it too, the rule a
-route's `efforts` name theirs by (`ModelRoute`)."""
+"""What a `model:` may name: a key of the `models` list of a profile, by the rule
+of that list (`ph.seams.models.Config`). A key that no list could hold is
+therefore refused at discovery, and not at the spawn that reads it. An `effort:`
+is held to the same rule, because a route names its `efforts` by it
+(`ModelRoute`)."""
 
 
 class Skill(WireModel):
@@ -245,114 +264,127 @@ class Skill(WireModel):
     path: str | None = None
     source: str = "installed"
     version: str = ""
-    """What the author called this revision. Empty when the file says nothing.
+    """The name that the author gave this revision. Empty when the file says
+    nothing.
 
-    Reported, never compared: `discover_skills` shadows by *precedence*, so a
-    user's `code-review` wins over their distribution's whatever the versions
-    say — and the question a person then has is which one they are running. It
-    rides the `skill` tool's result rather than the catalog, because the catalog
-    is in the prompt every turn and this is only interesting once."""
+    The version is reported and never compared. `discover_skills` shadows by
+    *precedence*, so the `code-review` of a user wins over the one of their
+    distribution, whatever the versions say. The user then wants to know which
+    one is running. The version is in the result of the `skill` tool and not in
+    the catalog, because the catalog is in the prompt every turn and the version
+    is interesting only one time."""
     argument_hint: str = ""
-    """How the skill is invoked, in the shape `CommandDefinition.argument_hint`
-    uses. This one *is* in the catalog: a skill the model cannot tell how to
-    start is a skill it reads and then guesses at."""
+    """How the skill is invoked, in the form that
+    `CommandDefinition.argument_hint` uses. This field *is* in the catalog. When
+    the model cannot tell how to start a skill, it reads the skill and then
+    guesses."""
     steps: list[str] = Field(default_factory=list)
-    """An ordered procedure this skill is, rather than advice it gives (P7-18).
+    """An ordered procedure that this skill is, as opposed to advice that it
+    gives (P7-18).
 
-    Seeded into the todo list when the skill is read, as entries the model may
-    mark done and may not delete — which is what makes a *skill* a procedure
-    rather than a suggestion, and what a `turn-stopping` listener then steers
-    against.
+    The steps are seeded into the todo list when the skill is read. The model
+    may mark these entries done and may not delete them. That makes a *skill* a
+    procedure and not a suggestion, and it is what a listener on
+    `agent/turn-stopping` then steers against.
 
-    **Implicitly sequential**: each step waits on the one before it, expressed
-    through the `requires` that `tool-todo` already has. A step list whose order
-    does not matter is a checklist, and an author who needs a real graph writes
-    the entries themselves — this field is for the common case, which is "do
+    **The steps are implicitly sequential.** Each step waits on the step before
+    it, through the `requires` field that `tool-todo` already has. A step list
+    whose order does not matter is a checklist, and an author who needs a real
+    graph writes the entries by hand. This field is for the common case: "do
     these in order".
 
-    Declared here and consumed in `ph-stabilize`, across a package boundary this
-    seam cannot cross, which is why reading a skill emits `skills/read` rather
-    than reaching for a todo list ph-core knows nothing about."""
+    The field is declared here and consumed in `ph-stabilize`. This seam cannot
+    cross that package boundary. So reading a skill emits `skills/read` and does
+    not reach for a todo list, which ph-core knows nothing about."""
     model: str = ""
-    """The listed model a child this skill directs runs on, by key (session profiles,
-    S7b) — `model: classify` for a skill that sorts rather than writes. Read when a
-    spawn names this skill; the key is the parent's profile's to hold, and one it
-    cannot run degrades: the child runs on its parent's model, and the parent is told
+    """The listed model that a child directed by this skill runs on, by key
+    (session profiles, S7b). An example is `model: classify` for a skill that
+    sorts and does not write. The key is read when a spawn names this skill. The
+    profile of the parent holds the key. A key that the parent cannot run
+    degrades: the child runs on the model of its parent, and the parent is told
     (`ModelFallback`). Empty says nothing."""
     effort: str = ""
-    """The reasoning effort a child this skill directs runs at: a name its route's
-    `efforts` define, or `default` (`DEFAULT_EFFORT`). Over the effort its route sets,
-    and under one the spawn names (`child_options`). Empty says nothing."""
+    """The reasoning effort that a child directed by this skill runs at: a name
+    that the `efforts` of its route define, or `default` (`DEFAULT_EFFORT`). It
+    takes precedence over the effort that the route sets, and an effort that the
+    spawn names takes precedence over it (`child_options`). Empty says
+    nothing."""
     accepts: list[str] = Field(default_factory=list)
-    """The media this skill hands a child it directs, as media types or families
-    (`image/*`): what the child's model has to take for it to see them (A3). Stated
-    apart from `model`, which names the job, so a cheap classifier that takes images is
-    one key and one list. A child whose route cannot take them runs on its parent's
-    route if that one can, and otherwise sees a text placeholder for each, its parent
-    told. Empty says nothing."""
+    """The media that this skill hands to a child it directs, as media types or
+    families (`image/*`). The model of the child must accept them for the child
+    to see them (A3). The list is stated apart from `model`, which names the
+    job, so a cheap classifier that takes images is one key and one list. A
+    child whose route cannot take the media runs on the route of its parent if
+    that route can. Otherwise the child sees a text placeholder for each one,
+    and its parent is told. Empty says nothing."""
     max_nudges: int | None = None
-    """How many times `skill-steps` may steer toward this skill's steps without
-    the plan moving, or `None` for the row's own `maxNudges` (D16).
+    """How many times `skill-steps` may steer toward the steps of this skill
+    without the plan moving, or `None` for the `maxNudges` of the row (D16).
 
-    The author's to set because the author knows what a partial run is worth: a
+    The author sets it, because the author knows what a partial run is worth. A
     release checklist abandoned at step three is worse than one that spent a
-    few more model calls finishing, while a survey that stops early has still
-    produced something — `0` says so, and seeds the steps without ever steering.
-    Declared here and read in `ph-stabilize`, the same crossing `steps` makes."""
+    few more model calls to finish. A survey that stops early has still produced
+    something: `0` says so, and it seeds the steps without ever steering. The
+    field is declared here and read in `ph-stabilize`, the same package crossing
+    that `steps` makes."""
     output: dict[str, Any] = Field(default_factory=dict)
-    """The value a child this skill directs returns, as a JSON Schema object: a
-    categorizing skill's `{"type": "object", "properties": {"kind": ...}}`. A child
-    given it finishes by returning one that matches, and fails if it cannot
+    """The value that a child directed by this skill returns, as a JSON Schema
+    object. An example is the `{"type": "object", "properties": {"kind": ...}}`
+    of a categorizing skill. A child that is given the schema finishes by
+    returning a value that matches, and fails if it cannot
     (`ph.seams.subagents.settle_value`). Empty says nothing.
 
-    Written as JSON Schema itself rather than `parameters`' friendlier form, because a
-    value is a structure (lists, nested objects) where an input is one typed word. Held
-    to what pH checks: a root that is an object, and no keyword the validator would
-    skip (`object_schema_problems`)."""
+    The schema is written as JSON Schema itself and not in the friendlier form
+    of `parameters`, because a value is a structure (lists, nested objects) and
+    an input is one typed word. It is held to what pH checks: the root is an
+    object, and it has no keyword that the validator would skip
+    (`object_schema_problems`)."""
     parameters: dict[str, Any] = Field(default_factory=dict)
-    """The inputs this skill takes, as a JSON Schema object (P7-18).
+    """The inputs that this skill takes, as a JSON Schema object (P7-18).
 
-    Authored in the friendlier per-input form — `type`, `required`, `default`,
-    `enum`, `hint` — and converted here, so the validator is the one
-    `validate_json_schema_value` already is rather than a second checker written
-    for this seam.
+    The author writes them in the friendlier per-input form: `type`, `required`,
+    `default`, `enum`, `hint`. They are converted here. The validator is then
+    `validate_json_schema_value`, which exists already, and not a second checker
+    written for this seam.
 
-    **Not in the catalog**, and that is the G9 trade made deliberately: a
-    parameter list per skill in every prompt is paid for on every request, where
-    a refusal naming the missing input is paid for only by the call that got it
-    wrong. `argument-hint` is the author's one line for the common case; the
-    schema is what makes the refusal exact."""
+    **The parameters are not in the catalog.** That is the G9 trade, made on
+    purpose. Every request pays for a parameter list per skill in every prompt.
+    Only the call that got an input wrong pays for a refusal that names the
+    missing input. `argument-hint` is the one line that the author has for the
+    common case. The schema makes the refusal exact."""
     allowed_tools: list[str] = Field(default_factory=list)
-    """The tools this skill expects to use. A declaration, not an enforcement.
+    """The tools that this skill expects to use. This is a declaration, not an
+    enforcement.
 
-    pH already has the enforcing mechanism — `ctx.tools.restrict` — and
-    deliberately does not wire it here: it is a *scope* boundary with a disposer,
-    restrictions intersect, and a turn is not a scope, so two skills read in one
-    turn could narrow to nothing with no moment to widen back. P7-18's executed
-    skill is that scope.
+    pH already has the mechanism that enforces, `ctx.tools.restrict`, and does
+    not wire it here on purpose. A restriction is a *scope* boundary with a
+    disposer, restrictions intersect, and a turn is not a scope. So two skills
+    read in one turn could narrow to nothing, with no moment to widen back. The
+    executed skill of P7-18 is that scope.
 
-    What it buys instead is `SkillValue.missing_tools`: the reader resolves this
-    list against what the caller can actually see, so the model learns a tool is
-    absent when it reads the skill rather than halfway through following it."""
+    The benefit of the declaration is `SkillValue.missing_tools`. The reader
+    resolves this list against what the caller can see. The model then learns
+    that a tool is absent when it reads the skill, and not halfway through
+    following it."""
     hint: str = ""
-    """One extra clause the catalog prints after the description.
+    """One extra clause that the catalog prints after the description.
 
-    For what a *particular registrar* knows and the catalog cannot derive:
-    `rlm-skills-python` installs a skill's package into the kernel venv, so for
-    those skills there is a second way to use one — `await name(...)` in a cell —
-    and a model told only "read the file" would never find it. A field rather
-    than a second catalog, because two catalogs is how a deployment ends up
-    telling the model about the same skill twice in one prompt."""
+    It holds what a *particular registrar* knows and the catalog cannot derive.
+    `rlm-skills-python` installs the package of a skill into the kernel venv.
+    For those skills there is a second way to use one: `await name(...)` in a
+    cell. A model that is told only "read the file" would never find it. This is
+    a field and not a second catalog, because with two catalogs a deployment
+    tells the model about the same skill twice in one prompt."""
 
 
 SkillRestriction = NameFilter
 """A per-scope filter over installed skills. Restrictions intersect.
 
-The same `NameFilter` `ctx.tools` narrows with — one rule, so a change to what
-`allow` and `deny` mean cannot reach one registry and miss the other.
-**Intersecting is the load-bearing word**: a restriction can only subtract, so a
-scope cannot grant itself a skill by adding one, and a child under a restricted
-parent cannot climb back out (P4-13b).
+It is the same `NameFilter` that `ctx.tools` narrows with. With one rule, a
+change to the meaning of `allow` and `deny` cannot reach one registry and miss
+the other. **The design depends on the word "intersect".** A restriction can
+only subtract. So a scope cannot grant itself a skill by adding one, and a child
+under a restricted parent cannot climb back out (P4-13b).
 """
 
 
@@ -360,38 +392,41 @@ parent cannot climb back out (P4-13b).
 class SkillService:
     """The service published as `ctx.skills`.
 
-    **Installation is global; only *reach* is scoped.** `register`'s `scope=` is
-    a lifetime, not a visibility — it says which row's unloading takes the skill
-    away, and the skill is in the catalog of every agent until then. Narrowing
-    is a separate verb (`restrict`) for the reason P4-13b states as its whole
-    security content: a child may hold a subset of its parent and never more, so
-    the registry offers subtraction and no addition. There is deliberately no
-    way to give one agent a skill another cannot see — to give a child a skill,
-    install it, which gives it to the parent too.
+    **Installation is global. Only *reach* is scoped.** The `scope=` of
+    `register` is a lifetime, not a visibility. It says which row takes the
+    skill away when that row unloads, and until then the skill is in the catalog
+    of every agent. Narrowing is a separate verb (`restrict`). P4-13b states the
+    reason as its whole security content: a child may hold a subset of its
+    parent and never more. So the registry offers subtraction and no addition.
+    There is no way to give one agent a skill that another cannot see, and that
+    is deliberate. To give a child a skill, install it, and the parent gets it
+    too.
     """
 
     ctx: Context
     _skills: dict[str, Skill] = field(default_factory=dict)
     _registrants: dict[str, str] = field(default_factory=dict)
-    """Each installed skill's profile row (`Context.row_id`), as `ToolRuntime` keeps a
-    tool's: which row gave it, for a narrowing that drops that row (S7b)."""
+    """The profile row of each installed skill (`Context.row_id`), as
+    `ToolRuntime` keeps the row of a tool. It says which row gave the skill, for
+    a narrowing that drops that row (S7b)."""
     _restrictions: ScopedEntries[SkillRestriction] = field(default_factory=ScopedEntries)
-    """Filters by the scope they belong to (`ScopedEntries`), as `ctx.tools` keeps its
-    layers.
+    """Filters, keyed by the scope that they belong to (`ScopedEntries`), as
+    `ctx.tools` keeps its layers.
 
-    A flat list scanned per read makes **every agent pay for every other agent's
-    narrowing**: a fan-out of sixteen children puts sixteen filters in front of the
-    parent's own catalog, none of which can change what the parent sees. Keyed, a read
-    walks `isolation_chain()` — the filters that can possibly apply and no others.
+    With a flat list scanned per read, **every agent pays for the narrowing of
+    every other agent**. A fan-out of sixteen children puts sixteen filters in
+    front of the catalog of the parent, and none of them can change what the
+    parent sees. With keys, a read walks `isolation_chain()`: the filters that
+    can possibly apply, and no others.
     """
     _reach: dict[tuple[Context | None, ...], tuple[int, frozenset[str]]] = field(
         default_factory=dict
     )
     """What each chain may reach, memoized against `_generation`.
 
-    `ToolRuntime.view`'s arrangement for the same reason: the answer is read once
-    per skill per prompt assembly and changes only when something registers or
-    unloads.
+    This is the arrangement of `ToolRuntime.view`, for the same reason. The
+    answer is read one time per skill per prompt assembly, and it changes only
+    when something registers or unloads.
     """
     _generation: int = 0
 
@@ -405,8 +440,9 @@ class SkillService:
         owner = self.ctx.owner_for(scope)
 
         def released() -> None:
-            # Inside the disposer the scope holds (`claim_key`'s `then`), so a row
-            # that unwinds takes its registrant and tells the catalog too.
+            # This runs inside the disposer that the scope holds (the `then` of
+            # `claim_key`). So a row that unwinds removes its registrant and
+            # also tells the catalog.
             self._registrants.pop(skill.name, None)
             self._changed()
 
@@ -417,31 +453,33 @@ class SkillService:
         return release
 
     def registrants(self) -> dict[str, str]:
-        """Each installed skill by name, and the profile row it lives with — the one
-        that registered it, or this seam's own for one registered with no scope."""
+        """Each installed skill by name, with the profile row that it lives
+        with. That is the row that registered it, or the row of this seam for a
+        skill registered with no scope outside the `apply` of any row."""
         return dict(self._registrants)
 
     def restrict(self, restriction: SkillRestriction, *, scope: Context | None = None) -> Disposer:
         """Narrow what one scope may see. Filters along the chain intersect.
 
-        Pass `scope=` — a filter owned by this service's context applies to every
-        agent, which is a deployment-wide policy and almost never what a caller
-        narrowing one child meant.
+        Pass `scope=`. A filter that the context of this service owns applies to
+        every agent. That is a deployment-wide policy, and almost never what a
+        caller that narrows one child meant.
         """
-        # Two questions, two answers (P6-12): the bucket is *which scope this
-        # narrows*, and must stay where the caller put it; the disposer is *when
-        # it lifts*, which is the row that asked. One value answering both is
-        # what this row found in five registries. Asked as a pair (P6-29) rather
-        # than as two calls, so a disposed activation warns once rather than
-        # twice — `owner_for` is the half that logs.
-        # Through the *pair*, not `by.owner` (P6-29): the bucket is keyed by
-        # the layer's isolation, so a restriction registered by a body running
-        # for an agent would otherwise sit under that agent's key with its
-        # disposer on the row — and stay there. `Running.add_disposer` releases
-        # on whichever scope ends first, which is the same reason
-        # `ToolRuntime._claim` uses it for `_layers` — and the release announces
-        # itself (`then`), so a
-        # child that unwinds takes its narrowing out of the memo too.
+        # There are two questions with two answers (P6-12). The bucket is
+        # *which scope this narrows*, and it must stay where the caller put it.
+        # The disposer is *when the narrowing lifts*, and that is the row that
+        # asked. P6-12 found one value answering both questions in five
+        # registries. The two are asked as a pair (P6-29) and not as two calls,
+        # so a disposed activation warns one time and not two times:
+        # `owner_for` is the half that logs.
+        # The release goes through the *pair*, not `by.owner` (P6-29). The
+        # bucket is keyed by the isolation of the layer. A restriction that a
+        # body running for an agent registers would otherwise sit under the key
+        # of that agent with its disposer on the row, and stay there.
+        # `Running.add_disposer` releases on whichever scope ends first, which
+        # is the reason that `ToolRuntime._claim` uses it for `_layers`. The
+        # release also announces itself (`then`), so a child that unwinds takes
+        # its narrowing out of the memo too.
         by = self.ctx.running_for(scope)
         release = self._restrictions.add(
             by, restriction, label="skill-restriction", then=self._changed
@@ -452,36 +490,39 @@ class SkillService:
     def _changed(self) -> None:
         """Bump the generation **and drop the caches**, as `ToolRuntime` does.
 
-        Bumping alone made every entry stale without removing any, so `_reach`
-        grew an entry per scope ever seen and never shrank — keyed by `Context`, so
-        a settled agent stayed reachable through its own cache line. Since P6-27 a
-        child's `_reach` key is `(child, parent, None)` rather than `(child, None)`,
-        which made a stale child entry pin its parent's context too.
-        `_restrictions` empties itself, with each scope's last filter.
+        Bumping alone made every entry stale and removed none. `_reach` then
+        grew by one entry per scope ever seen and never shrank. The table is
+        keyed by `Context`, so a settled agent stayed reachable through its own
+        cache entry. Since P6-27 the `_reach` key of a child is
+        `(child, parent, None)` and not `(child, None)`, so a stale child entry
+        also kept the context of its parent alive. `_restrictions` empties
+        itself: a scope goes when its last filter goes.
         """
         self._generation += 1
         self._reach.clear()
 
     def reach(self, scope: Boundary) -> frozenset[str]:
-        """Every skill name this boundary may use. The one place filters compose.
+        """Every skill name that this boundary may use. Filters compose only
+        here.
 
-        **Stated, with no default** (P6-32). This resolved `scope or self.ctx`,
-        and `self.ctx` is the mount — the *unrestricted* set — so an unstated
-        boundary was not "no skills", it was all of them. P6-31 left that
-        deliberately, because with `Context | None` there was no way for the
-        callers who legitimately mean the deployment (the prompt catalog, a
-        `phern doctor` probe) to say so, and making the seam refuse would have
-        refused them too. `DEPLOYMENT` is that way, so the ambiguity is gone and
-        the default can come off: a caller that states nothing now fails mypy.
+        **The boundary is stated, with no default** (P6-32). This method used to
+        resolve `scope or self.ctx`. `self.ctx` is the mount, which is the
+        *unrestricted* set. So an unstated boundary did not mean "no skills": it
+        meant all of them. P6-31 left that on purpose. With `Context | None`,
+        the callers that legitimately meant the deployment (the prompt catalog,
+        a `phern doctor` probe) had no way to say so, and a seam that refused
+        would have refused them too. `DEPLOYMENT` is that way. The ambiguity is
+        gone and the default is removed: a caller that states nothing now fails
+        mypy.
         """
         target = boundary_of(scope, self.ctx)
         chain = tuple(target.isolation_chain())
         cached = self._reach.get(chain)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
-        # On the miss, before the table grows — `_restrictions` drops a scope with
-        # its last filter, and this is the same care for the memo keyed by those
-        # scopes (I2).
+        # This runs on the miss, before the table grows. `_restrictions` drops a
+        # scope with its last filter, and this gives the same care to the memo
+        # that is keyed by those scopes (I2).
         drop_dead_chains(self._reach)
         names = self._resolve(chain)
         self._reach[chain] = (self._generation, names)
@@ -490,18 +531,20 @@ class SkillService:
     def _resolve(self, chain: tuple[Context | None, ...]) -> frozenset[str]:
         """What one isolation chain may reach: a pure function of the chain and the tables.
 
-        Split out of `reach` so the memo and the check that audits it cannot hold
-        two definitions of one fold — a second copy would let `stale_reach`
-        confirm a set the pipeline never serves, which is the one failure an
-        audit must not have. Purity is the property that makes it checkable at
-        all: given the same chain, `_skills` and `_restrictions`, this returns the
-        same set, so a cached answer that differs is drift and nothing else.
+        It is split out of `reach` so that the memo and the check that audits it
+        cannot hold two definitions of one fold. With a second copy,
+        `stale_reach` could confirm a set that the pipeline never serves, and
+        that is the one failure that an audit must not have. Purity makes the
+        check possible. Given the same chain, `_skills` and `_restrictions`,
+        this returns the same set. So a cached answer that differs is drift and
+        nothing else.
 
-        **The filters are gathered once, not per name.** Written inside the
-        per-name `all(...)` this did one dict lookup per skill per chain key to
-        answer a question with no filters in it at all — 5.44 µs against 0.36 µs
-        for twenty skills on an unnarrowed chain, which is every deployment-wide
-        resolve and every agent nobody narrowed.
+        **The filters are gathered one time, not per name.** An earlier version
+        gathered them inside the per-name `all(...)`. It did one dict lookup per
+        skill per chain key to answer a question that had no filters in it at
+        all. That took 5.44 µs against 0.36 µs for twenty skills on an
+        unnarrowed chain, and an unnarrowed chain is every deployment-wide
+        resolve and every agent that nobody narrowed.
         """
         filters = self._restrictions.gathered(chain)
         if not filters:
@@ -511,21 +554,21 @@ class SkillService:
     def stale_reach(self) -> list[str]:
         """Cached reach sets that no longer equal a rebuild (I6, P6-01).
 
-        Here rather than in the invariant row that declares it, for
-        `ToolRuntime.stale_views`' reason: the cache is this class's own secret,
-        and a check written against `_reach` from outside is one a rename
-        disables without anybody noticing.
+        The check is here and not in the invariant row that declares it, for the
+        reason that `ToolRuntime.stale_views` gives. The cache is private to
+        this class, and a rename would silently disable a check written against
+        `_reach` from outside.
 
-        **What a stale entry costs is the ceiling, not a listing.** `reach` is
-        what decides which skills an agent may use, so an entry that outlived a
-        `_changed()` keeps a skill reachable after the row owning it unloaded, or
-        hands a narrowed child the set its parent holds — the widening P4-13b
-        calls the whole security content of that row, and the one direction this
-        registry is built to make impossible.
+        **The cost of a stale entry is the ceiling, not a listing.** `reach`
+        decides which skills an agent may use. An entry that outlived a
+        `_changed()` keeps a skill reachable after the row that owns it
+        unloaded. Or it hands a narrowed child the set that its parent holds.
+        P4-13b calls that widening the whole security content of that row, and
+        it is the one direction that this registry is built to make impossible.
 
         Every cached entry is at the current generation, because `_changed`
-        clears the table when it bumps the counter — so every one is an answer
-        `reach` would serve, and every one is compared.
+        clears the table when it bumps the counter. So every entry is an answer
+        that `reach` would serve, and every entry is compared.
         """
         found: list[str] = []
         entries = list(self._reach.items())
@@ -536,22 +579,23 @@ class SkillService:
                     f"the cached skill reach for {chain_label(chain)} serves {sorted(cached)} "
                     f"where a rebuild gives {sorted(fresh)}"
                 )
-        # **And the ceiling itself, which comparing a fold against itself cannot
-        # see.** Both sides above go through `_resolve`, so a fold that composed
-        # restrictions *wrongly* would be confirmed, not caught — and the wrong
-        # composition is the one this registry exists to prevent. The tool
-        # registry shipped exactly that bug: "a child inherited its parent's
-        # scoped tools and could not be narrowed out of them, so a grant could
-        # widen a child but never bound it."
+        # **The ceiling itself is also checked, because a fold compared against
+        # itself cannot see it.** Both sides above go through `_resolve`. A fold
+        # that composed restrictions *wrongly* would therefore be confirmed, not
+        # caught, and the wrong composition is the one that this registry exists
+        # to prevent. The tool registry shipped exactly that bug: a child
+        # inherited the scoped tools of its parent and could not be narrowed out
+        # of them, so a grant could widen a child but never bound it.
         #
-        # Checkable here because two things hold for skills and not for tools:
-        # `isolation_chain` is suffix-ordered, so an ancestor's chain is a
-        # suffix of its descendant's; and a restriction only ever intersects
-        # (`NameFilter` neither field widens). A deeper chain therefore applies a
-        # superset of the filters, so its reach must be a subset. A tool view
-        # has no such rule — a grandchild may legitimately hold what its
-        # granting parent cannot see — which is why this clause is skills' own
-        # and not copied from next door.
+        # The check is possible here because two things hold for skills and not
+        # for tools. `isolation_chain` is suffix-ordered, so the chain of an
+        # ancestor is a suffix of the chain of its descendant. And a restriction
+        # only ever intersects (neither field of `NameFilter` widens). A deeper
+        # chain therefore applies a superset of the filters, so its reach must
+        # be a subset. A tool view has no such rule: a grandchild may
+        # legitimately hold what its granting parent cannot see. That is why
+        # this clause belongs to skills alone and is not copied from the tool
+        # registry.
         for chain, (_, narrow) in entries:
             for ancestor, (_, wide) in entries:
                 if (
@@ -578,18 +622,19 @@ class SkillService:
         return self._skills.get(name) if self.admits(name, scope) else None
 
     def body(self, name: str, scope: Boundary) -> str | None:
-        """The skill's full text, read only when asked for (G9).
+        """The full text of the skill, read only when it is asked for (G9).
 
-        Capped again here rather than trusting discovery: a file is validated
-        once at mount and read whenever the model asks, and the window between
-        those two is exactly where a skill directory that is a checkout gets
-        `git pull`ed. `None` for an unknown name or a body that no longer fits,
-        because both mean "there is nothing to hand you".
+        The size is capped again here, and discovery is not trusted. A file is
+        validated one time at mount and read whenever the model asks. A skill
+        directory that is a checkout can be updated with `git pull` between
+        those two moments. The result is `None` for an unknown name or for a
+        body that no longer fits, because both mean "there is nothing to hand
+        you".
 
-        **A read, not a record of one** (S8): a `skill/read` says a body reached an
-        agent, which only the reader knows — the `skill` tool once the arguments
-        render, a spawn once its child is admitted — so each records with
-        `record_read` when it hands the body over.
+        **This is a read, not a record of one** (S8). A `skill/read` says that a
+        body reached an agent, and only the reader knows that: the `skill` tool
+        when the arguments render, a spawn when its child is admitted. So each
+        reader records with `record_read` when it hands the body over.
         """
         skill = self.get(name, scope)
         if skill is None or skill.path is None:
@@ -616,29 +661,31 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 def offer_skills(ctx: Context, root: Path, *, source: str) -> None:
-    """Install the `SKILL.md` files under `root` as `source`'s, if a skills registry is
-    mounted: how a package ships skills.
+    """Install the `SKILL.md` files under `root` as the skills of `source`, if a
+    skills registry is mounted. This is how a package ships skills.
 
-    `discover_skills` globs `<root>/*/SKILL.md`, validates each one and skips a malformed
-    one with a logged reason; each arrives through `contribute_item`, so exactly when
-    the row offering it does, and leaves with it. A row offers its skills on purpose,
-    which is what keeps `skills-progressive`'s empty `paths` meaningful: installing a
-    skill is something a distribution does deliberately (I7). Only the one-line
-    description rides the prompt every turn; the body stays on disk until the model
-    asks for it by name (G9).
+    `discover_skills` globs `<root>/*/SKILL.md` and validates each file. It
+    skips a malformed one and logs the reason. Each skill arrives through
+    `contribute_item`, so it arrives exactly when the row that offers it does,
+    and it leaves with that row. A row offers its skills on purpose, and that
+    keeps the empty `paths` of `skills-progressive` meaningful: installing a
+    skill is something that a distribution does deliberately (I7). Only the
+    one-line description is in the prompt every turn. The body stays on disk
+    until the model asks for it by name (G9).
     """
     for skill in discover_skills([str(root)], source=source):
         contribute_item(ctx, SKILLS, skill, label=f"skill({skill.name})")
 
 
 def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | None:
-    """One `SKILL.md`, validated. `None` — with a reason logged — if it is not one.
+    """One `SKILL.md`, validated. `None`, with a reason logged, if the file is
+    not a valid one.
 
-    **Refused rather than half-accepted**: a skill whose name does not match its
-    directory would be addressed by one string in the catalog and found under
-    another on disk, which is a bug report from a confused model later. A bad
-    skill is skipped rather than fatal, because one malformed directory must not
-    cost a deployment every other skill it installed.
+    **A bad skill is refused and not half-accepted.** A skill whose name does
+    not match its directory would be addressed by one string in the catalog and
+    found under another on disk, and a confused model would report that as a bug
+    later. A bad skill is skipped and is not fatal, because one malformed
+    directory must not cost a deployment every other skill that it installed.
     """
     directory = path.parent
     try:
@@ -656,9 +703,10 @@ def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | Non
         log.warning("ph.seams.skills: %s has no YAML frontmatter", path)
         return None
     try:
-        # `safe_yaml_load` is the codebase's one YAML policy: no tags, and no
-        # implicit date coercion — `description: 2024-01-01` stays the string
-        # the author wrote instead of becoming a datetime `str()` reshapes.
+        # `safe_yaml_load` is the one YAML policy of the codebase: no tags, and
+        # no implicit date coercion. `description: 2024-01-01` stays the string
+        # that the author wrote and does not become a datetime that `str()`
+        # reshapes.
         front = safe_yaml_load(matched.group(1), origin=str(path)) or {}
     except LoaderError as error:
         log.warning("ph.seams.skills: %s has invalid frontmatter: %s", path, error)
@@ -678,8 +726,8 @@ def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | Non
     if not description or len(description) > DESCRIPTION_MAX:
         log.warning("ph.seams.skills: %s needs a description of 1..%s chars", path, DESCRIPTION_MAX)
         return None
-    # After the required fields, so a skill with a bad name is refused for its
-    # name rather than for whatever the optional half noticed first.
+    # This comes after the required fields, so a skill with a bad name is
+    # refused for its name and not for what the optional half noticed first.
     optional = _optional_front(front, path)
     if optional is None:
         return None
@@ -687,15 +735,16 @@ def read_skill(path: Path, *, source: str = "skills-progressive") -> Skill | Non
 
 
 def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
-    """The fields a `SKILL.md` may declare, or `None` with a reason logged.
+    """The fields that a `SKILL.md` may declare, or `None` with a reason logged.
 
-    **Refused rather than dropped**, like the required fields above it: a skill
-    whose `allowed-tools` is a string rather than a list would otherwise be
-    installed with that field silently empty, and the author would have no way to
-    tell the difference between "pH ignored it" and "pH does not support it".
+    **A bad field is refused and not dropped**, as with the required fields in
+    `read_skill`. Otherwise a skill whose `allowed-tools` is a string and not a
+    list would be installed with that field silently empty. The author could not
+    tell "pH ignored it" from "pH does not support it".
 
-    Kebab-case on the wire and snake_case on the model, which is the convention
-    the format already follows for every multi-word key an author writes.
+    The keys are kebab-case on the wire and snake_case on the model. The format
+    already follows that convention for every multi-word key that an author
+    writes.
     """
     version = as_str(front.get("version"))
     if version and VERSION_PATTERN.match(version) is None:
@@ -722,7 +771,8 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         return None
     if len(set(steps)) != len(steps):
         # `requires` names entries by their content, and a seeded step is an
-        # entry — two identical steps would be one entry the plan waits on twice.
+        # entry. Two identical steps would be one entry that the plan waits on
+        # two times.
         log.warning("ph.seams.skills: %s repeats a step", path)
         return None
 
@@ -731,8 +781,8 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
         return None
 
     nudges = front.get("max-nudges")
-    # `bool` first: YAML's `true` is an `int` to `isinstance`, and a budget of
-    # `true` nudges is a typo rather than a number.
+    # `bool` is checked first. The `true` of YAML is an `int` to `isinstance`,
+    # and a budget of `true` nudges is a typo and not a number.
     if nudges is not None and (
         isinstance(nudges, bool) or not isinstance(nudges, int) or nudges < 0
     ):
@@ -769,8 +819,9 @@ def _optional_front(front: dict[str, Any], path: Path) -> dict[str, Any] | None:
 
 
 def _key(front: dict[str, Any], key: str, path: Path) -> str | None:
-    """A name a profile defines, held to its `models` list's own rule (`MODEL_KEY`): a
-    `model`, or an `effort` a route's `efforts` define. Absent is `""`."""
+    """A name that a profile defines, held to the rule of its `models` list
+    (`MODEL_KEY`): a `model`, or an `effort` that the `efforts` of a route
+    define. Absent is `""`."""
     value = as_str(front.get(key))
     if value and not MODEL_KEY.match(value):
         log.warning("ph.seams.skills: %s %s %r is not a key", path, key, value)
@@ -779,16 +830,18 @@ def _key(front: dict[str, Any], key: str, path: Path) -> str | None:
 
 
 def _string_list(front: dict[str, Any], key: str, path: Path, *, cap: int) -> list[str] | None:
-    """How a `SKILL.md` declares a list of short strings — once, for both of them.
+    """How a `SKILL.md` declares a list of short strings. One function serves
+    `steps`, `allowed-tools` and `accepts`.
 
-    `steps` and `allowed-tools` are the same rule (a list of strings, trimmed,
-    capped, else refuse the skill) and were written out twice, which is how they
-    came to disagree about a blank entry: one refused the skill and the other
-    dropped it silently. Refusing is the rule the rest of the block already
-    follows, so it is the one that survived — an empty step is a plan entry with
-    no content, and an empty tool name matches nothing.
+    The rule is the same for each key: a list of strings, trimmed and capped, or
+    else the skill is refused. `steps` and `allowed-tools` were written out
+    twice, and so they came to disagree about a blank entry: one refused the
+    skill and the other dropped the entry silently. Refusing is the rule that
+    the rest of the block already follows, so it is the rule that was kept. An
+    empty step is a plan entry with no content, and an empty tool name matches
+    nothing.
 
-    Absent is not malformed: a key nobody wrote is an empty list.
+    Absent is not malformed: a key that nobody wrote is an empty list.
     """
     raw = front.get(key)
     if raw is None:
@@ -804,16 +857,18 @@ def _string_list(front: dict[str, Any], key: str, path: Path, *, cap: int) -> li
 
 
 def _parameter_schema(declared: object, path: Path) -> dict[str, Any] | None:
-    """An author's `parameters:` block as a JSON Schema, or `None` if it is not one.
+    """The `parameters:` block of an author as a JSON Schema, or `None` if it is
+    not a valid block.
 
-    Playbook's shape on the outside — one entry per input with `type`, `required`,
-    `default`, `enum` — and JSON Schema on the inside, because pH already has a
-    validator for that and a second one written here would be a second answer to
-    "is this input acceptable".
+    The outside has the shape of Playbook: one entry per input with `type`,
+    `required`, `default`, `enum`. The inside is JSON Schema, because pH already
+    has a validator for that. A second validator written here would be a second
+    answer to "is this input acceptable".
 
-    `additionalProperties: False` is the point of declaring at all: an argument
-    the skill never heard of is a typo the model can fix, and silently ignoring
-    it is how a `--dry-run` that was spelled `--dryrun` runs for real.
+    `additionalProperties: False` is the purpose of declaring at all. An
+    argument that the skill never heard of is a typo that the model can fix. If
+    it were silently ignored, a `--dry-run` that was spelled `--dryrun` would
+    run for real.
     """
     if declared is None:
         return {}
@@ -868,9 +923,9 @@ def _parameter_schema(declared: object, path: Path) -> dict[str, Any] | None:
 
 
 def _output_schema(declared: object, path: Path) -> dict[str, Any] | None:
-    """An author's `output:` block, or `None` with the reason logged if pH cannot hold
-    a value to it. Absent is `{}`. A schema that may not constrain the reply is kept,
-    with a warning (`structural_warning`)."""
+    """The `output:` block of an author, or `None` with the reason logged if pH
+    cannot hold a value to it. Absent is `{}`. A schema that may not constrain
+    the reply is kept, with a warning (`structural_warning`)."""
     if declared is None:
         return {}
     try:
@@ -885,72 +940,75 @@ def _output_schema(declared: object, path: Path) -> dict[str, Any] | None:
 
 
 def _rendered_value(value: object) -> str:
-    """One declared argument, as the skill's text should read it (D1).
+    """One declared argument, as the text of the skill should read it (D1).
 
-    **`as_str` is the wrong narrowing here**, and its own contract says so: it
-    answers `""` for anything that is not a string, which is exactly right where
-    a non-string is a *malformed* value and wrong where it is a declared one. A
+    **`as_str` is the wrong narrowing here**, and its own contract says so. It
+    answers `""` for anything that is not a string. That is right where a
+    non-string is a *malformed* value and wrong where it is a declared one. A
     skill may declare `{"type": "number"}` or `{"type": "boolean"}`, and every
-    such parameter rendered as nothing — in the instructions the model reads and
-    in every step seeded into its plan, silently, so the author's `Retry
-    {{parameters.attempts}} times` became `Retry  times`.
+    such parameter rendered as nothing. That happened silently, in the
+    instructions that the model reads and in every step seeded into its plan.
+    The `Retry {{parameters.attempts}} times` of an author became
+    `Retry  times`.
 
-    Booleans are spelled the way the schema that declared them spells them:
-    `true` and `false`, not Python's `True`. An author writing
-    `--strict={{parameters.strict}}` means the JSON value they declared, and a
-    model reading `True` in a shell flag has been handed a bug to find.
+    A boolean is spelled as the schema that declared it spells it: `true` and
+    `false`, not the `True` of Python. An author who writes
+    `--strict={{parameters.strict}}` means the JSON value that they declared. A
+    model that reads `True` in a shell flag has been handed a bug to find.
 
-    `None` renders empty rather than `"None"`, which is what an author means by
-    a declared-but-null value and what `as_str` did for it before.
+    `None` renders empty and not as `"None"`. That is what an author means by a
+    declared-but-null value, and it is what `as_str` did for it before.
     """
     if isinstance(value, str):
         return value
     if value is None:
         return ""
-    # Everything else by its JSON spelling, which is `dumps` and not four
-    # branches: it already renders `true`/`false` rather than Python's `True`,
-    # numbers without a repr's surprises, and a list or an object as the author
-    # declared it rather than with Python's single quotes.
+    # Everything else is rendered in its JSON spelling. That is `dumps` and not
+    # four branches. `dumps` already renders `true`/`false` and not the `True`
+    # of Python, numbers without the surprises of a repr, and a list or an
+    # object as the author declared it and not with the single quotes of Python.
     return dumps(value)
 
 
 def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[str, list[str]]:
-    """The skill's instructions *and* its steps, with its inputs filled in (P7-18).
+    """The instructions of the skill *and* its steps, with its inputs filled in
+    (P7-18).
 
-    Both, from one call, because they are one document: `steps:` is the procedure
-    the body explains, and an author who writes `Run {{parameters.gate}}` in a
-    step means the same thing they mean in a paragraph. Rendering only the body
-    would seed the *literal* `{{parameters.gate}}` into somebody's todo list —
-    where, unlike a paragraph, the model cannot go back and read what it stood
-    for.
+    One call returns both, because they are one document. `steps:` is the
+    procedure that the body explains. An author who writes
+    `Run {{parameters.gate}}` in a step means the same thing as in a paragraph.
+    Rendering only the body would seed the *literal* `{{parameters.gate}}` into
+    someone's todo list. There, unlike in a paragraph, the model cannot go back
+    and read what it stood for.
 
-    Raises `ValueError` — which the `skill` tool's body turns into a result the
-    model reads — when the arguments do not satisfy the declaration, or when the
-    text names an input the frontmatter never declared. That second one is an
-    author's typo, and it surfaces here rather than at load because G9 keeps the
-    body on disk until something asks for it: there is no earlier moment that has
-    both halves in hand.
+    Raises `ValueError` when the arguments do not satisfy the declaration, or
+    when the text names an input that the frontmatter never declared. The model
+    reads the error as the result of the `skill` tool. The second case is a typo
+    of the author. It surfaces here and not at load, because G9 keeps the body
+    on disk until something asks for it: no earlier moment has both halves in
+    hand.
 
-    **`body` is the whole file, frontmatter included** (`SkillService.body`), so
-    the undeclared-name scan already covers a `steps:` block without looking at
-    one — which is why there is no separate gate for that case and no separate
-    message naming it. The step *list* still has to be filled in here, because it
-    was parsed at load and is a second copy of the same sentences: unrendered, the
-    todo list and the instructions would spell one procedure two ways.
+    **`body` is the whole file, frontmatter included** (`SkillService.body`). So
+    the scan for undeclared names already covers a `steps:` block without
+    looking at one. That is why there is no separate gate for that case and no
+    separate message that names it. The step *list* must still be filled in
+    here, because it was parsed at load and is a second copy of the same
+    sentences. Unrendered, the todo list and the instructions would spell one
+    procedure in two ways.
 
-    **There is no shortcut for a skill that declares nothing**, and there was: an
-    early return handed such a body straight back. It made the scan conditional
-    on something the author cannot see — a skill with no `parameters:` block was
-    checked when the model happened to pass arguments and not otherwise, and a
-    `steps:`-only skill seeded a literal `{{parameters.gate}}` into the plan.
-    Prose with braces in it is unaffected either way, because `PLACEHOLDER` only
-    matches this one prefix; that is what keeps a skill able to contain an example
-    of itself, and it is the whole of the exemption that is needed.
+    **There is no shortcut for a skill that declares nothing.** There was one:
+    an early return handed such a body straight back. It made the scan depend on
+    something that the author cannot see. A skill with no `parameters:` block
+    was checked when the model happened to pass arguments and not otherwise, and
+    a skill with only `steps:` seeded a literal `{{parameters.gate}}` into the
+    plan. Prose with braces in it is unaffected either way, because
+    `PLACEHOLDER` matches only this one prefix. That keeps a skill able to
+    contain an example of itself, and no other exemption is needed.
 
-    Defaults are applied before validation so a declared default satisfies a
-    `required`-looking read, and after it the text sees a value for every declared
-    name — an author writing `{{parameters.tag}}` never has to think about
-    whether the caller passed one.
+    Defaults are applied before validation, so a declared default satisfies a
+    read that looks `required`. After validation the text sees a value for every
+    declared name. An author who writes `{{parameters.tag}}` never has to think
+    about whether the caller passed one.
     """
     declared = dict(skill.parameters.get("properties") or {})
     values = {
@@ -961,10 +1019,10 @@ def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[
     values.update(arguments)
     violations = validate_json_schema_value(skill.parameters, values)
     if violations:
-        # One validator, not two. An unknown argument is `additionalProperties:
-        # False` doing its job — an explicit membership check beside it was a
-        # second answer to one question, and the one that ran first, so the
-        # shared validator's rule was unreachable and untested.
+        # There is one validator, not two. `additionalProperties: False` refuses
+        # an unknown argument, as intended. An explicit membership check beside
+        # it was a second answer to one question. It also ran first, so the rule
+        # of the shared validator was unreachable and untested.
         raise ValueError(
             f"skill {skill.name!r} arguments: {'; '.join(violations)}. "
             f"It declares: {', '.join(sorted(declared)) or 'none'}"
@@ -982,9 +1040,10 @@ def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[
     filled = PLACEHOLDER.sub(fill, body)
     steps = [PLACEHOLDER.sub(fill, step) for step in skill.steps]
     if missing:
-        # One refusal for both halves, and it does not say which: an author
-        # reading it opens the file, and a model reading it cannot fix either
-        # one. Naming the parameter is what makes it actionable.
+        # There is one refusal for both halves, and it does not say which half.
+        # An author who reads it opens the file, and a model that reads it
+        # cannot fix either one. The name of the parameter is what makes the
+        # refusal actionable.
         raise ValueError(
             f"skill {skill.name!r} refers to undeclared parameter(s) "
             f"{', '.join(sorted(set(missing)))} in its body"
@@ -993,11 +1052,12 @@ def rendered_skill(body: str, skill: Skill, arguments: dict[str, Any]) -> tuple[
 
 
 def discover_skills(paths: Sequence[str], *, source: str = "skills-progressive") -> list[Skill]:
-    """Every valid skill under `paths`, later sources shadowing earlier ones.
+    """Every valid skill under `paths`. A later source shadows an earlier one.
 
-    Shadowing rather than colliding, because the list is a precedence order: a
-    user's own `code-review` is meant to win over the one their distribution
-    ships, and a refusal would make overriding a skill impossible.
+    The sources shadow and do not collide, because the list is a precedence
+    order. The `code-review` of a user is meant to win over the one that their
+    distribution ships, and a refusal would make it impossible to override a
+    skill.
     """
     found: dict[str, Skill] = {}
     for raw in paths:
@@ -1018,10 +1078,10 @@ def discover_skills(paths: Sequence[str], *, source: str = "skills-progressive")
 def render_catalog(skills: list[Skill], *, tool: bool = True) -> str:
     """Names and descriptions. Bodies stay on disk until something asks (G9).
 
-    `tool=False` drops the sentence naming the `skill` tool, for the deployment
-    where the catalog is rendered and the tool is not registered — telling a
-    model to call something that is not in its schema is worse than saying
-    nothing, because it looks like the model's mistake.
+    `tool=False` drops the sentence that names the `skill` tool. It is for the
+    deployment where the catalog is rendered and the tool is not registered.
+    Telling a model to call something that is not in its schema is worse than
+    saying nothing, because it looks like a mistake of the model.
     """
     if not skills:
         return ""
@@ -1064,28 +1124,29 @@ class SkillValue(ToolModel):
     """The inputs this skill declares, so a caller that guessed wrong the first
     time can get it right on the second without opening the file."""
     missing_tools: list[str] = Field(default_factory=list)
-    """Which of those this caller cannot reach — resolved, not just echoed.
+    """Which of those tools this caller cannot reach. The list is resolved, not
+    only echoed.
 
     An echoed list leaves the model to diff it against its own catalog. Resolved
-    against `run.scope`, it answers the question the declaration was for: can I
-    actually follow these instructions from here?"""
+    against `run.scope`, it answers the question that the declaration was for:
+    can I actually follow these instructions from here?"""
 
 
 class Config(WireModel):
     """Row config for `skills-progressive`."""
 
     paths: list[str] = Field(default_factory=list)
-    """Directories to scan, earliest first. Each holds `<name>/SKILL.md`.
+    """The directories to scan, earliest first. Each one holds `<name>/SKILL.md`.
 
-    Empty by default and on purpose: see the module docstring. A path is
-    `~`-expanded, so `~/.ph/skills` is a deployment's choice to write down
-    rather than this row's to assume."""
+    The list is empty by default on purpose: see the module docstring. A path is
+    `~`-expanded, so a deployment that wants `~/.ph/skills` writes it down, and
+    this row does not assume it."""
 
 
 def narrows(mounted: Config, asked: Config, reach: ChildReach) -> ChildLimit:
-    """A child's `skills-progressive` row may scan fewer of its parent's directories,
-    never others, and the child holds only the skills found under the ones it keeps
-    (S7b)."""
+    """The `skills-progressive` row of a child may scan fewer of the directories
+    of its parent, and never others. The child holds only the skills found under
+    the directories that it keeps (S7b)."""
     if asked.paths == mounted.paths:
         return ChildLimit()
     theirs, mine = _scanned(mounted), _scanned(asked)
@@ -1103,8 +1164,9 @@ def narrows(mounted: Config, asked: Config, reach: ChildReach) -> ChildLimit:
     mine_by_row = service.registrants()
 
     def found_elsewhere(name: str) -> bool:
-        # This row's skills only — by the row that installed each, so another row's
-        # skill, or a second `skills-progressive` row's, is not this one's to keep.
+        # Only the skills of this row count, by the row that installed each one.
+        # A skill of another row, or of a second `skills-progressive` row, does
+        # not belong to this row, so this row does not withhold it.
         skill = service.get(name, reach.boundary)
         if mine_by_row.get(name) != reach.row or skill is None or skill.path is None:
             return False
@@ -1130,29 +1192,33 @@ async def progressive(ctx: Context, config: Config) -> None:
     """Catalog in the prompt, body on demand (G9).
 
     **The catalog is a provider, not a fixed string.** It reads the registry at
-    assembly time, so a skill registered by *another* row — `rlm-skills-python`
-    is the one that exists — appears in this catalog rather than in a second one
-    of its own, and no row has to be mounted before another. The cost is that
-    registering a skill mid-session moves the cached prefix, which is honest:
-    the model was genuinely told something new.
+    assembly time. A skill that *another* row registers therefore appears in
+    this catalog and not in a second catalog of its own, and no row has to be
+    mounted before another. `rlm-skills-python` is such a row, and so is a row
+    that ships skills with `offer_skills`. The cost is that registering a skill
+    mid-session moves the cached prefix. That is the correct behavior: the model
+    really was told something new.
     """
     if config.paths:
-        # Threaded because a scan is `glob` plus an open per candidate, and mount
-        # is on the event loop that a TUI is about to draw on.
+        # The scan runs in a thread. A scan is `glob` plus an open per
+        # candidate, and mount is on the event loop that a TUI is about to draw
+        # on.
         registry = ctx.require(SKILLS)
         for skill in await anyio.to_thread.run_sync(discover_skills, config.paths):
             registry.register(skill, scope=ctx)
 
     def catalog(request: AssembleContext) -> str:
-        # Per assembly *and* per agent: a child narrowed at spawn (P4-13b) must
-        # not be told about skills it cannot read, or the catalog is a list of
-        # things to try and fail at. The `skill` tool is checked the same way,
-        # because the two can legitimately disagree for one deployment.
+        # The catalog is built per assembly *and* per agent. A child narrowed at
+        # spawn (P4-13b) must not be told about skills that it cannot read, or
+        # the catalog is a list of things to try and fail at. The `skill` tool
+        # is checked in the same way, because the two can legitimately disagree
+        # for one deployment.
         return render_catalog(
             ctx.require(SKILLS).list(request.scope),
-            # Scoped too: a child narrowed away from the `skill` tool must not be
-            # told in prose to call it. Telling a model to use something absent
-            # from its schema reads as the model's mistake, not the profile's.
+            # This is scoped too. A child narrowed away from the `skill` tool
+            # must not be told in prose to call it. Telling a model to use
+            # something that is absent from its schema looks like a mistake of
+            # the model, not of the profile.
             tool=ctx.require(TOOLS).get("skill", scope=request.scope) is not None,
         )
 
@@ -1161,39 +1227,42 @@ async def progressive(ctx: Context, config: Config) -> None:
     )
 
     async def read_body(args: SkillArgs, run: ToolRunContext) -> dict[str, Any]:
-        # The *stated* boundary, so a narrowed child is refused a skill it can
-        # see named nowhere — the catalog and the gate answer the same question,
-        # and until P6-24 they answered it in two: the catalog above reads
-        # `request.scope` while this read `getattr(run.agent, "ctx", None)`, the
-        # approval-routing target. `run.scope` is a non-optional `Context` and
-        # was sitting two lines away, which is the shape `fs_tools` had.
+        # This uses the *stated* boundary, so a narrowed child is refused a
+        # skill that it sees named nowhere. The catalog and the gate answer the
+        # same question. Until P6-24 they answered it in two ways: the catalog
+        # above reads `request.scope`, and this read
+        # `getattr(run.agent, "ctx", None)`, the approval-routing target.
+        # `run.scope` is a non-optional `Context` and was two lines away.
+        # `fs_tools` had the same shape.
         skills = ctx.require(SKILLS)
         tools = ctx.require(TOOLS)
         scope = run.scope
         skill = skills.get(args.name, scope)
         body = skills.body(args.name, scope)
         if skill is None or body is None:
-            # Named, because "unknown skill" and "this skill has no readable
-            # body" are different problems for the model: one is a typo it can
-            # fix from the catalog, the other is a deployment fault it cannot.
+            # The refusal names the available skills, because "unknown skill"
+            # and "this skill has no readable body" are different problems for
+            # the model. One is a typo that it can fix from the catalog. The
+            # other is a deployment fault that it cannot fix.
             known = ", ".join(one.name for one in skills.list(scope)) or "none"
             raise ValueError(f"no readable skill named {args.name!r}; available: {known}")
-        # Rendered, not raw: a declared input is filled in before the model reads
-        # the instruction that uses it, and arguments that do not satisfy the
-        # declaration are refused here rather than discovered three steps into a
-        # procedure that has already changed something.
+        # The body is rendered, not raw. A declared input is filled in before
+        # the model reads the instruction that uses it. Arguments that do not
+        # satisfy the declaration are refused here, and are not discovered three
+        # steps into a procedure that has already changed something.
         instructions, steps = rendered_skill(body, skill, dict(args.arguments))
-        # Recorded only now: arguments the declaration refuses end the call with the
-        # body never handed over, and a `skill/read` would say it had been.
+        # The read is recorded only now. Arguments that the declaration refuses
+        # end the call before the body is handed over, and a `skill/read` would
+        # say that it had been handed over.
         record_read(run.session, skill, body, via="tool")
-        # **Announced, not acted on.** A skill that declares `steps` is a
-        # procedure, and turning one into entries the model must work through
-        # belongs to `tool-todo` — which lives in ph-stabilize, a package this
-        # seam cannot import and a row a deployment may not have mounted. The
-        # event is how the declaration crosses that boundary without ph-core
-        # growing an opinion about plans (P7-18). An `emit`, so a raise inside
-        # `skill-steps` is logged rather than un-reading a body that is rendered and
-        # about to be returned.
+        # **The read is announced, not acted on.** A skill that declares `steps`
+        # is a procedure. Turning a procedure into entries that the model must
+        # work through belongs to `tool-todo`. That row is in ph-stabilize, a
+        # package that this seam cannot import, and a deployment may not have
+        # mounted it. The event carries the declaration across that boundary, so
+        # ph-core needs no opinion about plans (P7-18). It is an `emit`, so a
+        # raise inside `skill-steps` is logged and does not undo the read of a
+        # body that is rendered and about to be returned.
         ctx.emit(
             "skills/read",
             {
@@ -1210,8 +1279,9 @@ async def progressive(ctx: Context, config: Config) -> None:
             "parameters": sorted(skill.parameters.get("properties") or {}),
             "version": skill.version,
             "allowed_tools": list(skill.allowed_tools),
-            # Resolved against the same scope the body was fetched with, so the
-            # catalog, the gate and this answer one question in one voice.
+            # Resolved against the same scope that the body was fetched with, so
+            # the catalog, the gate and this list give one answer to one
+            # question.
             "missing_tools": [
                 name for name in skill.allowed_tools if tools.get(name, scope=scope) is None
             ],
@@ -1220,14 +1290,15 @@ async def progressive(ctx: Context, config: Config) -> None:
     def build_tool() -> ToolDefinition | None:
         """The tool, or `None` where there is nothing to read.
 
-        See `register_when_composed`: a `skill` tool in a deployment that
+        See `register_when_composed`. A `skill` tool in a deployment that
         installed no skills is a prompt-sized advertisement for a capability
         that is not there.
         """
-        # `DEPLOYMENT`, and it is the right answer rather than the convenient one
-        # (P6-32): the question is whether this *deployment* installed any skills
-        # at all, asked once at mount to decide whether the tool exists. It is
-        # not a per-agent question and there is no agent yet to ask it for.
+        # `DEPLOYMENT` is the correct answer here, and not only the convenient
+        # one (P6-32). The question is whether this *deployment* installed any
+        # skills at all. It is asked one time at mount, to decide whether the
+        # tool exists. It is not a per-agent question, and there is no agent yet
+        # to ask it for.
         if not ctx.require(SKILLS).list(DEPLOYMENT):
             return None
         return define_tool(

@@ -83,12 +83,14 @@ computed against its parent's, so an allow-list can only ever remove.
 
 ## Providing skills
 
-Register into the seam; there is no provider Protocol to satisfy. Two shipped
+Register into the seam; there is no provider Protocol to satisfy. Three shipped
 sources:
 
 * the built-in loader, reading `<dir>/<name>/SKILL.md` with validated
   frontmatter, from directories a deployment **names**;
-* `rlm-skills-python`, which contributes skills from a Python package.
+* `rlm-skills-python`, which contributes skills from a Python package;
+* a row that ships its own skills and installs them with `offer_skills`
+  (`ph-code-graph`, `ph-text-index`, and the sub-agent provider of `ph-rlm`).
 
 A row that discovers skills should register them at `apply` time and let the
 catalog provider pick them up — do not build a second catalog.

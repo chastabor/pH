@@ -57,7 +57,7 @@ from ph.cancel import CancelToken, first_of, is_canceled
 from ph.characters import capped_text, head_bytes, stream_decoder, utf8_size
 from ph.cordis import Context, Disposer, InactiveScopeError, Releaser, plugin, releasing
 from ph.json import as_int, as_str, thaw_json
-from ph.keys import AGENTS, CODE_RUNTIME
+from ph.keys import AGENTS, CODE_RUNTIME, SUBPROCESS
 from ph.orphans import OrphanJournal, host_journal, signal_child
 from ph.paths import resolve_roots
 from ph.seams.code_runtime import (
@@ -68,7 +68,7 @@ from ph.seams.code_runtime import (
 )
 from ph.seams.diagnostics import Diagnostic, contribute
 from ph.seams.sandbox import ConfinedArgv, SandboxPolicy, SandboxSeam
-from ph.seams.subprocess import first_line, scrub_env
+from ph.seams.subprocess import EnvScrub, SubprocessService, first_line
 from ph.seams.workspace import Workspace, confined_env, workspace_of, workspace_policy
 from ph.text import count_of
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
@@ -415,6 +415,13 @@ class Kernel:
     involved at all. If either were derived from "confinement happened", macOS
     would lose a working cancel route, and an outage would be read as a
     denial."""
+    scrub: EnvScrub = field(default_factory=EnvScrub)
+    """Which names of the parent environment the guest never inherits.
+
+    The runtime passes the scrub of `ctx.subprocess`, so the `scrub` and `keep`
+    of the deployment reach the one child that runs code the model wrote. The
+    default is the default scrub, for a kernel that is built with no seam to
+    ask."""
     env: Mapping[str, str] = field(default_factory=dict)
     """Extra environment for the child: `workspace.env`, or `confined_env` for a
     confined kernel.
@@ -503,11 +510,11 @@ class Kernel:
         host_end, child_end = socket.socketpair()
         argv = (str(self.environment.python), "-m", "ph_runtime")
         child_fd = child_end.fileno()
-        # Use `scrub_env`, not `os.environ`. This is the child that the docstring
+        # Use the scrub, not `os.environ`. This is the child that the docstring
         # of the seam describes: "a child runs code the model wrote, so it does
         # not inherit `*KEY*`". A cell that can read `os.environ` can print the
         # provider credential into its own output, and the output is then logged.
-        environ = scrub_env(
+        environ = self.scrub.apply(
             extra={
                 **self.env,
                 "NO_COLOR": "1",
@@ -1585,6 +1592,15 @@ class PythonCodeRuntime:
     `FsPermissions.ctx` has the same form for the same reason. When the resolver
     is absent (a profile with no sandbox seam at all), cells are limited by `cwd`
     and nothing else, which is how they were limited before."""
+    subprocesses: Callable[[], SubprocessService | None] | None = None
+    """The `ctx.subprocess` seam, which is requested when a kernel starts, for
+    the same reason as `sandbox`.
+
+    The guest is not spawned through that seam (`apply` says why), but its
+    environment follows the scrub of the seam. Without this, the `scrub` and
+    `keep` of `subprocess-local` reached every child except the one that runs
+    model-written code. When the resolver or the seam is absent, the kernel gets
+    the default scrub."""
     boot_timeout: float = 30.0
     shutdown_grace: float = 5.0
     cancel_grace: float = 2.0
@@ -1885,12 +1901,14 @@ class PythonCodeRuntime:
             # This is what `ctx.shell` gives a confined command. A confined
             # kernel has no `/tmp` of its own (`confined_env`).
             env = confined_env(workspace) if confine is not None else workspace.env
+        spawner = None if self.subprocesses is None else self.subprocesses()
         kernel = Kernel(
             namespace=namespace,
             environment=await self.environment(),
             limits=self.limits,
             journal=self.journal,
             cwd=None if workspace is None else workspace.root,
+            scrub=EnvScrub() if spawner is None else spawner.scrub,
             env=env,
             confine=confine,
             snapshots=self.snapshots,
@@ -2060,6 +2078,8 @@ async def apply(ctx: Context, config: Config) -> None:
     # for exactly that profile. `workspace-readonly-scratch` and `permissions-fs`
     # both say so.
     runtime.sandbox = partial(ctx.get, "sandbox")
+    # The same holds for `ctx.subprocess`, whose scrub the guest inherits.
+    runtime.subprocesses = partial(ctx.get, SUBPROCESS)
 
     contribute(
         ctx, Diagnostic(id="code-runtime", title="Code runtime", read=runtime.describe, order=40)

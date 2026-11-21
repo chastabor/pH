@@ -1,29 +1,26 @@
-"""`ctx.subprocess` — spawning, with nothing implicit.
+"""`ctx.subprocess`: spawning, with nothing implicit.
 
 Two properties matter more than convenience here.
 
 **The spec is fully explicit.** `SubprocessSpawnSpec` names argv, cwd, stdio and
-the termination grace. No hidden defaults: a caller that did not think about the
-working directory of a process the *model* asked for should have to say so, and
-a default inherited from the harness process is exactly the wrong answer once
-`ctx.workspace` starts handing out per-agent roots (Phase 4).
+the termination grace. There are no hidden defaults. A caller that did not
+think about the working directory of a process that the *model* asked for must
+still state one. A default inherited from the harness process is the wrong
+answer, because `ctx.workspace` gives each agent its own root (Phase 4).
 
 **The environment is scrubbed.** A child runs code the model wrote, so it does
-not inherit `*KEY*`, `*SECRET*`, `*TOKEN*` or `*PASSWORD*` (I-4). Credentials
-reach an adapter as a `CredentialRef` and are resolved at the edge (I-3); a
-child never needs the value, and the one that does is asking for it.
+not inherit `*KEY*`, `*SECRET*`, `*TOKEN*`, `*PASSWORD*`, `*PASSWD*` or
+`*CREDENTIAL*` (I-4, `DEFAULT_SCRUB`). A credential reaches an adapter as a
+`CredentialRef` and is resolved at the edge (I-3). A child never needs the
+value, and a child that does must be given it explicitly.
 
-Readers are **offset-based** rather than streams: a tool that reads a long
-build log needs to say "give me from byte N", and an oversized buffer spills to
-`ctx.spill_store` instead of into the model's context.
-
-**Both bounds live here, and that is the point of P7-13.** A child is somebody
-else's program: it decides how much it prints and how long it runs, and every
-caller that trusted it was one runaway command away from taking the process down
-with it. `max_output` bounds the memory and `timeout_ms` bounds the clock, in the
-seam, so `!!`, `tool-bash` and every future caller inherit them instead of each
-remembering. What a caller then clips for a log or a card is a *display* choice
-on top of a bound that already held.
+**Both bounds are in this seam, and that is the purpose of P7-13.** A child is
+the program of somebody else. It decides how much it prints and how long it
+runs. Every caller that trusted it could lose the whole process to one runaway
+command. `max_output` bounds the memory and `timeout_ms` bounds the time. Both
+are in the seam, so `!!`, `tool-bash` and every future caller get them, and no
+caller has to remember them. What a caller then clips for a log or a card is a
+*display* choice, on top of a bound that already held.
 
 @module ph.seams.subprocess
 """
@@ -32,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import subprocess as _sp
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -57,7 +53,6 @@ __all__ = [
     "DEFAULT_SCRUB",
     "LOCATION",
     "MAX_OUTPUT",
-    "SECRET_PATTERN",
     "EnvScrub",
     "SubprocessHandle",
     "SubprocessResult",
@@ -74,83 +69,85 @@ Stdio: TypeAlias = Literal["pipe", "inherit", "null"]
 Stream: TypeAlias = Literal["stdout", "stderr"]
 
 MAX_OUTPUT = 8 * 1024 * 1024
-"""How much of each stream a child's output is *kept*, per spawn (P7-13).
+"""How much of each stream of the output of a child is *kept*, for each spawn
+(P7-13).
 
-Generous, because this is not a display limit: `ph_app.shell` clips 64 KiB into
-the log and `tool-result-offload` spills at 80 000 characters, and both of those
-run on a string that already exists. This is the ceiling that stops the string
-existing — a `find /` or a build log on a bad day is tens of megabytes, and the
-drain used to hold all of it and then decode a second copy to `str`.
+The value is generous, because this is not a display limit. `ph.seams.shell`
+clips 64 KiB into the log (`SHELL_OUTPUT`), and `tool-result-offload` spills at
+80 000 characters. Both of those run on a string that already exists. This
+value is the ceiling that stops that string from existing. A `find /` or a
+build log on a bad day is tens of megabytes. The drain used to hold all of it
+and then decode a second copy to `str`.
 
-**Per stream, so the real ceiling is twice this**: the `bytearray` and then the
-decoded `str`, for each of two streams. Per stream rather than a shared budget
-because a chatty stdout must not starve the stderr that says why the command
-failed — which is the half a reader needs most.
+**The value is per stream, so the real ceiling is twice this**: the `bytearray`
+and then the decoded `str`, for each of two streams. It is per stream and not a
+shared budget, because a chatty stdout must not starve the stderr that says why
+the command failed. That is the half that a reader needs most.
 
-The *default*, not the only value: `subprocess-local` takes a `max_output_bytes`
-so an operator whose gate is a 40 MiB build log has somewhere to say so. What
-there is no spelling for is *unbounded* — a caller who forgets is exactly the
-caller this protects.
+This is the *default* and not the only value. `subprocess-local` takes a
+`max_output_bytes`, so an operator whose gate is a 40 MiB build log has a place
+to say so. There is no way to write *unbounded*. A caller that forgets the
+bound is exactly the caller that this protects.
 """
 
 DEFAULT_SCRUB = ("KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL")
-"""What marks an environment name as a credential, by default (I-4).
+"""The substrings that mark an environment name as a credential, by default
+(I-4).
 
-Substring matching, deliberately broad: `MY_API_KEY_2` and `GH_TOKEN_FILE` are
-both worth losing, and a child that genuinely needs a secret should be given it
-explicitly rather than by inheritance.
+The match is by substring and is deliberately broad. `MY_API_KEY_2` and
+`GH_TOKEN_FILE` are both worth losing. A child that really needs a secret
+should be given it explicitly, and not by inheritance.
 
-A **default**, not the rule: `subprocess-local` takes `scrub` and `keep`, because
-breadth this deliberate has a wrong answer for somebody — see `EnvScrub.keep`.
+This is a **default** and not the rule. `subprocess-local` takes `scrub` and
+`keep`, because a match this broad is wrong for some deployment. See
+`EnvScrub.keep`.
 """
-
-SECRET_PATTERN = re.compile("|".join(DEFAULT_SCRUB), re.IGNORECASE)
-"""The default marks as one pattern. Kept for callers that had it; `EnvScrub` is
-what a deployment configures."""
 
 COHERENT = (("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"),)
 """Families of environment variables that must be dropped or kept **together**.
 
-**A scrub that is broad is fine; a scrub that is *incoherent* is not.** git
-configures itself from `GIT_CONFIG_COUNT=n` plus `GIT_CONFIG_KEY_0…n-1` and
-`GIT_CONFIG_VALUE_0…n-1`, and `KEY` matches those key names — so the default
-scrub removed the keys, kept the count, and left git reading a configuration that
+**A broad scrub is acceptable. An *incoherent* scrub is not.** git configures
+itself from `GIT_CONFIG_COUNT=n` plus `GIT_CONFIG_KEY_0…n-1` and
+`GIT_CONFIG_VALUE_0…n-1`, and `KEY` matches those key names. So the default
+scrub removed the keys and kept the count. git then read a configuration that
 declares two entries and supplies none:
 
     error: missing config key GIT_CONFIG_KEY_0
     fatal: unable to parse command-line config
 
-That is **every** git and jj invocation pH makes failing, on any host that uses
-that entirely standard mechanism — a sandbox, a CI runner, tooling that injects
-`http.extraheader`. Found when a sandbox set it here; the bug was never the
-sandbox's.
+That failure hits **every** git and jj invocation that pH makes, on any host
+that uses this entirely standard mechanism: a sandbox, a CI runner, tooling
+that injects `http.extraheader`. It was found when a sandbox set the variables
+here. The bug was never in the sandbox.
 
-Dropping the whole family is also the *safer* reading of I-4, not a relaxation of
-it: `GIT_CONFIG_VALUE_n` is where an injected auth header's value would sit, and
-`VALUE` matches none of the marks. Keeping a family whole means keeping a
-credential; dropping it whole is what this does.
+To drop the whole family is also the *safer* reading of I-4, and not a
+relaxation of it. `GIT_CONFIG_VALUE_n` is where the value of an injected auth
+header would be, and `VALUE` matches none of the marks. To keep a family whole
+would keep a credential. This seam drops the family whole.
 """
 
 
 LOCATION = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"})
 """Variables that outrank `cwd` for the tool that reads them (J10).
 
-`COHERENT`'s argument, one step further. The test this seam actually applies is
-not "is this a secret" — `GIT_CONFIG_COUNT` is not — it is **would a child
-misbehave on inheriting this**, and these three have the worst answer of any name
-pH can be started with. git resolves them before `cwd`, so a pH launched from a
-`git rebase --exec`, a pre-commit hook or a `git bisect run` hands every child an
-answer to "which repository" that has nothing to do with the workspace it was
-given: an agent's worktree staged into the person's own index, checkpoints
-written to their object store, and a `git commit` the *model* typed landing on
-their branch.
+This takes the argument of `COHERENT` one step further. The test that this seam
+applies is not "is this a secret", because `GIT_CONFIG_COUNT` is not a secret.
+The test is **would a child misbehave if it inherited this**. By that test,
+these three are the worst names that pH can be started with. git resolves them
+before `cwd`. So a pH that is launched from a `git rebase --exec`, a pre-commit
+hook or a `git bisect run` gives every child an answer to "which repository"
+that has nothing to do with the workspace that the child was given. The
+worktree of an agent is staged into the index of the user, checkpoints are
+written to the object store of the user, and a `git commit` that the *model*
+typed lands on the branch of the user.
 
-Dropped here rather than at each spawner because there are three and the third
-was missed: `workspace_git.git`, `workspace_jj.jj` and `shell.run`, which is the
-one a model drives directly. A caller that means one passes it in `extra`, which
-is applied after this and therefore survives — `tree_hash` keeps its
-`GIT_INDEX_FILE`, and that is the whole escape hatch, the same one `keep` is for
-a credential-shaped name an operator wants back.
+The names are dropped here and not at each spawner, because three spawners
+needed the rule and the third was missed: `workspace_git.git`,
+`workspace_jj.jj` and `shell.run`. `shell.run` is the one that a model drives
+directly. A caller that means to set one of these names passes it in `extra`.
+`extra` is applied after the drop, so the value survives: `tree_hash` keeps its
+`GIT_INDEX_FILE`. That is the only way around the drop. `keep` does the same
+for a credential-shaped name that an operator wants back.
 """
 
 
@@ -166,21 +163,23 @@ def _family(name: str) -> tuple[str, ...] | None:
 class EnvScrub:
     """Which environment names a spawned child never inherits (I-4).
 
-    A value rather than a module constant because the breadth is deliberate and
-    therefore sometimes wrong: `GIT_CONFIG_KEY_n` is a *configuration* name that
-    matches `KEY`, and a deployment that wants git configured through it needs a
-    way to say so without editing pH. `subprocess-local` carries both fields.
+    This is a value and not a module constant, because the breadth is deliberate
+    and is therefore sometimes wrong. `GIT_CONFIG_KEY_n` is a *configuration*
+    name that matches `KEY`. A deployment that wants git configured through it
+    needs a way to say so without editing pH. `subprocess-local` carries both
+    fields.
 
-    The default is unchanged, and the safe direction is the default: a deployment
-    that configures nothing scrubs exactly what it scrubbed before.
+    The default is unchanged, and the default is the safe direction. A
+    deployment that configures nothing scrubs exactly what it scrubbed before.
     """
 
     marks: tuple[str, ...] = DEFAULT_SCRUB
     """Substrings that mark a name as a credential, matched case-insensitively."""
     keep: frozenset[str] = frozenset()
-    """Names kept even though they match — the override, and it is exact-match on
-    purpose. A pattern here would be a second scrub language to get wrong, and the
-    thing an operator actually knows is the variable's name."""
+    """Names that are kept even though they match. This is the override, and it
+    matches by exact name on purpose. A pattern here would be a second scrub
+    language to get wrong, and what an operator actually knows is the name of
+    the variable."""
 
     def drops(self, name: str) -> bool:
         """Whether a child is denied this name."""
@@ -202,8 +201,9 @@ class EnvScrub:
         kept = {
             name: value
             for name, value in source.items()
-            # `LOCATION` is not routed through `drops`: that predicate answers
-            # "is this a credential", and these are not. See `LOCATION`.
+            # `LOCATION` does not go through `drops`. That predicate answers
+            # "is this a credential", and these names are not credentials. See
+            # `LOCATION`.
             if name not in dropped and name not in LOCATION and _family(name) not in broken
         }
         if extra:
@@ -212,12 +212,13 @@ class EnvScrub:
 
 
 def first_line(text: str) -> str:
-    """The first non-blank line of a tool's output, or `""`.
+    """The first non-blank line of the output of a tool, or `""`.
 
-    Here rather than in each seam that reads a subprocess's words, because two
-    of them had it and a third was about to: a decline that quotes the backend
-    is the difference between "the sandbox refused a write" and "setting up uid
-    map: Permission denied", and only the second tells an operator what to do.
+    It is here and not in each seam that reads the output of a subprocess,
+    because two seams had their own copy and a third was about to. A decline
+    that quotes the backend says "setting up uid map: Permission denied" where
+    it would otherwise say "the sandbox refused a write". Only the quoted line
+    tells an operator what to do.
     """
     return next((line.strip() for line in text.splitlines() if line.strip()), "")
 
@@ -227,9 +228,10 @@ def scrub_env(
 ) -> dict[str, str]:
     """The parent environment minus anything that looks like a credential.
 
-    The **default** scrub, for a caller with no `ctx` to ask. A caller that has
-    one goes through `ctx.subprocess.env()`, which is the same thing under the
-    deployment's own `scrub`/`keep` — the whole point of making them config.
+    This is the **default** scrub, for a caller with no `ctx` to ask. A caller
+    that has a `ctx` calls `ctx.subprocess.env()`. That is the same scrub under
+    the `scrub` and `keep` of the deployment, and it is the reason that those
+    two are config.
     """
     return EnvScrub().apply(base, extra=extra)
 
@@ -244,47 +246,53 @@ class SubprocessSpawnSpec:
     grace_ms: int = 5_000
     """How long a terminated child may take to exit before it is killed.
 
-    The *termination* grace, not a run limit — `timeout_ms` is that. They were
-    conflated once: `ctx.shell` passed a caller's `timeout_ms` here, so a tool
-    whose description promised "kill the command after this long" only widened
-    the window a already-dying child had to finish (P7-13)."""
+    This is the *termination* grace and not a run limit. `timeout_ms` is the
+    run limit. An earlier version confused the two: `ctx.shell` passed the
+    `timeout_ms` of a caller here. A tool whose description promised "kill the
+    command after this long" then only widened the time that a child that was
+    already dying had to finish (P7-13)."""
     timeout_ms: int | None = None
     """How long the child may run before `run()` terminates it. `None` waits.
 
-    On the spec beside `grace_ms` because the two are one policy about a child's
-    lifetime, and a caller reading this class should see both."""
+    It is on the spec beside `grace_ms` because the two are one policy about
+    the lifetime of a child, and a caller that reads this class should see
+    both."""
     env: dict[str, str] | None = None
-    """`None` scrubs and inherits; a dict replaces the environment wholesale
-    (so `{}` is "nothing at all")."""
+    """`None` scrubs and inherits. A dict replaces the whole environment, so
+    `{}` is "nothing at all"."""
     max_output: int | None = None
-    """How much of each stream to keep, or `None` for the deployment's own.
+    """How much of each stream to keep, or `None` for the value of the
+    deployment.
 
-    See `MAX_OUTPUT` — a spec that says nothing still caps, which is the point."""
+    See `MAX_OUTPUT`. A spec that names no value is still capped, and that is
+    the purpose."""
     on_stderr_line: Callable[[str], None] | None = None
-    """Called with each line the child writes to stderr, as it is written.
+    """Called with each line that the child writes to stderr, as it is written.
 
-    For a child whose stderr is a report of how far it has got — a tool run with
-    `--progress` (`ph.toolcli`). Such a stream is **delivered and not kept**:
-    `pump` keeps the head of a stream up to `max_output`, and the line that
-    matters most of a progress stream is its last. So with a listener the
-    handle's `stderr` stays empty and every line reaches the listener, however
-    many there are. What a listener raises is logged and the drain goes on: a
-    reader's mistake must not leave the child blocked on a full pipe."""
+    It is for a child whose stderr is a report of how far it has got, such as a
+    tool run with `--progress` (`ph.toolcli`). Such a stream is **delivered and
+    not kept**. `pump` keeps the head of a stream up to `max_output`, and the
+    line of a progress stream that matters most is its last. So with a listener
+    the `stderr` of the handle stays empty and every line reaches the listener,
+    however many there are. An exception that a listener raises is logged, and
+    the drain goes on: a mistake of a reader must not leave the child blocked
+    on a full pipe."""
     forwards_signals: bool = True
-    """Whether a signal sent to this argv reaches the command it runs
-    (`ConfinedArgv.forwards_signals`). `False` for a wrapper that keeps the
-    command in a PID namespace, as `bwrap` does, and such a child is killed
-    outright: `terminate` asks nothing of it first.
+    """Whether a signal sent to this argv reaches the command that it runs
+    (`ConfinedArgv.forwards_signals`). It is `False` for a wrapper that keeps
+    the command in a PID namespace, as `bwrap` does. Such a child is killed
+    outright: `terminate` does not ask it to stop first.
 
-    **Because asking leaves it running.** The wrapper passes no `SIGTERM` on, so
-    the grace was never the command's. And for its first milliseconds the
-    namespace's init ignores `SIGTERM`, as an init does, and has not yet armed
-    `--die-with-parent`: the wrapper dies of the signal, this seam sees its child
-    gone and stops, and the command starts with no parent. Measured 2026-11-11,
-    `bwrap … --unshare-pid sleep` with its group signaled 0 to 50 ms after the
-    spawn: `SIGTERM` left 30 of 88 running, all between 1 and 6 ms, and
-    `SIGKILL` left none. A stop has to leave nothing behind, so that a restart
-    begins clean; a polite one is only worth having where it is heard."""
+    **Asking leaves it running.** The wrapper passes no `SIGTERM` on, so the
+    command never had the grace. For its first milliseconds, the init of the
+    namespace ignores `SIGTERM`, as an init does, and it has not yet armed
+    `--die-with-parent`. The wrapper dies of the signal, this seam sees that
+    its child is gone and stops, and the command starts with no parent.
+    Measured 2026-11-11, with `bwrap … --unshare-pid sleep` and its group
+    signaled 0 to 50 ms after the spawn: `SIGTERM` left 30 of 88 running, all
+    between 1 and 6 ms, and `SIGKILL` left none. A stop has to leave nothing
+    behind, so that a restart begins clean. A polite stop is only worth having
+    where the command hears it."""
 
 
 @dataclass(slots=True)
@@ -296,32 +304,36 @@ class SubprocessHandle:
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     cap: int = MAX_OUTPUT
-    """How much of each stream this child's drain keeps. Resolved by `spawn`
-    from the spec and the row's config, so `pump` reads one number."""
+    """How much of each stream the drain of this child keeps. `spawn` resolves
+    it from the spec and the config of the row, so `pump` reads one number."""
     dropped: int = 0
-    """Bytes this child printed past `cap` and nobody kept, across both streams.
+    """Bytes that this child printed past `cap` and nobody kept, across both
+    streams.
 
-    Counted rather than flagged: "output was truncated" is a worse thing to tell
-    a model than "37 MB was dropped", and a caller deciding whether to re-run the
-    command with a filter wants the size. Summed, because every reader of it —
-    the shell seam, `!!`, `tool-bash` — asks only how much went missing."""
+    It is a count and not a flag. "Output was truncated" tells a model less
+    than "37 MB was dropped", and a caller that decides whether to run the
+    command again with a filter wants the size. It is one sum, because every
+    reader of it (the shell seam, `!!`, `tool-bash`) asks only how much went
+    missing."""
     dispose: Disposer | None = None
-    """Releases this child's effect: terminate, reap, forget, deregister.
+    """Releases the effect of this child: terminate, reap, forget, deregister.
 
-    Set by `spawn`, which used to discard what `ctx.effect` returned — so a
-    caller finished with a child had no way to say so, and the effect lived as
-    long as its scope did. `run` is the caller that always is finished."""
+    `spawn` sets it. `spawn` used to discard what `ctx.effect` returned. A
+    caller that was finished with a child then had no way to say so, and the
+    effect lived as long as its scope did. `run` is the caller that is always
+    finished."""
     _drained: bool = False
     _waited: bool = False
 
     @property
     def finished(self) -> bool:
-        """Whether the child was seen through: its output read to the end
-        (`pump`) and its exit awaited (`wait`). Its release then leaves its group
-        alone, since what it left running it left on purpose; any other release is
-        a stop (`terminate`). Not the exit alone: a leader that exited while a job
-        it started holds the pipe was not seen through, and a timeout or a cancel
-        that stops it then is a stop."""
+        """Whether the child was seen through: its output was read to the end
+        (`pump`) and its exit was awaited (`wait`). The release of such a child
+        leaves its group alone, because whatever the child left running it left
+        on purpose. Any other release is a stop (`terminate`). The exit alone
+        is not enough. A leader that exited while a job that it started holds
+        the pipe was not seen through, and a timeout or a cancel that stops it
+        then is a stop."""
         return self._drained and self._waited
 
     @property
@@ -333,24 +345,18 @@ class SubprocessHandle:
         code: int | None = self.process.returncode
         return code
 
-    def read_from(self, offset: int, *, stream: Stream = "stdout") -> bytes:
-        """Bytes from `offset` on — the shape a tool polling a long run needs."""
-        buffer = self.stdout if stream == "stdout" else self.stderr
-        return bytes(buffer[offset:])
-
     async def pump(self) -> None:
         """Drain both pipes until the child closes them, keeping at most `max_output`.
 
-        **Reading never stops; only keeping does.** A drain that stopped reading
-        at the cap would leave the child blocked on a full pipe — forever, since
-        nothing else is going to empty it — and a bound that deadlocks the thing
-        it was protecting is worse than no bound. So every chunk is read and the
-        overflow is counted instead of stored.
+        **Reading never stops. Only keeping stops.** A drain that stopped
+        reading at the cap would leave the child blocked on a full pipe. The
+        block would be permanent, because nothing else empties the pipe. A
+        bound that deadlocks the thing that it protects is worse than no bound.
+        So every chunk is read, and the overflow is counted and not stored.
 
-        The *head* is what survives. A command that fails usually says why in its
-        first lines, and a reader with an offset (`read_from`) is reading forward
-        from the start; keeping the tail would serve a progress bar and lose the
-        error.
+        The *head* is what survives. A command that fails usually says why in
+        its first lines. To keep the tail would serve a progress bar and lose
+        the error.
         """
         cap = self.cap
 
@@ -368,16 +374,17 @@ class SubprocessHandle:
                 async for chunk in source:
                     room = cap - len(sink)
                     if len(chunk) <= room:
-                        # The whole chunk fits: extend it directly rather than
-                        # slicing, which is the case every ordinary command takes.
+                        # The whole chunk fits, so it is added directly and not
+                        # sliced. Every ordinary command takes this path.
                         sink.extend(chunk)
                         continue
                     if room > 0:
                         sink.extend(chunk[:room])
                     dropped += len(chunk) - max(room, 0)
             finally:
-                # Once, not per chunk, and in a `finally` so a canceled drain
-                # still reports what it had already thrown away.
+                # Added one time and not per chunk. It is in a `finally` so
+                # that a canceled drain still reports what it had already
+                # discarded.
                 self.dropped += dropped
 
         async with anyio.create_task_group() as scope:
@@ -392,24 +399,26 @@ class SubprocessHandle:
         return code
 
     async def terminate(self) -> None:
-        """Ask, wait out the grace, then insist — and always reap. A child whose
-        wrapper passes no signal on is not asked: it is killed
-        (`SubprocessSpawnSpec.forwards_signals`).
+        """Stop the child, and always reap it. The steps are: send `SIGTERM` to
+        its group, wait for at most `grace_ms`, then send `SIGKILL` to its
+        group. A child whose wrapper passes no signal on gets no `SIGTERM`: it
+        is killed at once (`SubprocessSpawnSpec.forwards_signals`).
 
-        A stop kills the whole group (J4), the child itself gone or not; a child
-        seen through (`finished`) is only reaped.
+        A stop kills the whole group (J4), whether the child itself is gone or
+        not. A child that was seen through (`finished`) is only reaped.
 
-        The `wait()` in the finally is what keeps a zombie from accumulating
-        (F4): a child that exited but was never awaited stays in the table for
+        The `aclose()` in the `finally` keeps zombies from accumulating (F4). A
+        child that exited and was never awaited stays in the process table for
         as long as the parent lives.
 
-        **Shielded as a whole, and bounded** (J4). Only the reap used to be, so a
-        caller cancelled during the grace — which is the ordinary way a timeout
-        arrives — unwound straight past the `kill()`, and a child that ignores
-        `SIGTERM` went on holding the disposer, and its scope, until it chose to
-        exit. The escalation *is* the point of this method, so it has to survive
-        the cancellation that asked for it; the grace is what keeps that from
-        being an unbounded wait.
+        **The whole method is shielded, and bounded** (J4). Only the reap used
+        to be shielded. A caller that was canceled during the grace then
+        unwound past the `kill()`, and a cancel during the grace is the
+        ordinary way that a timeout arrives. A child that ignores `SIGTERM`
+        went on holding the disposer, and its scope, until it chose to exit.
+        The escalation is the purpose of this method, so it has to survive the
+        cancellation that asked for it. The grace keeps that from being an
+        unbounded wait.
         """
         with anyio.CancelScope(shield=True):
             try:
@@ -423,12 +432,13 @@ class SubprocessHandle:
                 pass
             finally:
                 try:
-                    # `aclose`, not `wait`: it closes the child's pipes *and*
-                    # reaps. A timeout cancels `pump` mid-read, so the drains let
-                    # go of streams nobody then closed — and the transport was
-                    # finalized after the loop had gone, which asyncio reports as
-                    # an unraisable `Event loop is closed` from a `__del__` in
-                    # whatever test ran next.
+                    # `aclose` and not `wait`: it closes the pipes of the child
+                    # *and* reaps. A timeout cancels `pump` in the middle of a
+                    # read, so the drains let go of streams that nobody then
+                    # closed. The transport was then finalized after the loop
+                    # had gone. asyncio reports that as an unraisable
+                    # `Event loop is closed` from a `__del__`, in whatever test
+                    # ran next.
                     await self.process.aclose()
                 except Exception:
                     log.debug("ph.seams.subprocess: reaping pid %s failed", self.pid)
@@ -436,12 +446,12 @@ class SubprocessHandle:
 
 @dataclass(frozen=True, slots=True)
 class SubprocessResult:
-    """What one finished child produced, and what was lost getting it.
+    """What one finished child produced, and what was lost in getting it.
 
-    A record rather than the `(code, out, err)` tuple this used to be: with a cap
-    and a clock in the seam there are now two ways a result can be *incomplete*,
-    and a tuple has nowhere to say so — which would leave every caller rendering
-    a truncated log as if it were the whole thing.
+    This is a record and not the `(code, out, err)` tuple that it used to be.
+    With a cap and a clock in the seam, a result can now be *incomplete* in two
+    ways, and a tuple has no place to say so. Every caller would then render a
+    truncated log as if it were the whole log.
     """
 
     exit_code: int
@@ -451,52 +461,53 @@ class SubprocessResult:
     """Bytes past the cap that nobody kept, across both streams."""
     timed_out: bool = False
     canceled: bool = False
-    """Whether `signal` ended it rather than the command finishing (N3).
+    """Whether `signal` ended the child before the command finished (N3).
 
-    **A third bound needs a third answer.** `run` applies three — the timeout, a
-    disposal, and the person's cancel — and reported only two, so a child killed
-    because somebody pressed stop came back as an ordinary result with
-    `timed_out=False` and whatever exit code the kill produced. That is
-    indistinguishable from a command that exited on its own, which is the one
-    reading a caller must not make: a cancel is not a result."""
-
-    @property
-    def truncated(self) -> bool:
-        """Whether what this holds is a prefix of what the child printed."""
-        return self.dropped > 0
+    **A third bound needs a third answer.** `run` applies three bounds: the
+    timeout, a disposal, and the cancel of the user. It reported only two. So a
+    child that was killed because somebody pressed stop came back as an
+    ordinary result, with `timed_out=False` and whatever exit code the kill
+    produced. That is indistinguishable from a command that exited on its own.
+    A caller must not read it that way: a cancel is not a result."""
 
 
 class Config(WireModel):
     """Row config for `subprocess-local`."""
 
     sweep_orphans: bool = True
-    """Whether mounting this row kills children a hard-killed run left behind.
+    """Whether mounting this row kills the children that a hard-killed run left
+    behind.
 
-    On by default because a re-parented child is burning CPU now, and off is what
-    a deployment sharing `$PH_RUNTIME` with something pH does not own would set."""
+    It is on by default, because a re-parented child is using CPU now. A
+    deployment that shares `$PH_RUNTIME` with something that pH does not own
+    would turn it off."""
     scrub: list[str] = Field(default_factory=lambda: list(DEFAULT_SCRUB))
-    """Substrings that mark an environment variable as a credential a child never
-    inherits (I-4). Case-insensitive, matched anywhere in the name.
+    """Substrings that mark an environment variable as a credential that a child
+    never inherits (I-4). The match is case-insensitive and anywhere in the
+    name.
 
-    Config rather than a constant because the breadth is deliberate and therefore
-    sometimes wrong — and because a deployment that narrows it should have to say
-    so in a profile, where it is reviewable, rather than by editing pH."""
+    This is config and not a constant, because the breadth is deliberate and is
+    therefore sometimes wrong. A deployment that narrows it also has to say so
+    in a profile, where the change can be reviewed, and not by editing pH."""
     keep: list[str] = Field(default_factory=list)
-    """Names kept even though they match `scrub` — the exception, by exact name.
+    """Names that are kept even though they match `scrub`. This is the exception,
+    by exact name.
 
-    `GIT_CONFIG_KEY_0` is the case this exists for: a *configuration* name that
-    matches `KEY`. It needs no entry here today, because `COHERENT` keeps git's
-    numbered-config family whole either way; what this is for is the deployment
-    that genuinely wants such a variable through, and would otherwise have no
-    spelling for it short of a fork."""
+    `GIT_CONFIG_KEY_0` is the case that this exists for: a *configuration* name
+    that matches `KEY`. It needs no entry here today, because `COHERENT` keeps
+    the numbered-config family of git whole either way. This setting is for the
+    deployment that really wants such a variable passed through. Without it,
+    that deployment could only fork pH."""
     max_output_bytes: int = MAX_OUTPUT
-    """How much of each stream a child's output is kept. See `MAX_OUTPUT`.
+    """How much of each stream of the output of a child is kept. See
+    `MAX_OUTPUT`.
 
-    Config rather than a constant, for the reason `fs-local`'s `ignore` is
-    (P6-19): the value has a wrong answer for somebody. `ctx.shell` takes no
-    `max_output`, so without this the 8 MiB default is the only ceiling `!!`,
-    `tool-bash` and an autonomous gate can ever run under — and an operator whose
-    gate is a 40 MiB build log would have to edit source."""
+    This is config and not a constant, for the reason that the `ignore` of
+    `fs-local` is (P6-19): the value is wrong for some deployment. `ctx.shell`
+    takes no `max_output`. So without this setting the 8 MiB default would be
+    the only ceiling that `!!`, `tool-bash` and an autonomous gate could ever
+    run under, and an operator whose gate is a 40 MiB build log would have to
+    edit source."""
 
 
 @dataclass(slots=True)
@@ -505,32 +516,37 @@ class SubprocessService:
 
     ctx: Context
     journal: OrphanJournal | None = None
-    """Where a spawn is recorded so a hard kill leaves a trail (F5).
+    """Where a spawn is recorded, so that a hard kill leaves a trail (F5).
 
-    **Optional, because a deployment may have nowhere to write it** — a
-    read-only `$PH_RUNTIME`, a test with no roots — and a seam that refused to
-    spawn over a diagnostic would be trading a working harness for a tidier one.
-    `None` means the hole this closes is open again, which `phern doctor` says out
-    loud rather than the seam pretending otherwise.
+    **It is optional, because a deployment may have nowhere to write it**: a
+    read-only `$PH_RUNTIME`, or a test with no roots. A seam that refused to
+    spawn because of a diagnostic would trade a working harness for a tidier
+    one. `None` means that the gap that this closes is open again.
+    `phern doctor` reports that plainly, and the seam does not pretend
+    otherwise.
     """
     max_output: int = MAX_OUTPUT
     """The deployment's ceiling, applied to any spec that names none."""
     scrub: EnvScrub = field(default_factory=EnvScrub)
-    """The deployment's credential scrub, applied to every child this seam spawns.
+    """The credential scrub of the deployment, applied to every child that this
+    seam spawns.
 
-    On the seam because the alternative is a module constant that no profile can
-    reach, and "what a spawned child inherits" is exactly the kind of thing a
-    deployment has to be able to state — see `EnvScrub` and `COHERENT`.
+    It is on the seam because the alternative is a module constant that no
+    profile can reach. "What a spawned child inherits" is exactly what a
+    deployment has to be able to state. See `EnvScrub` and `COHERENT`.
     """
 
     def env(self, *, extra: Mapping[str, str] | None = None) -> dict[str, str]:
-        """The environment a child of this deployment gets. **The one door.**
+        """The environment that a child of this deployment gets. **This is the one
+        function that builds it.**
 
-        Every seam that spawns a tool — git, jj, agentfs, the sandbox backend, the
-        kernel — used to call the module-level `scrub_env` itself, which meant the
-        deployment's own `scrub`/`keep` reached none of them: the row could be
-        configured and every actual child would still be built from the default.
-        Asking the seam is what makes the config mean anything.
+        Every seam that spawns a tool (git, jj, agentfs, the sandbox backend,
+        the kernel) used to call the module-level `scrub_env` itself. The
+        `scrub` and `keep` of the deployment then reached none of them: the row
+        could be configured, and every actual child was still built from the
+        default. The config has an effect only where the spawner asks the seam.
+        The kernel manager of `ph-rlm` does not spawn through this seam. It
+        reads `scrub` from the seam and applies it to the guest itself.
         """
         return self.scrub.apply(extra=extra)
 
@@ -551,30 +567,33 @@ class SubprocessService:
                 stdout=_stdio(spec.stdio),
                 stderr=_stdio(spec.stdio),
                 stdin=None,
-                # **Its own process group, so the whole command can be stopped**
-                # (J4). `terminate` signalled the direct child, which for
-                # `sh -c 'build | tee log'` is the shell: the pipeline's other
-                # members kept the CPU, kept the pipes and outlived the timeout
-                # that was supposed to end them. A leader of its own group is
-                # what makes `killpg` mean "this command".
+                # **The child gets its own process group, so that the whole
+                # command can be stopped** (J4). `terminate` used to signal the
+                # direct child. For `sh -c 'build | tee log'` that child is the
+                # shell. The other members of the pipeline kept the CPU, kept
+                # the pipes and outlived the timeout that was supposed to end
+                # them. A child that leads its own group is what makes `killpg`
+                # mean "this command".
                 #
-                # It also detaches the child from the controlling terminal, which
-                # is wanted: a Ctrl-C in the person's shell is for pH, and a child
-                # pH is managing should be ended by pH's own ladder rather than by
-                # a signal that reaches it from the side.
+                # It also detaches the child from the controlling terminal, and
+                # that is wanted. A Ctrl-C in the shell of the user is for pH.
+                # A child that pH manages should be ended by the escalation in
+                # `terminate`, and not by a signal that reaches it from the
+                # side.
                 start_new_session=True,
             )
             child = SubprocessHandle(spec=spec, process=process, cap=cap)
             handle["child"] = child
-            # **Journalled here, between the spawn and the disposer.** Every
-            # cleanup path pH has is structural — this effect, the scope that
-            # owns it, the reap in `terminate`'s `finally` — and none of them
-            # runs under `SIGKILL`, which POSIX answers by re-parenting the child
-            # to init rather than killing it. The record is what a later start
-            # sweeps by.
+            # **The spawn is journaled here, between the spawn and the
+            # disposer.** Every cleanup path of pH is structural: this effect,
+            # the scope that owns it, and the reap in the `finally` of
+            # `terminate`. None of them runs under `SIGKILL`. POSIX answers
+            # `SIGKILL` by re-parenting the child to init, and does not kill
+            # the child. A later start sweeps by this record.
             #
-            # Inline rather than through `to_thread`: without the `fsync` this is
-            # one buffered write (~20 µs), and the hop cost more than the work.
+            # The write is inline and does not go through `to_thread`. Without
+            # the `fsync` it is one buffered write (~20 µs), and the hop cost
+            # more than the work.
             journal = self.journal
             if journal is not None:
                 journal.record(pid=process.pid, argv=spec.argv, label=spec.argv[0])
@@ -583,9 +602,10 @@ class SubprocessService:
                 try:
                     await child.terminate()
                 finally:
-                    # In the `finally` for `terminate`'s own reason: a reap that
-                    # did not happen must not also lose the record of the child
-                    # it was for, or the next sweep hunts something already gone.
+                    # This is in the `finally` for the same reason as the reap
+                    # in `terminate`: it must run even when the stop fails.
+                    # Otherwise the record of the child stays open, and the next
+                    # sweep looks for something that is already gone.
                     if journal is not None:
                         journal.forget(process.pid)
 
@@ -605,22 +625,24 @@ class SubprocessService:
         scope: Context | None = None,
         signal: Cancellation | None = None,
     ) -> SubprocessResult:
-        """Spawn, drain, and await — the common case as one call, both bounds applied.
+        """Spawn, drain, and await: the common case as one call, with both bounds
+        applied.
 
-        `timeout_ms` is enforced here rather than by each caller, for the reason
-        `max_output` is: a bound every caller has to remember is a bound most of
-        them will not. A child that outstays it is terminated through the same
-        path a disposal uses, so the grace and the reap are not a second story —
-        and what it managed to print is still returned, because a command that
-        hung after saying something useful should not lose the useful part.
+        `timeout_ms` is enforced here and not by each caller, for the same
+        reason as `max_output`: most callers forget a bound that every caller
+        has to remember. A child that outstays the timeout is terminated
+        through the same path that a disposal uses, so the grace and the reap
+        have one implementation. What the child managed to print is still
+        returned, because a command that hung after it said something useful
+        should not lose the useful part.
 
-        **`signal` is the third bound, and the only one a person can reach**
-        (C7). A timeout is a number chosen in advance; escape is a decision made
-        while watching. Without it `bash sleep 3600` with no `timeout_ms` could
-        not be interrupted at all — the cancel reached the tool pipeline and
-        stopped there, because nothing between it and the child was watching.
-        Terminated by the same path as a timeout, so there is one story about
-        how a child ends.
+        **`signal` is the third bound, and the only one that a user can
+        reach** (C7). A timeout is a number chosen in advance. Escape is a
+        decision made while watching. Without `signal`, `bash sleep 3600` with
+        no `timeout_ms` could not be interrupted at all. The cancel reached the
+        tool pipeline and stopped there, because nothing between the pipeline
+        and the child was watching. A canceled child is terminated by the same
+        path as a timeout, so there is one description of how a child ends.
         """
         child = await self.spawn(spec, scope=scope)
         seconds = None if spec.timeout_ms is None else spec.timeout_ms / 1000
@@ -633,23 +655,25 @@ class SubprocessService:
 
             with anyio.move_on_after(seconds) as bound:
                 # `raced` answers `None` for "the signal won", and `drain`
-                # answers an exit code — so `None` here is unambiguous. A
+                # answers an exit code. So `None` here is unambiguous. A
                 # timeout takes the other path: `move_on_after` cancels the
-                # body, this line never finishes, and `cancelled_caught` is
-                # what says so.
+                # body, this line never finishes, and `cancelled_caught`
+                # reports it.
                 canceled = await raced(signal, drain) is None
         finally:
-            # **Released, not merely reaped.** Reaping in a `finally` is the
-            # point (F4) — an exception between spawn and wait must not leave the
-            # child alive — and the disposer does that *and* closes the journal
-            # record *and* drops the effect. Only reaping left both open until
-            # the owning scope unwound, which for a daemon root is hours: the
-            # journal grew a live `spawn` line per command run, and `_effects`
-            # grew an entry per command beside it.
+            # **The child is released, and not only reaped.** The reap is in a
+            # `finally` on purpose (F4): an exception between spawn and wait
+            # must not leave the child alive. The disposer does that reap. It
+            # also closes the journal record and drops the effect. When this
+            # only reaped, both stayed open until the owning scope unwound,
+            # and for a daemon root that is hours. The journal grew a live
+            # `spawn` line for each command that ran, and `_effects` grew an
+            # entry for each command beside it.
             await maybe_await(child.dispose() if child.dispose is not None else None)
-        # `returncode` rather than `wait()`'s value: both paths out of the block
-        # leave it set, and reading it once means the timeout path has no second
-        # spelling. `-1` only when a child left no status at all.
+        # This reads `returncode` and not the value of `wait()`. Both paths out
+        # of the block leave it set, and one read means that the timeout path
+        # needs no second form. It is `-1` only when a child left no status at
+        # all.
         return SubprocessResult(
             exit_code=-1 if child.returncode is None else child.returncode,
             stdout=capped_text(child.stdout, child.cap),
@@ -663,9 +687,10 @@ class SubprocessService:
 async def _delivered(
     source: anyio.abc.ByteReceiveStream, listener: Callable[[str], None], cap: int
 ) -> int:
-    """Hand `source` to `listener` a line at a time until the child closes it.
-    Returns how many bytes were dropped: only those of a line longer than `cap`,
-    which is cut there — one line must not be how a child fills this process."""
+    """Hand `source` to `listener` one line at a time until the child closes it.
+    Returns how many bytes were dropped. Only a line longer than `cap` loses
+    bytes. It is cut at `cap`, so that one line cannot fill the memory of this
+    process."""
 
     def deliver(line: bytes) -> None:
         try:
@@ -684,7 +709,7 @@ async def _delivered(
         pending.extend(kept)
         dropped += len(rest) - len(kept)
     if pending:
-        # A last line the child did not end: a crash's final word.
+        # A last line that the child did not end: the last words of a crash.
         deliver(bytes(pending))
     return dropped
 
@@ -701,14 +726,16 @@ def _stdio(mode: Stdio) -> int | None:
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the local subprocess provider, and sweep what a hard kill left (F5).
 
-    **The sweep runs at every start**, which is the journal's own rule: a session
-    nobody reopens would never reconcile its strays, and a child re-parented to
-    init is burning CPU now rather than waiting to be noticed. It is safe to run
-    from any pH process because the journal records each child's *owner* — a
-    live owner's children are held, never killed.
+    **The sweep runs at every start**, which is the rule of the journal itself.
+    A session that nobody reopens would never reconcile its strays, and a child
+    that was re-parented to init is using CPU now and is not waiting to be
+    noticed. The sweep is safe to run from any pH process, because the journal
+    records the *owner* of each child. The children of a live owner are held
+    and never killed.
 
-    Off the loop, because it stats `/proc` per record and may `SIGKILL`; and
-    after `provide`, so a deployment whose sweep fails still has a working seam.
+    The sweep runs off the loop, because it checks `/proc` for each record and
+    may send `SIGKILL`. It runs after `provide`, so a deployment whose sweep
+    fails still has a working seam.
     """
     journal = host_journal()
     ctx.provide(
@@ -730,8 +757,8 @@ async def apply(ctx: Context, config: Config) -> None:
         ),
     )
     if journal is not None and config.sweep_orphans:
-        # `sweep` already logs what it did, under the same condition — a second
-        # sentence here for one event is what `ph.text` exists to prevent.
+        # `sweep` already logs what it did, under the same condition. A second
+        # sentence here for the same event is what `ph.text` exists to prevent.
         await anyio.to_thread.run_sync(journal.sweep)
 
 

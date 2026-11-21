@@ -256,7 +256,7 @@ async def apply(ctx: Context, config: Config) -> None:
     async def wait_for_child(args: WaitArgs, run: ToolRunContext) -> dict[str, Any]:
         """A failed child fails the call, and the error keeps the last text of the
         child. A canceled wait stops waiting and leaves the child working. The
-        `task` tool, in contrast, releases the child."""
+        `task` tool, in contrast, revokes the child."""
         session = run.session
         try:
             awaited = ctx.require(SUBAGENTS).waiter(session.id if session else "", args.child_id)

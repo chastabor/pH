@@ -1,8 +1,8 @@
 # `ctx.subprocess` — spawning, with nothing implicit
 
 **Module:** `ph/seams/subprocess.py` · **Row:** `subprocess-local` ·
-**Consumers:** [`ctx.shell`](shell.md), the git worktree tier, the runtime venv
-builder, `ph-rlm`'s kernel
+**Consumers:** [`ctx.shell`](shell.md), the workspace tiers (git, jj, agentfs)
+and the probes of the local sandbox backend
 
 Two properties matter more than convenience.
 
@@ -20,12 +20,16 @@ inherited from the harness process is exactly the wrong answer once
 ## The environment is scrubbed (I-4)
 
 A child runs code the model wrote, so it does **not** inherit `*KEY*`,
-`*SECRET*`, `*TOKEN*` or `*PASSWORD*`.
+`*SECRET*`, `*TOKEN*`, `*PASSWORD*`, `*PASSWD*` or `*CREDENTIAL*`. Those are the
+default marks. `subprocess-local` takes `scrub` and `keep` to change them.
 
 Credentials reach an adapter as a `CredentialRef` and are resolved at the edge
 (I-3, [`ctx.credentials`](credentials.md)); **a child never needs the value**, and
-the one that does is asking for it. `scrub_env` is the function, and it is
-exported because the shell and the kernel both spawn.
+the one that does is asking for it. `ctx.subprocess.env()` is the one function
+that builds the environment of a child under the scrub of the deployment.
+`ph-rlm`'s kernel does not spawn through this seam (its guest must not inherit
+the terminal), and it applies the same scrub to the guest itself. `scrub_env` is
+the default scrub, for a caller with no `ctx` to ask.
 
 ## Both bounds live here (P7-13)
 
@@ -33,9 +37,8 @@ A child is somebody else's program: it decides how much it prints and how long i
 runs. Every caller that trusted it was one runaway command away from taking the
 process down.
 
-* **`max_output`** — an oversized buffer spills to
-  [`ctx.spill_store`](spill_store.md) rather than into the model's context, and
-  `SubprocessResult.dropped` says how much did not survive.
+* **`max_output`** — the head of each stream is kept up to the cap, and
+  `SubprocessResult.dropped` says how many bytes past it were read and not kept.
 * **`timeout_ms`** — with `timed_out` on the result.
 
 A child whose stderr is a report of how far it has got — a tool run with
@@ -46,11 +49,6 @@ the line that matters most of a progress stream is its last.
 The result is `stdout`, `stderr`, `exit_code`, `dropped`, `timed_out`. **A
 non-zero exit is not a tool error**: `is_error` is about the tool raising, and a
 command that failed usefully has an exit code the model should read.
-
-## Readers are offset-based
-
-Not streams. A tool reading a long build log needs to say *"give me from byte
-N"*, and an offset is a thing a model can put in an argument.
 
 ## The surface
 

@@ -93,7 +93,7 @@ unix socket under `$PH_RUNTIME/sandbox/` that the sandbox reaches through its
 read-only view of `/`, and inside the sandbox a `socat` shim that turns
 `127.0.0.1:3128` into that socket so `HTTPS_PROXY` has something to point at.
 
-**Each backend declares its door** (`sandbox_local.Door`), because the two
+**Each backend declares its door** (`needs_loopback` in `sandbox_local`), because the two
 mechanisms are not the same shape. `bwrap` *unshares*: the sandbox has a loopback
 of its own, so the shim above is the door. Seatbelt *denies*: a confined command on
 macOS shares the host's loopback, there is no PID namespace for a shim to die with

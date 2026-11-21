@@ -661,7 +661,6 @@ async def test_a_flood_is_capped_before_the_buffer_grows(tmp_path: Path) -> None
     assert outcome.exit_code == 0, "the child ran to completion; nothing blocked on a full pipe"
     assert len(outcome.stdout) == cap, "kept exactly the cap"
     assert outcome.dropped == 8 * 1024 * 1024 - cap, "and counted the rest"
-    assert outcome.truncated
 
 
 async def test_the_deployments_ceiling_applies_to_a_spec_that_names_none(tmp_path: Path) -> None:

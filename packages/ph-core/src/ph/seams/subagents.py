@@ -1,27 +1,29 @@
-"""`ctx.subagents` — delegation to a child agent, and the handle it returns.
+"""`ctx.subagents`: delegation to a child agent, and the handle that it returns.
 
-The seam definition only; the provider ships with a profile (`rlm-child` in
-Phase 3). Two things about the contract are load-bearing enough to state here
-rather than leave to a provider's docstring:
+This module is the seam definition only. A row that a profile mounts registers
+the provider: `ph-rlm` registers `rlm-child`. Three rules of the contract are
+important enough to state here and not in the docstring of a provider.
 
-**The handle returns before the child answers.** `start()` resolves once the
-child is *admitted* — session created, admission logged, task detached — not
-once it has finished. That is the non-blocking fan-out an RLM parent depends on:
-it spawns eight children, keeps working, and their replies arrive as ordinary
-inbox messages on later turns. A contract where `start()` awaited completion
-would make the parent's control loop serial and force it to poll.
+**The handle returns before the child answers.** `start()` returns when the
+child is *admitted*: its session is created, its admission is logged, and its
+task is detached. It does not wait for the child to finish. An RLM parent
+depends on this fan-out, which does not block. The parent spawns eight children
+and keeps working, and their replies arrive as ordinary inbox messages on later
+turns. If `start()` awaited completion, the control loop of the parent would be
+serial, and the parent would have to poll.
 
-**Completion is available but separate.** `SubagentRun.result()` awaits
-quiescence for the caller that genuinely wants to block — a generic `task` tool
-returning the child's last text. Both callers use one provider, which is why the
-answer is reachable but never the thing `start()` gives back.
+**Completion is available, but separate.** `SubagentRun.result()` awaits
+quiescence for a caller that does want to block. One such caller is a generic
+`task` tool that returns the last text of the child. Both kinds of caller use
+one provider. For that reason the answer is reachable, but `start()` never
+returns it.
 
-**`access` defaults to read (E4).** A child asks for the workspace guarantee it
-needs; the default is the conservative one, so a delegation that never mentions
-`access` cannot silently receive a writable repo. The provider resolves the
-request against whatever tier is actually available and reports what was granted
-— a child told nothing about its workspace attempts writes and reads the
-failures as bugs.
+**`access` defaults to read (E4).** A child asks for the workspace guarantee
+that it needs. The default is the conservative one, so a delegation that never
+mentions `access` cannot silently receive a writable repo. The provider resolves
+the request against the tier that is actually available, and reports what it
+granted. A child that is told nothing about its workspace attempts writes and
+reads the failures as bugs.
 
 @module ph.seams.subagents
 """
@@ -143,7 +145,6 @@ from .token_meter import SPENDING_TYPES, event_tokens
 _LOG = log_writer(__name__)
 
 __all__ = [
-    "ACCESS_LEVELS",
     "ADMITTED",
     "CHILD_EVENT_TYPES",
     "DELETED",
@@ -220,34 +221,37 @@ __all__ = [
 log = logging.getLogger("ph.seams.subagents")
 
 ORDER_BRIEF = ORDER_SKILLS + 10
-"""After the skills catalog, because the brief is the *assignment* and the
-catalog is the menu — a reader who has just been told what to do should meet the
-list of other things last."""
+"""The brief comes after the skills catalog, because the brief is the *assignment*
+and the catalog is the menu. The assignment is what the reader meets last, so
+no list of other things follows it."""
 
 ORDER_OUTPUT = ORDER_BRIEF + 1
 """Right after the brief: what to hand back is the end of the assignment."""
 
 RESULT_TOOL = "submit_result"
-"""The tool a child with an `output` returns its value through: registered on that
-child's own scope, so no other agent has it (`SubagentService._give_output`)."""
+"""The tool that a child with an `output` returns its value through. It is
+registered on the scope of that child, so no other agent has it
+(`SubagentService._give_output`)."""
 
 ADMITTED = "subagent/admitted"
 DELETED = "subagent/deleted"
 STATUS = "subagent/status"
 RETURNED = "subagent/returned"
-"""The records a delegation leaves — in the **child's own** log (Phase 11).
-`returned` is a child's value, for one with an `output` (`record_returned`).
+"""The records that a delegation leaves. They are in the log of the **child
+itself** (Phase 11). `returned` is the value of a child that has an `output`
+(`record_returned`).
 
-Each session owns its log: a child records what it was asked, each start, each
-wait, its ending and its deletion in its own log, and nothing about it is written
-to its parent's. A parent, the resume sweep, budgets, caps and front ends read a
-child's state from the child's log (`child_state`). The parent's copy this
-replaces was a second account of the child that every durability rule — the
-admission's flush (S2), a restart's (S10), the child's log before the parent's
-`done` (F1), the usage catch-up after a crash (L5) — existed to keep in step.
+Each session owns its log. A child records in its own log what it was asked,
+each start, each wait, its ending and its deletion. Nothing about the child is
+written to the log of its parent. A parent, the resume sweep, budgets, caps and
+front ends read the state of a child from the log of the child (`child_state`).
+Before this, the parent kept a copy, which was a second account of the child.
+Every durability rule existed to keep the two accounts in step: the flush of the
+admission (S2), the flush of a restart (S10), the log of the child before the
+`done` of the parent (F1), and the usage catch-up after a crash (L5).
 
-Named here rather than spelled at each `append` site, because the fold below and
-every producer have to agree on them exactly."""
+The names are defined here and not spelled at each `append` site, because the
+fold below and every producer must agree on them exactly."""
 
 _ANSWER = "assistant/message"
 CHILD_EVENT_TYPES = frozenset(
@@ -261,69 +265,66 @@ CHILD_EVENT_TYPES = frozenset(
         CREDENTIAL_WAIT.settled,
     }
 )
-"""What a child's state is folded from (`fold_child_event`): the records above; the ones
-that spend tokens (`SPENDING_TYPES`) — an answer among them, which is also what forgives
-the ladder; and a credential hold's pair. Any other record leaves a child's state as it
-was, so a reader of a stored log parses only these, and a watcher skips the rest."""
+"""The record types that the state of a child is folded from (`fold_child_event`):
+
+- The four records above.
+- The records that spend tokens (`SPENDING_TYPES`). An answer is one of them, and
+  an answer is also what forgives the ladder.
+- The two records of a credential hold.
+
+Any other record leaves the state of a child as it was. So a reader of a stored
+log parses only these types, and a watcher skips the rest."""
 
 Access: TypeAlias = Literal["read", "write"]
 """What a child asks of the parent's workspace. `read` is the default (E4)."""
 
-ACCESS_LEVELS: Mapping[str, Access] = literal_lookup(Access)
-"""Every `Access` by its own spelling — the read-side check for a value that
-arrived as a `str`. See `literal_lookup`.
-
-The value it guards comes off the **log**: `_readmit_one` rebuilds a child's
-request from `subagent/admitted`, and `admission_payload` records the narrowing
-precisely because "a restart re-derives the ceiling from this record and nothing
-else". A `cast` stood here, which asserts rather than checks — and what this one
-feeds is `_take_workspace`'s `access`, the difference between a child getting a
-writable checkout of the project and a read-only one."""
-
 SubagentStatus: TypeAlias = Literal["queued", "running", "done", "error", "canceled"]
-"""A child's lifecycle, as its own log records it and its parent and the TUI panel
-read it.
+"""The lifecycle of a child, as its own log records it and as its parent and the
+TUI panel read it.
 
-Lifecycle only. *Why* a child is live — woken to answer a question rather than
-still on its first task — is a separate `cause` on the same record, because a
-child's state folds status last-write-wins: a `rehydrated` member would have meant a
-woken child that is actively working reads as not-running to every consumer that
+This is the lifecycle only. *Why* a child is live is a separate `cause` on the
+same record: for example, the child was woken to answer a question and is not
+still on its first task. The reason is the fold. The state of a child takes the
+last status that was written. With a `rehydrated` member here, a woken child
+that is actively working would read as not running to every consumer that
 branches on `"running"`."""
 
 UNRECOVERABLE_DETAIL = (
     "the harness stopped while this child was running, and no provider here can "
     "start it again; its transcript is on disk"
 )
-"""Interrupted, with nothing mounted that could resume it.
+"""The child was interrupted, and nothing that is mounted could resume it.
 
-Its own sentence because the answer a parent needs differs: the ladder was not
-spent, and a deployment that mounted the provider again could have carried on —
-so "it ran out of attempts" would be false. Settled all the same: a row left
-`queued` for a provider that will never come holds the root out of passivation
-for good."""
+This case has its own sentence because the parent needs a different answer. The
+ladder was not spent, and a deployment that mounted the provider again could
+have carried on. So "it ran out of attempts" would be false. The child is
+settled all the same. A child that is left `queued` for a provider that will
+never come holds the root out of passivation permanently."""
 
 INTERRUPTED_DETAIL = "the harness stopped while this child was running; it did not finish"
-"""Why a child that was mid-turn at shutdown did not finish.
+"""Why a child that was in the middle of a turn at shutdown did not finish.
 
-A sentence rather than a code, because its reader is a person or a model looking
-at a child's state and asking what happened to a child that never answered."""
+It is a sentence and not a code, because its reader is a person or a model that
+looks at the state of a child and asks what happened to a child that never
+answered."""
 
 
 PARENT_TEARDOWN = "parent-teardown"
-"""Why a child was revoked when its parent ended or went away (I2): its parent's scope
-unwound under it, or — found on a restart — its parent had ended and left it
-unfinished. One reason for both, because they are one event: the second is the first,
-completed by the next process where the crash cut it short."""
+"""Why a child was revoked when its parent ended or went away (I2). Either the scope
+of its parent unwound under it, or a restart found that its parent had ended and
+left it unfinished. Both cases have one reason, because they are one event. In
+the second case a crash cut the first short, and the next process completed it."""
 
 
 REVOKING_AT_ONCE = 8
-"""How many descendants' logs `_revoke_beneath` opens at a time.
+"""How many logs of descendants `_revoke_beneath` opens at one time.
 
-Bounded because each holds its whole log in memory until its tombstone is written,
-and takes a worker thread to read it, sweep it and flush it — from the limiter
-every root in the process shares, so an unbounded family walk would queue other
-roots' file reads and flushes behind it. Eight overlaps the waits worth overlapping
-(a `git` reconcile, an `fsync`) without either."""
+The number is bounded for two reasons. Each open log is held whole in memory
+until its tombstone is written. Each also takes a worker thread to read it,
+sweep it and flush it, and that thread comes from the limiter that every root in
+the process shares. So an unbounded walk of a family would queue the file reads
+and flushes of other roots behind it. Eight overlaps the waits that are worth
+overlapping (a `git` reconcile, an `fsync`) without either cost."""
 
 
 SUSPENDED_DETAIL = (
@@ -331,19 +332,21 @@ SUSPENDED_DETAIL = (
 )
 """Why a child is `queued` after its whole mount unwound under it (S1).
 
-Written by a provider in place of a tombstone: a daemon stopping, or a root remounted
-on a new profile, is not a revocation, so the row stays live and the resume sweep
-readmits it. `queued` rather than left `running`, because nothing crashed: the sweep
-readmits a `queued` row without asking the ladder whether it may. Its next start is
-still a restart (`cause: resumed`), since it was one, so a child that then crashes
-without having answered carries that start onto the ladder."""
+A provider writes it in place of a tombstone. A daemon that stops, or a root
+that is remounted on a new profile, is not a revocation. So the child stays
+live, and the resume sweep readmits it. The status is `queued` and is not left
+as `running`, because nothing crashed: the sweep readmits a `queued` child
+without asking the ladder whether it may. The next start of the child is still a
+restart (`cause: resumed`), because it was one. So a child that then crashes
+before it has answered carries that start onto the ladder."""
 
 
 def exhausted_detail(limit: int) -> str:
-    """The ladder spent, naming the bound **actually in force**.
+    """The sentence for a spent ladder. It names the bound that is **actually in
+    force**.
 
-    Built from `INTERRUPTED_DETAIL` rather than restating it, so the two cannot
-    come to describe one interruption differently.
+    It is built from `INTERRUPTED_DETAIL` and does not restate it, so the two
+    cannot come to describe one interruption differently.
     """
     return (
         f"{INTERRUPTED_DETAIL} — and it has now been interrupted "
@@ -355,28 +358,33 @@ SettledStatus: TypeAlias = Literal["done", "error", "canceled"]
 """A status that means a child has stopped."""
 
 SETTLED_STATUSES: frozenset[str] = frozenset(get_args(SettledStatus))
-"""The statuses that mean a child has stopped. Beside the vocabulary it reads.
+"""The statuses that mean a child has stopped. The set is defined beside the
+vocabulary that it reads.
 
-Here rather than in the consumer, for the reason the four event names are here:
-the fold and every producer have to agree exactly. P5-05's sweeper wrote its own
-copy — `{"completed", "failed", "canceled", "deleted"}` — and it was wrong in
-three of four members. `completed` and `failed` are names no producer emits (the
-writer says `done` and `error`), `deleted` is not a status at all, and the two
-that actually mean settled were missing. The effect was that a root which had
-ever run a child to completion could never be released: every settled child read
-as live, forever, which is most of what passivation exists to do.
+It is here and not in the consumer for the same reason that the four event names
+are here: the fold and every producer must agree exactly. The sweeper of P5-05
+wrote its own copy, `{"completed", "failed", "canceled", "deleted"}`, and three
+of its four members were wrong. No producer emits `completed` or `failed` (the
+writer says `done` and `error`), and `deleted` is not a status at all. The two
+names that do mean settled were missing. The effect was that a root that had
+ever run a child to completion could never be released. Every settled child read
+as live permanently, and releasing such a root is most of what passivation
+exists to do.
 """
 
 
 def child_options(request: SubagentRequest) -> AgentOptions:
-    """The options a child's agent runs with.
+    """The options that the agent of a child runs with.
 
-    **A child on a resolved route runs with that route's settings**, the way a root
-    started on it does (`ModelEntry.options`), and none of its parent's: a temperature
-    tuned for the parent's model is not one for this. A child on its parent's route runs
-    with its parent's options. A reasoning effort the spawn asked for is the child's
-    either way, else one its skills name, else its route's; `default` among them asks
-    for the provider's own. Here once, for every provider that builds a child.
+    **A child on a resolved route runs with the settings of that route**, as a
+    root that is started on the route does (`ModelEntry.options`). It takes none
+    of the settings of its parent: a temperature that was tuned for the model of
+    the parent is not tuned for this one. A child on the route of its parent runs
+    with the options of its parent. In both cases the reasoning effort is the
+    one that the spawn asked for, else the one that its skills name, else the one
+    of its route. `default` in any of them asks for the effort of the provider
+    itself. The rule is stated here one time, for every provider that builds a
+    child.
     """
     resolved = request.entry.options() if request.entry is not None else request.parent.options
     effort = request.reasoning_effort or request.skill_effort or resolved.reasoning_effort
@@ -396,30 +404,30 @@ class _Standing(Protocol):
 def child_is_live(state: _Standing) -> bool:
     """Whether this child is still working.
 
-    Deletion is a tombstone rather than a status — `fold_child_event` sets
-    `deleted` and leaves `status` alone — so both have to be read, which is the
-    other half a hand-written copy got wrong.
+    A deletion is a tombstone and not a status: `fold_child_event` sets `deleted`
+    and leaves `status` unchanged. So both must be read. That is the other half
+    that a hand-written copy got wrong.
 
-    A status the fold does not recognize leaves the one before it standing
-    (`fold_child_event`), and a child admitted with none yet reads `queued`, so
-    the failure direction is kept: a caller that releases a parent on the strength
-    of this must fail towards keeping one alive. Getting it backwards abandons a
-    running child; getting it this way costs memory until the child settles.
+    A status that the fold does not recognize leaves the previous status in place
+    (`fold_child_event`), and a child that was admitted and has no status yet
+    reads `queued`. So the direction of failure is kept: a caller that releases a
+    parent because of this answer must fail toward keeping the parent alive. The
+    wrong direction abandons a running child. This direction costs memory until
+    the child settles.
     """
     return not state.deleted and state.status not in SETTLED_STATUSES
 
 
 StatusCause: TypeAlias = Literal["rehydrated", "resumed"]
-"""Why a child entered its current status, when it is not simply "it started".
+"""Why a child entered its current status, when the reason is not simply "it
+started".
 
-`resumed` is a child put back on its feet after its harness stopped mid-turn —
-the ladder below, and the reason a reader of its log can tell that run from a
-first attempt."""
+`resumed` marks a child that was started again after its harness stopped in the
+middle of a turn. The ladder counts these starts (`restarts_since_progress`),
+and the cause lets a reader of the log tell that run from a first attempt."""
 
 DowngradeReason: TypeAlias = Literal["workspace-not-mounted"]
 """Why a granted access is narrower than the one requested."""
-
-_DOWNGRADE_REASONS: Mapping[str, DowngradeReason] = literal_lookup(DowngradeReason)
 
 _DOWNGRADE_TEXT: dict[str, str] = {
     "workspace-not-mounted": (
@@ -430,40 +438,46 @@ _DOWNGRADE_TEXT: dict[str, str] = {
 
 
 def _downgrade_text(reason: DowngradeReason | str) -> str:
-    """The sentence for one downgrade code, for `admission_notes`: one copy, so there
-    is one thing to edit when the tier lands."""
+    """The sentence for one downgrade code, for `admission_notes`. There is one copy,
+    so there is one place to edit when the wording changes."""
     return _DOWNGRADE_TEXT.get(reason, f"access was narrowed ({reason})")
 
 
 FallbackReason: TypeAlias = UnrunnableReason | Literal["contested", "cannot-accept"]
-"""Why a child runs on its parent's route rather than the model it was asked onto: the
-list does not hold the key, no adapter here serves its provider, the skills it was
-given name different models, or its route cannot take the media they hand it."""
+"""Why a child runs on the route of its parent and not on the model that it was
+asked onto:
+
+- `unlisted`: the list does not hold the key.
+- `unserved`: no adapter here serves its provider.
+- `contested`: the skills that it was given name different models.
+- `cannot-accept`: its route cannot take the media that those skills hand it."""
 
 
 class ModelFallback(WireModel):
-    """A model a child was asked onto that this mount cannot run, so it runs on its
-    parent's route instead (`SubagentService.resolve_model`): one a skill names, or, on
-    a readmission, any.
+    """A model that a child was asked onto and that this mount cannot run, so the
+    child runs on the route of its parent (`SubagentService.resolve_model`). At a
+    spawn it is a model that a skill names. At a readmission it can be any model.
 
-    What was asked and a code rather than a sentence, for `downgrade_reason`'s reasons:
-    the admission is durable, and the profile a sentence would describe changes after
-    it. `admission_notes` renders the sentence."""
+    It holds what was asked and a code, not a sentence, for the same reasons as
+    `downgrade_reason`: the admission is durable, and the profile that a sentence
+    would describe changes after the admission. `admission_notes` renders the
+    sentence."""
 
     asked: tuple[str, ...] = Field(min_length=1)
-    """The model asked for, a key or `provider/model` for a whole route; for skills
-    that disagree, each key they name."""
+    """The model that was asked for: a key, or `provider/model` for a whole route.
+    For skills that disagree, it holds each key that they name."""
     reason: FallbackReason
     media: tuple[str, ...] | None = None
-    """For `cannot-accept`, the media its skills hand it that the route cannot take;
-    absent otherwise."""
+    """For `cannot-accept`, the media that its skills hand it and that the route
+    cannot take. Absent otherwise."""
 
 
 class MediaShortfall(WireModel):
-    """Media a child's skills hand it that neither its route nor its parent's can take
-    (A3), so it runs and sees a text placeholder for each, its parent told. A record
-    rather than a refusal, for graceful degradation's reason: the child can still do
-    what words can do, and the person learns what to set up."""
+    """Media that the skills of a child hand it and that neither its route nor the
+    route of its parent can take (A3). The child runs and sees a text placeholder
+    for each one, and its parent is told. This is a record and not a refusal, for
+    the reason behind graceful degradation: the child can still do what words can
+    do, and the user learns what to set up."""
 
     media: tuple[str, ...] = Field(min_length=1)
     route: str
@@ -482,11 +496,12 @@ def _shortfall_text(shortfall: MediaShortfall) -> str:
 
 
 class EffortUnsent(WireModel):
-    """A reasoning effort a child runs without, because its route's profile does not say
-    how to send it (`ModelRoute.efforts`): its own request withholds it by the same rule
-    (`unmapped_effort`), so it thinks at its provider's default, its parent told. A
-    record rather than a refusal, as `MediaShortfall` is: the child runs on the model
-    it was asked onto, and only how hard it thinks differs."""
+    """A reasoning effort that a child runs without, because the profile of its
+    route does not say how to send it (`ModelRoute.efforts`). The request of the
+    child itself withholds the effort by the same rule (`unmapped_effort`). So the
+    child thinks at the default of its provider, and its parent is told. This is
+    a record and not a refusal, as `MediaShortfall` is: the child runs on the
+    model that it was asked onto, and only how hard it thinks differs."""
 
     effort: str
     route: str
@@ -530,19 +545,20 @@ def _fallback_text(fallback: ModelFallback) -> str:
 
 
 def ended_text(name: str, result: SubagentResult) -> str:
-    """Why a child its caller waited on gave it nothing to use: how it ended, why, and its
-    last text, which may still hold what the caller needs. One wording for every tool that
-    waits."""
+    """Why a child that its caller waited on gave the caller nothing to use: how the
+    child ended, why, and its last text, which may still hold what the caller
+    needs. Every tool that waits uses this one wording."""
     why = f": {result.error}" if result.error else ""
     said = f"\n\nIts last text:\n{result.answer}" if result.answer else ""
     return f"{name} ended as {result.status}{why}{said}"
 
 
 def admission_notes(run: SubagentRun) -> list[str]:
-    """What a parent is told about how its child was admitted, beside the facts: why
-    its access is narrower than asked, why it runs on another model than its skill
-    asked for, what it cannot see, and an effort it runs without. One list, so the
-    delegating tools cannot tell a parent different things."""
+    """What a parent is told about how its child was admitted, in addition to the
+    facts: why the access of the child is narrower than the request, why the child
+    runs on another model than its skill asked for, what the child cannot see, and
+    an effort that it runs without. There is one list, so the delegating tools
+    cannot tell a parent different things."""
     notes: list[str] = []
     if run.downgrade_reason is not None:
         notes.append(_downgrade_text(run.downgrade_reason))
@@ -556,22 +572,23 @@ def admission_notes(run: SubagentRun) -> list[str]:
 
 
 def _refused(reason: Deny | str) -> SubagentSpawnError:
-    """One guard's answer, as the error the pipeline already knows how to read.
+    """The answer of one guard, as the error that the pipeline already knows how to
+    read.
 
     **The code is derived from the reading, exactly as `registry._gate` derives
-    it** (D15). The tool side picks `budget_result` or `denied_result` off
-    `Deny.failure_kind` and carries no code on the decision at all; carrying one
-    here meant the same code arrived with two readings — `SPAWN_REFUSED` as a
-    retryable misconfiguration from a direct raise, and as a policy denial from
-    the ceiling — which is the one distinction `TOOL_DENIED`'s own docstring
-    exists to keep.
+    it** (D15). The tool side picks `budget_result` or `denied_result` from
+    `Deny.failure_kind`, and its decision carries no code at all. When the
+    decision carried a code here, the same code arrived with two readings.
+    `SPAWN_REFUSED` meant a misconfiguration that a retry can fix when it came
+    from a direct raise, and a policy denial when it came from the ceiling. That
+    is the one distinction that the docstring of `TOOL_DENIED` exists to keep.
 
-    `Deny` rather than a second refusal type for the same reason: the child
-    ceiling and the tool ceiling are the same decision, and the row that governs
-    both now writes it once. A bare string is still a guard's answer and means
-    the plain refusal every guard but the ceiling wants — `ToolRuntime.guard` is
-    posture-less for that reason, and this keeps the two seams' guards the same
-    shape.
+    The answer is a `Deny` and not a second refusal type for the same reason. The
+    child ceiling and the tool ceiling are the same decision, and the row that
+    governs both now writes it one time. A bare string is still the answer of a
+    guard. It means the plain refusal that every guard except the ceiling wants.
+    `ToolRuntime.guard` has no posture for that reason, and this keeps the guards
+    of the two seams the same shape.
     """
     if isinstance(reason, str):
         return SubagentSpawnError(reason)
@@ -586,22 +603,24 @@ def _refused(reason: Deny | str) -> SubagentSpawnError:
 class SubagentSpawnError(HarnessError):
     """A delegation was refused before the child existed.
 
-    Distinct from a child that ran and failed: this one produced no session, no
-    log and no artifacts, so a caller may retry it with different arguments.
+    This is distinct from a child that ran and failed. A refusal produced no
+    session, no log and no artifacts, so a caller may retry it with different
+    arguments.
 
-    **A `HarnessError`, so the refusal keeps its shape on the way out** (D15).
-    It was a bare `Exception`, which meant it carried no code and no
-    `failure_kind` and arrived at the model as a generic failure with the turn
-    carrying on — the posture D7 replaced for tool calls, surviving here because
-    nothing had given a spawn refusal a way to say more. The two tool bodies
-    that catch it also flattened it into a `ValueError`/`ToolCallError`, so even
-    a richer error would not have reached the pipeline; they now let it through.
+    **It is a `HarnessError`, so the refusal keeps its shape on the way out**
+    (D15). It was a bare `Exception` before. It then carried no code and no
+    `failure_kind`, and it arrived at the model as a generic failure while the
+    turn carried on. That is the posture that D7 replaced for tool calls. It
+    survived here because nothing had given a spawn refusal a way to say more.
+    The two tool bodies that caught it also flattened it into a `ValueError` or a
+    `ToolCallError`, so even a richer error would not have reached the pipeline.
+    They now let it through.
 
-    The defaults are the old behaviour exactly — `SPAWN_REFUSED`, a failure the
-    model may act on, the turn continuing — because most refusals here are
-    misconfiguration a retry *can* fix: no such provider, no such preset, a
-    grant the parent does not hold. Only a spent ceiling says otherwise, and it
-    says so by passing them.
+    The defaults are exactly the old behavior: `SPAWN_REFUSED`, a failure that
+    the model may act on, and a turn that continues. Most refusals here are a
+    misconfiguration that a retry *can* fix: no such provider, no such preset, a
+    grant that the parent does not hold. Only a spent ceiling says otherwise, and
+    it says so by passing other values.
     """
 
     def __init__(
@@ -621,123 +640,136 @@ class SubagentSpawnError(HarnessError):
 class SubagentRequest:
     """One delegation, as the caller describes it.
 
-    `parent` is the agent handle delegating, not an id: the provider needs its
-    session to log the admission and its inbox to deliver the reply, and looking
-    both up from an id would let a caller name an agent it does not hold.
+    `parent` is the handle of the agent that delegates, not an id. The seam and
+    the provider read its session, its scope and its options, and a lookup of
+    those from an id would let a caller name an agent that it does not hold.
     """
 
     prompt: str
     parent: AgentHandle
-    """Who is delegating. **Required for a spawn, and tolerated as `None` by
+    """The agent that delegates. **Required for a spawn, and tolerated as `None` by
     `held_by` alone.**
 
-    `_boundary_for` has an explicit `if request.parent is None` branch — a
-    grant computed with no parent inherits the mount's own ceiling — but every
-    provider that goes on to *spawn* reads the parent's session, scope and
-    options, so declaring it optional here made eight reads in
-    `ph_rlm.subagents` type errors for a case they never receive. The
-    declaration is the spawn contract; the one caller that asks only for a
-    grant passes `None` past it deliberately.
+    `_delegating_boundary` has an explicit `if request.parent is None` branch: a
+    grant that is computed with no parent inherits the ceiling of the mount. But
+    every provider that goes on to *spawn* reads the session, the scope and the
+    options of the parent. When this field was declared optional, eight reads in
+    `ph_rlm.subagents` became type errors for a case that they never receive.
+    The declaration is the contract of a spawn. The one caller that asks only for
+    a grant passes `None` past the declaration on purpose.
 
-    The handle, not the driver: a provider reads this parent and never steers
-    it. The one notice that does reach a parent's inbox (`_inject`) looks the
-    driver up by session id instead, because a parent disposed while its child
-    ran has no inbox to deliver to — so the wider type bought nothing and let a
-    provider reach `cancel` on the agent that asked it for a child.
+    The type is the handle and not the driver, because a provider reads this
+    parent and never steers it. The one notice that does reach the inbox of a
+    parent (`_deliver_notice`) goes to a driver that is looked up by session id,
+    because a parent that was disposed while its child ran has no inbox to
+    deliver to. So the wider type had no benefit, and it let a provider reach
+    `cancel` on the agent that asked it for a child.
     """
     scope: Context | None = None
-    """The boundary this delegation is made **from** (P6-31).
+    """The boundary that this delegation is made **from** (P6-31).
 
-    Not the child's — that does not exist yet when the ceiling is computed, and when
-    it does it is `SubagentRun.scope`, which `_enforce` checks is inside this one.
+    It is not the scope of the child. That scope does not exist yet when the
+    ceiling is computed. When it exists, it is `SubagentRun.scope`, and `_enforce`
+    checks that it is inside this one.
 
-    The same value and the same argument as `ToolExecutionInput.scope`: the caller
-    states the boundary, the seam does not guess it. Optional only because a
-    `SubagentRequest` is built by callers and by providers rather than only inside
-    this seam; `_delegating_boundary` resolves it.
+    This is the same value and the same argument as `ToolExecutionInput.scope`:
+    the caller states the boundary, and the seam does not guess it. It is optional
+    only because callers and providers build a `SubagentRequest`, and not only
+    this seam. `_delegating_boundary` resolves it.
     """
     name: str | None = None
-    """A stable label among its siblings, which is how they are addressed. Made from
-    the task when omitted, and unique either way: the seam names every child before
-    its provider is asked (`SubagentService.start`)."""
+    """A stable label among its siblings, which is how they are addressed. When it
+    is omitted, the name is made from the task. It is unique in both cases,
+    because the seam names every child before it asks the provider
+    (`SubagentService.start`)."""
     choice: ModelChoice = field(default_factory=ModelChoice)
-    """The model the spawn names (session profiles, S7b): a key the parent's profile
-    lists, its own or its assigned profile's, or a whole route. Neither leaves it to
-    the skills it is given, else its parent's route. What its admission records, and
-    what a readmission resolves again (`SubagentService.resolve_model`)."""
+    """The model that the spawn names (session profiles, S7b). It is a key that the
+    profile of the parent lists, or a whole route. The key is the one that the
+    spawn gives or the one that its assigned profile gives. A choice of neither
+    leaves the model to the skills that the child is given, and else to the route
+    of its parent. The admission records the choice, and a readmission resolves
+    it again (`SubagentService.resolve_model`)."""
     reasoning_effort: str | None = None
-    """An effort the spawn names, over the one its route carries (`child_options`)."""
+    """An effort that the spawn names. It takes precedence over the effort of its
+    route (`child_options`)."""
     entry: ModelEntry | None = None
-    """What `resolve_model` resolved the spawn to: the listed entry, or a whole route no
-    entry matches under no key, whose settings a child on it runs with
-    (`child_options`). `None` runs the child on its parent's route, with its parent's
-    options."""
+    """What `resolve_model` resolved the spawn to: the listed entry, or a whole
+    route that no entry matches, under no key. A child on it runs with its
+    settings (`child_options`). `None` runs the child on the route of its parent,
+    with the options of its parent."""
     model_fallback: ModelFallback | None = None
-    """The model the child was asked onto and this mount could not run, so it runs on
-    its parent's route instead (`resolve_model`)."""
+    """The model that the child was asked onto and that this mount could not run, so
+    the child runs on the route of its parent (`resolve_model`)."""
     media_shortfall: MediaShortfall | None = None
-    """Media its skills hand it that neither its route nor its parent's can take
-    (`resolve_model`)."""
+    """Media that its skills hand it and that neither its route nor the route of its
+    parent can take (`resolve_model`)."""
     effort_unsent: EffortUnsent | None = None
-    """The effort it will run at, where its route's profile does not say how to send
-    it (`resolve_model`)."""
+    """The effort that the child will run at, when the profile of its route does not
+    say how to send it (`resolve_model`)."""
     skill_effort: str | None = None
-    """The reasoning effort the skills it is given name (`Skill.effort`), where they
-    agree (`resolve_model`): over its route's, under the spawn's own (`child_options`)."""
+    """The reasoning effort that the skills it is given name (`Skill.effort`), when
+    they agree (`resolve_model`). It takes precedence over the effort of its
+    route, and the effort of the spawn takes precedence over it
+    (`child_options`)."""
     output: dict[str, Any] | None = None
-    """The JSON Schema object the child's value must match: the spawn's own, else the
-    one the skills it is given declare (`resolve_output`). A child with one is given
-    `submit_result` and owes a value; `None` asks only for an answer."""
+    """The JSON Schema object that the value of the child must match. It is the
+    schema of the spawn, or else the one that the skills it is given declare
+    (`resolve_output`). A child with an output is given `submit_result` and owes a
+    value. `None` asks only for an answer."""
     access: Access = "read"
     preset: str | None = None
-    """A named kind of child the deployment configured (`subagent-presets`).
+    """A named kind of child that the deployment configured (`subagent-presets`).
 
-    Resolved into the fields below before the ceiling is checked, so a preset is
-    a set of defaults and never a way past it.
+    It is resolved into the fields below before the ceiling is checked. So a
+    preset is a set of defaults and never a way past the ceiling.
     """
     profile: str | None = None
-    """A named profile the parent assigns its child (session profiles, S7b), read as a
-    narrowing on the parent's own mount (`ph.seams.subagent_profiles`): the tools and
-    skills of what it runs, its default model, and a read-only sandbox. Resolved into
-    the fields around it before the ceiling is checked; one that would widen anything
-    is refused, naming the row."""
+    """A named profile that the parent assigns to its child (session profiles, S7b).
+    It is read as a narrowing on the mount of the parent
+    (`ph.seams.subagent_profiles`): the tools and skills of what it runs, its
+    default model, and a read-only sandbox. It is resolved into the fields around
+    it before the ceiling is checked. A profile that would widen anything is
+    refused, and the refusal names the row."""
     skills: tuple[str, ...] | None = None
-    """Which skills the child gets. `None` inherits the parent's whole set.
+    """Which skills the child gets. `None` inherits the whole set of the parent.
 
-    A **subset of the parent's, always** — naming one the parent does not hold
-    is refused rather than granted, because a spawn that could widen would make
-    delegation the privilege escalation I7 exists to prevent (P4-13b). To give a
-    child a skill, install it, which gives it to the parent too.
+    The set is **always a subset of the set of the parent**. A spawn that names a
+    skill that the parent does not hold is refused and not granted. A spawn that
+    could widen would make delegation the privilege escalation that I7 exists to
+    prevent (P4-13b). To give a child a skill, install it, which gives it to the
+    parent too.
 
-    `()` is a real answer and not the same as `None`: a child that should read
-    no skill at all. Naming one is also *direction* — the named skills' bodies
-    are put in the child's own prompt, because a child spawned to follow a
-    procedure should not have to spend a turn fetching it.
+    `()` is a real answer and is not the same as `None`: it is a child that should
+    read no skill at all. Naming a skill is also *direction*. The bodies of the
+    named skills are put in the prompt of the child, because a child that is
+    spawned to follow a procedure should not have to spend a turn fetching it.
     """
     tools: tuple[str, ...] | None = None
-    """Which tools the child gets. `None` inherits the parent's whole set.
+    """Which tools the child gets. `None` inherits the whole set of the parent.
 
-    Same ceiling, same reason. Applied as a `ToolRestriction`, which can only
-    subtract — the Code Mode transport stays reachable regardless, because it is
-    unrestrictable by construction and a child with no way to call anything is
-    not a narrower child, it is a broken one.
+    The ceiling and the reason are the same as for `skills`. The set is applied as
+    a `ToolRestriction`, which can only subtract. The Code Mode transport stays
+    reachable in every case, because by construction it cannot be restricted. A
+    child with no way to call anything is not a narrower child. It is a broken
+    one.
     """
     paths: tuple[str, ...] | None = None
-    """The extra directories the child's sandbox binds writable, canonical. `None`
-    binds the parent's. Set by an assigned profile's `sandbox-allow` row
-    (`resolve_profile`) and applied as a limit (`SandboxSeam.restrict_paths`), which
-    can only subtract.
+    """The extra directories that the sandbox of the child binds writable, as
+    canonical paths. `None` binds the directories of the parent. The
+    `sandbox-allow` row of an assigned profile sets it (`resolve_profile`). It is
+    applied as a limit (`SandboxSeam.restrict_paths`), which can only subtract.
     """
     call_id: str | None = None
     """The tool call that asked for this child: a `task` call, or the dispatch of an
     `rlm.run` inside a cell (S2).
 
-    Recorded on the admission so the call can be answered from the child's own log
-    after a restart (`admitted_by`) — the admission is on disk before the child runs, so a
-    call with no admission started no child, and one with an admission started this
-    one. Without it, a delegating call cut short by a crash could only be answered
-    "unknown", and the model delegated the same task again beside the child the
-    resume had already put back to work.
+    It is recorded on the admission, so that the call can be answered from the
+    log of the child after a restart (`admitted_by`). The admission is on disk
+    before the child runs. So a call with no admission started no child, and a
+    call with an admission started this one. Without the id, a delegating call
+    that a crash cut short could only be answered "unknown". The model then
+    delegated the same task again, beside the child that the resume had already
+    put back to work.
     """
 
 
@@ -745,9 +777,10 @@ class SubagentRequest:
 class SubagentResult:
     """What a finished child produced, for a caller that waited.
 
-    A plain dataclass, not a `WireModel`: it never crosses a JSON boundary. What
-    is durable about a child's outcome is the `subagent/status` record; this is
-    the in-process answer handed to whoever awaited `result()`.
+    It is a plain dataclass and not a `WireModel`, because it never crosses a JSON
+    boundary. The durable part of the outcome of a child is the `subagent/status`
+    record. This is the in-process answer that is handed to the caller that
+    awaited `result()`.
     """
 
     status: SubagentStatus
@@ -761,27 +794,29 @@ class SubagentResult:
 SubagentAwaiter: TypeAlias = Callable[[], Awaitable[SubagentResult]]
 """How a caller waits for one delegation to settle.
 
-Named because a provider *builds* one and `SubagentRun.result` *holds* one, in
-different packages — `ph_rlm.subagents._awaiter` spelled this union out by hand
-so that the two copies had nothing linking them.
+The type has a name because a provider *builds* one and `SubagentRun.result`
+*holds* one, in different packages. `ph_rlm.subagents._awaiter` spelled the type
+out by hand, so nothing linked the two copies.
 """
 
 
 @dataclass(slots=True)
 class SubagentRun(WireForm):
-    """A live delegation. Returned at admission, before the child answers.
+    """A live delegation. It is returned at admission, before the child answers.
 
-    `WireForm`, not `WireDataclass`: it serializes itself, but it cannot take the
-    alias-derived body. That body emits every non-`None` field, and some of these
-    do not travel — `owner` (which defaults to `""`, so it would always ride),
-    plus `output`, `result`, `dispose`, `grant`, `scope` and `ready`, a `Grant`, a
-    `Context` and an event among them. Only `id` → `runId` is a spelling the alias
+    It is a `WireForm` and not a `WireDataclass`: it serializes itself, but it
+    cannot take the body that is derived from the aliases. That body emits every
+    field that is not `None`, and some of these fields do not travel. They are
+    `owner` (which defaults to `""`, so it would always be emitted), and `output`,
+    `result`, `dispose`, `grant`, `scope` and `ready`, which include a `Grant`, a
+    `Context` and an event. Only `id` → `runId` is a spelling that the alias
     function would miss.
 
-    The fields are the admission facts a parent can act on immediately: what to
-    call it, where its log is, and which guarantees it actually got. `granted`
-    may differ from what was asked when the available tier cannot honor the
-    request, and it is the value its admission and the child's own prompt report.
+    The fields are the admission facts that a parent can act on immediately: what
+    to call the child, where its log is, and which guarantees it actually got.
+    `granted_access` may differ from the request when the available tier cannot
+    honor the request. It is the value that the admission and the prompt of the
+    child report.
     """
 
     id: str
@@ -789,84 +824,91 @@ class SubagentRun(WireForm):
     session_id: str
     parent_id: str
     model_provider: str
-    """Which LLM provider the child runs on. Named for what it is, because the
-    *subagent* provider is a different thing on the same handle and one field
-    called `provider` for both is how `rehydrate` looked up the wrong one."""
+    """Which LLM provider the child runs on. The name says what it is, because the
+    *subagent* provider is a different thing on the same handle. When one field
+    named `provider` served both, `rehydrate` looked up the wrong one."""
     model: str
     requested_access: Access
     granted_access: Access
     owner: str = ""
-    """Which `ctx.subagents` provider owns this run, stamped by the service.
+    """Which `ctx.subagents` provider owns this run. The service stamps it.
 
-    Not `provider` — `SubagentRequest.provider` is the *LLM* provider, and one
-    word for both is how `rehydrate` looked up the wrong one. Not in `to_wire`,
-    which is the handle a caller is given; the service writes it onto the
-    admission (`record_admitted`), because readmission after a restart has to find
-    the provider that owns the child. It was missing from the log once, and a
-    readmit then worked only while exactly one provider was mounted."""
+    It is not named `provider`. The *LLM* provider is `model_provider` on this
+    handle, and when one word served both, `rehydrate` looked up the wrong one.
+    It is not in `to_wire`, which is the handle that a caller is given. The
+    service writes it onto the admission (`record_admitted`), because a
+    readmission after a restart must find the provider that owns the child. At
+    one time it was missing from the log, and a readmit then worked only while
+    exactly one provider was mounted."""
     downgrade_reason: DowngradeReason | None = None
-    """Why `granted` is narrower than `requested`, as a code rather than prose.
+    """Why `granted_access` is narrower than `requested_access`, as a code and not
+    as prose.
 
-    A durable event carrying an English sentence is unparseable by the consumer
-    that has to branch on it, and it goes stale silently: the reason a `write`
-    was refused today stops being true when the workspace tier lands, in every
-    log already written. `admission_notes()` renders the sentence from the code,
-    once."""
+    A consumer that must branch on a durable event cannot parse an English
+    sentence in it. The sentence also goes stale silently: the reason that a
+    `write` was refused stops being true when a workspace tier is mounted, in
+    every log that is already written. `admission_notes()` renders the sentence
+    from the code, in one place."""
     model_fallback: ModelFallback | None = None
-    """The model this child was asked onto and runs without, stamped by the seam from
-    the resolved request, at a spawn and at a readmission."""
+    """The model that this child was asked onto and runs without. The seam stamps it
+    from the resolved request, at a spawn and at a readmission."""
     media_shortfall: MediaShortfall | None = None
-    """Media this child's skills hand it that it cannot see, stamped as
-    `model_fallback` is."""
+    """Media that the skills of this child hand it and that it cannot see. It is
+    stamped as `model_fallback` is."""
     effort_unsent: EffortUnsent | None = None
     """The effort this child runs without, stamped as `model_fallback` is."""
     output: dict[str, Any] | None = None
-    """The shape this child owes its value in, stamped by the seam from the request for
-    the provider's drive to settle (`settle_value`). Not in `to_wire`: a parent holds
-    the schema it asked for."""
+    """The shape that this child owes its value in. The seam stamps it from the
+    request, for the drive of the provider to settle (`settle_value`). It is not
+    in `to_wire`, because a parent holds the schema that it asked for."""
     result: SubagentAwaiter | None = None
     """Awaits quiescence and reports the outcome. `None` from a provider whose
     children cannot be waited on."""
     dispose: Disposer | None = None
-    """Stops and lets go of a child the seam would not admit, **without revoking it**:
-    no tombstone, since a refusal is not a deletion. It writes nothing, so its
-    caller ends the child first: the seam does (`SubagentService._abandon`), and
-    the `task` tool revokes a child whose wait was canceled before it calls
-    this. A parent's teardown, and a delete, reach a provider's children by
-    other paths, and those revoke."""
+    """Stops and lets go of a child that the seam would not admit, **without
+    revoking it**. It writes no tombstone, because a refusal is not a deletion. It
+    writes nothing at all, so its caller ends the child first. The seam does so
+    (`SubagentService._abandon`). The `task` tool revokes a child whose wait was
+    canceled (`SubagentService.delete`) before it calls this. The teardown of a
+    parent, and a delete, reach the children of a provider by other paths, and
+    those paths revoke."""
     grant: Grant | None = None
-    """What this child was bounded to, stamped by the seam once it has applied it.
+    """What this child was bounded to. The seam stamps it when it applies it.
 
-    On the run because the run is what a provider keeps: a rehydration builds a
-    *new* scope for a settled child and the filters that bounded the old one
-    went with it, so replaying the ceiling needs the grant to have outlived the
-    scope — and the parent it was computed from."""
+    It is on the run because the run is what a provider keeps. A rehydration
+    builds a *new* scope for a settled child, and the filters that bounded the old
+    scope went with that scope. So to apply the ceiling again, the grant must
+    have outlived the scope, and the parent that it was computed from."""
     scope: Context | None = None
-    """The child's own scope, set by the provider so the **seam** can bound it.
+    """The scope of the child itself. The provider sets it so that the **seam** can
+    bound it.
 
-    The ceiling was a documented obligation on providers before this field, and the
-    second call site had already missed it: `rehydrate` builds a fresh scope for a
-    settled child. Handing the scope back makes the enforcement the seam's, on both
-    paths, rather than a rule a provider is trusted to remember.
+    Before this field, the ceiling was a documented obligation on providers, and
+    the second call site had already missed it: `rehydrate` builds a fresh scope
+    for a settled child. Because the provider hands the scope back, the seam
+    enforces the ceiling on both paths, and the ceiling is not a rule that a
+    provider is trusted to remember.
     """
     ready: anyio.Event = field(default_factory=anyio.Event, repr=False, compare=False)
-    """Set by the seam when the child may take its first step, and awaited by the
-    provider's drive before it does.
+    """The seam sets it when the child may take its first step. The drive of the
+    provider awaits it before the child takes that step.
 
-    A provider starts the drive before it hands the run back, and only then can the
-    seam bound it (`_enforce` needs `scope`), so without this a child ran ahead of
-    its own ceiling. Set once the child is bounded; for a readmitted child, once its
-    own children have been swept as well (L5b), so the children its first prompt
-    describes are the settled ones. A child released before this is set — refused,
-    or its admission unwritten — has it set by the release, and its drive, let
-    through, finds itself released and runs nothing."""
+    A provider starts the drive before it hands the run back, and only then can
+    the seam bound the child (`_enforce` needs `scope`). So without this event a
+    child ran ahead of its own ceiling. The event is set when the child is
+    bounded. For a readmitted child it is set when the children of that child
+    have been swept as well (L5b), so the children that its first prompt
+    describes are the settled ones. A child can be released before the event is
+    set, because it was refused or its admission was not written. The release
+    then sets the event. The drive is let through, finds that the child is
+    released, and runs nothing."""
 
     def to_wire(self) -> dict[str, JsonValue]:
-        """The admission facts, for a caller holding the handle.
+        """The admission facts, for a caller that holds the handle.
 
-        No `status`: a child's state is the fold over its own `subagent/status`
-        records, and a second copy on the handle would be a value frozen at whatever
-        the last in-process update left."""
+        There is no `status`. The state of a child is the fold over its own
+        `subagent/status` records, and a second copy on the handle would be a
+        value frozen at whatever the last in-process update left."""
         wire: dict[str, JsonValue] = {
             "runId": self.id,
             "name": self.name,
@@ -889,14 +931,14 @@ class SubagentRun(WireForm):
 
 
 class ChildNotice(WireModel):
-    """What a child's ending tells its parent: a message into the parent's inbox,
-    carried on the ending itself (`record_ended`).
+    """What the ending of a child tells its parent: a message into the inbox of the
+    parent. The ending record itself carries it (`record_ended`).
 
-    On the child's record because the child is what ended: its own log says what its
-    parent is owed, and the id says whether the parent's log has it. So a crash
-    between the child's ending and the parent's write costs the parent nothing — the
-    sweep that brings the parent back delivers what its log lacks
-    (`SubagentService._resume`).
+    It is on the record of the child because the child is what ended. The log of
+    the child says what its parent is owed, and the id says whether the log of
+    the parent has it. So a crash between the ending of the child and the write
+    of the parent costs the parent nothing. The sweep that brings the parent back
+    delivers what the log of the parent lacks (`SubagentService._resume`).
     """
 
     text: str
@@ -907,54 +949,60 @@ class ChildNotice(WireModel):
 
 
 class Admission(WireModel):
-    """A child's `subagent/admitted` record: the run, the task, **the narrowing**, and
-    what the seam stamps beside them.
+    """The `subagent/admitted` record of a child: the run, the task, **the
+    narrowing**, and what the seam stamps beside them.
 
-    One model for the writer and every reader — `ChildState`, the readmission that
-    rebuilds a request from it — so a key one side spells and the other looks for
-    cannot come apart. `CodeDispatchRef` states the same argument for the same
-    reason.
+    The writer and every reader use this one model. The readers include
+    `ChildState` and the readmission that rebuilds a request from the record. So
+    a key that one side spells and the other side looks for cannot come apart.
+    `CodeDispatchRef` states the same argument for the same reason.
 
-    **No session id and no parent id**: the record is in the child's own log, whose
-    id is the one and whose header names the other (`delegating_parent`).
+    **It holds no session id and no parent id.** The record is in the log of the
+    child itself. The id of that log is the session id, and the header of that
+    log names the parent (`delegating_parent`).
 
-    **The narrowing is logged because a restart re-derives the ceiling from this
-    record and nothing else.** `preset`, `skills` and `tools` are what `grant_for`
-    resolves a child's reach from, and an admission that recorded only the run would
-    come back after a restart with the parent's *whole* set — a child quietly wider
-    than the one that was admitted, which is §6.5 broken by a power cut. `None`
-    means "inherited everything", as it does on the request.
+    **The narrowing is logged because a restart derives the ceiling again from
+    this record and from nothing else.** `preset`, `skills`, `tools` and `paths`
+    are what the reach of a child is resolved from (`grant_for`). An admission
+    that recorded only the run would come back after a restart with the *whole*
+    set of the parent. The child would then be quietly wider than the one that
+    was admitted, and a power cut would have broken §6.5. `None` means
+    "inherited everything", as it does on the request.
     """
 
     run_id: str
     name: str = ""
     owner: str = ""
-    """The provider row that runs it, so a readmission asks that one (P11-04)."""
+    """The name of the provider that runs it, so that a readmission asks that
+    provider (P11-04)."""
     prompt: str = ""
     model_provider: str = ""
     model: str = ""
     choice: ModelChoice | None = None
-    """The model the spawn named (`SubagentRequest.choice`), `None` for none. With
-    `skills` and `reasoning_effort` it is all a readmission resolves the child's route
-    from, against its parent's list as it is then (`_request_of`)."""
+    """The model that the spawn named (`SubagentRequest.choice`), or `None` for
+    none. A readmission resolves the route of the child from this, `skills` and
+    `reasoning_effort` alone, against the list of its parent as it is at that
+    time (`_request_of`)."""
     reasoning_effort: str | None = None
     """The effort the spawn named, `None` for none."""
     model_key: str | None = None
     """The key the spawn resolved to, for the audit (item 8)."""
     route: ModelRoute | None = None
-    """The route the spawn resolved to, settings and all, for the audit. `None` on its
-    parent's route. A readmission works it out again rather than reading it back."""
+    """The route that the spawn resolved to, with its settings, for the audit.
+    `None` for a child on the route of its parent. A readmission works the route
+    out again and does not read it back."""
     model_fallback: ModelFallback | None = None
-    """The model the child was asked onto and ran without, for the audit: what the
-    person running the parent has to set up for it to run there."""
+    """The model that the child was asked onto and ran without, for the audit. It is
+    what the user who runs the parent must set up for the child to run there."""
     media_shortfall: MediaShortfall | None = None
     """Media its skills handed it that it could not see, for the audit, as
     `model_fallback` is."""
     effort_unsent: EffortUnsent | None = None
     """The effort it ran without, for the audit, as `model_fallback` is."""
     output: dict[str, Any] | None = None
-    """The shape the child owes its value in, read back as it was, not worked out
-    again: the parent was promised this one, so a readmitted child still owes it."""
+    """The shape that the child owes its value in. A readmission reads it back as it
+    was and does not work it out again. The parent was promised this shape, so a
+    readmitted child still owes it."""
     requested_access: Access = "read"
     granted_access: Access = "read"
     downgrade_reason: DowngradeReason | None = None
@@ -964,12 +1012,14 @@ class Admission(WireModel):
     tools: tuple[str, ...] | None = None
     paths: tuple[str, ...] | None = None
     call_id: str | None = None
-    """The call that asked for it, which a cut-short call is answered by (S2)."""
+    """The call that asked for it. A call that was cut short is answered by it
+    (S2)."""
     parent_turn: int | None = None
-    """The seq of the parent's latest `turn/start` at admission: the turn a spawn cap
-    counts it in."""
+    """The seq of the latest `turn/start` of the parent at admission. It is the turn
+    that a spawn cap counts the child in."""
     goal_id: str | None = None
-    """The parent's goal open at admission: the one its spend is charged to."""
+    """The goal of the parent that was open at admission. The spend of the child is
+    charged to it."""
 
 
 def admission_payload(
@@ -980,8 +1030,8 @@ def admission_payload(
     parent_turn: int | None = None,
     goal_id: str | None = None,
 ) -> dict[str, JsonValue]:
-    """The `subagent/admitted` payload for `run`, admitted on `request` — an `Admission`,
-    in the log's spelling."""
+    """The `subagent/admitted` payload for `run`, which was admitted on `request`:
+    an `Admission`, in the spelling of the log."""
     entry = request.entry
     admission = Admission(
         run_id=run.id,
@@ -1010,7 +1060,7 @@ def admission_payload(
         parent_turn=parent_turn,
         goal_id=goal_id,
     )
-    # Lists rather than the model's tuples: the log's own spelling of a sequence.
+    # Lists and not the tuples of the model: a list is how the log spells a sequence.
     thawed = thaw_json(admission.to_wire())
     assert isinstance(thawed, dict)
     return dict[str, JsonValue](thawed)
@@ -1027,16 +1077,21 @@ def record_admitted(
     *,
     owner: str,
 ) -> SessionEvent:
-    """A child's admission, in its own log — the record a resume finds it by (S2).
+    """Write the admission of a child in its own log. A resume finds the child by
+    this record (S2).
 
-    Written by the seam (`SubagentService._admit`), not by a provider: the seam
-    holds the resolved request and the provider's run both, and it is the one that
-    knows `owner`. Beside the payload it stamps what a reader of the child needs
-    from its parent's side *at this moment*: the parent's latest `turn/start`
-    (`parentTurn`, which the spawn caps count a turn by) and the parent's open goal
-    (`goalId`, which the child's spend is charged to). Made durable by the seam
-    before the child's gate opens; a child whose admission cannot be written is
-    refused.
+    The seam writes it (`SubagentService._admit`), and a provider does not. The
+    seam holds both the resolved request and the run of the provider, and only
+    the seam knows `owner`. Beside the payload, it stamps what a reader of the
+    child needs from the side of its parent *at this moment*:
+
+    - The latest `turn/start` of the parent (`parentTurn`), which the spawn caps
+      count a turn by.
+    - The open goal of the parent (`goalId`), which the spend of the child is
+      charged to.
+
+    The seam makes the record durable before the gate of the child opens. A child
+    whose admission cannot be written is refused.
     """
     parent = request.parent.session
     goals = ctx.get(GOALS)
@@ -1052,25 +1107,30 @@ def record_admitted(
 
 
 def _current_turn(parent: Session) -> int | None:
-    """The seq of `parent`'s latest `turn/start`: the turn a child admitted now is
-    stamped with (`parentTurn`), and the one the spawn caps count."""
+    """The seq of the latest `turn/start` of `parent`. A child that is admitted now
+    is stamped with this turn (`parentTurn`), and the spawn caps count it."""
     opened = parent.latest("turn/start")
     return opened.seq if opened is not None else None
 
 
 def record_waiting(child: Session, /, **extra: JsonValue) -> None:
-    """`queued`, for a child that is waiting: for a slot (`slots`), or stopped with
-    its mount (`SUSPENDED_DETAIL`).
+    """Write `queued` for a child that is waiting. The child waits for a slot
+    (`slots`), or it was stopped with its mount (`SUSPENDED_DETAIL`), or it was
+    interrupted and is now held for a credential (`_held_for_credential`).
 
-    No barrier: a wait decides nothing a crash could get wrong. The statuses whose
-    place on disk does decide something have their own doors — `record_started` for
-    a restart the ladder counts, `record_ended` for an ending its parent is about to
-    be told, `record_deleted` for a revocation.
+    There is no barrier, because a wait decides nothing that a crash could get
+    wrong. The statuses whose place on disk does decide something have their own
+    functions:
 
-    **The one module that writes `subagent/status`**, so the shape the fold reads
-    has one spelling, and so the writers-of-record table can hold a provider to it:
-    a provider that appends a status of its own fails `test_log_writers`, which is
-    what keeps these doors from being optional.
+    - `record_started`, for a restart that the ladder counts.
+    - `record_ended`, for an ending that the parent is about to be told.
+    - `record_deleted`, for a revocation.
+
+    **This is the one module that writes `subagent/status`.** So the shape that
+    the fold reads has one spelling, and the writers-of-record table can hold a
+    provider to it. A provider that appends a status of its own fails
+    `test_log_writers`, and that is what keeps these functions from being
+    optional.
 
     Nothing is written for a tombstoned child (`_tombstoned`).
     """
@@ -1080,18 +1140,20 @@ def record_waiting(child: Session, /, **extra: JsonValue) -> None:
 
 
 def _tombstoned(child: Session, status: SubagentStatus) -> bool:
-    """Whether `child` is tombstoned, and so takes no status after it.
+    """Whether `child` is tombstoned, and so takes no status after the tombstone.
 
     A revocation writes the ending and the tombstone and then waits for the disk
-    (`record_deleted`), and a provider's drive can come back from its own wait
-    inside that one: past its gate, or out of a run the revocation canceled. The
-    fold takes the last status it reads, so a `running` or a `done` written then
-    turned a revoked child into one that ran and finished, and its ending's notice
-    told the parent so. The tombstone is in the log before that wait starts, so it
-    is the doors that hold the rule, whichever provider is driving.
+    (`record_deleted`). The drive of a provider can come back from its own wait
+    during that wait: past its gate, or out of a run that the revocation
+    canceled. The fold takes the last status that it reads. So a `running` or a
+    `done` that was written then turned a revoked child into one that ran and
+    finished, and the notice of its ending told the parent so. The tombstone is
+    in the log before that wait starts. So the functions that write a status hold
+    the rule, whichever provider is driving.
 
     `record_started` and `record_waiting` ask only this, and not whether the child
-    ended, because a finished child that is woken writes `running` over its `done`.
+    ended, because a finished child that is woken writes `running` over its
+    `done`.
     """
     if child.latest(DELETED) is None:
         return False
@@ -1108,21 +1170,25 @@ def _append_status(
 async def record_started(
     ctx: Context, child: Session, /, *, cause: StatusCause | None = None
 ) -> SessionEvent | None:
-    """`running`, for a child about to take its turn — **on its own disk first when it
-    is a restart** (S10). The caller starts the attempt after this returns.
+    """Write `running` for a child that is about to take its turn. **When the start
+    is a restart, the record reaches the disk of the child first** (S10). The
+    caller starts the attempt after this returns.
 
     The ladder counts `running` records with `cause: "resumed"`
-    (`restarts_since_progress`), and a restart that reached only memory before the
-    child took the daemon down again was never counted: a crash loop never advanced
-    the count on disk, so `CHILD_RETRY_LIMIT` never tripped. A first start counts
-    nothing, and neither does a woken (`rehydrated`) one, so those ride the child's
-    next flush — its first model request, which is before anything they describe.
+    (`restarts_since_progress`). A restart that reached only memory before the
+    child took the daemon down again was never counted. A crash loop never
+    advanced the count on disk, so `CHILD_RETRY_LIMIT` was never reached. A first
+    start counts nothing, and neither does a woken (`rehydrated`) start. So those
+    records are written with the next flush of the child. That flush is its first
+    model request, which is before anything that the records describe.
 
-    Best effort: a log that cannot be written has bigger problems than this count,
-    and refusing the child its turn would not write the record either.
+    This is best effort. A log that cannot be written has bigger problems than
+    this count, and refusing the child its turn would not write the record
+    either.
 
-    `None`, with nothing written, for a child tombstoned already (`_tombstoned`): it was
-    revoked while its drive waited, and the caller does not start the attempt.
+    It returns `None`, with nothing written, for a child that is already
+    tombstoned (`_tombstoned`). The child was revoked while its drive waited, and
+    the caller does not start the attempt.
     """
     if _tombstoned(child, "running"):
         return None
@@ -1141,30 +1207,35 @@ async def record_ended(
     notice: ChildNotice | None = None,
     **extra: JsonValue,
 ) -> SessionEvent | None:
-    """A child's ending, in its own log — **on its disk before the caller hands the
-    result to the parent** (F1).
+    """Write the ending of a child in its own log. **The record reaches the disk of
+    the child before the caller hands the result to the parent** (F1).
 
-    Nothing else writes the child's log at that point: its last barrier was *before*
-    its last model request. A parent told "done, here is the answer" by a child whose
-    log ended before the answer is one repair would call interrupted on the next
-    open, and readmit to do the work again. The caller delivers the result after
-    this returns. Best effort, for `record_started`'s reason: an ending that cannot
-    be written is still the ending.
+    Nothing else writes the log of the child at that point: its last barrier was
+    *before* its last model request. Suppose that a parent is told "done, here is
+    the answer" by a child whose log ended before the answer. On the next open,
+    repair would call that child interrupted and readmit it to do the work
+    again. The caller delivers the result after this returns. This is best
+    effort, for the same reason as in `record_started`: an ending that cannot be
+    written is still the ending.
 
-    **What it left unfinished beneath it ends with it** (`_end_beneath`). **And what
-    it tells its parent** (`notice`) rides on the ending, on the child's disk first,
-    and is then delivered into the parent's inbox (`_deliver_notice`).
+    **What the child left unfinished beneath it ends with it** (`_end_beneath`).
+    **What the child tells its parent** (`notice`) is appended to the ending
+    record. It reaches the disk of the child first, and is then delivered into
+    the inbox of the parent (`_deliver_notice`).
 
-    **A child that owes a value cannot end `done` without one**, whichever provider
-    ends it: the door settles it (`settle_value`) and ends a child that has none as
-    `error`, saying why, with a notice of the seam's own in place of the provider's,
-    which was worded for an answer.
+    **A child that owes a value cannot end `done` without one**, whichever
+    provider ends it. This function settles the value (`settle_value`). It ends a
+    child that has no value as `error` and says why. The notice is then one that
+    the seam writes, in place of the notice of the provider, which was worded for
+    an answer.
 
-    **A child is ended once**, as `record_deleted` settles one once. `None`, with
-    nothing written and nobody told, for a child that is no longer live: tombstoned,
-    whose revocation wrote its ending and whose parent is owed no notice of one, or
-    ended already, whose parent was told then. Each provider and seam path that ends
-    a child relies on this rather than asking first.
+    **A child is ended one time**, as `record_deleted` settles a child one time.
+    The function returns `None`, with nothing written and nobody told, for a
+    child that is no longer live. Such a child is tombstoned or has already
+    ended. The revocation of a tombstoned child wrote its ending, and its parent
+    is owed no notice of one. The parent of a child that had already ended was
+    told then. Each provider path and seam path that ends a child relies on this
+    and does not ask first.
     """
     if not child_is_live(_standing(ctx, child)):
         log.debug("ph.seams.subagents: %s has ended; `%s` not written", child.id, status)
@@ -1191,18 +1262,21 @@ async def record_ended(
 
 
 def said_text(answer: str) -> str:
-    """A notice's account of what a child last said, or nothing when it said nothing —
-    one wording for every notice that carries it, the providers' among them."""
+    """What a notice says about the last text of a child, or nothing when the child
+    said nothing. Every notice that carries this text uses this one wording,
+    including the notices of a provider."""
     return f" Last assistant text: {answer}" if answer else ""
 
 
 def _failed_notice(child: Session, why: str, *, summary: str) -> ChildNotice | None:
     """What a child that failed tells its parent: which child, why, and what it last
-    said — read from the child's own log, which holds its name and run id. `summary`
-    follows its name. `None` for a log no admission names, which has no parent to tell.
+    said. All three are read from the log of the child itself, which holds its
+    name and its run id. `summary` follows the name. The result is `None` for a
+    log that no admission names, because such a log has no parent to tell.
 
-    One wording for the door's own failure (`record_ended`, a child that owed a value)
-    and the sweep's give-up (`SubagentService._end_child`)."""
+    Two endings use this one wording: the failure that `record_ended` writes for
+    a child that owed a value, and the ending of a child that the sweep gives up
+    on (`SubagentService._end_child`)."""
     admission = child.projection(ADMITTED, _admission_of)
     if admission is None:
         return None
@@ -1214,22 +1288,27 @@ def _failed_notice(child: Session, why: str, *, summary: str) -> ChildNotice | N
 
 
 def _deliver_notice(parent: AgentDriver, notice: ChildNotice) -> None:
-    """A child's ending notice into `parent`'s inbox, and the parent woken (P13-05).
+    """Put the ending notice of a child into the inbox of `parent`, and wake the
+    parent (P13-05).
 
-    **Woken, not injected.** A parent mid-turn, blocked in the tool that waits for the
-    child, takes it at its next step either way. The parent this is for is the one
-    that is *idle*: resumed past the turn that was waiting, by a restart that closed
-    that turn, with the child readmitted and finishing later. `inject` left the
-    result in its inbox with nothing to run it, and the parent sat "running" on a
-    pending message for the life of the daemon. `steer` says `agent/woken`, which a
-    host that drives the agent on demand hears.
+    **The parent is woken, and the notice is not only injected.** A parent that
+    is in the middle of a turn, blocked in the tool that waits for the child,
+    takes the notice at its next step in both cases. This function is for the
+    parent that is *idle*. A restart closed the turn that was waiting, the
+    parent was resumed past that turn, and the child was readmitted and finished
+    later. `inject` left the result in the inbox of that parent with nothing to
+    run it, and the parent stayed "running" on a pending message for the life of
+    the daemon. `steer` emits `agent/woken`, and a host that drives the agent on
+    demand listens for that event.
 
-    **Not flushed here**: a child never writes its parent's log, and it need not. The
-    notice is on the child's ending, on the child's disk, so one the parent's log lost
-    to a crash before its own next barrier — or one whose parent was not live to take
-    it — is delivered by the sweep that brings the parent back, which finds its id
-    missing. And a parent that read it had written it first, at the barrier before the
-    request that read it, so it is never delivered twice.
+    **Nothing is flushed here.** A child never writes the log of its parent, and
+    it does not need to. The notice is on the ending record of the child, on the
+    disk of the child. A crash can take the notice from the log of the parent
+    before the next barrier of the parent, or the parent can be absent when the
+    notice arrives. In both cases the sweep that brings the parent back finds
+    that the id of the notice is missing, and delivers it. A parent that read
+    the notice had written it first, at the barrier before the request that read
+    it. So the notice is never delivered twice.
     """
     parent.steer(_notice_message(notice.text, notice.summary, notice.id))
 
@@ -1239,28 +1318,33 @@ ReturnedVia: TypeAlias = Literal["tool", "text"]
 the JSON object itself."""
 
 REMINDED = "reminded to return its result"
-"""The summary a child's one reminder carries, which is how a later turn's end tells it
-was sent (`_reminded`): the seam's other messages into an inbox are ending notices."""
+"""The summary that the one reminder of a child carries. The end of a later turn
+reads the summary to tell that the reminder was sent (`_reminded`). The summary
+identifies the reminder, because the other messages that the seam puts into an
+inbox are ending notices."""
 
 
 def record_returned(child: Session, /, value: JsonObject, *, via: ReturnedVia) -> SessionEvent:
-    """A child's value, checked, in its own log: what `settle_value` reads back and the
-    fold carries to its parent (`ChildState.value`).
+    """Write the checked value of a child in its own log. `settle_value` reads the
+    record back, and the fold carries the value to the parent
+    (`ChildState.value`).
 
-    No barrier of its own: the child's ending comes after it and flushes it
-    (`record_ended`), and a value a crash took before then is asked for again by the
-    readmitted run.
+    The record has no barrier of its own. The ending of the child comes after it
+    and flushes it (`record_ended`). When a crash takes the value before that
+    flush, the readmitted run asks for the value again.
     """
     return _LOG.append(child, RETURNED, {"value": value, "via": via})
 
 
 def _result_tool(output: dict[str, Any]) -> ToolDefinition:
-    """`submit_result` for one child: its arguments are the value, checked against
-    `output`. A value that does not match is an error naming each violation, which the
-    model fixes on its next step, as it would any tool's arguments. One that does is
-    recorded in the child's own log and ends its turn."""
+    """`submit_result` for one child. Its arguments are the value, and they are
+    checked against `output`. A value that does not match is an error that names
+    each violation. The model fixes it on its next step, as it would fix the
+    arguments of any tool. A value that matches is recorded in the log of the
+    child itself, and the turn of the child ends."""
 
-    # `Any`, as `define_tool` asks of a raw-schema body: the check below is its type.
+    # `Any`, because `define_tool` asks for it on a body with a raw schema. The
+    # check below does the work of the type.
     def execute(arguments: Any, run: ToolRunContext) -> str:  # noqa: ANN401
         violations = validate_json_schema_value(output, arguments)
         if violations:
@@ -1287,8 +1371,10 @@ def _result_tool(output: dict[str, Any]) -> ToolDefinition:
 
 
 def _output_note(output: dict[str, Any]) -> str:
-    """The child's prompt section saying it owes a value, and in what shape: its tool's
-    schema too, but said where a child working in code, or with no tool calls, reads it."""
+    """The section of the prompt of a child which says that the child owes a value,
+    and in what shape. The schema of its tool says the shape too. This section
+    says it where a child that works in code, or that makes no tool calls, reads
+    it."""
     return (
         f"You owe your result in a set shape. When you are done, call `{RESULT_TOOL}` "
         f"with it (from code, `await tools.{RESULT_TOOL}(...)`); that is your answer, and "
@@ -1308,14 +1394,18 @@ class Returned:
 
 
 def settle_value(child: Session) -> Returned:
-    """What a child that has run to quiescence returned: the value it returned this
-    start, through `submit_result` or as its last reply (recorded as the value), or why
-    there is none. For a provider wording its own ending; `record_ended` holds every
-    ending to it, and the waiter's result follows the log (`_settle_waiter`).
+    """What a child that has run to quiescence returned. It is the value that the
+    child returned in this start, through `submit_result` or as its last reply
+    (which is then recorded as the value), or the reason why there is none.
 
-    The shape owed is the child's admission's, so a child whose parent has no log,
-    and wrote no admission, is held to nothing here. A child woken to be asked
-    something else (`rehydrated`) owes nothing again: its value went to its parent when
+    A provider calls this to word its own ending. `record_ended` holds every
+    ending to the same answer, and the result of the waiter follows the log
+    (`_settle_waiter`).
+
+    The shape that the child owes is the one in its admission. So a child whose
+    parent has no log, and which therefore wrote no admission, is held to
+    nothing here. A child that was woken to be asked something else
+    (`rehydrated`) owes nothing a second time: its value went to its parent when
     it first ended.
     """
     output = _owed(child)
@@ -1328,13 +1418,16 @@ def settle_value(child: Session) -> Returned:
 
 
 async def _remind_owed(agent: AgentDriver, _turn: int) -> None:
-    """A child about to stop that owes a value and has not returned it, reminded once a
-    start, by objecting to the stop as any `agent/turn-stopping` listener does: steering
-    one message in, so the same turn goes on.
+    """Remind a child that is about to stop, owes a value and has not returned it.
+    The child is reminded one time in each start. The reminder objects to the
+    stop as any `agent/turn-stopping` listener does: it steers one message in,
+    so the same turn goes on.
 
-    Who owes what is read from the child's own log, its admission's `output`, so a
-    readmitted child is held to it too; the count of reminders is read there as well,
-    for `nudges_since`' reason: a counter on a listener starts at zero after a restart.
+    Who owes what is read from the log of the child itself, from the `output` of
+    its admission. So a readmitted child is held to it too. The count of
+    reminders is read from that log as well, for the same reason as in
+    `nudges_since` (`ph_stabilize.skill_steps`): a counter on a listener starts
+    at zero after a restart.
     """
     child = agent.session
     # A root owes nothing, and is not made to read its whole log back to say so.
@@ -1347,27 +1440,30 @@ async def _remind_owed(agent: AgentDriver, _turn: int) -> None:
 
 
 def _value_of(child: Session, output: dict[str, Any]) -> Returned:
-    """This start's value: one `submit_result` recorded since the child's latest
-    `running`, else its last reply read as the JSON object, recorded once it checks.
-    Otherwise what was wrong with that reply, as the problem."""
-    since = _started(child)
+    """The value of this start. It is the one that `submit_result` recorded since the
+    latest `running` of the child. Otherwise it is the last reply of the child,
+    read as the JSON object, and recorded when it passes the check. When that
+    reply does not pass, the result holds what was wrong with it, as the
+    problem."""
+    since = _since(child)
     returned = child.latest(RETURNED)
-    if returned is not None and returned.seq > since:
+    if returned is not None and returned.seq >= since:
         return Returned(value=thaw_json(as_obj(returned.data.get("value"))))
     answer = child.projection(_ANSWER, _answer_of)
     try:
-        value = validated_shape(answer[1] if answer and answer[0] > since else "", output)
+        value = validated_shape(answer[1] if answer and answer[0] >= since else "", output)
     except SchemaViolation as violation:
         return Returned(problem=str(violation))
     record_returned(child, value, via="text")
     return Returned(value=value)
 
 
-def _started(child: Session) -> int:
-    """The seq of the child's latest status, its `running` while it runs: where this
-    start's records begin."""
+def _since(child: Session) -> int:
+    """The seq at which the records of this start begin. That is one past the
+    latest status of the child, which is its `running` while it runs. A child
+    with no status yet has the whole of its log."""
     status = child.latest(STATUS)
-    return status.seq if status is not None else -1
+    return 0 if status is None else status.seq + 1
 
 
 def _woken(child: Session) -> bool:
@@ -1377,8 +1473,9 @@ def _woken(child: Session) -> bool:
 
 
 def _reminded(child: Session) -> bool:
-    """Whether this start already reminded the child, read off its log."""
-    events = (child.at(index) for index in range(_started(child) + 1, child.seq))
+    """Whether the child was already reminded in this start. The answer is read from
+    its log."""
+    events = (child.at(index) for index in range(_since(child), child.seq))
     return any(
         event is not None
         and event.type == "user/message"
@@ -1388,8 +1485,9 @@ def _reminded(child: Session) -> bool:
 
 
 def _owed(child: Session) -> dict[str, Any] | None:
-    """The shape a child owes its value in this start, by its own admission: `None` for
-    one that owes none, or that was woken to be asked something else."""
+    """The shape that a child owes its value in for this start, by its own
+    admission. It is `None` for a child that owes no value, or that was woken to
+    be asked something else."""
     admission = child.projection(ADMITTED, _admission_of)
     if admission is None or admission.output is None or _woken(child):
         return None
@@ -1397,9 +1495,11 @@ def _owed(child: Session) -> dict[str, Any] | None:
 
 
 def _admission_of(event: SessionEvent) -> Admission | None:
-    """One `subagent/admitted` record as an `Admission`, or `None` for one that does not
-    parse: the fold's reading, and the projection the reminder and the ending door read
-    it through, once a session rather than at every turn's end."""
+    """One `subagent/admitted` record as an `Admission`, or `None` for a record that
+    does not parse. The fold reads an admission through this function. The
+    reminder (`_remind_owed`) and `record_ended` read it as a projection of the
+    session. A projection parses the record one time for a session, and not at
+    the end of every turn."""
     try:
         return Admission.model_validate(event.data)
     except ValidationError:
@@ -1407,8 +1507,9 @@ def _admission_of(event: SessionEvent) -> Admission | None:
 
 
 def _answer_of(event: SessionEvent) -> tuple[int, str] | None:
-    """One event's assistant text with its seq, or `None` when it carries none, so the
-    projection scans back to the last turn that said something (`last_answer`)."""
+    """The assistant text of one event with its seq, or `None` when the event
+    carries none. So the projection scans back to the last turn that said
+    something (`last_answer`)."""
     message = derive_event_message(event)
     if message is None or message.role != "assistant":
         return None
@@ -1417,15 +1518,15 @@ def _answer_of(event: SessionEvent) -> tuple[int, str] | None:
 
 
 def last_answer(child: Session | None) -> str:
-    """A child's last non-empty assistant text: its answer, by convention. An
-    incremental fold rather than a walk of its log, which is longest just when this is
-    asked."""
+    """The last non-empty assistant text of a child, which by convention is its
+    answer. It is an incremental fold and not a walk of the log, because the log
+    is longest at the time when this is asked."""
     answer = child.projection(_ANSWER, _answer_of) if child is not None else None
     return answer[1] if answer is not None else ""
 
 
 def _reminder(problem: str) -> str:
-    """The one correction a child that has not returned its value is sent."""
+    """The one correction that is sent to a child that has not returned its value."""
     return (
         f"You have not returned your result in the shape asked for ({problem}). Call "
         f"`{RESULT_TOOL}` with it now, or reply with only the JSON object."
@@ -1433,8 +1534,9 @@ def _reminder(problem: str) -> str:
 
 
 def _notice_message(text: str, summary: str, message_id: str | None = None) -> Message:
-    """A message from this seam into an agent's inbox: a child's ending to its parent,
-    or a reminder to a child. One shape, so a reader of either knows whose it is."""
+    """A message from this seam into the inbox of an agent: the ending of a child to
+    its parent, or a reminder to a child. Both have one shape, so a reader of
+    either knows that it came from this seam."""
     return create_user_message(
         content=[{"type": "text", "text": text}],
         source=PluginSource(
@@ -1447,7 +1549,7 @@ def _notice_message(text: str, summary: str, message_id: str | None = None) -> M
 
 
 def _inbox_ids(log: Session) -> set[str]:
-    """The id of every message delivered into `log`'s inbox."""
+    """The id of every message that was delivered into the inbox of `log`."""
     return {
         as_str(as_obj(message).get("id"))
         for event in log.events
@@ -1457,35 +1559,41 @@ def _inbox_ids(log: Session) -> set[str]:
 
 
 async def record_deleted(ctx: Context, child: Session, /, reason: str) -> None:
-    """A child's tombstone — with the `canceled` that ends it, for a child that had not
-    ended — **in one batch** (S14), in its own log, and on its disk before the caller
-    releases anything.
+    """Write the tombstone of a child in its own log. For a child that had not ended,
+    the `canceled` that ends it is written with the tombstone **in one batch**
+    (S14). Both are on the disk of the child before the caller releases
+    anything.
 
-    Apart, a flush between them left a child `canceled` and not deleted. A child
-    that already settled is not settled again: a `canceled` over its `done` turned a
-    finished child into a revoked one. Whether it ended is read from its own log,
-    not from a caller's flag (`_standing`). A child
-    tombstoned already is left as it is, and **what it left unfinished beneath it
-    ends with it** (`_end_beneath`).
+    When the two records were written apart, a flush between them left a child
+    `canceled` and not deleted. A child that has already settled is not settled
+    again: a `canceled` over its `done` turned a finished child into a revoked
+    one. Whether the child ended is read from its own log, and not from a flag
+    of the caller (`_standing`). A child that is already tombstoned is left as
+    it is. **What the child left unfinished beneath it ends with it**
+    (`_end_beneath`).
     """
     await _tombstone(ctx, child, reason)
     await _end_beneath(ctx, child)
 
 
 def _standing(ctx: Context, child: Session) -> ChildState:
-    """Whether `child` ended or was revoked, for the two doors that will not do either
-    twice (`record_ended`, `record_deleted`). Through the seam's cached fold when there
-    is one, since a long log refolded per revocation is a parent's teardown paying for
-    every child it had; from the log itself when there is none, or when the child has
-    no admission for the seam to know it by."""
+    """The state of `child`, which says whether it ended or was revoked. The two
+    functions that will not do either twice read it: `record_ended`, and
+    `record_deleted` through `_tombstone`.
+
+    The state comes from the cached fold of the seam when there is one. Without
+    the cache, each revocation folds a long log again, and the teardown of a
+    parent pays that cost for every child that it had. The state comes from the
+    log itself when there is no cached fold, or when the child has no admission
+    for the seam to know it by."""
     service = ctx.get(SUBAGENTS)
     known = service.state(child.id) if service is not None else None
     return known if known is not None else child_state(child)
 
 
 async def _tombstone(ctx: Context, child: Session, reason: str) -> None:
-    """`record_deleted`'s own write, without taking anything beneath the child with
-    it: what `_revoke_beneath` writes on each descendant, since its walk already
+    """The write of `record_deleted` itself. It ends nothing beneath the child.
+    `_revoke_beneath` writes this on each descendant, because its walk already
     reaches every level."""
     state = _standing(ctx, child)
     if state.deleted:
@@ -1498,8 +1606,9 @@ async def _tombstone(ctx: Context, child: Session, reason: str) -> None:
 
 
 async def _end_beneath(ctx: Context, child: Session) -> None:
-    """**A child that ends takes what it left unfinished beneath it** — in the doors
-    that end one, so it holds whichever provider or seam path ended it
+    """**A child that ends takes with it what it left unfinished beneath it.** The two
+    functions that end a child call this (`record_ended` and `record_deleted`).
+    So the rule holds whichever provider path or seam path ended the child
     (`SubagentService._revoke_beneath`)."""
     service = ctx.get(SUBAGENTS)
     if service is not None:
@@ -1509,16 +1618,19 @@ async def _end_beneath(ctx: Context, child: Session) -> None:
 async def open_child_log(
     ctx: Context, parent: Session, run_id: str, /, **meta: JsonValue
 ) -> Session:
-    """A child's own log, opened — resumed when one survived, else created — named and
-    filed the way its parent finds it by (Phase 11).
+    """Open the log of a child itself. A log that survived is resumed, and otherwise
+    a new one is created. The log is named and filed in the way that its parent
+    finds it by (Phase 11).
 
-    The id is its parent's with its run's after (`child_session_id`), and the header
-    names the parent and says it is a sub-agent. Its family is its parent's, given
-    rather than inherited, since the store files a child with its parent only while
-    the parent is live in it — and given to `open_session`, which looks for a log
-    that survived there rather than across the store. Every
-    provider opens its children here, so none can name one a restart would not find;
-    `meta` adds what a provider says of its own (`agentPreset`).
+    The id is the id of its parent followed by the id of its run
+    (`child_session_id`). The header names the parent and says that the session
+    is a sub-agent. The family of the child is the family of its parent. It is
+    given and not inherited, because the store files a child with its parent
+    only while the parent is live in the store. It is given to `open_session`,
+    which then looks for a surviving log in that family and not across the
+    store. Every provider opens its children here, so no provider can name a
+    child in a way that a restart would not find. `meta` adds what a provider
+    says of its own (`agentPreset`).
     """
     return await open_session(
         ctx,
@@ -1534,21 +1646,22 @@ async def open_child_log(
 
 
 def parent_went_away(name: str) -> SubagentSpawnError:
-    """A spawn refused because its parent's scope was disposed mid-admission."""
+    """The refusal of a spawn whose parent had its scope disposed during the
+    admission."""
     return SubagentSpawnError(
         f"subagent {name}: its parent went away while it was being admitted, so it was not started"
     )
 
 
 def admitted_by(children: Mapping[str, ChildState], call: SessionEvent) -> ChildState | None:
-    """The child a call record admitted, or `None` if it admitted none.
+    """The child that a call record admitted, or `None` if the call admitted none.
 
-    For a delegating tool's `reconcile` (S2): `call` is the record a crash left
-    unanswered — a `tool/call`, or a Code Mode dispatch's
-    `tool/code-dispatch-start` — and `children` are the parent's, read from their
-    own logs. The admission reaches the child's disk before the child takes a step
-    (`SubagentService._admit`), so no child means none ran, and the call is safe to
-    make again.
+    This is for the `reconcile` of a delegating tool (S2). `call` is the record
+    that a crash left unanswered: a `tool/call`, or the
+    `tool/code-dispatch-start` of a Code Mode dispatch. `children` are the
+    children of the parent, read from their own logs. The admission reaches the
+    disk of the child before the child takes a step (`SubagentService._admit`).
+    So no child means that none ran, and the call is safe to make again.
     """
     call_id = call_id_of(call)
     if not call_id:
@@ -1561,20 +1674,21 @@ def admitted_by(children: Mapping[str, ChildState], call: SessionEvent) -> Child
 class ReadmittingProvider(Protocol):
     """A provider that can take an admitted child back from the log alone (P5-04).
 
-    A daemon that stopped between a child's admission and its first turn left the
-    work described in the child's own log and running nowhere. `readmit` is how the
-    next daemon puts it back: the run id and the session id come from that log, so
-    the child keeps its identity, its name and its log rather than arriving as a
-    second child the parent never asked for.
+    A daemon that stopped between the admission of a child and its first turn
+    left the work described in the log of the child and running nowhere.
+    `readmit` is how the next daemon puts the child back. The run id and the
+    session id come from that log. So the child keeps its identity, its name and
+    its log, and does not arrive as a second child that the parent never asked
+    for.
 
-    Its own Protocol, and not a method on `SubagentProvider`, for
-    `RehydratableProvider`'s reason exactly — resuming an *un-run* child is not
-    something every way of running one can do, and a `getattr` probe would report
-    a provider whose method is misnamed as one that cannot do it.
+    It is a Protocol of its own, and not a method on `SubagentProvider`, for
+    exactly the reason that `RehydratableProvider` gives. Not every way of
+    running a child can resume a child that has *not run*. A `getattr` probe
+    would report a provider whose method is misnamed as one that cannot do it.
 
-    Returning `None` declines this one child without failing the sweep: the next
-    daemon is starting a root, and one child it cannot rebuild must not stop the
-    others from coming back.
+    A return of `None` declines this one child and does not fail the sweep. The
+    next daemon is starting a root, and one child that it cannot rebuild must
+    not stop the others from coming back.
     """
 
     async def readmit(
@@ -1584,14 +1698,15 @@ class ReadmittingProvider(Protocol):
 
 @runtime_checkable
 class RevokingProvider(Protocol):
-    """A provider that can stop a child it is running and tombstone it (Phase 11).
+    """A provider that can stop a child that it is running, and tombstone it
+    (Phase 11).
 
-    `SubagentService.delete` is the door a revocation goes through: a child this
-    process is running is its provider's to stop — its job, its agent — and the
-    provider writes the tombstone into the child's log as it lets go
-    (`record_deleted`). A child nothing is running here, settled by an earlier
-    process, is tombstoned by the seam itself. `False` means the provider holds no
-    such child.
+    Every revocation goes through `SubagentService.delete`. A child that this
+    process is running belongs to its provider, with its job and its agent, and
+    the provider stops it. The provider writes the tombstone into the log of the
+    child as it lets go (`record_deleted`). A child that nothing is running
+    here, because an earlier process settled it, is tombstoned by the seam
+    itself. `False` means that the provider holds no such child.
     """
 
     async def revoke(self, run_id: str, reason: str) -> bool: ...
@@ -1601,11 +1716,11 @@ class RevokingProvider(Protocol):
 class RehydratableProvider(Protocol):
     """A provider whose settled children can be given a runtime again (P3-13).
 
-    A second Protocol rather than a method on `SubagentProvider`, because not
-    every way of running a child can resume one — and rather than a `getattr`
-    probe, because a provider whose method is misnamed or has the wrong arity
-    would then fail silently as "cannot rehydrate", which is the failure mode
-    that already cost this package a day.
+    It is a second Protocol and not a method on `SubagentProvider`, because not
+    every way of running a child can resume one. It is not a `getattr` probe,
+    because a provider whose method is misnamed or has the wrong arity would
+    then fail silently as "cannot rehydrate". That failure mode has already cost
+    this package a day.
     """
 
     async def rehydrate(self, run_id: str) -> bool: ...
@@ -1615,10 +1730,11 @@ class RehydratableProvider(Protocol):
 class SubagentProvider(Protocol):
     """A way of running a child agent.
 
-    One method. A `capabilities` set was drafted here for a consumer to branch
-    on — whether children survive the parent, whether they can be messaged — and
-    removed again: with one provider there is nothing to branch on, and the
-    vocabulary a second provider needs is not guessable from the first.
+    It has one method. A `capabilities` set was drafted here for a consumer to
+    branch on: whether children survive the parent, and whether they can be
+    messaged. It was removed again. With one provider there is nothing to branch
+    on, and the vocabulary that a second provider needs cannot be guessed from
+    the first.
     """
 
     async def start(self, request: SubagentRequest) -> SubagentRun: ...
@@ -1626,13 +1742,14 @@ class SubagentProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class _Registered:
-    """A delegation provider and who registered it (P6-29).
+    """A delegation provider and the row that registered it (P6-29).
 
-    One of the two row-supplied objects that `_row_bodies` cannot find by shape: a
-    provider is an *object satisfying a Protocol*, so `dict[str, SubagentProvider]`
-    names no callable, and this claims its slot with `claim_key` rather than
-    `claim_slot`. `_provider_fields` discriminates on the Protocol, which is true of a
-    provider however it was registered.
+    This is one of the two row-supplied objects that `_row_bodies` cannot find
+    by shape. A provider is an *object that satisfies a Protocol*, so
+    `dict[str, SubagentProvider]` names no callable. The service also claims the
+    entry with `claim_key` and not with `claim_slot`. `_provider_fields`
+    discriminates on the Protocol, and that holds for a provider however it was
+    registered.
     """
 
     provider: SubagentProvider
@@ -1640,11 +1757,13 @@ class _Registered:
 
 
 SpawnGuard: TypeAlias = Callable[[SubagentRequest], "Deny | str | None"]
-"""A policy asked before a child exists: a reason to refuse, or `None` to allow.
+"""A policy that is asked before a child exists. It returns a reason to refuse, or
+`None` to allow.
 
-Deny-only and asked before the provider is, so a refusal produces no session, no
-log and no artifact — `SubagentSpawnError`'s contract. The limits row's child caps
-are the first registrant (P4-04)."""
+A guard can only deny, and it is asked before the provider is. So a refusal
+produces no session, no log and no artifact, which is the contract of
+`SubagentSpawnError`. The child caps of the limits row are the first registrant
+(P4-04)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1655,18 +1774,23 @@ class _SpawnGuard:
 
 @dataclass(frozen=True, slots=True)
 class ChildCounts:
-    """A parent's children, as the spawn caps count them (`SubagentService.child_counts`)."""
+    """The children of a parent, as the spawn caps count them
+    (`SubagentService.child_counts`)."""
 
     turn: int = 0
-    """Those admitted in the parent's current turn, and those on their way."""
+    """The children admitted in the current turn of the parent, and the spawns that
+    are in progress."""
     session: int = 0
-    """All of them, a deleted one included, and those on their way."""
+    """All the children, including a deleted one, and the spawns that are in
+    progress."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Readmitter:
-    """The provider a child's admission names, able to readmit it: its name, its row,
-    and itself as a `ReadmittingProvider` — asked once per child, and carried."""
+    """The provider that the admission of a child names, when it can readmit the
+    child: its name, the row that registered it, and the provider itself as a
+    `ReadmittingProvider`. It is looked up one time for each child and then
+    passed on."""
 
     name: str
     by: Running
@@ -1677,9 +1801,10 @@ class _Readmitter:
 class SubagentService:
     """The service published as `ctx.subagents`.
 
-    Named providers, unlike `ctx.code_runtime`'s single slot: "run a child" has
-    genuinely different answers in one deployment — an RLM child, an ephemeral
-    research task — and the caller names which it wants.
+    It holds named providers, where `ctx.code_runtime` has a single slot. "Run a
+    child" has genuinely different answers in one deployment, such as an RLM
+    child and an ephemeral research task, and the caller names the one that it
+    wants.
     """
 
     ctx: Context
@@ -1689,42 +1814,49 @@ class SubagentService:
     _folds: SessionFoldCache[ChildState] = field(
         default_factory=lambda: SessionFoldCache(child_state, extend=extend_child_state)
     )
-    """Each live child's state, folded from its own log and cached per session. The
-    prompt, the model's roster tool, the spawn caps and every name lookup read it
-    several times per model step.
+    """The state of each live child, folded from its own log and cached for each
+    session. The prompt, the roster tool of the model, the spawn caps and every
+    name lookup read it several times in each model step.
 
-    The *fold* stays a pure function of one log — `child_state_of` has to work on a
-    stored log too — so drift is checked per child (I6), with no key spanning logs."""
+    The *fold* stays a pure function of one log, because `child_state_of` must
+    work on a stored log too. So drift is checked for each child (I6), and no
+    key spans logs."""
     _live: dict[str, set[str]] = field(default_factory=dict)
-    """The live children of each parent, by session id: kept as sessions are
-    published and let go (`_published`, `_let_go`), since a child's parent link
-    never changes. A parent's children cost its own children, not every session the
-    mount holds."""
+    """The live children of each parent, by session id. The table is kept up to date
+    as sessions are published and let go (`_published`, `_let_go`). That is
+    enough, because the parent link of a child never changes. So reading the
+    children of a parent costs a lookup of those children, and not a pass over
+    every session that the mount holds."""
     _stored: dict[str, dict[str, ChildState]] = field(default_factory=dict)
-    """Children this process is not running, by parent id and then session id. A
-    parent is here once its stored children were read (`load_children`), and a child
-    of it that is let go leaves its last state here (`_let_go`)."""
+    """The children that this process is not running, by parent id and then by
+    session id. A parent is in the table after its stored children were read
+    (`load_children`). When a child of such a parent is let go, its last state
+    stays here (`_let_go`)."""
     _unreadable: dict[str, set[str]] = field(default_factory=dict)
-    """Children whose logs will not read, by parent id and then session id (P13-09):
-    found so by the tree read (`stored_tree`) or by a readmission's strict one
-    (`_isolate`). Neither live nor ended, so no sweep waits on one or writes into it."""
+    """The children whose logs cannot be read, by parent id and then by session id
+    (P13-09). Either the tree read found the damage (`stored_tree`), or the
+    strict read of a readmission did (`_isolate`). Such a child is neither live
+    nor ended, so no sweep waits on it or writes into it."""
     _spawning: dict[str, set[str]] = field(default_factory=dict)
-    """The names of each parent's spawns past the guards and not yet admitted, by
-    parent id (`child_counts`)."""
+    """The names of the spawns of each parent that have passed the guards and are not
+    yet admitted, by parent id (`child_counts`)."""
     _sweeps: KeyedLocks[str] = field(default_factory=KeyedLocks)
-    """One sweep of a parent's children at a time, by parent id (S1); a second waits.
+    """One sweep of the children of a parent runs at a time, by parent id (S1). A
+    second sweep waits.
 
-    `_resume` asks `state.run_id in self._runs` and then awaits — a hold written,
-    a log opened — before `_admit` writes the entry, so two sweeps of one parent
-    that overlapped both took the same child to readmit: the second's write or
-    open failed on the log the first held, and its `except Exception` ended the
-    child the first was putting back, telling the parent it had failed. Two
-    `credentials/store` requests in a row are two such sweeps.
+    `_resume` asks `state.run_id in self._runs` and then awaits, while a hold is
+    written or a log is opened, before `_admit` writes the entry. So two sweeps
+    of one parent that overlapped both took the same child to readmit. The write
+    or the open of the second sweep failed on the log that the first held. Its
+    `except Exception` then ended the child that the first was putting back, and
+    told the parent that the child had failed. Two `credentials/store` requests
+    in a row are two such sweeps.
 
-    **Waits rather than skips**: the second reads the state the first left, so a
-    credential that arrived while the first ran is not missed. Per parent, so a
-    readmitted child's own sweep (`_sweep_readmitted`) and the descent in
-    `readmit_waiting` take their own turn rather than this one."""
+    **The second sweep waits and does not skip.** It reads the state that the
+    first left, so a credential that arrived while the first ran is not missed.
+    The lock is for each parent. So the sweep of the children of a readmitted
+    child (`_sweep_readmitted`) and the descent in `readmit_waiting` each take
+    the lock of their own parent, and not this one."""
 
     def register_provider(
         self, name: str, provider: SubagentProvider, *, scope: Context | None = None
@@ -1736,33 +1868,37 @@ class SubagentService:
         )
 
     def guard(self, check: SpawnGuard, *, scope: Context | None = None) -> Disposer:
-        """Register a deny-only policy asked before every admission (P4-04).
+        """Register a deny-only policy that is asked before every admission (P4-04).
 
-        The shape `ToolRuntime.guard` has, for the same reasons: monotonic — a guard
-        can refuse and never widen — and asked *before* the provider is, so a refused
-        spawn produces nothing to clean up. A count of children is the seam's business
-        to *ask* and a policy row's to *decide*, which is why the child caps are a
-        registration here rather than a field on this seam's config.
+        It has the shape of `ToolRuntime.guard`, for the same reasons. It is
+        monotonic: a guard can refuse and can never widen. It is asked *before*
+        the provider is, so a refused spawn produces nothing to clean up. The
+        seam *asks* for a count of children, and a policy row *decides* on it.
+        For that reason the child caps are a registration here, and not a field
+        on the config of this seam.
         """
         by = self.ctx.running_for(scope)
         return claim_entry(by.owner, self._guards, _SpawnGuard(check, by), label="subagent-guard")
 
     def child_counts(self, parent: Session) -> ChildCounts:
-        """How many children `parent` has made, this turn and in all: what a spawn cap
-        counts, read from the children's own logs when a spawn is judged.
+        """How many children `parent` has made, in this turn and in all. This is what a
+        spawn cap counts. It is read from the logs of the children themselves
+        when a spawn is judged.
 
-        **A spawn on its way counts as a child.** Its guards run before its provider
-        builds the child, and the child is in `children` only once its admission is
-        written. With nothing else counted, two spawns from one step (the driver runs a
-        step's tool calls side by side) each saw the other missing, and both passed a
-        cap one of them crossed. A spawn is on its parent's list from its last guard
-        until its admission is written or it is refused, with no await at either
-        hand-off, so it is counted once, in this turn: the one its admission stamps.
+        **A spawn that is in progress counts as a child.** Its guards run before
+        its provider builds the child, and the child is in `children` only after
+        its admission is written. When nothing else was counted, two spawns from
+        one step each saw the other missing, because the driver runs the tool
+        calls of a step side by side. Both then passed a cap that one of them
+        crossed. A spawn is on the list of its parent from its last guard until
+        its admission is written or it is refused, and neither hand-off has an
+        await. So it is counted one time, in this turn, which is the turn that
+        its admission stamps.
 
-        **The turn is the parent's latest `turn/start`, by seq** (`_current_turn`). A
-        child admitted before the parent had a turn counts in the turn only while the
-        parent still has none. Deleted children count, and a fork starts with none,
-        since no child names it.
+        **The turn is the latest `turn/start` of the parent, by seq**
+        (`_current_turn`). A child that was admitted before the parent had a
+        turn counts in the turn only while the parent still has none. Deleted
+        children count. A fork starts with none, because no child names it.
         """
         children = self.children(parent.id).values()
         spawning = len(self._spawning.get(parent.id, ()))
@@ -1773,14 +1909,16 @@ class SubagentService:
         )
 
     def _named(self, request: SubagentRequest, parent: Session | None) -> str:
-        """The name a spawn's child is addressed by, unique among its siblings.
+        """The name that the child of a spawn is addressed by. It is unique among its
+        siblings.
 
-        **Named by the seam, before its provider is asked**, for `child_counts`'
-        reason: a provider that named a child from the admitted ones let two spawns
-        from one step take one name. `start` holds the name on the parent's list of
-        spawns on their way. A name asked for that a sibling has is refused, since
-        names address children (`agent_message`, the roster); one left out is made
-        from the task (`default_child_name`).
+        **The seam names the child before it asks the provider**, for the same
+        reason as in `child_counts`: when a provider named a child from the
+        admitted ones, two spawns from one step could take one name. `start`
+        holds the name on the list of the spawns of the parent that are in
+        progress. A requested name that a sibling already has is refused,
+        because names address children (`agent_message`, the roster). A name
+        that is left out is made from the task (`default_child_name`).
         """
         taken: set[str] = set()
         if parent is not None:
@@ -1799,8 +1937,8 @@ class SubagentService:
         return name
 
     def _landed(self, parent: Session | None, name: str) -> None:
-        """Take a spawn off its parent's list: admitted, and a child from here, or
-        refused. A second call does nothing."""
+        """Take a spawn off the list of its parent. Either it was admitted, and is a
+        child from now on, or it was refused. A second call does nothing."""
         if parent is None or (names := self._spawning.get(parent.id)) is None:
             return
         names.discard(name)
@@ -1813,15 +1951,18 @@ class SubagentService:
     def resolve(self, name: str | None) -> str | None:
         """Which provider a consumer should use, or `None` when there is no answer.
 
-        The policy is here because it is a property of *this* table: empty means
-        the one that is mounted, two mounted with no name chosen is a question
-        this seam refuses to answer for a caller, and a configured name is
-        checked against what is actually mounted rather than trusted.
+        The policy is here because it is a property of *this* table:
 
-        That last clause is the one worth stating. A row that trusts its own
+        - No name means the one provider that is mounted.
+        - Two mounted providers with no name chosen is a question that this seam
+          refuses to answer for a caller.
+        - A configured name is checked against what is actually mounted, and is
+          not trusted.
+
+        The last rule is the important one. A row that trusts its own
         `provider:` setting advertises a capability whenever the provider row
-        was renamed or removed — the phantom arriving by the one route that
-        looks like a deliberate choice.
+        was renamed or removed. The capability that does not exist then arrives
+        by the one route that looks like a deliberate choice.
         """
         names = self.provider_names()
         if name is not None:
@@ -1855,21 +1996,22 @@ class SubagentService:
     def held_by(
         self, request: SubagentRequest, boundary: Context | None = None
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """What the parent holds, in the two registries a grant covers.
+        """What the parent holds, in the two registries that a grant covers.
 
-        One reader for both halves of the ceiling — the refusal, the
-        materialization and the "did this narrow anything" check all need the
-        same two sets, and computing them three times in three spellings is how
-        the three come to disagree about what "holds" means.
+        Both halves of the ceiling have one reader. The refusal, the
+        materialization and the check for "did this narrow anything" all need
+        the same two sets. If they were computed three times in three spellings,
+        the three would come to disagree about what "holds" means.
 
-        `boundary` is threaded for the same reason `held` is on `check_grant`
-        and `grant_for`: `start` needs the resolution three times (the ceiling,
-        the brief, the containment check), and passing the one answer down makes
-        the three agree by construction rather than by re-derivation.
+        `boundary` is passed in for the same reason that `held` is a parameter
+        of `check_grant` and `grant_for`. `start` needs the resolution three
+        times: for the ceiling, for the brief and for the containment check.
+        Passing the one answer down makes the three agree by construction, and
+        not because each derived it again.
 
-        A parent's `submit_result` is not among what it holds: it is how that parent
-        answers its own parent, and a child of its own handed it would return a value
-        into nobody's contract.
+        The `submit_result` of a parent is not among what it holds. It is how
+        that parent answers its own parent. A child that was handed it would
+        return a value into a contract that nobody has.
         """
         parent_scope = boundary if boundary is not None else self._delegating_boundary(request)
         skills = self.ctx.get(SKILLS)
@@ -1882,25 +2024,30 @@ class SubagentService:
         )
 
     def _delegating_boundary(self, request: SubagentRequest) -> Context:
-        """The boundary a spawn's ceiling is computed in — stated, not guessed (P6-31).
+        """The boundary that the ceiling of a spawn is computed in. It is stated, not
+        guessed (P6-31).
 
-        Four cases:
+        There are four cases:
 
-        * **a stated `request.scope`** wins, as it does everywhere else — "a stated scope
-          wins before any handle is consulted" is the security property here;
-        * **no scope and no parent** is the mount: a spawn with no parent is a root
-          delegation, and the deployment-wide set is what it legitimately holds;
-        * **a parent whose `.ctx` cannot be read** is **refused**. `None` is not "no
-          ceiling" — `SkillService.reach` and `ToolRuntime.names` both resolve it to the
-          *mount*, the unrestricted set — so an unreadable parent did not narrow a child,
-          it handed it everything the deployment holds. There is no narrower default to
-          pick, and this is the one path whose stake is that a spawn which could widen
-          would make delegation a privilege escalation (I7);
-        * **a parent with a usable `.ctx`** is that scope.
+        - **A stated `request.scope`** wins, as it does everywhere else. A
+          stated scope wins before any handle is consulted, and that is the
+          security property here.
+        - **No scope and no parent** is the mount. A spawn with no parent is a
+          root delegation, and the deployment-wide set is what it legitimately
+          holds.
+        - **A parent whose `.ctx` cannot be read** is **refused**. `None` was
+          never "no ceiling". Before P6-32, `SkillService.reach` and
+          `ToolRuntime.names` both resolved it to the *mount*, which is the
+          unrestricted set. So an unreadable parent did not narrow a child: it
+          handed the child everything that the deployment holds. There is no
+          narrower default to pick. The stake on this path is that a spawn which
+          could widen would make delegation a privilege escalation (I7).
+        - **A parent with a usable `.ctx`** is that scope.
 
-        Resolved here, at the entry, by the code that knows a parent was meant — never in
-        the downstream registries, which since P6-32 require a stated `Boundary` and so
-        cannot guess either.
+        The boundary is resolved here, at the entry, by the code that knows that
+        a parent was meant. It is never resolved in the downstream registries.
+        Since P6-32 they require a stated `Boundary`, so they cannot guess
+        either.
         """
         if request.scope is not None:
             return request.scope
@@ -1920,15 +2067,16 @@ class SubagentService:
     ) -> None:
         """Refuse a spawn that asks for more than the parent holds (P4-13b).
 
-        **Here rather than in each provider**, because this is the one path every
-        delegation takes and a ceiling one provider forgot would not be one. The seam
-        applies the grant too, through `SubagentRun.scope`, because `rehydrate` builds a
-        fresh scope for a settled child and would otherwise hand it the deployment-wide
-        set.
+        **The check is here and not in each provider**, because this is the one
+        path that every delegation takes. A ceiling that one provider forgot
+        would not be a ceiling. The seam applies the grant too, through
+        `SubagentRun.scope`. `rehydrate` builds a fresh scope for a settled
+        child, and would otherwise hand that child the deployment-wide set.
 
-        Refused rather than silently intersected: a child that came back with something
-        other than what was asked for is a result the parent cannot interpret — a
-        `reviewer` child missing its review skill does the job wrong and reports success.
+        The spawn is refused and not silently intersected. A child that came
+        back with something other than what was asked for is a result that the
+        parent cannot interpret. A `reviewer` child that is missing its review
+        skill does the job wrong and reports success.
         """
         held_skills, held_tools = held if held is not None else self.held_by(request)
         for kind, asked, holds in (
@@ -1946,13 +2094,14 @@ class SubagentService:
                 )
 
     def resolve_preset(self, request: SubagentRequest) -> SubagentRequest:
-        """Fill what a named preset supplies and the caller left unsaid.
+        """Fill in what a named preset supplies and the caller did not state.
 
-        Defaults, not a ceiling: a caller may still narrow further, and cannot
-        widen past the parent whatever it names, because `check_grant` runs on
-        the *resolved* request. An unknown name is refused rather than ignored —
-        a spawn that asked for a `reviewer` and silently got a generic child is
-        the failure `resolve_model` refuses for the same reason one field over.
+        These are defaults and not a ceiling. A caller may still narrow further.
+        It cannot widen past the parent whatever it names, because `check_grant`
+        runs on the *resolved* request. An unknown name is refused and not
+        ignored. A spawn that asked for a `reviewer` and silently got a generic
+        child is the failure that `resolve_model` refuses, for the same reason,
+        for the model field.
         """
         if request.preset is None:
             return request
@@ -1973,47 +2122,58 @@ class SubagentService:
     def resolve_model(
         self, request: SubagentRequest, *, readmitting: bool = False
     ) -> SubagentRequest:
-        """The route a child runs on, resolved by its parent's own list (S7b, item 8): at
-        its spawn, and again at each readmission.
+        """Resolve the route that a child runs on, by the list of its parent (S7b, item
+        8). The route is resolved at the spawn, and again at each readmission.
 
-        The list is the mount's `models`, the parent's profile as it runs, `/model`
-        included, and a child resolved onto an entry runs with that entry's settings
-        (`child_options`). A route is named one of three ways:
+        The list is the `models` of the mount. That is the profile of the parent
+        as it runs, with `/model` included. A child that is resolved onto an
+        entry runs with the settings of that entry (`child_options`). A route is
+        named in one of three ways:
 
-        * **By the spawn** (`SubagentRequest.choice`): a key, its own or its assigned
-          profile's, or a whole route, which runs as the entry it matches, else as given
-          with no settings, as a root started on it does (`ModelList.resolve`).
-        * **By the skills it is given**, when the spawn names none (`model: classify` in
-          their front matter).
-        * **By neither**: its parent's route, with its parent's options; refused when the
-          parent has none (`_require_parents_route`), at a readmission too, since there is
-          nothing to fall back to.
+        - **By the spawn** (`SubagentRequest.choice`). The choice is a key, or a
+          whole route. The key is the one that the spawn gives or the one that
+          its assigned profile gives. A whole route runs as the entry that it
+          matches. A route that matches no entry runs as given with no settings,
+          as a root that is started on it does (`ModelList.resolve`).
+        - **By the skills that the child is given**, when the spawn names none
+          (`model: classify` in their front matter).
+        - **By neither.** The child runs on the route of its parent, with the
+          options of its parent. It is refused when the parent has no route
+          (`_require_parents_route`). That holds at a readmission too, because
+          there is nothing to fall back to.
 
-        **A spawn is refused only where whoever chose can choose again at once.** A route
-        the spawn named that this mount cannot run is refused, naming why: the parent is
-        right there, and running the child elsewhere would answer it on a model it did
-        not pick. So are skills that name different models, which the parent settles with
-        `model=`. A skill's model this mount cannot run degrades instead, since its author
-        wrote the key without knowing this profile: the child runs on its parent's route,
-        and the request carries a `ModelFallback` that the admission records and the
-        spawn's answer says, so the parent and the person both learn what to set up.
+        **A spawn is refused only where whoever chose can choose again at
+        once.** A route that the spawn named and that this mount cannot run is
+        refused, and the refusal names why. The parent is right there, and
+        running the child elsewhere would answer the parent on a model that it
+        did not pick. Skills that name different models are refused too, and the
+        parent settles them with `model=`. A model that a skill names and that
+        this mount cannot run degrades instead, because the author of the skill
+        wrote the key without knowing this profile. The child runs on the route
+        of its parent. The request carries a `ModelFallback`, the admission
+        records it, and the answer of the spawn reports it. So the parent and
+        the user both learn what to set up.
 
-        **A readmission degrades all of them** (`readmitting`): nobody is there to choose
-        again, and a refusal would end the child. Worked out again rather than read back
-        from its admission, so a model the person has set up since reaches a readmitted
-        child as it reaches a new one, and so does a skill that now names another.
+        **A readmission degrades all of them** (`readmitting`). Nobody is there
+        to choose again, and a refusal would end the child. The route is worked
+        out again and not read back from the admission. So a model that the user
+        has set up since then reaches a readmitted child as it reaches a new
+        one, and so does a skill that now names another model.
 
-        **Then the media its skills hand it** (`Skill.accepts`, A3), asked of the route
-        it resolved to (`_with_media`): one that cannot take them gives way to its
-        parent's route where that one can, and where neither can the child runs and
-        sees a placeholder for each, its parent told (`MediaShortfall`). A route the
-        spawn named itself is refused instead, by the rule above.
+        **Then the media that its skills hand it** (`Skill.accepts`, A3). The
+        route that the child resolved to is asked whether it can take them
+        (`_with_media`). A route that cannot take them gives way to the route of
+        the parent where that route can. A route that the spawn named itself is
+        refused there instead, by the rule above. Where neither route can take
+        them, the child runs and sees a placeholder for each, and its parent is
+        told (`MediaShortfall`).
 
-        **And the effort its skills name** (`Skill.effort`), which `child_options` puts
-        under the spawn's own and over its route's (`_with_effort`). The effort that
-        wins, where its route's profile does not say how to send it, is run without and
-        its parent told (`EffortUnsent`), never refused: the child is on the model it
-        was asked onto either way.
+        **Then the effort that its skills name** (`Skill.effort`).
+        `child_options` puts it under the effort of the spawn and over the
+        effort of the route (`_with_effort`). When the profile of the route does
+        not say how to send the effort that wins, the child runs without it and
+        its parent is told (`EffortUnsent`). This is never a refusal: in both
+        cases the child is on the model that it was asked onto.
         """
         routed = self._with_media(
             self._resolve_route(request, readmitting=readmitting), readmitting=readmitting
@@ -2021,10 +2181,11 @@ class SubagentService:
         return self._with_effort(routed)
 
     def _with_effort(self, request: SubagentRequest) -> SubagentRequest:
-        """`request` with the effort its skills name, where they agree, and the effort it
-        runs at where its route cannot send it. Skills that name different efforts name
-        none, so the child runs at its route's: an effort is a setting to degrade around,
-        not a contract the parent must settle."""
+        """`request` with the effort that its skills name, where they agree, and with
+        the effort that it runs at where its route cannot send that effort.
+        Skills that name different efforts name none, so the child runs at the
+        effort of its route. An effort is a setting to degrade around. It is not
+        a contract that the parent must settle."""
         named = self._named_by_skills(request, lambda skill: skill.effort)
         efforts = set(named.values())
         if len(efforts) > 1:
@@ -2036,9 +2197,11 @@ class SubagentService:
         return replace(request, effort_unsent=self._unsent_effort(request))
 
     def _unsent_effort(self, request: SubagentRequest) -> EffortUnsent | None:
-        """The effort `request`'s child runs at, where its route's profile does not say
-        how to send it: asked by the rule its own request withholds the effort by
-        (`unmapped_effort`), of the list the spawn resolved its route from."""
+        """The effort that the child of `request` runs at, when the profile of its route
+        does not say how to send it. The question is asked by the same rule that
+        the request of the child itself withholds the effort by
+        (`unmapped_effort`). It is asked of the list that the spawn resolved its
+        route from."""
         options = child_options(request)
         listed = self.ctx.get(MODELS) or ModelList()
         defined = listed.efforts_for(options.provider, options.model, key=options.model_key)
@@ -2048,7 +2211,7 @@ class SubagentService:
         return EffortUnsent(effort=options.reasoning_effort, route=route, defined=tuple(defined))
 
     def _resolve_route(self, request: SubagentRequest, *, readmitting: bool) -> SubagentRequest:
-        """`resolve_model`'s route, before the media are asked about."""
+        """The route of `resolve_model`, before the question about media is asked."""
         choice = request.choice
         by_skills = choice.is_default
         named = self._named_by_skills(request, lambda skill: skill.model) if by_skills else {}
@@ -2084,8 +2247,9 @@ class SubagentService:
         refusable: bool,
         readmitting: bool,
     ) -> SubagentRequest:
-        """`request` on its parent's route, said in the log and on the request; or, where
-        whoever chose can choose again at once and it is not a readmission, refused."""
+        """`request` on the route of its parent, with the fallback reported in the log
+        and on the request. Where whoever chose can choose again at once, and
+        this is not a readmission, the spawn is refused instead."""
         if refusable and not readmitting:
             raise SubagentSpawnError(refusal)
         self._require_parents_route(request)
@@ -2093,8 +2257,8 @@ class SubagentService:
         return replace(request, entry=None, model_fallback=fallback)
 
     def _with_media(self, request: SubagentRequest, *, readmitting: bool) -> SubagentRequest:
-        """`request` on a route that can take the media its skills hand the child, where
-        there is one (`resolve_model`)."""
+        """`request` on a route that can take the media that its skills hand the child,
+        where there is one (`resolve_model`)."""
         needed = sorted(
             {media for skill in self._given_skills(request).values() for media in skill.accepts}
         )
@@ -2133,7 +2297,8 @@ class SubagentService:
 
     @staticmethod
     def _require_parents_route(request: SubagentRequest) -> None:
-        """Refuse a child left on its parent's route when the parent has none."""
+        """Refuse a child that is left on the route of its parent when the parent has
+        none."""
         options = request.parent.options
         if not (options.provider and options.model):
             raise SubagentSpawnError(
@@ -2141,19 +2306,21 @@ class SubagentService:
             )
 
     def resolve_output(self, request: SubagentRequest) -> SubagentRequest:
-        """The shape a spawn's child owes its value in: the spawn's own `output`, else
-        the one the skills it is given declare, else none.
+        """Resolve the shape that the child of a spawn owes its value in. It is the
+        `output` of the spawn itself, else the one that the skills it is given
+        declare, else none.
 
-        A schema pH cannot hold a value to is refused (`object_schema_problems`), as
-        are skills that declare different ones, which the parent settles by passing
-        `output`. Refused rather than degraded: the parent asked for a structure it
-        means to read, and a child running without that contract would answer some
-        other question. Not asked again at a readmission, whose admission holds the
-        shape the parent was promised (`_request_of`).
+        A schema that pH cannot hold a value to is refused
+        (`object_schema_problems`). Skills that declare different outputs are
+        refused too, and the parent settles them by passing `output`. These are
+        refused and not degraded: the parent asked for a structure that it means
+        to read, and a child that runs without that contract would answer some
+        other question. The shape is not resolved again at a readmission. The
+        admission holds the shape that the parent was promised (`_request_of`).
         """
         if request.output is not None:
-            # A plain dict from here: the type the request declares, and what is sent
-            # to the child's model as its tool's schema.
+            # A plain dict from here on. It is the type that the request declares,
+            # and it is sent to the model of the child as the schema of its tool.
             try:
                 output = checked_object_schema(request.output)
             except ValueError as problems:
@@ -2176,7 +2343,8 @@ class SubagentService:
     def _named_by_skills[T](
         self, request: SubagentRequest, read: Callable[[Skill], T]
     ) -> dict[str, T]:
-        """What each skill a spawn names asks for by `read`, by skill, for those that ask."""
+        """What each skill that a spawn names asks for, as `read` returns it, keyed by
+        skill name. Skills that ask for nothing are left out."""
         return {
             name: value
             for name, skill in self._given_skills(request).items()
@@ -2184,7 +2352,7 @@ class SubagentService:
         }
 
     def _given_skills(self, request: SubagentRequest) -> dict[str, Skill]:
-        """The skills a spawn names, by name, as the parent holds them."""
+        """The skills that a spawn names, by name, as the parent holds them."""
         service = self.ctx.get(SKILLS)
         if not request.skills or service is None:
             return {}
@@ -2196,14 +2364,18 @@ class SubagentService:
         }
 
     async def resolve_profile(self, request: SubagentRequest) -> SubagentRequest:
-        """A profile the parent assigns, as the narrowing it is (S7b, item 9).
+        """Resolve a profile that the parent assigns, as the narrowing that it is (S7b,
+        item 9).
 
-        Composed by the host (`ctx.named_profiles`) and read against the parent's
-        mount (`ph.seams.subagent_profiles.narrowing`), then written into the request
-        as the tools, skills, model and access it resolves to — so the ceiling below
-        checks what it gives, and the admission records it: a child's reach is fixed
-        when it is admitted. **A ceiling, not defaults**: what a spawn names beside
-        it may narrow further, and naming more than it gives is refused.
+        The host composes the profile (`ctx.named_profiles`), and it is read
+        against the mount of the parent
+        (`ph.seams.subagent_profiles.narrowing`). It is then written into the
+        request as the tools, the skills, the model and the writable paths that
+        it resolves to. So the ceiling check that follows checks what the
+        profile gives, and the admission records it: the reach of a child is
+        fixed when it is admitted. **The profile is a ceiling, not a set of
+        defaults.** What a spawn names beside it may narrow further, and a spawn
+        that names more than the profile gives is refused.
         """
         name = request.profile
         if name is None:
@@ -2215,8 +2387,8 @@ class SubagentService:
                 "assigned to a child"
             )
         try:
-            # On a worker thread: composing reads and parses every layer file, and a
-            # spawn runs on the event loop every root of a daemon shares.
+            # On a worker thread. Composing reads and parses every layer file, and a
+            # spawn runs on the event loop that every root of a daemon shares.
             composed = await anyio.to_thread.run_sync(composer.compose, name)
         except (LoaderError, OSError, ValueError) as error:
             raise SubagentSpawnError(f'profile "{name}" does not compose: {error}') from error
@@ -2259,11 +2431,12 @@ class SubagentService:
     ) -> Grant:
         """Materialize what this child may reach, from a parent that still exists.
 
-        `None` means "everything the parent holds" and is written out as that explicit
-        list. The isolation chain already bounds the child; what the list is for is the
-        ruling — **a child's capability is fixed at admission**, so this records what the
-        parent held *then* rather than deferring to what it holds whenever the child is
-        next asked. See `Grant`.
+        `None` means "everything that the parent holds", and it is written out
+        as that explicit list. The isolation chain already bounds the child. The
+        list is for the ruling that **the capability of a child is fixed at
+        admission**. So it records what the parent held *then*, and does not
+        defer to what the parent holds whenever the child is next asked. See
+        `Grant`.
         """
         held_skills, held_tools = held if held is not None else self.held_by(request, boundary)
         named = request.skills
@@ -2279,29 +2452,32 @@ class SubagentService:
         )
 
     async def _end_child(self, session_id: str, detail: str, *, tell_parent: bool = False) -> None:
-        """End, in its own log, a child the seam is giving up on — and tell its parent.
+        """End a child that the seam is giving up on, in the log of the child itself,
+        and tell its parent.
 
-        **A child with an admission and no ending is one nothing can release.**
-        Its log says it was admitted, so `child_is_live` reads it as working, and
-        its parent is held out of passivation by a child that no longer exists
-        (K3, K4). It has to *end*, and only its log can end it.
+        **Nothing can release a child that has an admission and no ending.** Its
+        log says that it was admitted, so `child_is_live` reads it as working,
+        and a child that no longer exists holds its parent out of passivation
+        (K3, K4). The child has to *end*, and only its log can end it.
 
-        **The parent was promised a report** (P13-05): the delegating tool told it the
-        child "reports back by message", and a child the sweep gives up on — spent,
-        unresumable, without a provider — used to end in silence, leaving the parent
-        waiting on a reply nobody would write. With `tell_parent` the ending carries a
-        notice saying which child, why, and what it last said (`_failed_notice`),
-        delivered the way any ending's is. A spawn refused at admission does not: its
-        refusal is the caller's answer already.
+        **The parent was promised a report** (P13-05). The delegating tool told
+        the parent that the child "reports back by message". A child that the
+        sweep gives up on is spent, unresumable or without a provider. Such a
+        child used to end in silence, and the parent waited for a reply that
+        nobody would write. With `tell_parent`, the ending carries a notice that
+        says which child, why, and what it last said (`_failed_notice`). The
+        notice is delivered in the way that the notice of any ending is. A spawn
+        that is refused at admission gets no notice, because the refusal is
+        already the answer to the caller.
 
-        A child that ended already is left as it ended (`record_ended`): a readmission
-        `_admit` refused is ended by `_abandon`, and the sweep that catches the
-        refusal comes here for the same child.
+        A child that has already ended is left as it ended (`record_ended`).
+        `_abandon` ends a readmission that `_admit` refused, and the sweep that
+        catches the refusal then comes here for the same child.
 
-        Best effort, and never raised: this is how the seam gives up on a child —
-        refused, unresumable, spent — and a root coming back must not be held
-        hostage by a log it could not write. A child whose spawn was refused before
-        it had a log leaves nothing to end.
+        This is best effort and never raises. It is how the seam gives up on a
+        child that is refused, unresumable or spent, and a root that is coming
+        back must not be blocked by a log that it could not write. A child whose
+        spawn was refused before it had a log leaves nothing to end.
         """
 
         async def end(child: Session) -> None:
@@ -2318,21 +2494,25 @@ class SubagentService:
     async def _write_child(
         self, session_id: str, write: Callable[[Session], Awaitable[object]]
     ) -> None:
-        """Write to a child's own log, whether or not this process is running it.
+        """Write to the log of a child itself, whether or not this process is running
+        the child.
 
-        A live child's session is written as it is. One this process does not hold —
-        settled by an earlier process, or not readmitted yet — is claimed and loaded
-        without being resumed (`stored_session`), written, flushed, and let go: the
-        sweep ends a child it will not readmit this way, and records a hold on one
-        waiting for a credential, and neither is a reason to rebuild its runtime.
-        Nothing to write to — no live session, and none stored — is a no-op.
+        The session of a live child is written as it is. A child that this
+        process does not hold was settled by an earlier process, or is not yet
+        readmitted. Its log is claimed and loaded without being resumed
+        (`stored_session`), then written, flushed and let go. The sweep ends a
+        child that it will not readmit in this way, and records a hold on a
+        child that waits for a credential. Neither is a reason to rebuild the
+        runtime of the child. When there is nothing to write to, because there
+        is no live session and none is stored, the call does nothing.
 
-        **Read by path when its state says where** (`ChildState.family`): every child
-        a sweep writes to was read from the store as it opened, with its header, so
-        its log is opened where that header files it. Looking it up by id instead
-        listed every family directory in the store, on the event loop, once per
-        child. One this service knows nothing of is looked for first, so no lease is
-        taken on an id with no log.
+        **The log is read by path when the state of the child says where**
+        (`ChildState.family`). Every child that a sweep writes to was read from
+        the store with its header (`load_children`), so its log is opened where
+        that header files it. A lookup by id instead listed every family
+        directory in the store, on the event loop, one time for each child. A
+        child that this service knows nothing of is looked for first, so no
+        lease is taken on an id that has no log.
         """
         sessions = self.ctx.require(SESSIONS)
         live = sessions.get(session_id)
@@ -2357,17 +2537,18 @@ class SubagentService:
             sessions.dispose(session_id)
 
     async def _abandon(self, run: SubagentRun, why: str, *, tell_parent: bool) -> None:
-        """End and release a child this seam has decided not to admit (K3).
+        """End and release a child that this seam has decided not to admit (K3).
 
-        **Ended first, saying `why`, then released**, so its account is on its disk
-        before anything is let go, as a revocation's is (`record_deleted`). The
-        release revokes nothing (`SubagentRun.dispose`), so a refused child reads
-        `error`, not deleted.
+        **The child is ended first, with `why`, and then released.** So its
+        account is on its disk before anything is let go, as the account of a
+        revocation is (`record_deleted`). The release revokes nothing
+        (`SubagentRun.dispose`), so a refused child reads `error`, not deleted.
 
-        Best-effort: the refusal is what the caller has to see, and a disposer
-        that throws must not replace it with its own exception. `releasing`
-        rather than a bare shield for the reason it gives — a disposer that hangs
-        must not make the refusal unkillable.
+        The release is best effort. The refusal is what the caller has to see,
+        and a disposer that throws must not replace it with its own exception.
+        The release uses `releasing` and not a bare shield, for the reason that
+        `releasing` gives: a disposer that hangs must not make the refusal
+        unkillable.
         """
         await self._end_child(run.session_id, why, tell_parent=tell_parent)
         if run.dispose is None:
@@ -2386,43 +2567,51 @@ class SubagentService:
         held: tuple[tuple[str, ...], tuple[str, ...]],
         boundary: Context,
     ) -> SubagentRun:
-        """Bind a child a provider has already started on `request`, or release it (K3, L6).
+        """Bind a child that a provider has already started on `request`, or release it
+        (K3, L6).
 
-        **The sequence, in one place, because both spawners need all of it.**
-        `_enforce` reads `run.scope`, which only the provider can produce, so the
-        check cannot move ahead of the spawn — and by the time it refuses there
-        is a child driving. Three things then have to happen and no two of them
-        are optional: its admission is *ended* in the log, the child is released
-        (`_abandon` does both, in that order), and the refusal reaches the caller.
+        **The sequence is in one place, because both spawners need all of it.**
+        `_enforce` reads `run.scope`, which only the provider can produce. So
+        the check cannot move ahead of the spawn, and when it refuses, a child
+        is already driving. Three things must then happen, and none of them is
+        optional. The admission is *ended* in the log, the child is released
+        (`_abandon` does both, in that order), and the refusal reaches the
+        caller.
 
-        `start` had all three and `_readmit_one` had none of them: it called
-        `_enforce` bare, so a `check_grant` refusal after a profile edit left the
-        child running unbounded and undisposed while `resume_children`'s
-        `except` ended its record — the K3 shape arriving through the path
-        K4 had already been written for. Two spawners with one admission each
-        was the defect; one admission both call is the fix.
+        `start` had all three and `_readmit_one` had none of them. It called
+        `_enforce` bare. So a `check_grant` refusal after a profile edit left
+        the child running unbounded and undisposed, while the `except` of the
+        sweep (`_resume`) ended its record. That was the failure of K3, arriving
+        through the path that K4 had already been written for. The defect was
+        two spawners with one admission each. The fix is one admission that both
+        call.
 
-        With `record`, which is `start`'s, **the seam writes the child's admission,
-        into the child's own log** (S2, Phase 11) — the one record a resume finds a
-        child by. The seam rather than the provider, because it holds both halves:
-        the resolved request and the provider's run, and `owner`, which is how a
-        readmission finds the provider again. It reaches the child's disk before the
-        gate opens, fail-closed as a durable intent is: one that cannot be written is
-        a refusal like the ceiling's. A provider that opened no log for its child is
-        refused too, since that log is the child's only record. A readmit writes no
-        admission — the one it was rebuilt from is already there.
+        With `record`, which `start` passes, **the seam writes the admission of
+        the child into the log of the child itself** (S2, Phase 11). It is the
+        one record that a resume finds a child by. The seam writes it and the
+        provider does not, because the seam holds both halves: the resolved
+        request and the run of the provider. It also holds `owner`, which is how
+        a readmission finds the provider again. The admission reaches the disk
+        of the child before the gate opens. It fails closed, as a durable intent
+        does: an admission that cannot be written is a refusal, like the refusal
+        of the ceiling. A provider that opened no log for its child is refused
+        too, because that log is the only record of the child. A readmission
+        writes no admission, because the one that it was rebuilt from is already
+        there.
 
-        `start`'s spawn comes off its parent's list in the step that writes its
-        admission, which is the step it starts counting as a child in (`child_counts`).
+        The spawn of `start` comes off the list of its parent in the step that
+        writes its admission. That is the step in which it starts to count as a
+        child (`child_counts`).
 
-        The caller opens the child's gate (`SubagentRun.ready`) once this returns:
-        `start` at once, a readmission after its own children are swept.
+        The caller opens the gate of the child (`SubagentRun.ready`) after this
+        returns. `start` opens it at once. A readmission opens it after the
+        children of the child are swept.
         """
-        # Stamped here rather than trusted from the provider: the service is what
-        # knows which name the caller asked for, and `rehydrate` has to be able
-        # to find its way back to the same provider. The fallback is what this
-        # start resolved (`resolve_model`), a readmission's as much as a spawn's,
-        # and the output is what the child owes its parent.
+        # The owner is stamped here and not trusted from the provider. The service
+        # knows which name the caller asked for, and `rehydrate` must be able to
+        # find the same provider again. The fallback is what this start resolved
+        # (`resolve_model`), at a readmission as at a spawn. The output is what
+        # the child owes its parent.
         run.owner = owner
         run.model_fallback = request.model_fallback
         run.media_shortfall = request.media_shortfall
@@ -2430,30 +2619,34 @@ class SubagentService:
         run.output = request.output
         self._settle_waiter(run)
         child = self.ctx.require(SESSIONS).get(run.session_id)
-        # A parent with no log of its own has nothing a child could be found by, and
-        # nothing is recorded for its child: the one case a spawn is not durable.
+        # A parent with no log of its own has nothing that a child could be found
+        # by, and nothing is recorded for its child. This is the one case in which
+        # a spawn is not durable.
         parent = request.parent.session if record else None
         try:
             if parent is not None:
                 if child is None or not _names_parent(child, parent.id):
-                    # Its log is how its parent finds it after a restart
-                    # (`SessionArchive.descendants_of`), so a child with no log, or one
-                    # that does not name its parent, is one nothing could bring back.
+                    # The parent finds the child after a restart by the log of the
+                    # child (`SessionArchive.descendants_of`). So nothing could bring
+                    # back a child with no log, or with a log that does not name its
+                    # parent.
                     raise SubagentSpawnError(
                         f'subagent {run.name}: the "{owner}" provider opened no log for it '
                         "that names its parent, and a child's own log is its only record, "
                         "so it was not started"
                     )
-                # Before the ceiling: a child refused below reads as admitted and then
-                # ended, rather than as a log with no account of what it was.
+                # The admission is written before the ceiling is checked. So a child
+                # that is refused below reads as admitted and then ended, and not as
+                # a log with no account of what it was.
                 record_admitted(self.ctx, child, run, request, owner=owner)
                 self._landed(parent, run.name)
             try:
                 self._enforce(grant, run, held, boundary)
                 self._give_output(run)
             except InactiveScopeError as gone:
-                # The ceiling registers on the child's scope, which a parent that went
-                # away took with it: the same refusal a provider's own builds get.
+                # The ceiling registers on the scope of the child, and a parent that
+                # went away took that scope with it. This is the same refusal that
+                # the builds of a provider itself get.
                 raise parent_went_away(run.name) from gone
             if (
                 parent is not None
@@ -2466,12 +2659,13 @@ class SubagentService:
                 )
         except BaseException as stopped:
             # **Any way out ends what the provider started** (S2, Holdings rule 2),
-            # not a refusal alone: a cancel at the admission's flush, or anything
-            # else raised past `provider.start`, left a child driving toward a gate
-            # nobody would open, an admission with no ending, and nothing in `_runs`
-            # for a delete to reach. Shielded, since a cancel is one of the ways.
-            # A spawn's refusal is its caller's answer; a readmission has no caller,
-            # so its parent is told here, on the one ending the child gets.
+            # and not only a refusal. A cancel at the flush of the admission, or
+            # anything else raised after `provider.start`, left a child driving
+            # toward a gate that nobody would open, an admission with no ending,
+            # and nothing in `_runs` for a delete to reach. The ending is shielded,
+            # because a cancel is one of the ways out. The refusal of a spawn is
+            # the answer to its caller. A readmission has no caller, so its parent
+            # is told here, on the one ending that the child gets.
             why = (
                 str(stopped)
                 if isinstance(stopped, SubagentSpawnError)
@@ -2484,11 +2678,15 @@ class SubagentService:
         return run
 
     def _settle_waiter(self, run: SubagentRun) -> None:
-        """Make what a waiter is handed for a child that owes a value agree with the
-        child's own log, whichever provider ran it: the ending door may have ended
-        `error` a child its provider called `done` (`record_ended`), and the value is
-        the one the log holds. So `task` answers from the log, as its reconcile does
-        after a crash, and a provider relying on the door gets it right for nothing."""
+        """Make the result that a waiter is handed agree with the log of the child
+        itself, for a child that owes a value. This holds whichever provider ran
+        the child.
+
+        `record_ended` may have ended as `error` a child that its provider
+        called `done`, and the value is the one that the log holds. So `task`
+        answers from the log, as its reconcile does after a crash. A provider
+        that relies on `record_ended` gets the right result with no code of its
+        own."""
         awaited = run.result
         if run.output is None or awaited is None:
             return
@@ -2508,13 +2706,14 @@ class SubagentService:
 
     def _give_output(self, run: SubagentRun) -> None:
         """Give a child that owes a value the way to return it: `submit_result`, and a
-        note in its prompt that it must.
+        note in its prompt which says that it must.
 
-        **Registered on the child's own scope, deliberately.** `Grant.apply` narrows
-        only by restriction, because a scope's own registration is one its own filter
-        cannot mask. That is what a return channel needs: the child has it whatever
-        its grant names, and no other agent does (`held_by` keeps it from the child's
-        own children too). It grants no reach, only a way to answer.
+        **The tool is registered on the scope of the child itself, on purpose.**
+        `Grant.apply` narrows only by restriction, because the filter of a scope
+        cannot mask a registration of that same scope. A return channel needs
+        exactly that. The child has the tool whatever its grant names, and no
+        other agent has it. `held_by` keeps it from the children of the child
+        too. The tool grants no reach. It is only a way to answer.
         """
         if run.output is None:
             return
@@ -2541,26 +2740,28 @@ class SubagentService:
     ) -> None:
         """Bound the child, or refuse the spawn if this provider cannot be bounded.
 
-        Fail-closed, and narrowly: a provider that does not hand back a scope is
-        unbounded, which is only *unsafe* when the grant actually narrows something. So a
-        deployment where nothing is restricted keeps working with any provider, and the
-        moment a spawn means to narrow, a provider that cannot deliver that is refused
-        rather than silently ignored.
+        The check fails closed, and narrowly. A provider that does not hand back
+        a scope is unbounded. That is only *unsafe* when the grant actually
+        narrows something. So a deployment in which nothing is restricted keeps
+        working with any provider. When a spawn means to narrow, a provider that
+        cannot deliver the narrowing is refused and not silently ignored.
 
-        **The containment check has no off switch** (P6-31). `boundary` is resolved by
-        `_delegating_boundary`, which refuses rather than yielding `None`, so by here it
-        is always a `Context` and the check always runs.
+        **The containment check has no off switch** (P6-31).
+        `_delegating_boundary` resolves `boundary`, and it refuses where it
+        would otherwise yield `None`. So `boundary` is always a `Context` here,
+        and the check always runs.
         """
         if run.scope is not None:
-            # **A provider's scope must be inside the parent's** (P6-27).
-            # Containment is the isolation chain now, so a scope built anywhere
-            # else silently opts out of it — and opts out *invisibly*, because
-            # the child still gets the admission grant and therefore still
-            # passes every ceiling assertion; all it loses is the inherited
-            # narrowing. Checked at the one place every delegation passes
-            # through, for `check_grant`'s reason: "a ceiling one provider forgot
-            # would not be one." A provider that predates nesting, or a future
-            # one that forgets `parent=`, fails here instead of at nothing.
+            # **The scope that a provider builds must be inside the scope of the
+            # parent** (P6-27). Containment is now the isolation chain, so a
+            # scope that is built anywhere else silently opts out of it. It opts
+            # out *invisibly*: the child still gets the admission grant, so it
+            # still passes every ceiling assertion. It loses only the inherited
+            # narrowing. The check is at the one place that every delegation
+            # passes through, for the reason that `check_grant` gives: a ceiling
+            # that one provider forgot would not be a ceiling. A provider that
+            # predates nesting, or a future provider that forgets `parent=`,
+            # fails here. Without this check it would fail nowhere.
             if not boundary.reaches(run.scope):
                 raise SubagentSpawnError(
                     f'the "{run.owner or "subagent"}" provider built the child a scope outside '
@@ -2583,13 +2784,16 @@ class SubagentService:
         request = self.resolve_output(self.resolve_model(resolved))
         parent = request.parent.session
         if parent is not None:
-            # Every child the parent has, on disk as well as in memory, before anything
-            # counts them — a spawn cap, the names its children have taken. Once
-            # per mount (`load_children`); a parent resumed through the sweep has it.
+            # Read every child that the parent has, on disk as well as in memory,
+            # before anything counts them: a spawn cap, or the names that its
+            # children have taken. The read happens one time for each mount
+            # (`load_children`). A parent that was resumed through the sweep
+            # already has it.
             await self.load_children(parent.id, parent.header.family)
-        # Guards first: a refusal here has nothing to unwind, which is the
-        # contract `SubagentSpawnError` states. Bound to the registering row, as
-        # every registry-invoked body is (P6-29).
+        # The guards run first. A refusal here has nothing to unwind, which is the
+        # contract that `SubagentSpawnError` states. Each guard runs bound to the
+        # row that registered it, as every body that a registry invokes does
+        # (P6-29).
         for guard in list(self._guards):
             with running(guard.by):
                 reason = guard.check(request)
@@ -2598,56 +2802,64 @@ class SubagentService:
         child_name = self._named(request, parent)
         request = replace(request, name=child_name)
         if parent is not None:
-            # On its way from here, with no await since its guards (`child_counts`).
+            # The spawn is in progress from here, with no await since its guards
+            # (`child_counts`).
             self._spawning.setdefault(parent.id, set()).add(child_name)
         try:
-            # Once, then threaded — the ceiling, the brief and the containment
-            # check must be answers to the *same* boundary, and one resolution
-            # makes that true by construction (the `held` argument one line down
-            # exists for the identical reason).
+            # The boundary is resolved one time and then passed down. The
+            # ceiling, the brief and the containment check must be answers to the
+            # *same* boundary, and one resolution makes that true by
+            # construction. The `held` argument one line down exists for the
+            # same reason.
             boundary = self._delegating_boundary(request)
             held = self.held_by(request, boundary)
             self.check_grant(request, held)
             grant = self.grant_for(request, held, boundary=boundary)
             entry = self.require(name)
-            # As the row that registered the provider (P6-29). A provider's `start`
-            # is row code this registry invokes — the same category as a tool's
-            # `execute` — and it ran unbound, so anything it registered landed on the
-            # seam and outlived its row. The layer is the registration's own, for the
-            # reason `CompactionSeam.engine_by` states: the target is in hand here
-            # (`request.parent`) but reading it means another copy of P6-24's
-            # `getattr(agent, "ctx", None)`, and the child's own containment is
-            # `Grant`'s subject rather than this binding's.
+            # The provider runs as the row that registered it (P6-29). The
+            # `start` of a provider is row code that this registry invokes, in
+            # the same category as the `execute` of a tool. It used to run
+            # unbound, so anything that it registered landed on the seam and
+            # outlived its row. The layer is the layer of the registration, for
+            # the reason that `CompactionSeam.engine_by` states. The target is in
+            # hand here (`request.parent`), but reading it means another copy of
+            # the `getattr(agent, "ctx", None)` of P6-24. The containment of the
+            # child itself is the subject of `Grant`, and not of this binding.
             try:
                 with running(entry.by):
                     run = await entry.provider.start(request)
             except InactiveScopeError as gone:
-                # **A spawn whose parent's scope died under it is a refusal**, whichever
-                # provider was building it: every registration a child needs — its
-                # workspace, its release, its job — is on a scope inside the parent's.
-                # The provider releases what it built and lets this through; the caller
-                # is owed the spawn's own answer, with a code, not a raw scope error.
+                # **A spawn is refused when the scope of its parent was disposed
+                # under it**, whichever provider was building it. Every
+                # registration that a child needs (its workspace, its release,
+                # its job) is on a scope inside the scope of the parent. The
+                # provider releases what it built and lets this error through.
+                # The caller is owed the answer of the spawn itself, with a
+                # code, and not a raw scope error.
                 raise parent_went_away(child_name) from gone
-            # The seam's to give, and stamped as `_admit` stamps the owner.
+            # The seam gives the name, and stamps it as `_admit` stamps the owner.
             run.name = child_name
             admitted = await self._admit(
                 run, request, record=True, owner=name, grant=grant, held=held, boundary=boundary
             )
         finally:
             self._landed(parent, child_name)
-        # Read into the child's prompt, now that it has one (S8).
+        # Record what was read into the prompt of the child, now that the child
+        # has one (S8).
         grant.record_brief(request.parent.session)
         admitted.ready.set()
         return admitted
 
     def children(self, parent_id: str) -> dict[str, ChildState]:
-        """One parent's children by run id, as their own logs tell it (Phase 11).
+        """The children of one parent by run id, as their own logs describe them
+        (Phase 11).
 
-        The read every consumer should use when it has a `ctx`. A child this process
-        runs through its own cached fold; one it does not, from what
-        `load_children` read off the store or what its session held when it was let
-        go — a live child's state winning over a stored copy of it. A log with no
-        admission is not a child. In admission order.
+        Every consumer that has a `ctx` should use this read. The state of a
+        child that this process runs comes from its own cached fold. The state
+        of any other child comes from what `load_children` read from the store,
+        or from what its session held when it was let go. The state of a live
+        child takes precedence over a stored copy of it. A log with no admission
+        is not a child. The children are in admission order.
         """
         found = dict(self._stored.get(parent_id, {}))
         sessions = self.ctx.get(SESSIONS)
@@ -2662,14 +2874,18 @@ class SubagentService:
         return {state.run_id: state for state in admitted}
 
     def family(self, parent_id: str) -> list[ChildState]:
-        """Everything beneath `parent_id` — its children, theirs, and so on — each
-        before its own children, siblings in admission order.
+        """Everything beneath `parent_id`: its children, their children, and so on.
+        Each child comes before its own children, and siblings are in admission
+        order.
 
-        The one walk of a delegation tree: a goal's spend, the daemon's panel, what
-        holds a root, what waits for a credential. Cycle-safe for `descendants`'
-        reason — a log claiming an ancestor as its child costs a wasted lookup, not a
-        hang. Every level, once the tree's root was read (`load_children`), which a
-        resumed session's is as it opens.
+        This is the one walk of a delegation tree. Its readers are the spend of
+        a goal, the panel of the daemon, the check of what holds a root, and the
+        list of what waits for a credential. The walk is cycle-safe, for the
+        reason that `descendants` gives (`ph.persistence.families`): a log that
+        claims an ancestor as its child costs a wasted lookup, and not a hang.
+        The walk reaches every level after the root of the tree was read
+        (`load_children`). The tree of a resumed session is read as the session
+        opens.
         """
         found: list[ChildState] = []
         seen = {parent_id}
@@ -2684,26 +2900,31 @@ class SubagentService:
         return found
 
     async def load_children(self, parent_id: str, family: str) -> dict[str, ChildState]:
-        """`children`, with everything beneath `parent_id` on disk that this process is
-        not running read in — **the whole tree, not one level**.
+        """`children`, after a read of everything beneath `parent_id` on disk that
+        this process is not running. The read covers **the whole tree, not one
+        level**.
 
-        One read of the store (`SessionArchive.descendants_of`) finds every level,
-        since a tree is filed in one family under its root's id; each state is filed
-        under the parent its own header names, and every parent in the tree counts as
-        read. So a restart sees a grandchild beneath a child it did not readmit —
-        which one level at a time left unread, and so uncounted, unlisted and never
-        ended.
+        One read of the store (`SessionArchive.descendants_of`) finds every
+        level, because a tree is filed in one family under the id of its root.
+        Each state is filed under the parent that its own header names, and
+        every parent in the tree counts as read. So a restart sees a grandchild
+        beneath a child that it did not readmit. A read of one level at a time
+        left that grandchild unread, and so uncounted, unlisted and never ended.
 
-        Once per tree per mount: a stored child changes only when this process opens
-        it, and then it is live — or when its session is let go, which hands its state
-        back (`_let_go`). A resumed session's tree is read as it opens
-        (`open_session`); the sweep, a spawn, a revocation and the crash checks ask
-        again, which then costs a lookup. On a worker thread, and only the records a
-        child's state is folded from (`CHILD_EVENT_TYPES`): a child's log is mostly
-        streamed chunks, and a mount runs on the loop every root of a daemon shares.
+        The read happens one time for each tree in each mount. A stored child
+        changes in two cases only. Either this process opens it, and then it is
+        live. Or its session is let go, and that hands its state back
+        (`_let_go`). The tree of a resumed session is read as the session opens
+        (`open_session`). The sweep, a spawn, a revocation and the reconcile of
+        a call that a crash cut short ask again, and a repeated call costs only
+        a lookup. The read runs on a worker thread, and it reads only the
+        records that the state of a child is folded from (`CHILD_EVENT_TYPES`).
+        The log of a child is mostly streamed chunks, and a mount runs on the
+        event loop that every root of a daemon shares.
 
-        `family` is the parent's (`SessionHeader.family`) — every descendant's too,
-        since a tree is filed with its root — and is where the store looks.
+        `family` is the family of the parent (`SessionHeader.family`), and it is
+        where the store looks. It is the family of every descendant too, because
+        a tree is filed with its root.
         """
         if parent_id not in self._stored:
             store = self.ctx.get(SESSION_PERSISTENCE)
@@ -2718,17 +2939,19 @@ class SubagentService:
             )
             self._stored.setdefault(parent_id, {})
             for owner, states in tree.states.items():
-                # What is already known of a child wins over this read of it.
+                # What is already known of a child takes precedence over this
+                # read of it.
                 self._stored[owner] = states | self._stored.get(owner, {})
             for child, owner in tree.unreadable.items():
                 self._unreadable.setdefault(owner, set()).add(child)
         return self.children(parent_id)
 
     def unreadable(self, root_id: str) -> tuple[str, ...]:
-        """The children beneath `root_id`, at every level, whose logs will not read
-        (P13-09) — what the live-roots index carries as `damaged`. Sorted, so an
-        unchanged answer compares equal. Read again when the tree is, which is the
-        root's next mount, so a repair shows there."""
+        """The children beneath `root_id`, at every level, whose logs cannot be read
+        (P13-09). The live-roots index carries them as `damaged`. The result is
+        sorted, so an unchanged answer compares equal. The logs are read again
+        when the tree is read again, which is at the next mount of the root. So
+        a repair shows then."""
         if not self._unreadable:
             return ()
         owners = [root_id, *(state.session_id for state in self.family(root_id))]
@@ -2737,11 +2960,13 @@ class SubagentService:
     def _isolate(self, state: ChildState, damaged: LogDamaged) -> None:
         """Set aside a child whose log the strict read refused (P13-09).
 
-        The tree read folds only the records a child's state is made of, so damage in
-        a record of another type passes it, and is met when a readmission opens the
-        log whole. Ending the child there would write into a file that cannot be read,
-        and leaving it live would hold its root for good; it is filed with the tree
-        read's own refusals instead, out of its parent's children.
+        The tree read folds only the records that the state of a child is made
+        of. So damage in a record of another type passes the tree read, and a
+        readmission finds it when it opens the whole log. To end the child at
+        that point would write into a file that cannot be read. To leave the
+        child live would hold its root permanently. So the child is filed with
+        the refusals of the tree read itself, and it is taken out of the
+        children of its parent.
         """
         log.warning(
             "ph.seams.subagents: child %s will not read and is left alone: %s",
@@ -2752,13 +2977,15 @@ class SubagentService:
         self._unreadable.setdefault(state.parent_id, set()).add(state.session_id)
 
     def delegated_tokens(self, parent_id: str, goal_id: str | None = None) -> int:
-        """What `parent_id`'s children spent — only those admitted under `goal_id`, when
-        one is named — and everything beneath them, from their own logs.
+        """What the children of `parent_id` spent, with everything beneath them, read
+        from their own logs. When `goal_id` is named, only the children that
+        were admitted under that goal count.
 
-        **Every level**: a goal is a budget for a delegation tree, and a grandchild's
-        answers are part of what the goal asked for. The roster this replaces charged
-        one level only — a child's own answers, mirrored into its parent's log — so a
-        grandchild's spend, and every child's compactions, reached no goal at all.
+        **Every level counts.** A goal is a budget for a delegation tree, and
+        the answers of a grandchild are part of what the goal asked for. The
+        roster that this replaces charged one level only: the answers of a child
+        itself, mirrored into the log of its parent. So the spend of a
+        grandchild, and the compactions of every child, reached no goal at all.
         """
         return sum(
             state.tokens + sum(below.tokens for below in self.family(state.session_id))
@@ -2785,18 +3012,20 @@ class SubagentService:
             self._live.setdefault(parent_id, set()).add(session.id)
 
     def _let_go(self, session: Session) -> None:
-        """A session was let go: keep a child's last state as its stored copy — the
-        state its log now holds, which nothing will change until this process opens
-        it again. Kept only for a parent whose stored children were read; for any
-        other, the store answers when they are. Its fold goes with the session once
-        this has read it (`SessionTable`)."""
+        """A session was let go. Keep the last state of a child as its stored copy.
+
+        That is the state that its log now holds, and nothing changes it until
+        this process opens the log again. The copy is kept only for a parent
+        whose stored children were read. For any other parent, the store answers
+        when its children are read. The fold of the child goes with the session
+        after this function has read it (`SessionTable`)."""
         parent_id = session.header.delegating_parent
         if parent_id:
             live = self._live.get(parent_id)
             if live is not None:
                 live.discard(session.id)
-                # Gone with its last child, or the table kept one empty set per
-                # parent that ever delegated.
+                # The entry goes with its last child. Otherwise the table kept
+                # one empty set for each parent that ever delegated.
                 if not live:
                     del self._live[parent_id]
             stored = self._stored.get(parent_id)
@@ -2805,14 +3034,16 @@ class SubagentService:
                 stored[session.id] = state
 
     def forget_session(self, session_id: str) -> None:
-        """Drop the stored tree this service read for one session, every level of
-        which `load_children` filed. Its own fold goes with the session itself."""
+        """Drop the stored tree that this service read for one session.
+        `load_children` filed every level of it. The fold of the session itself
+        goes with the session."""
         for owner in [*(state.session_id for state in self.family(session_id)), session_id]:
             self._stored.pop(owner, None)
             self._unreadable.pop(owner, None)
 
     def name_of(self, agent_id: str) -> str:
-        """What an agent is called — the name its own admission records — or its id."""
+        """What an agent is called: the name that its own admission records, or else
+        its id."""
         state = self.state(agent_id)
         return (state.name or agent_id) if state is not None else agent_id
 
@@ -2820,13 +3051,16 @@ class SubagentService:
         return self._runs.get(run_id)
 
     def waiter(self, parent_id: str, run_id: str) -> SubagentAwaiter:
-        """How a parent waits for one of its own children: its live run's waiter, or, for
-        a child this process no longer holds, the ending its own log records (its answer
-        then the preview the ending kept). One reading for every tool that waits, so the
-        ownership check and the log's account cannot drift apart between them.
+        """How a parent waits for one of its own children.
 
-        :raises LookupError: for a child that is not the parent's, or one still working
-            with nothing here to wait on.
+        For a live run it is the waiter of that run. For a child that this
+        process no longer holds, it is the ending that the log of the child
+        records, and the answer is then the preview that the ending kept. A tool
+        that waits for a child by its run id uses this one reading, so the
+        ownership check and the account of the log cannot differ between tools.
+
+        :raises LookupError: for a child that is not a child of the parent, or
+            for a child that is still working with nothing here to wait on.
         """
         state = self.children(parent_id).get(run_id)
         if state is None:
@@ -2848,19 +3082,19 @@ class SubagentService:
         return logged
 
     def list(self, *, parent_id: str | None = None) -> list[SubagentRun]:
-        """Live runs, optionally only one parent's, in admission order."""
+        """The live runs, or only those of one parent, in admission order."""
         runs = list(self._runs.values())
         if parent_id is None:
             return runs
         return [run for run in runs if run.parent_id == parent_id]
 
     async def ensure_addressable(self, session_id: str) -> bool:
-        """Make the agent behind `session_id` reachable, waking it if it settled.
+        """Make the agent behind `session_id` reachable, and wake it if it settled.
 
-        The one place the session-id → run → provider → wake path is stated. A
-        caller that wants to address an agent asks this rather than composing the
-        three hops itself, which is how the second caller forgets the
-        revoked-child refusal.
+        This is the one place that states the path from a session id to a run,
+        to a provider, to a wake. A caller that wants to address an agent asks
+        this function and does not compose the three hops itself. A second
+        caller that composes them forgets the refusal of a revoked child.
         """
         if self.ctx.require(AGENTS).get(session_id) is not None:
             return True
@@ -2868,45 +3102,51 @@ class SubagentService:
         return bool(run is not None and await self.rehydrate(run.id))
 
     async def resume_children(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
-        """What a resumed root owes its unfinished children (P5-04). Returns the revived.
+        """Give a resumed root what it owes its unfinished children (P5-04). It
+        returns the run ids of the children that run again.
 
-        Two opposite answers to two states, which is why this exists rather than
-        one sweep over "everything unsettled":
+        There are two states, and they need opposite answers. That is why this
+        is not one sweep over "everything unsettled":
 
-        * **queued** — admitted and never run. Re-driven, because nothing was
-          claimed, spent or written and the work is the same work.
-        * **running** — interrupted mid-turn. Put back on the *ladder*: its turn
-          is closed on resume and its task is presented again, up to
-          `retry_limit` times, after which it is failed and says so.
+        - **queued**: the child was admitted and never ran. It is driven again,
+          because nothing was claimed, spent or written, and the work is the
+          same work.
+        - **running**: the child was interrupted in the middle of a turn. It is
+          put back on the *ladder*. Its turn is closed on resume and its task is
+          presented again, up to `retry_limit` times. After that it is failed,
+          and its ending says so.
 
-        **The ladder is what makes re-running an interrupted child sound**, and it
-        is the piece this row shipped without at first. A child that started a
-        turn has *claimed* its task from its inbox, so simply driving it again
-        finds nothing pending and ends at step zero reporting `completed` — the
-        empty turn P5-04 found at the root, and a parent told its child succeeded
-        when it did not. Re-presenting the task is what makes the next attempt a
-        real one, and the count is what stops it being infinite.
+        **The ladder is what makes it sound to run an interrupted child again.**
+        This row first shipped without it. A child that started a turn has
+        *claimed* its task from its inbox. So a plain second drive finds nothing
+        pending and ends at step zero reporting `completed`. That is the empty
+        turn that P5-04 found at the root, and the parent is told that its child
+        succeeded when it did not. Presenting the task again makes the next
+        attempt a real one, and the count stops the attempts from being
+        infinite.
 
-        Doing nothing was never the third option: `child_is_live` counts an
-        unsettled child, so a row nothing will ever move keeps its whole root out
-        of passivation for the life of the process while the parent waits on a
-        reply nobody is writing.
+        To do nothing was never a third option. `child_is_live` counts an
+        unsettled child. So a child that nothing will ever move keeps its whole
+        root out of passivation for the life of the process, while the parent
+        waits for a reply that nobody is writing.
 
-        **Every decision is written in the log it is about** (Phase 11). The ladder
-        reads a child's starts and answers from the child's own log, which is where
-        they are, so nothing has to be caught up first. A child it gives up on is
-        ended in its own log; one it puts back is readmitted, and its drive writes
-        the restart on its own disk before the attempt (S10). Nothing orders one
-        child's records against another's or against the parent's, so a crash
-        mid-sweep leaves each child decided or undecided, and the next start decides
-        the undecided the same way.
+        **Every decision is written in the log that it is about** (Phase 11).
+        The ladder reads the starts and the answers of a child from the log of
+        the child itself, which is where they are. So nothing has to be caught
+        up first. A child that the sweep gives up on is ended in its own log. A
+        child that the sweep puts back is readmitted, and its drive writes the
+        restart on its own disk before the attempt (S10). Nothing orders the
+        records of one child against the records of another child or of the
+        parent. So a crash in the middle of a sweep leaves each child decided or
+        undecided, and the next start decides the undecided children in the same
+        way.
 
-        `retry_limit` has **no default**, and that is P6-32's rule rather than an
-        inconvenience: how many attempts work is worth is the host's policy, and
-        a seam that answered it for a caller who said nothing would be choosing
-        one. The daemon states it beside the root's own ladder
-        (`ph_app.daemon.recovery.CHILD_RETRY_LIMIT`), which is where somebody
-        tuning restart behavior will already be looking; `--mode rpc` and the
+        `retry_limit` has **no default**. That is the rule of P6-32, and not an
+        inconvenience. How many attempts the work is worth is the policy of the
+        host, and a seam that answered for a caller who said nothing would be
+        choosing a policy. The daemon states the limit beside the ladder of the
+        root itself (`ph_app.daemon.recovery.CHILD_RETRY_LIMIT`), which is where
+        somebody who tunes restart behavior already looks. `--mode rpc` and the
         one-shot modes read the same bound.
         """
         session = parent.session
@@ -2917,18 +3157,20 @@ class SubagentService:
             return await self._resume(parent, retry_limit=retry_limit)
 
     async def readmit_waiting(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
-        """Put back to work the children of `parent` held for a credential that has
-        since arrived (T5), and theirs. Returns the revived.
+        """Put back to work the children of `parent` that were held for a credential
+        which has since arrived (T5), and their children. It returns the run ids
+        of the children that run again.
 
-        The same sweep a resume runs, asked again: a child still missing its
-        credential stays held and appends nothing, and one whose name is here now has
-        its hold settled and is readmitted. For whoever hands a deployment a
-        credential — the daemon's `credentials/store`.
+        This is the sweep that a resume runs, asked again. A child that still
+        lacks its credential stays held and appends nothing. A child whose
+        credential is here now has its hold settled and is readmitted. The
+        caller is whoever hands a deployment a credential: the
+        `credentials/store` of the daemon.
 
-        **Every level** (L5b): a child that is running may hold children of its own
-        waiting for the same name. So each live child of `parent` is asked too.
-        `retry_limit` is the host's, for the sweep a readmitted child's own children
-        get.
+        **Every level is asked** (L5b). A child that is running may hold
+        children of its own that wait for the same name. So each live child of
+        `parent` is asked too. `retry_limit` is the limit of the host, for the
+        sweep that the children of a readmitted child get.
         """
         session = parent.session
         if session is None:
@@ -2943,42 +3185,50 @@ class SubagentService:
         return revived
 
     async def _resume(self, parent: AgentDriver, *, retry_limit: int) -> Sequence[str]:
-        """Decide, child by child, what each of `parent`'s unfinished children becomes:
-        ended, held, or running again. Returns the run ids running again.
+        """Decide, child by child, what each unfinished child of `parent` becomes:
+        ended, held, or running again. It returns the run ids of the children
+        that run again.
 
-        **Only children this process is not running**, `queued` or interrupted
-        `running`. For each, in its own log:
+        **Only the children that this process is not running are decided**: a
+        `queued` child, or a `running` child that was interrupted. The decision
+        for each child is written in its own log:
 
-        * **Nothing can readmit it** — ended. Left live, it holds its parent out of
-          passivation for a reply nobody is writing.
-        * **Interrupted, and its ladder spent** — ended, saying how many times.
-          Re-presenting the task is what makes a restart real, and the count is what
-          stops it being infinite; an answer forgives the restarts before it
+        - **Nothing can readmit it.** The child is ended. A child that stayed
+          live would hold its parent out of passivation for a reply that nobody
+          is writing.
+        - **It was interrupted, and its ladder is spent.** The child is ended,
+          and the ending says how many times. Presenting the task again makes a
+          restart real, and the count stops the restarts from being infinite.
+          An answer forgives the restarts before it
           (`restarts_since_progress`).
-        * **Its route names a credential this deployment cannot supply** (T5) — held,
-          not readmitted: readmitted, it would spend its ladder failing on a key a
-          person could supply in a second. It stays live, no start is counted, and
-          its own log says which name it waits for. `readmit_waiting` asks again.
-        * **Otherwise readmitted**, with the ceiling re-derived from its admission —
-          `check_grant`, `grant_for`, `_enforce` — so a child comes back from a power
-          cut no wider than it was admitted (§6.5). The spawn guards do not run: they
-          gate new work, and a cap would count the child against itself. Its own
-          children are swept before its first step (L5b, `_sweep_readmitted`).
+        - **Its route names a credential that this deployment cannot supply**
+          (T5). The child is held and not readmitted. A readmitted child would
+          spend its ladder failing on a key that a person could supply in a
+          second. The child stays live, no start is counted, and its own log
+          says which name it waits for. `readmit_waiting` asks again.
+        - **Otherwise the child is readmitted.** Its ceiling is derived again
+          from its admission (`check_grant`, `grant_for`, `_enforce`). So a
+          child comes back from a power cut no wider than it was admitted
+          (§6.5). The spawn guards do not run. They gate new work, and a cap
+          would count the child against itself. The children of the child are
+          swept before its first step (L5b, `_sweep_readmitted`).
 
-        One child that cannot be rebuilt is logged and ended rather than failing the
-        sweep (K4): a root coming back must not be held hostage by the least
-        recoverable thing it holds, and **a provider that declines is an ending too**
-        (L6).
+        One child that cannot be rebuilt is logged and ended, and it does not
+        fail the sweep (K4). A root that is coming back must not be blocked by
+        the least recoverable thing that it holds. **A provider that declines is
+        an ending too** (L6).
 
-        **An ended child's notice reaches its parent** (`ChildNotice`): one its parent's
-        log lacks — a crash came between the child's ending and the parent's write — is
-        delivered now, and one the log has is not delivered again.
+        **The notice of an ended child reaches its parent** (`ChildNotice`). A
+        notice that the log of the parent lacks is delivered now. The log lacks
+        it when a crash came between the ending of the child and the write of
+        the parent. A notice that the log has is not delivered again.
 
-        **An ended child's unfinished descendants are revoked** (`_revoke_beneath`):
-        one given up on here takes them with it as its ending is written
-        (`record_ended`), and one that ended in an earlier process left them to a
-        crash that came before they were — every ended child's at once, before the
-        rest of the sweep.
+        **The unfinished descendants of an ended child are revoked**
+        (`_revoke_beneath`). A child that is given up on here takes them with it
+        as its ending is written (`record_ended`). A child that ended in an
+        earlier process left them behind if a crash came before they were
+        revoked. The descendants of every ended child are revoked in one call,
+        before the rest of the sweep.
         """
         session = parent.session
         if session is None:
@@ -2986,8 +3236,9 @@ class SubagentService:
         revived: list[str] = []
         delivered: set[str] | None = None
         children = self.children(session.id)
-        # Their subtrees are disjoint from one another's and from every live child's,
-        # so nothing below orders against them.
+        # The subtrees of these children are disjoint from one another and from
+        # the subtree of every live child. So nothing below has to be ordered
+        # against them.
         await self._revoke_beneath(
             *(
                 state.session_id
@@ -3046,26 +3297,33 @@ class SubagentService:
         return revived
 
     async def _revoke_beneath(self, *session_ids: str) -> None:
-        """Tombstone (`PARENT_TEARDOWN`), each in its own log, every unfinished
-        descendant of each child in `session_ids` that ended, that this process is not
-        running.
+        """Tombstone every unfinished descendant of each ended child in `session_ids`
+        that this process is not running. Each tombstone is written in the log
+        of that descendant, with the reason `PARENT_TEARDOWN`.
 
-        **A running one is its provider's**: a child's own children are effects of its
-        scope, revoked as it unwinds (I2). What that teardown never reaches is a child
-        this process is not running — held for a credential, left beneath a child a
-        restart readmitted, or reached on disk by a delete — and what a crash between a
-        child's ending and its children's left behind. Left alone, such a descendant
-        reads as working for good: nothing readmits a child beneath one that ended, so
-        it held its root out of passivation and asked for a credential it would never
-        use. Every level of every subtree in one walk (`family`), best effort.
+        **A running descendant belongs to its provider.** The children of a
+        child are effects of its scope, and they are revoked as that scope
+        unwinds (I2). That teardown never reaches a child that this process is
+        not running: a child that is held for a credential, a child that was
+        left beneath a child that a restart readmitted, or a child that a delete
+        reached on disk. It also never reaches what a crash left behind between
+        the ending of a child and the endings of its children. Such a
+        descendant, left alone, reads as working permanently, because nothing
+        readmits a child beneath a child that ended. It held its root out of
+        passivation, and it asked for a credential that it would never use. One
+        walk covers every level of every subtree (`family`). The walk is best
+        effort.
 
-        **The logs concurrently**, every subtree's together — a resume hands over every
-        child that ended at once. Each is opened through `stored_session`, which
-        settles what reading it owes before the write (`SessionStore.loaded`) — a
-        spill sweep and a workspace reconcile, `git` per leaked tree — and one at a
-        time a restart paid that back to back for every descendant. Nothing orders
-        one log's tombstone against another's, and a crash midway leaves each
-        revoked or not, for the next start to finish the same way.
+        **The logs are written concurrently, for every subtree together.** A
+        resume hands over every ended child in one call. Each log is opened
+        through `stored_session`, which settles what a read of the log owes
+        before the write (`SessionStore.loaded`): a spill sweep and a workspace
+        reconcile, which runs `git` for each leaked tree. When the logs were
+        opened one at a time, a restart paid that cost back to back for every
+        descendant. Nothing orders the tombstone of one log against the
+        tombstone of another. A crash in the middle leaves each descendant
+        revoked or not revoked, and the next start finishes the rest in the
+        same way.
         """
         pending = [
             state
@@ -3094,12 +3352,13 @@ class SubagentService:
                 group.start_soon(revoke, state)
 
     async def _sweep_readmitted(self, run: SubagentRun, *, retry_limit: int) -> None:
-        """A readmitted child's own children, swept as its parent's were (L5b), and
-        then its gate opened (`SubagentRun.ready`).
+        """Sweep the children of a readmitted child, as the children of its parent
+        were swept (L5b), and then open its gate (`SubagentRun.ready`).
 
-        Logged and left rather than raised: the child itself is readmitted, and one
-        level that cannot be swept must not undo the level above it. The gate opens
-        whatever happened, since the child was bounded before this ran.
+        A failure is logged and not raised. The child itself is readmitted, and
+        one level that cannot be swept must not undo the level above it. The
+        gate opens whatever happened, because the child was bounded before this
+        ran.
         """
         try:
             child = self.ctx.require(AGENTS).get(run.session_id)
@@ -3111,8 +3370,9 @@ class SubagentService:
             run.ready.set()
 
     def _request_of(self, parent: AgentDriver, state: ChildState) -> SubagentRequest:
-        """The request a child was admitted with, rebuilt from its own admission, with
-        its route worked out again from what the spawn asked for (`resolve_model`)."""
+        """The request that a child was admitted with, rebuilt from its own
+        admission. Its route is worked out again from what the spawn asked for
+        (`resolve_model`)."""
         admission = state.admission or Admission(run_id=state.run_id)
         request = SubagentRequest(
             prompt=admission.prompt,
@@ -3131,13 +3391,15 @@ class SubagentService:
         return self.resolve_model(self.resolve_preset(request), readmitting=True)
 
     async def _held_for_credential(self, state: ChildState, request: SubagentRequest) -> bool:
-        """Whether this child waits for a credential, with its own log made to say so.
+        """Whether this child waits for a credential. The function also makes the log
+        of the child say so.
 
-        Asked of the route first, without opening anything: a child whose log already
-        says what is true — waiting for this name, or for nothing — needs nothing
-        written, and most readmitted children are that. Only a hold that starts or
-        ends opens the child's log to record it. A held child that was interrupted
-        mid-turn is marked `queued` beside the hold, since it is not running.
+        The route is asked first, and nothing is opened for that. A child whose
+        log already says what is true (it waits for this name, or for nothing)
+        needs nothing written, and most readmitted children are in that case.
+        The log of the child is opened only to record a hold that starts or
+        ends. A held child that was interrupted in the middle of a turn is
+        marked `queued` beside the hold, because it is not running.
         """
         options = child_options(request)
         route = (options.provider, options.model)
@@ -3156,7 +3418,7 @@ class SubagentService:
     async def _readmit_one(
         self, state: ChildState, request: SubagentRequest, readmitter: _Readmitter
     ) -> SubagentRun | None:
-        """One child, through the admission path it originally took."""
+        """Readmit one child, through the admission path that it first took."""
         boundary = self._delegating_boundary(request)
         held = self.held_by(request, boundary)
         self.check_grant(request, held)
@@ -3166,12 +3428,13 @@ class SubagentService:
                 request,
                 run_id=state.run_id,
                 session_id=state.session_id,
-                # How many times this child has *already* been started, which is
-                # what tells a restart from a first run — and it is `starts`,
-                # never `restarts_since_progress`: an answer forgives the ladder,
-                # so a child that got somewhere and was then stopped again would
-                # otherwise be readmitted as though it had never run, its restart
-                # go unrecorded, and the ladder never count it again.
+                # How many times this child has *already* been started. That
+                # count tells a restart from a first run. It is `starts` and
+                # never `restarts_since_progress`, because an answer forgives
+                # the ladder. With the other count, a child that made progress
+                # and was then stopped again would be readmitted as though it
+                # had never run. Its restart would go unrecorded, and the ladder
+                # would never count it again.
                 restarts=state.starts,
             )
         if run is None:
@@ -3191,8 +3454,9 @@ class SubagentService:
     def _readmitter(self, state: ChildState) -> _Readmitter | None:
         """The provider that could put this child back, or `None` if none can.
 
-        By the `owner` its admission records, so it is the provider that ran it — not
-        whichever one happens to be mounted alone.
+        The provider is found by the `owner` that the admission of the child
+        records. So it is the provider that ran the child, and not whichever
+        provider happens to be the only one mounted.
         """
         name = self.resolve(state.owner or None)
         entry = self._providers.get(name or "")
@@ -3201,17 +3465,20 @@ class SubagentService:
         return _Readmitter(name=name, by=entry.by, provider=entry.provider)
 
     async def delete(self, parent: Session, run_id: str, *, reason: str) -> bool:
-        """Revoke one of `parent`'s children, with a tombstone in its own log. Its
-        transcript stays on disk. `False` when there is no such child, or it was
-        revoked already.
+        """Revoke one child of `parent`, with a tombstone in the log of the child
+        itself. Its transcript stays on disk. The result is `False` when there
+        is no such child, or when the child was already revoked.
 
-        A tombstone rather than a removal, because the child's log and artifacts
-        outlive it: a parent looking for what a revoked child did should find the
-        revocation, not a gap. **Any child, live or not** (Phase 11): one this process
-        runs is its provider's to stop (`RevokingProvider`), which writes the
-        tombstone as it lets go; one settled by an earlier process is tombstoned
-        here. A revocation used to reach only children this process held in memory.
-        Either way what it left unfinished beneath it goes with it (`record_deleted`).
+        The child gets a tombstone and is not removed, because its log and its
+        artifacts outlive it. A parent that looks for what a revoked child did
+        should find the revocation, and not a gap. **Any child can be revoked,
+        live or not** (Phase 11). A child that this process runs is stopped by
+        its provider (`RevokingProvider`), which writes the tombstone as it lets
+        go. The seam tombstones any other child here: a child that this process
+        is not running, such as one that an earlier process settled, or a child
+        whose provider cannot revoke it. A revocation used to reach only the
+        children that this process held in memory. In both cases, what the child
+        left unfinished beneath it goes with it (`record_deleted`).
         """
         state = (await self.load_children(parent.id, parent.header.family)).get(run_id)
         if state is None or state.deleted:
@@ -3231,11 +3498,11 @@ class SubagentService:
     async def rehydrate(self, run_id: str) -> bool:
         """Make a settled child addressable again (P3-13).
 
-        A child that finished had its agent released, so it has no inbox to steer
-        into — but its session and its log are both still there.
-        Rehydration is the provider re-attaching a runtime to that state; a
-        provider that cannot do it says so by not implementing the method, and
-        the caller gets `False` rather than an exception it has to interpret.
+        The agent of a child that finished was released, so the child has no
+        inbox to steer into. Its session and its log are both still there. In a
+        rehydration, the provider attaches a runtime to that state again. A
+        provider that cannot do this says so by not implementing the method. The
+        caller then gets `False`, and not an exception that it has to interpret.
         """
         run = self._runs.get(run_id)
         if run is None:
@@ -3252,15 +3519,16 @@ class SubagentService:
 
 
 class SubagentPreset(WireModel):
-    """A named kind of child a deployment is willing to spawn.
+    """A named kind of child that a deployment is willing to spawn.
 
-    **No prompt field, deliberately.** The obvious design gives a preset its own
-    standing instructions, and then a directing skill and a preset are two
-    channels saying what a child is for — competing where they disagree and
-    duplicated where they do not. A skill body already *is* a standing
-    instruction (P4-13b), so a preset binds a name to the capability and lets the
-    skill do the directing: `reviewer` is `skills: [code-review]`, and what a
-    reviewer does is written once, in the skill, where a human edits it.
+    **A preset has no prompt field, on purpose.** The obvious design gives a
+    preset its own standing instructions. A directing skill and a preset are
+    then two channels that say what a child is for. They compete where they
+    disagree, and they are duplicated where they agree. The body of a skill
+    already *is* a standing instruction (P4-13b). So a preset binds a name to
+    the capability and lets the skill do the directing. For example, `reviewer`
+    is `skills: [code-review]`, and what a reviewer does is written one time, in
+    the skill, where a human edits it.
     """
 
     skills: tuple[str, ...] | None = None
@@ -3271,13 +3539,14 @@ class PresetConfig(WireModel):
     """Row config for `subagent-presets`."""
 
     presets: dict[str, SubagentPreset] = Field(default_factory=dict)
-    """Named by the deployment, selected by a parent.
+    """The presets, which the deployment names and a parent selects.
 
-    A **menu, never a grant**: naming a preset whose entries the parent does not
-    hold is refused like any other spawn, because a preset that widened whatever
-    selected it would put the escalation one indirection away and under the
-    model's control (P4-13b). Presets exist so a deployment writes "what a
-    reviewer is" once, not so it can hand out more than the parent has.
+    A preset is a **menu, never a grant**. A spawn that names a preset whose
+    entries the parent does not hold is refused like any other spawn. A preset
+    that widened whatever selected it would put the escalation one indirection
+    away, and under the control of the model (P4-13b). Presets exist so that a
+    deployment writes "what a reviewer is" one time. They do not exist so that
+    a deployment can hand out more than the parent has.
     """
 
 
@@ -3285,11 +3554,12 @@ class PresetConfig(WireModel):
 class SubagentPresetService:
     """The service published as `ctx.subagent_presets`.
 
-    Config-only, with no `register(..., scope=)` — the one table under
-    `ph.seams` without one, and deliberately: a preset is what a *deployment* is
-    willing to spawn, so a package that could ship one would be widening what a
-    profile allows without the profile saying so. A package ships the skill; a
-    profile decides which children may hold it.
+    The table is filled from config only, and it has no
+    `register(..., scope=)`. It is the one table under `ph.seams` without one,
+    and that is on purpose. A preset is what a *deployment* is willing to
+    spawn. A package that could ship a preset would widen what a profile allows
+    without the profile saying so. A package ships the skill, and a profile
+    decides which children may hold it.
     """
 
     presets: dict[str, SubagentPreset] = field(default_factory=dict)
@@ -3308,17 +3578,18 @@ async def presets(ctx: Context, config: PresetConfig) -> None:
 
 
 SHIPPED_SKILLS = Path(__file__).parent.parent / "shipped_skills"
-"""The skills ph-core ships for handing to a child: `categorize`, which asks for the
-`classify` kind and owes a checked value (A2)."""
+"""The skills that ph-core ships for handing to a child: `categorize`, which asks
+for the `classify` kind and owes a checked value (A2)."""
 
 
 def offer_shipped_skills(ctx: Context) -> None:
     """Install the shipped delegation skills, if a skills registry is mounted.
 
-    Called by a row that registers a provider, which is what starts a child (ph-rlm's
-    `rlm-child`), not by this seam's: a skill for handing to a child is noise in a
-    profile that cannot start one, and only its one-line description rides the prompt
-    (G9).
+    A row that registers a provider calls this, because a provider is what
+    starts a child. In `ph-rlm` that row is `rlm-subagent-provider`, which
+    registers `rlm-child`. The row of this seam does not call it. A skill for
+    handing to a child is noise in a profile that cannot start a child. Only the
+    one-line description of the skill is added to the prompt (G9).
     """
     offer_skills(ctx, SHIPPED_SKILLS, source="subagents")
 
@@ -3328,14 +3599,16 @@ async def apply(ctx: Context, config: None) -> None:
     """Mount the subagent seam definition. No provider ships in ph-base."""
     service = SubagentService(ctx=ctx)
     ctx.provide(SUBAGENTS, service)
-    # A child let go keeps its last state as its stored copy; its fold goes with the
-    # session, after this listener has read it (`SessionStore.dispose`).
+    # A child that is let go keeps its last state as its stored copy. Its fold
+    # goes with the session, after this listener has read it
+    # (`SessionStore.dispose`).
     ctx.on("session/created", service._published)
     ctx.on("session/disposed", service._let_go)
     ctx.on("agent/turn-stopping", _remind_owed)
-    # A child's state is what the prompt tells its parent about it and what the
-    # interruption ladder counts starts against, so a drifted one is a parent
-    # reasoning about a child its log does not describe.
+    # The state of a child is what the prompt tells its parent about it, and
+    # what the interruption ladder counts starts against. With a drifted state,
+    # a parent reasons about a child that the log of the child does not
+    # describe.
     contribute_fold_cache(
         ctx, id="subagent-fold-cache", subject="subagent state", stale=service._folds.stale
     )
@@ -3345,21 +3618,22 @@ async def apply(ctx: Context, config: None) -> None:
 class Grant:
     """What one child may reach, resolved to names and fixed at admission.
 
-    **A child's capability is fixed at the moment it is admitted.** A parent that
-    gains a tool afterwards does not widen a child already running: the child was
-    spawned for a job, with a ceiling its prompt and its brief were written against,
-    and silently growing that mid-flight would make "what could this child do"
-    unanswerable from the admission record. A parent that needs a child with more
-    spawns a *new* child, whose admission says so.
+    **The capability of a child is fixed at the moment that it is admitted.** A
+    parent that gains a tool afterwards does not widen a child that is already
+    running. The child was spawned for a job, with a ceiling that its prompt
+    and its brief were written against. If the ceiling grew silently while the
+    child ran, "what could this child do" could not be answered from the
+    admission record. A parent that needs a child with more spawns a *new*
+    child, whose admission says so.
 
-    That is why the allow-list stays even though the isolation chain would bound the
-    child anyway: the chain answers "no more than the parent **holds**", and this
-    answers "no more than the parent held **then**". Only the second is stable enough
-    to read a transcript against.
+    That is why the allow-list stays although the isolation chain would bound
+    the child anyway. The chain answers "no more than the parent **holds**",
+    and the allow-list answers "no more than the parent held **then**". Only
+    the second answer is stable enough to read a transcript against.
 
-    `brief` is rendered here rather than read per assembly: it is the cached prompt
-    prefix, and a `PromptSection` that hits the filesystem on every model step is
-    neither static nor free.
+    `brief` is rendered here and not read at each assembly. It is the cached
+    prefix of the prompt, and a `PromptSection` that reads the filesystem on
+    every model step is neither static nor free.
     """
 
     skills: tuple[str, ...]
@@ -3368,27 +3642,30 @@ class Grant:
     """The extra writable directories, where an assigned profile narrowed them."""
     brief: str = ""
     briefed: tuple[tuple[Skill, str], ...] = ()
-    """The skills `brief` holds, and exactly what of each was read — recorded as
-    `skill/read` (`via="brief"`) once the child is admitted (`record_brief`), not
-    when read: a spawn refused before then put nothing in any child's prompt."""
+    """The skills that `brief` holds, and exactly what was read of each. The reads
+    are recorded as `skill/read` (`via="brief"`) when the child is admitted
+    (`record_brief`), and not when the skills are read. A spawn that was
+    refused before the admission put nothing in the prompt of any child."""
 
     def record_brief(self, session: Session | None) -> None:
-        """Say, in `session`, what of each skill this brief put in the child's prompt."""
+        """Record in `session` what this brief put in the prompt of the child, for
+        each skill."""
         for skill, text in self.briefed:
             record_read(session, skill, text, via="brief")
 
     def apply(self, ctx: Context, scope: Context) -> None:
-        """Bound a child's scope to this grant.
+        """Bound the scope of a child to this grant.
 
-        **Narrowing is by restriction, never by registration.** A scope's own
-        registration is unmaskable by its own filter — a filter reaches everything
-        *outside* the scope that wrote it and nothing inside — so registering on a child
-        is a way to hand it something its parent cannot see, which is the opposite of a
-        ceiling. Filters only intersect, so they are the only instrument a spawn may use.
+        **Narrowing is by restriction, never by registration.** The filter of a
+        scope cannot mask a registration of that same scope. A filter reaches
+        everything *outside* the scope that wrote it, and nothing inside. So a
+        registration on a child is a way to hand the child something that its
+        parent cannot see, which is the opposite of a ceiling. Filters only
+        intersect, so they are the only instrument that a spawn may use.
 
-        An *ancestor's* registration is maskable (P6-27), and must be, or a child could
-        never be narrowed below a parent that registered on its own scope. What still
-        holds is that a scope cannot filter itself.
+        The registration of an *ancestor* can be masked (P6-27). It must be, or
+        a child could never be narrowed below a parent that registered on its
+        own scope. What still holds is that a scope cannot filter itself.
         """
         skills = ctx.get(SKILLS)
         if skills is not None:
@@ -3410,14 +3687,16 @@ class Grant:
 def _brief(
     skills: SkillService, named: Sequence[str], scope: Context
 ) -> tuple[str, tuple[tuple[Skill, str], ...]]:
-    """The named skills' instructions, read once, and what was read of each.
+    """The instructions of the named skills, read one time, and what was read of
+    each.
 
     **A named skill is direction, not a lookup.** G9 keeps bodies out of the
-    prompt because a catalog of twenty is twenty bodies the model probably will
-    not need; a child spawned *for* one will need that one, certainly. Making it
-    spend a turn fetching what it was created to do is a wasted call and a real
-    chance it never fetches at all — so the named bodies go in its prompt, and
-    everything else it can still reach stays catalog-only.
+    prompt, because a catalog of twenty skills is twenty bodies that the model
+    probably does not need. A child that was spawned *for* one skill certainly
+    needs that one. A child that must spend a turn fetching what it was created
+    to do wastes a call, and there is a real chance that it never fetches the
+    body at all. So the named bodies go in its prompt, and everything else that
+    it can still reach stays in the catalog only.
     """
     parts: list[str] = []
     read: list[tuple[Skill, str]] = []
@@ -3435,7 +3714,7 @@ def _brief(
 
 
 _UNADMITTED = Admission(run_id="")
-"""What a `ChildState` with no admission reads as — never handed out by a reader."""
+"""What a `ChildState` with no admission reads as. No reader hands it out."""
 
 _STATUSES: Mapping[str, SubagentStatus] = literal_lookup(SubagentStatus)
 _CAUSES: Mapping[str, StatusCause] = literal_lookup(StatusCause)
@@ -3443,33 +3722,39 @@ _CAUSES: Mapping[str, StatusCause] = literal_lookup(StatusCause)
 
 @dataclass(frozen=True, slots=True)
 class ChildState:
-    """One child, as its own log tells it (Phase 11).
+    """One child, as its own log describes it (Phase 11).
 
-    The fold of a child's own log — its admission, its statuses, its tombstone, its
-    answers, its credential hold — and of nothing else. No parent keeps a copy, so
-    there is no second account of the child to disagree with this one: every rule
-    that used to keep a parent's roster in step with its child's log (S2, S10, F1,
-    L5) is a rule about one log now.
+    The state is the fold of the log of the child itself, and of nothing else:
+    its admission, its statuses, its tombstone, the value that it returned, the
+    records that spend tokens (an answer is one of them) and its credential
+    hold. No parent keeps a copy, so there is no second account of the child
+    that could disagree with this one. Every rule that used to keep the roster
+    of a parent in step with the log of its child (S2, S10, F1, L5) is now a
+    rule about one log.
 
-    `admission` is `None` for a log that has none — or one no `Admission` parses —
-    which is not a child: a workspace can reach the disk before the admission does,
-    and a spawn refused before it was admitted leaves such a log behind. Every reader
-    skips it; the properties below read an admitted child's record.
+    `admission` is `None` for a log that has no admission, or whose admission
+    does not parse as an `Admission`. Such a log is not a child. A workspace
+    can reach the disk before the admission does, and a spawn that was refused
+    before it was admitted leaves such a log behind. Every reader skips it. The
+    properties below read the record of an admitted child.
 
-    `starts`, `resumes` and `resumes_at_last_answer` are the interruption ladder's
-    whole state, all folded and all totals: the log already records one `running`
-    per drive and one `assistant/message` per answer, so "how many times has this
-    been started" and "how many restarts had there been at its last answer" are
-    questions about records that are already there. What the ladder *makes* of them
-    is `restarts_since_progress`, beside the sweep that decides (P3).
+    `starts`, `resumes` and `resumes_at_last_answer` are the whole state of the
+    interruption ladder. All three are folded, and all three are totals. The
+    log already records one `running` for each drive and one
+    `assistant/message` for each answer. So "how many times has this been
+    started" and "how many restarts had there been at its last answer" are
+    questions about records that are already there. What the ladder *makes* of
+    the totals is `restarts_since_progress`, beside the sweep that decides
+    (P3).
     """
 
     session_id: str
     parent_id: str
     family: str | None = None
-    """The family directory its log is filed in, as its own header says, so a write to
-    a child this process is not running reads that path rather than searching the
-    store for it (`SubagentService._write_child`). `None` for a log with no header."""
+    """The family directory that its log is filed in, as its own header says. A
+    write to a child that this process is not running reads that path and does
+    not search the store for the log (`SubagentService._write_child`). `None`
+    for a log with no header."""
     admission: Admission | None = None
     admitted_at: float = 0.0
     status: SubagentStatus = "queued"
@@ -3487,7 +3772,9 @@ class ChildState:
     resumes: int = 0
     resumes_at_last_answer: int = 0
     tokens: int = 0
-    """What it spent — its answers and its compactions — by `TokenUsage.total`."""
+    """What it spent, by `TokenUsage.total`. The spend is the sum over the records
+    in `SPENDING_TYPES`: its answers, its compactions, and the questions that a
+    decision model answered."""
     value: JsonObject | None = None
     """What it returned, for a child with an `output` (`record_returned`), or `None`."""
 
@@ -3536,9 +3823,10 @@ class ChildState:
         return self._record.downgrade_reason
 
     def run(self) -> SubagentRun:
-        """The admission facts as the handle a spawn returned — for a caller that
-        answers from the log what the live path answers from the handle: a
-        delegating tool's `reconcile` builds the value its `execute` would have."""
+        """The admission facts as the handle that a spawn returned. It is for a caller
+        that answers from the log what the live path answers from the handle.
+        The `reconcile` of a delegating tool builds from it the value that its
+        `execute` would have returned."""
         record = self._record
         return SubagentRun(
             id=record.run_id,
@@ -3557,11 +3845,12 @@ class ChildState:
         )
 
     def to_wire(self) -> dict[str, JsonValue]:
-        """The child as a row: its admission, where it is, and how it stands — for
-        the model's roster tool and a front end's panel."""
+        """The child as a row: its admission, where it is, and its current state. The
+        roster tool of the model and the panel of a front end read it."""
         admission = thaw_json(self.admission.to_wire()) if self.admission is not None else {}
         assert isinstance(admission, dict)
-        # The schema a row's reader asked for and holds already; the value is the news.
+        # The reader of a row asked for the schema and already holds it. The
+        # value is what is new.
         admission.pop("output", None)
         row: dict[str, JsonValue] = {
             **admission,
@@ -3587,20 +3876,25 @@ class ChildState:
 
 
 def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
-    """One event of a child's own log folded into its state. The rules, in one place.
+    """Fold one event of the log of a child into the state of that child. The
+    rules are in this one place.
 
-    **Each field is set by its own record, and replaced whole.** A status carries its
-    `cause` and `detail` or it carries none, so a later status never keeps an
-    earlier one's reason: the roster this replaces merged each status into its row,
-    and a child woken after a restart went on saying `resumed`. A status this fold
-    does not know leaves the one before it standing — a child is never read as
-    settled by a record nobody can read, which is `child_is_live`'s direction.
+    **Each field is set by its own record, and replaced whole.** A status
+    carries its `cause` and `detail`, or it carries none. So a later status
+    never keeps the reason of an earlier one. The roster that this replaces
+    merged each status into its row, and a child that was woken after a restart
+    went on saying `resumed`. A status that this fold does not know leaves the
+    previous status in place. So a child is never read as settled because of a
+    record that nobody can read, which is the direction that `child_is_live`
+    keeps.
 
-    An `assistant/message` is an answer: it forgives the restarts before it, and it
-    and a compaction are what the child spent.
+    An `assistant/message` is an answer, and it forgives the restarts before
+    it. An answer and the other records in `SPENDING_TYPES` are what the child
+    spent.
     """
     kind = event.type
-    # The type test first: a child's log is mostly `assistant/chunk`.
+    # The type test comes first, because the log of a child is mostly
+    # `assistant/chunk`.
     if kind not in CHILD_EVENT_TYPES:
         return state
     data = event.data
@@ -3643,7 +3937,8 @@ def fold_child_event(state: ChildState, event: SessionEvent) -> ChildState:
 
 
 def _notice_of(recorded: JsonValue) -> ChildNotice | None:
-    """An ending's notice, or `None` when it carries none or one this build cannot read."""
+    """The notice of an ending. `None` when the ending carries no notice, or one
+    that this build cannot read."""
     if recorded is None:
         return None
     try:
@@ -3660,8 +3955,9 @@ def child_state(log: Session) -> ChildState:
 def child_state_of(
     session_id: str, header: SessionHeader | None, events: Iterable[SessionEvent]
 ) -> ChildState:
-    """`child_state` over a header and events rather than a session: a log read from
-    the store, which a resume holds before any `Session` is built for it."""
+    """`child_state` over a header and events, and not over a session. It is for a
+    log that was read from the store. A resume holds such a log before any
+    `Session` is built for it."""
     parent = header.delegating_parent if header is not None else None
     state = ChildState(
         session_id=session_id,
@@ -3674,8 +3970,9 @@ def child_state_of(
 
 
 def extend_child_state(previous: ChildState, log: Session, start: int) -> ChildState:
-    """`child_state` continued from a prefix — what `SubagentService`'s cache folds a
-    new slice with. Extending the fold of a prefix equals folding the whole log."""
+    """`child_state` continued from a prefix. The cache of `SubagentService` folds
+    a new slice of the log with it. Extending the fold of a prefix gives the
+    same state as folding the whole log."""
     state = previous
     for event in log.events_from(start):
         state = fold_child_event(state, event)
@@ -3687,41 +3984,44 @@ class StoredTree:
     """What `stored_tree` read of one family."""
 
     states: dict[str, dict[str, ChildState]] = field(default_factory=dict)
-    """Each session's children by session id, filed under the parent its header
-    names — with an entry, empty or not, for every session in the tree, since each
-    one's children were in this read."""
+    """The children of each session by session id, filed under the parent that the
+    header of each child names. Every session in the tree has an entry, empty
+    or not, because the children of each one were in this read."""
     unreadable: dict[str, str] = field(default_factory=dict)
-    """The logs the read refused, by session id, each with the parent its listing
-    row names."""
+    """The logs that the read refused, by session id. Each is stored with the
+    parent that its listing row names."""
 
 
 def stored_tree(store: SessionArchive, parent_id: str, family: str, live: set[str]) -> StoredTree:
-    """Everything beneath `parent_id` on disk that this process is not running, each
-    folded from its stored log. Blocking: on a worker thread (`load_children`), or a
-    rebuild's (`ph.seams.live_index`), which asks of the same family the same question.
+    """Everything beneath `parent_id` on disk that this process is not running,
+    each folded from its stored log. The function blocks. It runs on a worker
+    thread (`load_children`), or on the thread of a rebuild
+    (`ph.seams.live_index`), which asks the same question of the same family.
 
-    **One log that will not read costs its own row and not the tree** (P13-09). The
-    read used to raise through here, so one damaged child file refused its root: the
-    root could not be mounted, its siblings were never readmitted, and nothing
-    could repair the file because nothing could open the family. The child is
-    reported `unreadable` instead, and is in no parent's children: not live, so no
-    sweep waits on it or readmits it, and not ended, so no sweep writes a tombstone
-    into a file it cannot read. `phern doctor sessions` names the line, and its
-    `--repair` cuts the log back to what reads.
+    **One log that cannot be read costs its own row and not the tree**
+    (P13-09). The read used to raise through this function, so one damaged
+    child file refused its root. The root could not be mounted, its siblings
+    were never readmitted, and nothing could repair the file because nothing
+    could open the family. Now the child is reported as `unreadable`, and it is
+    among the children of no parent. It is not live, so no sweep waits on it or
+    readmits it. It is not ended, so no sweep writes a tombstone into a file
+    that it cannot read. `phern doctor sessions` names the line, and its
+    `--repair` cuts the log back to what can be read.
 
-    **A refusal of the log's content, and nothing else.** That is a `ValueError` from
-    every backend — the JSONL reader's `LogDamaged`, a row another backend cannot
-    validate — while a log that has gone missing or cannot be opened is not damage,
-    and still raises as it did.
+    **Only a refusal of the content of the log is caught.** That is a
+    `ValueError` from every backend: the `LogDamaged` of the JSONL reader, or a
+    row that another backend cannot validate. A log that has gone missing or
+    cannot be opened is not damage, and it still raises as before.
     """
     tree = StoredTree()
     for row in store.descendants_of(parent_id, family):
         tree.states.setdefault(row.session_id, {})
         if row.session_id in live:
             continue
-        # A child's log starts at seq 0, so its own file is the whole of it — read by
-        # its family, which the listing already found, rather than searched for, and
-        # only for what its state is folded from.
+        # The log of a child starts at seq 0, so its own file is the whole log.
+        # The file is read by its family, which the listing already found, and
+        # is not searched for. Only the records that its state is folded from
+        # are read.
         try:
             header, events = store.read_own(
                 row.session_id, family=row.family, types=CHILD_EVENT_TYPES
@@ -3742,11 +4042,13 @@ def stored_tree(store: SessionArchive, parent_id: str, family: str, live: set[st
 
 
 def _names_parent(child: Session, parent_id: str) -> bool:
-    """Whether a child's log names `parent_id` the way the store finds it by.
+    """Whether the log of a child names `parent_id` in the way that the store finds
+    the child by.
 
-    The header's parent link decides (`delegating_parent`); the id's `<parent>-`
-    prefix is how `SessionArchive.descendants_of` narrows the family directory before it
-    reads a header, so a child without it is one the listing never reaches.
+    The parent link of the header decides (`delegating_parent`). The
+    `<parent>-` prefix of the id is how `SessionArchive.descendants_of` narrows
+    the family directory before it reads a header. So the listing never reaches
+    a child without that prefix.
     """
     return child.header.delegating_parent == parent_id and is_child_id(parent_id, child.id)
 
@@ -3754,31 +4056,33 @@ def _names_parent(child: Session, parent_id: str) -> bool:
 def restarts_since_progress(state: ChildState) -> int:
     """How many times a child has been restarted since it last answered (P3).
 
-    **The ladder's rule, stated where the ladder is decided** rather than folded
-    into the state: a child stopped, working an hour, then stopped again met two
-    incidents, not a lifetime's, so an answer forgives the restarts before it. An
-    `assistant/message` in its own log is the answer — a model reply, which a turn
-    that did nothing cannot produce. The state keeps both facts as totals
-    (`resumes`, `resumes_at_last_answer`), so a different rule is a change here and
-    not to the fold.
+    **The rule of the ladder is stated where the ladder is decided**, and it is
+    not folded into the state. A child that was stopped, worked for an hour,
+    and was then stopped again met two incidents, and not the incidents of a
+    lifetime. So an answer forgives the restarts before it. The answer is an
+    `assistant/message` in the log of the child itself. It is a model reply,
+    which a turn that did nothing cannot produce. The state keeps both facts as
+    totals (`resumes`, `resumes_at_last_answer`). So a different rule is a
+    change here, and not a change to the fold.
     """
     return state.resumes - state.resumes_at_last_answer
 
 
 FamilyRole: TypeAlias = Literal["self", "parent", "sibling", "child"]
-"""How one agent stands relative to another, within reach."""
+"""How one agent is related to another agent that it can reach."""
 
 
 class _Parented(Protocol):
-    """A session's id and its parent link, and nothing else.
+    """The id of a session and its parent link, and nothing else.
 
-    All `reachable_family` reads — its docstring already says sessions are
-    "passed in rather than read from a store, so this answers on a resumed log
-    with no live agents as readily as in a running process", which is a
-    structural contract described in prose. Written as one, a caller can hand it
-    a family tree it built for the purpose: the messaging test does exactly
-    that, and its two-field double satisfied this all along while failing the
-    declared `Session` (issue 32).
+    This is all that `reachable_family` reads. The docstring of that function
+    already says that the sessions are passed in and are not read from a store,
+    so that the function answers on a resumed log with no live agents as well
+    as in a running process. That is a structural contract described in prose.
+    With the contract written as a Protocol, a caller can hand the function a
+    family tree that it built for the purpose. The messaging test does exactly
+    that. Its two-field double satisfied this Protocol all along, and it failed
+    the declared `Session` (issue 32).
     """
 
     @property
@@ -3794,17 +4098,19 @@ class _HasParent(Protocol):
 
 
 def reachable_family(sessions: Iterable[_Parented], agent_id: str) -> dict[str, FamilyRole]:
-    """Every agent `agent_id` may address, mapped to how it is related (C7).
+    """Every agent that `agent_id` may address, mapped to how it is related (C7).
 
-    The enumeration half of `family_reach`, and derived *from* it rather than
-    restating the rule — the guard that refuses a send and the roster that tells
-    the model who it may address must not be able to disagree.
+    This is the enumeration half of `family_reach`. It is derived *from*
+    `family_reach` and does not restate the rule. The guard that refuses a send
+    and the roster that tells the model who it may address must not be able to
+    disagree.
 
-    An agent's id is its session's id, so the parent link is
-    `SessionHeader.delegating_parent` and nothing needs a side index — the agent
-    that spawned it, which a fork's `parent_session` is not: a forked root is a
-    root. Sessions are passed in rather than read from a store, so this answers on
-    a resumed log with no live agents as readily as in a running process.
+    The id of an agent is the id of its session. So the parent link is
+    `SessionHeader.delegating_parent`, and nothing needs a side index. That
+    link names the agent that spawned it. The `parent_session` of a fork does
+    not: a forked root is a root. The sessions are passed in and are not read
+    from a store. So this function answers on a resumed log with no live agents
+    as well as in a running process.
     """
     parents = {session.id: session.header.delegating_parent for session in sessions}
     if agent_id not in parents:
@@ -3832,11 +4138,11 @@ def family_reach(
 ) -> bool:
     """Whether `sender` may address `target` under the nuclear-family rule (C7).
 
-    A sender reaches its parent, its direct children, and same-depth siblings
-    sharing a parent — roots counting as siblings of each other. Placed in the
-    seam rather than in the RLM bundle because it is the reach rule for *any*
-    provider's children, and the guard that enforces it (P3-12) must not be able
-    to disagree with the roster that displays it.
+    A sender reaches its parent, its direct children, and the siblings at its
+    own depth that share its parent. Roots count as siblings of each other. The
+    rule is in the seam and not in the RLM bundle, because it is the reach rule
+    for the children of *any* provider. The guard that enforces it (P3-12) must
+    not be able to disagree with the roster that displays it.
     """
     if sender_id == target_id:
         return True
@@ -3853,11 +4159,12 @@ MAX_NAME_CHARS = 64
 
 def default_child_name(prompt: str, tag: str, *, taken: Collection[str] = ()) -> str:
     """`subagent-<prompt-slug>-<tag>`, unique among `taken`. `tag` tells apart two
-    children given the same task; the seam passes eight random hex digits.
+    children that were given the same task. The seam passes eight random hex
+    digits.
 
-    A name the parent can read back matters more than it looks: the roster, the
-    terminal notice and every `agent_message` address use it, and a child called
-    `child-4` tells the parent nothing about which delegation it was.
+    A name that the parent can read back matters more than it seems to. The
+    roster, the ending notice and every `agent_message` address use it. A child
+    called `child-4` tells the parent nothing about which delegation it was.
     """
     words = [
         word for word in "".join(c if c.isalnum() else " " for c in prompt).split()[:4] if word

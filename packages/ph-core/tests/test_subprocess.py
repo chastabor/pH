@@ -489,5 +489,5 @@ async def test_a_stream_cut_at_its_cap_ends_on_a_whole_character(tmp_path: Path)
         )
     )
 
-    assert result.truncated
+    assert result.dropped > 0
     assert result.stdout == "✓" * (1000 // len("✓".encode()))

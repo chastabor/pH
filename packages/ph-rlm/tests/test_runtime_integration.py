@@ -22,6 +22,7 @@ from rlm_fixtures import MountedRuntime
 from runtime_helpers import run_cell
 
 from ph.keys import AGENTS, CODE_RUNTIME, FS, SESSIONS, SYSTEM_PROMPT, TOOLS, WORKSPACE
+from ph.seams.subprocess import DEFAULT_SCRUB
 from ph.testing import FAKE_OPTIONS, StubWorkspaceProvider, not_none, run_tool, simple_tool
 from ph.tools.registry import RUN_CODE
 
@@ -215,3 +216,44 @@ async def test_a_cell_runs_inside_the_agents_workspace(
     # The redirection environment also reached the child, so a cell that runs the
     # tests of the project does not leave caches in that tree (E12).
     assert pycache == str(scratch / "pycache")
+
+
+async def test_the_scrub_of_the_deployment_reaches_the_kernel(
+    mounted_runtime: MountedRuntime, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kernel runs the code that the model wrote, so the `scrub` and `keep`
+    of `subprocess-local` have to reach it.
+
+    The kernel does not spawn through `ctx.subprocess`, and it used to build its
+    environment from the default scrub. A deployment that added a mark still
+    passed the marked variable to every cell, and a name in `keep` never
+    arrived.
+
+    Sabotage: build the environment in `Kernel.start` from `scrub_env` and the
+    cell reads `["configured", None]`.
+    """
+    monkeypatch.setenv("PH_TEST_SHIBBOLETH", "configured")
+    monkeypatch.setenv("PH_TEST_KEPT_API_KEY", "kept")
+    ctx, session, agent = await mounted_runtime(
+        snapshots=False,
+        extra_rows=[
+            {
+                "id": "subprocess",
+                "config": {
+                    "scrub": [*DEFAULT_SCRUB, "SHIBBOLETH"],
+                    "keep": ["PH_TEST_KEPT_API_KEY"],
+                },
+            }
+        ],
+    )
+
+    result = await run_cell(
+        ctx,
+        "import os\n"
+        "[os.environ.get(name) for name in ('PH_TEST_SHIBBOLETH', 'PH_TEST_KEPT_API_KEY')]",
+        agent=agent,
+        session=session,
+    )
+
+    assert result.is_error is False
+    assert result.value["value"] == [None, "kept"]

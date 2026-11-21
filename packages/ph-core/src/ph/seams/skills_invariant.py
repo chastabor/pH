@@ -1,21 +1,22 @@
 """Runtime invariant: a memoized skill reach equals a freshly built one (P6-01, I6).
 
-`SkillService.reach` memoizes per isolation chain and invalidates on a generation
-counter, which is `ToolRuntime.view`'s arrangement and has `ToolRuntime.view`'s
-failure mode: a registration path that mutates the table without bumping the
-counter serves an answer that was true a moment ago.
+`SkillService.reach` memoizes per isolation chain and invalidates on a
+generation counter. That is the arrangement of `ToolRuntime.view`, and it has
+the same failure mode: a registration path that mutates the table without
+bumping the counter serves an answer that was true a moment ago.
 
-**What a stale answer costs here is the capability ceiling.** `reach` is the one
-place skill filters compose, so it decides which skills an agent may use. An
-entry that outlived its `_changed()` keeps a skill reachable after the row owning
-it unloaded — a capability outliving its scope, I2's failure wearing a cache's
-clothes — or hands a narrowed child the set its parent holds, which is the
-widening P4-13b calls its whole security content and the one direction the
-registry is built to make impossible.
+**The cost of a stale answer here is the capability ceiling.** `reach` is the
+one place where skill filters compose, so it decides which skills an agent may
+use. An entry that outlived its `_changed()` keeps a skill reachable after the
+row that owns it unloaded. That is a capability that outlives its scope: the
+failure of I2, in the form of a cache. Or the entry hands a narrowed child the
+set that its parent holds. P4-13b calls that widening its whole security
+content, and it is the one direction that the registry is built to make
+impossible.
 
-It is checked separately from the tool view rather than folded in with it,
-because the two are different registries with different failure stories, and a
-report naming which cache drifted is what a person can act on.
+This check is separate from the check of the tool view and is not folded into
+it. The two are different registries with different failure stories, and a
+person can act on a report that names which cache drifted.
 
 @module ph.seams.skills_invariant
 """
@@ -32,21 +33,24 @@ __all__ = ["apply", "violations"]
 def violations(ctx: Context) -> list[str]:
     """Every cached reach set that no longer equals what the service would build.
 
-    Asked of the service rather than computed here: see `SkillService.stale_reach`
-    for why the check lives with the cache it checks.
+    The service is asked, and nothing is computed here. See
+    `SkillService.stale_reach` for the reason that the check lives with the
+    cache that it checks.
     """
     return list(ctx.require(SKILLS).stale_reach())
 
 
 @plugin("skills-invariant", affects="deployment", inject=[SKILLS])
 async def apply(ctx: Context, config: None) -> None:
-    """Declare the reach cache's half of I6, pollable.
+    """Declare the half of I6 that belongs to the reach cache, as a pollable
+    invariant.
 
-    `inject=[SKILLS]` because an unmet key means the row never activates, so a
-    profile that drops the skills registry drops this invariant with it. Guarding
-    on `ctx.get(SKILLS) is None` instead would report `holds` about a registry
-    that is not there — "a lie shaped like reassurance", which is the one thing
-    this seam's two-kinds distinction exists to prevent.
+    `inject=[SKILLS]` is here because an unmet key means that the row never
+    activates. A profile that drops the skills registry therefore drops this
+    invariant with it. A guard on `ctx.get(SKILLS) is None` would instead report
+    `holds` about a registry that is not there. That is a false reassurance, and
+    the invariants seam separates an inline invariant from a pollable one to
+    prevent exactly that.
     """
     contribute(
         ctx,

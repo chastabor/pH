@@ -56,7 +56,7 @@ from runtime_helpers import namespace
 
 from ph.orphans import process_alive
 from ph.seams.code_runtime import CodeBinding, CodeBindingNamespace
-from ph.seams.subprocess import scrub_env
+from ph.seams.subprocess import EnvScrub
 from ph.testing import EMOJI_FAMILY, settled
 from ph.tools.code_mode import CodeRunFailure, ToolCallError
 from ph_rlm.kernel.manager import (
@@ -1486,11 +1486,15 @@ async def test_the_guest_reads_with_the_hosts_frame_cap(
     """
     handed: dict[str, str] = {}
 
-    def recording(*, extra: Mapping[str, str]) -> dict[str, str]:
-        handed.update(extra)
-        return scrub_env(extra=extra)
+    apply = EnvScrub.apply
 
-    monkeypatch.setattr("ph_rlm.kernel.manager.scrub_env", recording)
+    def recording(
+        scrub: EnvScrub, base: Mapping[str, str] | None = None, *, extra: Mapping[str, str]
+    ) -> dict[str, str]:
+        handed.update(extra)
+        return apply(scrub, base, extra=extra)
+
+    monkeypatch.setattr(EnvScrub, "apply", recording)
     raised = 256 * 1024 * 1024
 
     # `start` raises unless the guest answers `boot`. A return therefore proves

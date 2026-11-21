@@ -1,29 +1,35 @@
-"""A profile a parent assigns its child, read as a narrowing (session profiles, S7b).
+"""A profile that a parent assigns to its child, read as a narrowing (session
+profiles, S7b).
 
-A child runs inside its parent's scope and **on its parent's mount** (decision 21):
-it never gets a mount of its own, so a profile assigned to it cannot be mounted. It
-is read instead, row by row, against what the parent's mount runs:
+A child runs inside the scope of its parent and **on the mount of its parent**
+(decision 21). It never gets a mount of its own, so a profile that is assigned
+to it cannot be mounted. The profile is read instead, row by row, against what
+the mount of the parent runs:
 
-* **what it runs** — a row the assigned profile runs that the parent's mount does
-  not is refused, naming the row: there is no mount to run it on, and a child can
-  hold less than its parent and never more;
-* **what a row it drops gave** — the tools and skills of each row the parent runs
-  and the assigned profile does not go with it, found by the row that registered
-  each (`ToolRuntime.registrants`, `SkillService.registrants`);
-* **what a row it keeps says** — asked of the row's own plugin, which declares how a
-  child holds less of it (`plugin(..., narrows=)`, `ph.cordis.child_limit`): the
-  `models` row's default, `sandbox-policy`'s posture, `skills-progressive`'s paths
-  and `sandbox-allow`'s writable directories. A row joins by declaring one, and
-  nothing here names it, as long as what it holds back is one of `ChildLimit`'s
-  kinds.
+* **What it runs.** A row that the assigned profile runs and the mount of the
+  parent does not run is refused, and the refusal names the row. There is no
+  mount to run it on, and a child can hold less than its parent and never more.
+* **What a dropped row gave.** A dropped row is a row that the parent runs and
+  the assigned profile does not. Its tools and skills go with it. They are
+  found by the row that registered each (`ToolRuntime.registrants`,
+  `SkillService.registrants`).
+* **What a kept row says.** The plugin of the row answers this, because the
+  plugin declares how a child holds less of the row (`plugin(..., narrows=)`,
+  `ph.cordis.child_limit`). The narrowers cover the default of the `models`
+  row, the posture of `sandbox-policy`, the paths of `skills-progressive` and
+  the writable directories of `sandbox-allow`. A row joins by declaring a
+  narrower, and nothing here names the row, as long as what it holds back is
+  one of the kinds of `ChildLimit`.
 
-What a row with no narrower says is the parent's, because it is the parent's mount
-the child runs on: a retry ceiling or a compaction threshold cannot differ for one
-agent of a mount. The resolved narrowing is what the admission records, so a child's
-reach is fixed when it is admitted — not whatever the named file says later.
+For a row with no narrower, what the row says for the parent applies to the
+child, because the child runs on the mount of the parent. A retry ceiling or a
+compaction threshold cannot differ for one agent of a mount. The admission
+records the resolved narrowing. So the reach of a child is fixed when the child
+is admitted, and it does not follow what the named file says later.
 
-`NamedProfiles` is how the seam gets a named profile composed: the host that mounted
-the parent knows where named profiles live (`ph_app`), and ph-core does not.
+`NamedProfiles` is how the seam gets a named profile composed. The host that
+mounted the parent (`ph_app`) knows where named profiles are kept, and ph-core
+does not.
 
 @module ph.seams.subagent_profiles
 """
@@ -53,10 +59,11 @@ __all__ = ["NamedProfiles", "Narrowing", "narrowing"]
 
 
 class NamedProfiles(Protocol):
-    """Compose a named profile by name — the host's, provided as `ctx.named_profiles`."""
+    """Composes a named profile by name. The host provides it as `ctx.named_profiles`."""
 
     def compose(self, name: str) -> Profile:
-        """`name` composed as a session's would be, or raise saying why not."""
+        """Return `name` composed as the profile of a session would be, or raise
+        with the reason why not."""
         ...
 
 
@@ -66,19 +73,23 @@ class Narrowing:
 
     tools: tuple[str, ...]
     skills: tuple[str, ...]
-    """The parent's, less the dropped rows' and what a kept row withheld."""
+    """What the parent holds, less what the dropped rows gave and what a kept row
+    withheld."""
     limit: ChildLimit
-    """Every row it keeps, joined: its model, posture and writable directories."""
+    """The limits of every row that the child keeps, joined: its model, posture
+    and writable directories."""
 
 
 def narrowing(assigned: Profile, reach: ChildReach, *, held_tools: Sequence[str]) -> Narrowing:
-    """`assigned` read against the parent's mount, `reach.ctx` — see the module
-    docstring.
+    """Read `assigned` against the mount of the parent, which is `reach.ctx`. The
+    module docstring describes the reading.
 
-    `held_tools` and `reach.skills` are the parent's own reach (`SubagentService.
-    held_by`), which is narrower than the mount's when the parent is a child itself.
+    `held_tools` and `reach.skills` are the reach of the parent itself
+    (`SubagentService.held_by`). That reach is narrower than the reach of the
+    mount when the parent is itself a child.
 
-    :raises NarrowingRefused: naming the row, for anything the parent does not hold.
+    :raises NarrowingRefused: for anything that the parent does not hold. The
+        message names the row.
     """
     mount = reach.ctx.require(MOUNT)
     running = _enabled(mount.profile)
@@ -108,8 +119,9 @@ def narrowing(assigned: Profile, reach: ChildReach, *, held_tools: Sequence[str]
 
 
 def _configs(fork: ForkScope, row: Row) -> tuple[BaseModel | None, BaseModel | None]:
-    """One row's config as the parent's mount runs it and as the assigned profile
-    says it, each read by the row's own model — what its narrower compares."""
+    """The config of one row as the mount of the parent runs it, and as the
+    assigned profile states it. The config model of the row reads each of them.
+    The narrower of the row compares the two."""
     try:
         asked = fork.spec.resolve_config(interpolate(row.config))
     except ValidationError as error:
@@ -124,12 +136,14 @@ def _enabled(profile: Profile) -> dict[str, Row]:
 
 
 def _given(registrants: dict[str, str], held: Sequence[str], dropped: set[str]) -> tuple[str, ...]:
-    """What the parent holds, less what a row the assigned profile does not run gave."""
+    """What the parent holds, less what each dropped row gave. A dropped row is a
+    row that the assigned profile does not run."""
     return tuple(name for name in held if registrants.get(name) not in dropped)
 
 
 def _skills(ctx: Context, held: Sequence[str], dropped: set[str]) -> tuple[str, ...]:
-    """The parent's skills, less those a row the assigned profile does not run gave —
-    by the row that registered each (`SkillService.registrants`), as tools are."""
+    """The skills of the parent, less those that each dropped row gave. They are
+    found by the row that registered each (`SkillService.registrants`), as tools
+    are."""
     service = ctx.get(SKILLS)
     return tuple(held) if service is None else _given(service.registrants(), held, dropped)
