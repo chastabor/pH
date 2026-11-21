@@ -1,34 +1,37 @@
-"""`tool-attach` — the model puts a file it found in front of its own eyes (P7-01).
+"""`tool-attach`: the model attaches a file that it found, to see it (P7-01).
 
-The **model door** of the split I-9 draws, and the half that was missing: a person
-attaches with `--attach`, which reads a path directly with the harness's own
-permissions, while a model may attach only what `ctx.fs` already lets it read. So
-this tool is a `ctx.fs.read_bytes` and a `save_bytes`, and every rule that bounds
-a `read` — `permissions-fs`, the workspace tier, any `fs/read-intent` listener a
-deployment adds — bounds it with nothing new to configure. A tool that reached
-`save_path` instead would have been an exfiltration primitive with a friendly
-name: attach a private key as a "document" and let a provider read it out.
+This tool is the **model side** of the split that I-9 draws, and it is the side
+that was missing. A user attaches with `--attach`, which reads a path directly
+with the permissions of the harness. A model may attach only what `ctx.fs`
+already lets it read. So this tool is a `ctx.fs.read_bytes` and a `save_bytes`.
+Every rule that bounds a `read` also bounds this tool, with nothing new to
+configure: `permissions-fs`, the workspace tier, and any `fs/read-intent`
+listener that a deployment adds. A tool that called `save_path` instead would be
+an exfiltration primitive with a friendly name: attach a private key as a
+"document" and let a provider read it out.
 
-**The media rides a context message, not the tool result.** A result's content
-becomes a `tool-result` block, and both shipped wires flatten those to text —
-Anthropic keeps only text blocks inside `tool_result`, OpenAI's `tool` role takes
-a string — so an image returned as result content would have been dropped by the
-renderer on the way out, silently, which is the exact failure this row exists to
-end. `run.defer_context` is the mechanism that already exists for "this call
-produced something the *conversation* should carry": the loop appends it after
-`tool/result`, so call/result adjacency survives and the picture is in the next
-request. What the result itself carries is the *account* — what was attached, how
-big, and what it measured — which is what makes a replayed session render the
-same card as the live one.
+**The media goes in a context message, not in the tool result.** The content of
+a result becomes a `tool-result` block, and all three shipped wires flatten
+those blocks to text. Anthropic keeps only the text blocks inside `tool_result`,
+the `tool` role of OpenAI takes a string, and the `functionResponse` of Google
+takes text. The renderer would therefore silently drop an image that was
+returned as result content. That is the exact failure that this row exists to
+end. `run.defer_context` is the existing mechanism for "this call produced
+something that the *conversation* should carry". The loop appends the message
+after `tool/result`, so the call and the result stay adjacent and the picture is
+in the next request. The result itself carries the *account*: what was attached,
+its size, and its measured dimensions. With that account, a replayed session
+renders the same card as the live session.
 
 **Only what a provider ingests as content.** `MediaBlock` is deliberately not a
-general file block, and this tool is where a model would otherwise discover that:
-a `.zip` or a 40 MB CSV "attached" would be stored, sent, refused by the route and
-degraded to a pointer — three layers of work to tell the model what this refusal
-says in one sentence, and it names the tool that does read a CSV. What counts as
-media is `ph.llm.media.is_attachable`, beside the accept policy rather than here:
-it is a statement about what a `MediaBlock` may carry, and the other producer —
-a person's `--attach` — is owed the same answer.
+general file block, and this tool is where a model would otherwise find that
+out. A `.zip` or a 40 MB CSV that was "attached" would be stored, sent, refused
+by the route and degraded to a pointer. That is three layers of work to tell the
+model what the refusal of this tool says in one sentence, and the refusal names
+the tool that does read a CSV. `ph.llm.media.is_attachable` decides what counts
+as media. It is beside the accept policy and not here, because it is a statement
+about what a `MediaBlock` may carry. The other producer, the `--attach` of a
+user, must get the same answer.
 
 @module ph.tools.builtin.attach_tool
 """
@@ -55,17 +58,18 @@ __all__ = ["MAX_ATTACH_BYTES", "apply"]
 MAX_ATTACH_BYTES = 32 * 1024 * 1024
 """The default ceiling on one attached file, before any route is consulted.
 
-Larger than either shipped route's own limit (5 MB at Anthropic, 20 MB on the
-OpenAI wire) **on purpose**, because it is a different limit answering a different
-question. `ResolvedModel.max_attachment_bytes` is "will this provider take it",
-and `media-degrade` already answers that per request, per route, with a pointer
-the model can read — a second copy of it here would refuse for the route the
-session happens to be on and be wrong the moment it resumes on another. What this
-bounds is the harness: the bytes are read into memory, hashed and written, so the
-number that matters is the one past which a model can make the process swap by
-naming a file. A stored blob over a route's ceiling is not wasted, either — the
-store keeps originals (P7-03), so the same attachment is there for a route that
-takes it.
+The value is larger than the limit of every shipped route (5 MB at Anthropic,
+20 MB on the OpenAI wire and at Google) **on purpose**. It is a different limit
+that answers a different question. `ResolvedModel.max_attachment_bytes` answers
+"will this provider take it". `media-degrade` already answers that question for
+each request and each route, with a pointer that the model can read. A second
+copy of that limit here would refuse for the route that the session happens to
+be on, and would be wrong as soon as the session resumes on another route. This
+value bounds the harness. The bytes are read into memory, hashed and written, so
+the number that matters is the size past which a model can make the process swap
+by naming a file. A stored blob over the ceiling of a route is not wasted
+either. The store keeps originals (P7-03), so the same attachment is there for a
+route that takes it.
 """
 
 REACH_FOR_READ = (
@@ -75,21 +79,23 @@ REACH_FOR_READ = (
 )
 """What the model is told when it attaches the wrong kind of file.
 
-Names the tool that does work, because a refusal that only says no costs a turn:
-the model's next move should be `read`, and it should not have to guess that."""
+The text names the tool that does work, because a refusal that only says no
+costs a turn. The next call of the model should be `read`, and the model should
+not have to guess that."""
 
 
 class Config(WireModel):
     """Row config for the attach tool."""
 
     max_bytes: int = MAX_ATTACH_BYTES
-    """The largest file this tool will read into memory, in bytes.
+    """The largest file that this tool reads into memory, in bytes.
 
-    The harness's bound, not a route's: whether a provider will *take* the file is
-    `ResolvedModel.max_attachment_bytes`, answered per request by `media-degrade`
-    with a pointer the model can read. Lowering this refuses the read outright, so
-    a deployment that sets it below its route's ceiling has quietly made a second
-    accept policy."""
+    This is the bound of the harness and not of a route. Whether a provider will
+    *take* the file is `ResolvedModel.max_attachment_bytes`, and `media-degrade`
+    answers that for each request with a pointer that the model can read. A lower
+    value here refuses the read outright. A deployment that sets it below the
+    ceiling of its route has therefore made a second accept policy without saying
+    so."""
 
 
 class AttachArgs(ToolModel):
@@ -108,13 +114,13 @@ class AttachValue(ToolModel):
 
 
 def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
-    """The sentence the model reads, which has to say where the file went.
+    """The sentence that the model reads. It must say where the file went.
 
-    A confirmation alone would leave the model to guess whether it is looking at
-    the picture yet — it is not, quite: the media arrives in the *next* request,
-    because a context message is appended after this result. Saying so is what
-    stops a model attaching the same file twice, or answering about an image it
-    has not been shown.
+    A confirmation alone would leave the model to guess whether it can see the
+    picture yet. It cannot yet: the media arrives in the *next* request, because
+    a context message is appended after this result. The sentence says so. That
+    stops a model from attaching the same file twice, or from answering about an
+    image that it has not been shown.
     """
     size = f"{value['mime']}, {value['bytes']} bytes"
     if value.get("width") and value.get("height"):
@@ -127,10 +133,11 @@ async def apply(ctx: Context, config: Config) -> None:
     """Register the attach tool.
 
     `inject` names `attachments` as well as `fs`, so a profile that mounts no
-    store never registers the tool at all — the `subagent-task` rule. A model
-    offered `attach` in every prompt and told on every call that there is nowhere
-    to put a file has been taught a capability the deployment does not have, and
-    pays prompt tokens for the lesson on every request.
+    store never registers the tool. This is the `subagent-task` rule. A model
+    that is offered `attach` in every prompt, and is told on every call that
+    there is nowhere to put a file, has been taught a capability that the
+    deployment does not have. It also pays prompt tokens for that on every
+    request.
     """
     store = ctx.require(ATTACHMENTS)
 
@@ -139,11 +146,12 @@ async def apply(ctx: Context, config: Config) -> None:
         target = fs.resolve(args.path, agent=run.agent)
         mime = mime_of(target.name)
         if not is_attachable(mime):
-            # Before the gate, and cheap: this is a statement about the argument,
-            # decided from the name alone with nothing read and no policy asked —
-            # the same ordering `UNKNOWN_TOOL` has ahead of policy (C6). An
-            # unclassifiable extension reads as "no type", which is more useful
-            # than the literal `application/octet-stream`.
+            # This check runs before the gate, and it is cheap. It is a statement
+            # about the argument, decided from the name alone, with nothing read
+            # and no policy asked. `UNKNOWN_TOOL` has the same position ahead of
+            # policy (C6). An extension that cannot be classified is reported as
+            # "no type", which is more useful than the literal
+            # `application/octet-stream`.
             named = "no recognizable type" if mime == OCTET_STREAM else mime
             raise HarnessError(f"{args.path} is {named}. {REACH_FOR_READ}", "NOT_ATTACHABLE")
         content = await fs.read_bytes(
@@ -157,9 +165,10 @@ async def apply(ctx: Context, config: Config) -> None:
         run.defer_context(
             create_user_message(
                 content=[MediaBlock(attachment=ref)],
-                # `relay`, the form a plugin uses for content it is carrying on
-                # somebody's behalf, and never `{"kind": "user"}`: a person did
-                # not attach this and the transcript must not say they did.
+                # `relay` is the form that a plugin uses for content that it
+                # carries on behalf of somebody else. The source is never
+                # `{"kind": "user"}`: a person did not attach this, and the
+                # transcript must not say that one did.
                 source=PluginSource(plugin="tool-attach", form="relay"),
             )
         )
@@ -180,17 +189,18 @@ async def apply(ctx: Context, config: Config) -> None:
             parameters=AttachArgs,
             output=ToolOutput(schema=AttachValue, render=_render),
             execute=attach,
-            # **Not** `effects_confined_to_workspace`, and the default is right
-            # rather than merely safe: the blob lands in `$PH_HOME/attachments`,
-            # which a workspace restore does not undo and *must not* — the log
-            # references it, so collecting it would make the session unresumable
-            # (`phern attachments gc` is the only thing allowed to, and only for a
-            # digest no session mentions). `/revert` listing it as uncovered is
-            # therefore the true statement, not the cautious one.
+            # **Not** `effects_confined_to_workspace`. The default is right, and
+            # not only safe. The blob lands in `$PH_HOME/attachments`, which a
+            # workspace restore does not undo and *must not* undo. The log
+            # references the blob, so collecting it would make the session
+            # unresumable. Only `phern attachments gc` may collect it, and only
+            # for a digest that no session mentions. So when `/revert` lists the
+            # call as not covered, that statement is true and not only cautious.
             is_concurrency_safe=True,
-            # It reads a file the model can already read and stores a copy where
-            # only this harness looks. There is nothing here to take back, so
-            # asking would be the over-asking `is_irreversible` warns about.
+            # The tool reads a file that the model can already read, and stores a
+            # copy where only this harness looks. There is nothing to take back.
+            # A request for approval here would be the over-asking that
+            # `is_irreversible` warns about.
             is_irreversible=False,
             **simple_views("read", "Attach", "path"),
         )

@@ -1,9 +1,10 @@
-"""`ReactLoopAgent` — one session driven through turn and step boundaries.
+"""`ReactLoopAgent`: one session driven through turn and step boundaries.
 
-The Phase 0 driver implements dsh's lifecycle verbatim **except tool
-execution**, which lands with the pipeline in Phase 1 (P1-02). The order below
-is the contract, and every stabilization feature in Phase 4 attaches to one of
-these seams rather than to the loop itself (D12):
+The driver implements the lifecycle of dsh verbatim. Tool execution is not in
+the driver: a step hands its tool calls to the tool pipeline
+(`execute_tool_calls`, P1-02). The order below is the contract. Every
+stabilization feature (Phase 4) attaches to one of these seams and not to the
+loop itself (D12):
 
 ```
 turn/start
@@ -19,6 +20,8 @@ turn/start
   │    request/context        (appended only when the route or its window changed)
   │    llm/stream             → assistant/chunk* → assistant/message
   │    agent/request-error    → retry | None
+  │    step/retry             (the record of a model call that is made again)
+  │    execute_tool_calls     (the tool calls of the message, when it has any)
   ├ step/end
   ├ agent/turn-stopping       (a listener objects by steering)
 turn/end
@@ -26,14 +29,15 @@ turn/end
 
 Two rules are easy to lose in a port and expensive to lose in production:
 
-* every request's `messages` is `session.derive_messages()` — never a
-  separately-maintained array (invariant I3, asserted by P0-14);
-* `max-tokens` is **sticky** for the turn: a later completed step must not
+* The `messages` of every request is `session.derive_messages()`. It is never
+  an array that is maintained separately (invariant I3, asserted by P0-14).
+* `max-tokens` is **sticky** for the turn. A later completed step must not
   downgrade the outcome, or a truncated answer is reported as a clean one.
 
-The driver runs inside the scope `ctx.agents` created for it. Services resolve
-through that scope most-specific-first, so `self.ctx.require(LLM)` is the global
-adapter seam unless something shadowed it for this agent alone.
+The driver runs inside the scope that `ctx.agents` created for it. Services
+resolve through that scope, the most specific first. `self.ctx.require(LLM)` is
+therefore the global adapter seam, unless something shadowed it for this agent
+alone.
 
 @module ph.agent_loop.driver
 """
@@ -76,7 +80,7 @@ from ..llm.types import (
     TokenUsage,
     ToolCallBlock,
     create_assistant_message,
-    create_user_message,
+    user_text,
 )
 from ..session import Session, SurfaceIntent
 from ..session.request_header import EpochHeader, RequestContext, canonical_header, header_equals
@@ -98,20 +102,21 @@ class _Phase:
     turn: int = 0
     step: int = 0
     cause: AgentCancelCause | None = None
-    """Who the loop's own `cancel` was told stopped this turn, for its `turn/end`.
-    Whether the turn is canceled is the token's to say: a stop sent straight to the
-    token has no cause, and stops the loop all the same."""
+    """Who stopped this turn, as the `cancel` of the loop was told, for its `turn/end`.
+    The token says whether the turn is canceled. A stop that is sent straight to
+    the token has no cause, and it stops the loop all the same."""
     token: CancelToken = field(default_factory=CancelToken)
-    """The live cancellation view handed to tool calls, and the one the loop checks.
+    """The live cancellation view that is handed to tool calls. The loop checks the
+    same one.
 
-    A flag the loop checks between awaits is not enough once a tool body can run
-    for minutes: the body needs to observe cancellation itself, and the pipeline
-    needs to tell "aborted before dispatch" from "aborted" to know whether the
-    call had an effect."""
+    A flag that the loop checks between awaits is not enough when a tool body
+    can run for minutes. The body needs to observe cancellation itself. The
+    pipeline also needs to tell "aborted before dispatch" from "aborted", to
+    know whether the call had an effect."""
 
     def begin_turn(self) -> None:
-        """Fresh per-turn state: a new token, so an old cancellation cannot leak
-        into the next turn's tool calls."""
+        """Fresh per-turn state. The token is new, so an old cancellation cannot
+        leak into the tool calls of the next turn."""
         self.step = 0
         self.cause = None
         self.token = CancelToken()
@@ -121,7 +126,7 @@ class _Phase:
 class _PreparedStep:
     kind: str
     held: InboxBatch
-    """The inbox batch the step was proposed with, still pending until it is taken."""
+    """The inbox batch that the step was proposed with. It stays pending until it is taken."""
     messages: tuple[Message, ...] = ()
     assembly: PromptAssembly | None = None
 
@@ -164,12 +169,13 @@ class ReactLoopAgent:
     def reroute(self, options: AgentOptions) -> None:
         """Run on `options` from the next request on.
 
-        Setting `options` alone would change nothing past this process's first
-        request: from then on a request is seeded from the conversation's own
-        `request/header`, so what a waterfall proposed stays proposed. This marks
-        the next seed as coming from `options` instead, and the header that
-        request logs — reason `change` — is the log's record of the new route.
-        A turn in flight finishes its current request on the old one.
+        Setting `options` alone would change nothing after the first request of
+        this process. From then on a request is seeded from the `request/header`
+        of the conversation, so what a waterfall proposed stays proposed. This
+        method marks the next seed as coming from `options` instead. The header
+        that this request logs, with reason `change`, is the record of the new
+        route in the log. A turn in flight finishes its current request on the
+        old route.
         """
         self.options = options
         self._rerouted = True
@@ -188,16 +194,17 @@ class ReactLoopAgent:
 
     def send(self, message: Message, target: InboxTarget, wakeup: bool) -> None:
         # Waking input cannot join an aborted activity, so it starts the next
-        # turn. Classified BEFORE the insertion, so a reentrant cancel from a
-        # splice observer cannot reclassify it.
+        # turn. It is classified BEFORE the insertion, so that a reentrant
+        # cancel from a splice observer cannot reclassify it.
         waking_after_abort = wakeup and self._phase.kind != "idle" and self._phase.token.canceled
         self.inbox.append("next-turn" if waking_after_abort else target, message)
         if wakeup:
-            # The wake the table in `ph.agent.inbox` promises, said out loud. This
-            # loop runs only when something calls `run()`, so the host that holds
-            # it — a daemon's root task, an rpc server between prompts — is what
-            # hears this and runs it. Said after the append, so a listener that
-            # runs the agent at once finds the message pending.
+            # This event is the wake that the table in `ph.agent.inbox`
+            # promises. This loop runs only when something calls `run()`. The
+            # host that holds it (the root task of a daemon, an rpc server
+            # between prompts) hears this event and runs the loop. The event is
+            # emitted after the append, so a listener that runs the agent at
+            # once finds the message pending.
             self.ctx.emit("agent/woken", self)
 
     def followup(self, message: Message) -> None:
@@ -209,28 +216,30 @@ class ReactLoopAgent:
         self.send(message, "next-step", True)
 
     def inject(self, message: Message) -> None:
-        """Deliver at the next step boundary without waking — it waits."""
+        """Deliver at the next step boundary without waking the agent. The message waits."""
         self.send(message, "next-step", False)
 
     def interject(self, message: Message) -> None:
-        """Deliver as soon as this loop will take it: mid-turn if one is running.
+        """Deliver as soon as this loop will take it: mid-turn if a turn is running.
 
-        The verb for *"also this"* from outside — a person typing while the agent
-        works. A running turn takes it at the next step, so the answer does not
-        wait for whatever the agent is in the middle of; an idle one has no turn
-        to join, and a prompt to an idle agent means a new one.
+        This is the verb for *"also this"* from outside: a user who types while
+        the agent works. A running turn takes the message at the next step, so
+        the answer does not wait for whatever the agent is in the middle of. An
+        idle agent has no turn to join, and a prompt to an idle agent means a
+        new turn.
 
-        **Decided here rather than by the caller**, because the phase is this
-        object's and a caller reading `status` and then choosing a verb is
-        branching on a value that can change between the two. It also gives every
-        front end the same reach without each re-deriving it — and the reach a
-        child already had, since a child's message is delivered by `steer`.
+        **The choice is made here and not by the caller**, because the phase
+        belongs to this object. A caller that reads `status` and then chooses a
+        verb branches on a value that can change between the two. This also
+        gives every front end the same reach, without each front end deriving
+        it again. A child already had that reach, because the message of a
+        child is delivered by `steer`.
         """
         self.send(message, "next-step" if self._phase.kind != "idle" else "next-turn", True)
 
     @property
     def signal(self) -> CancelToken:
-        """The live cancellation view — the same token `cancel` below trips."""
+        """The live cancellation view. It is the same token that `cancel` below trips."""
         return self._phase.token
 
     def cancel(self, cause: AgentCancelCause, *, keep_inbox: bool = False) -> None:
@@ -250,10 +259,10 @@ class ReactLoopAgent:
     async def run(self) -> None:
         """Drive turns until the inbox is empty.
 
-        The public entry point; a daemon or the CLI calls it after queueing
-        input. Failures are reported at their live boundary (`agent/error`) and
-        contained here, because a driver that propagated would take the process
-        down with one bad turn.
+        This is the public entry point. A daemon or the CLI calls it after
+        queueing input. Failures are reported at their live boundary
+        (`agent/error`) and contained here, because a driver that propagated
+        them would take the process down with one bad turn.
         """
         if self._phase.kind != "idle":
             raise RuntimeError(f'agent "{self.id}" already has active work')
@@ -273,9 +282,7 @@ class ReactLoopAgent:
 
     async def prompt(self, text: str) -> None:
         """Queue one human prompt and drive the loop to idle."""
-        self.followup(
-            create_user_message(content=[{"type": "text", "text": text}], source={"kind": "user"})
-        )
+        self.followup(user_text(text))
         await self.run()
 
     async def dispose(self) -> None:
@@ -288,20 +295,21 @@ class ReactLoopAgent:
 
     async def _pre_step(self, target: InboxTarget, turn: int, step: int) -> _PreparedStep:
         self._throw_if_canceled()
-        # **Proposed, not taken** (C4, S3). Taking the batch appends
-        # `agent/inbox/spliced`, which is what removes the messages from the
-        # inbox for good, and both `assemble` and `agent/pre-step` are awaits:
-        # a person's interrupt can land in either, and a pre-step listener may
-        # make a model call — compaction's summary does — whose checkpoint
-        # barrier flushes the log. Taken first, an interrupt consumed the prompt
-        # and ran nothing, and a crash during that call left it out of the inbox
-        # on disk and nowhere in the conversation. So the batch is only
-        # proposed here; `_turn` takes it in the batch that records the step.
+        # **The batch is proposed, not taken** (C4, S3). Taking the batch
+        # appends `agent/inbox/spliced`, which removes the messages from the
+        # inbox for good. Both `assemble` and `agent/pre-step` are awaits. The
+        # interrupt of a user can land in either. A pre-step listener may also
+        # make a model call, as the summary of compaction does, and the
+        # checkpoint barrier of that call flushes the log. When the batch was
+        # taken first, an interrupt consumed the prompt and ran nothing, and a
+        # crash during that call left the prompt out of the inbox on disk and
+        # nowhere in the conversation. So the batch is only proposed here, and
+        # `_turn` takes it in the batch that records the step.
         assembly = await self.ctx.require(SYSTEM_PROMPT).assemble(self.ctx, agent=self)
         self._throw_if_canceled()
         held = self.inbox.propose(target)
-        # Only when the conversation the model is shown lacks it (C12) — see
-        # `context_message`.
+        # Only when the conversation that the model is shown lacks it (C12).
+        # See `context_message`.
         context = context_message(assembly, self.session.derive_messages())
         messages = (*held.messages, context) if context is not None else held.messages
 
@@ -314,18 +322,20 @@ class ReactLoopAgent:
         try:
             answered = await self.ctx.waterfall("agent/pre-step", request, inner=inner)
         except Exception:
-            # **A pre-step that fails still consumes its batch**, as it did when
-            # the batch was taken first: `run` contains a turn failure and nothing
-            # runs the turn again (the daemon's `_drive` says why), so a batch left
-            # pending would be taken by the *next* prompt's turn, ahead of the
-            # prompt that woke it. A stop is not a failure, and leaves it pending.
+            # **A pre-step that fails still consumes its batch**, as it did
+            # when the batch was taken first. `run` contains a turn failure and
+            # nothing runs the turn again (the `_drive` of the daemon says
+            # why). A batch that was left pending would therefore be taken by
+            # the turn of the *next* prompt, ahead of the prompt that woke it.
+            # A stop is not a failure, and it leaves the batch pending.
             if not self._phase.token.canceled:
                 self.inbox.take(held, turn)
             raise
         self._throw_if_canceled()
         decision = settled("agent/pre-step", answered, PreStepDecision)
         if decision.kind == "reject":
-            # Refused, as a failure is: consumed, and reaching no model call.
+            # A refusal is handled as a failure is: the batch is consumed, and
+            # it reaches no model call.
             self.inbox.take(held, turn)
             await self.ctx.serial("agent/step-rejected", request)
             return _PreparedStep(kind="reject", held=held)
@@ -341,11 +351,11 @@ class ReactLoopAgent:
         capped = False
         """Whether any step in this turn stopped at `max_tokens`.
 
-        Kept beside `turn_ends` rather than inside it, because the two answer
-        different questions: what ends the turn, and what the person should be
-        told about it. Folding the second into the first made a `max-tokens` step
-        *end the turn* even where the loop had more to do — see where it is read
-        below.
+        This is kept beside `turn_ends` and not inside it, because the two
+        answer different questions: what ends the turn, and what the user
+        should be told about it. When the second was folded into the first, a
+        `max-tokens` step *ended the turn* even where the loop had more to do.
+        See where it is read below.
         """
         target: InboxTarget = "next-turn"
         try:
@@ -357,10 +367,11 @@ class ReactLoopAgent:
                     turn_ends = TurnEndReason(kind="blocked")
                     return False
                 if not decision.messages and (turn_ends is not None or phase.step == 0):
-                    # Emptied by its pre-step, so it opens no step and consumes what
-                    # it was proposed with. On the first step — a removed waking
-                    # message, an `enter` rewritten to empty — it still owns the
-                    # turn boundary it opened; it just spends no model call.
+                    # The pre-step emptied the batch, so it opens no step and
+                    # consumes what it was proposed with. On the first step (a
+                    # waking message that was removed, an `enter` that was
+                    # rewritten to empty) it still owns the turn boundary that
+                    # it opened. It only spends no model call.
                     self.inbox.take(decision.held, turn)
                     if turn_ends is not None:
                         break
@@ -377,12 +388,12 @@ class ReactLoopAgent:
                 try:
                     assert decision.assembly is not None
                     step_end = await self._step(decision.assembly)
-                    # **The outcome is sticky; the stopping is not.** A step that
-                    # hit `max_tokens` must still be reported as such at the end
-                    # of the turn, however the turn actually finishes — but a
-                    # `None` here means "tools ran, there is more to do", and
-                    # holding the earlier reason for it ended the turn with a
-                    # `tool/result` the model never saw. The two were one
+                    # **The outcome is sticky. The stopping is not.** A step
+                    # that hit `max_tokens` must still be reported as such at
+                    # the end of the turn, however the turn finishes. But a
+                    # `None` here means "tools ran, there is more to do".
+                    # Holding the earlier reason over it ended the turn with a
+                    # `tool/result` that the model never saw. The two were one
                     # variable, so the sticky answer was also the deciding one.
                     capped = capped or (step_end is not None and step_end.kind == "max-tokens")
                     turn_ends = step_end
@@ -400,19 +411,20 @@ class ReactLoopAgent:
             turn_ends = _aborted(error, phase.cause)
             raise
         except Exception as error:
-            # A harness error's own code rather than `UNKNOWN`, because that is
-            # what `HarnessError` is for: *"a failure's routing matters as much as
-            # its message — retry policy, the sandbox layer and replay all branch
-            # on the code"*. Flattening every one of them here made `turn/end`
-            # unable to say which failure it was, in the record a client reads to
-            # decide whether retrying could possibly help.
+            # The failure keeps the code of a harness error and does not become
+            # `UNKNOWN`. That is the purpose of `HarnessError`: the routing of
+            # a failure matters as much as its message, because retry policy,
+            # the sandbox layer and replay all branch on the code. When every
+            # error was flattened here, `turn/end` could not say which failure
+            # it was, in the record that a client reads to decide whether a
+            # retry could possibly help.
             failure = error.failure if isinstance(error, LlmError) else _as_failure(error)
             turn_ends = TurnEndReason(kind="error", error=failure)
             self._report(error)
             raise
         except BaseException as error:
-            # A stop from outside, a cancelled scope, an interrupt or an exit,
-            # recorded as the loop's own are.
+            # A stop from outside, a canceled scope, an interrupt or an exit.
+            # Each is recorded as the stops of the loop itself are.
             turn_ends = _aborted(error, phase.cause)
             raise
         finally:
@@ -435,15 +447,17 @@ class ReactLoopAgent:
         self._throw_if_canceled()
         system = render_prompt(assembly)
 
-        # **Which attempt this is, because a retried step keeps its coordinates**
-        # (G12). That is deliberate — `llm/retry` is legible in the log because
-        # of it — but it leaves `(turn, step)` naming a *step* where a model
-        # *call* is what needs the name. Two attempts minted the same tool-call
-        # ids and `recorded_steps` had to infer the boundary between them.
+        # **Which attempt this is, because a retried step keeps its
+        # coordinates** (G12). That is deliberate, because it makes `llm/retry`
+        # readable in the log. But it leaves `(turn, step)` naming a *step*
+        # where a model *call* is what needs the name. Two attempts created the
+        # same tool-call ids, and `recorded_steps` had to infer the boundary
+        # between them.
         #
-        # **Counted here because this is the only place every retry passes**,
-        # by the row that asked (G13): the attempt is the total, and a policy's
-        # budget is its own share or the total as it chooses.
+        # **The count is here because this is the only place that every retry
+        # passes**, and it is kept by the row that asked (G13). The attempt is
+        # the total. The budget of a policy is its own share or the total, as
+        # the policy chooses.
         retries: Counter[str] = Counter()
         attempt = 0
         while True:
@@ -455,15 +469,15 @@ class ReactLoopAgent:
                 self._throw_if_canceled()
                 async for chunk in stream:
                     self._throw_if_canceled()
-                    # **Named before it is logged** (G11): a tool call the
+                    # **Named before it is logged** (G11). A tool call that the
                     # provider did not name gets its id here, so the raw record
-                    # and the assembled message agree about it. This is the only
-                    # consumer that pairs a call to a result, and the only one
-                    # holding the coordinates the id is built from.
+                    # and the assembled message agree about it. This is the
+                    # only consumer that pairs a call to a result, and the only
+                    # one that holds the coordinates that the id is built from.
                     chunk = named_call(chunk, turn, step, attempt)
-                    # Raw chunks are logged before assembly, so the log carries
-                    # token-level replay fidelity even for a stream that later
-                    # fails.
+                    # Raw chunks are logged before assembly. The log therefore
+                    # has token-level replay fidelity even for a stream that
+                    # fails later.
                     chunk_seqs.append(
                         _LOG.append(
                             self.session,
@@ -471,9 +485,9 @@ class ReactLoopAgent:
                             {
                                 "turn": turn,
                                 "step": step,
-                                # The call's own coordinate, so `recorded_steps`
-                                # reads the boundary between two attempts rather
-                                # than inferring it (G12).
+                                # The coordinate of the call itself, so that
+                                # `recorded_steps` reads the boundary between
+                                # two attempts and does not infer it (G12).
                                 "attempt": attempt,
                                 "chunk": chunk.to_wire(),
                             },
@@ -484,9 +498,9 @@ class ReactLoopAgent:
             except Canceled:
                 content = assembler.interrupted_blocks()
                 if content:
-                    # An interrupted turn still finalizes what the user saw:
-                    # dropping it would leave the transcript claiming the model
-                    # said nothing.
+                    # An interrupted turn still finalizes what the user saw.
+                    # Dropping it would leave a transcript that claims the
+                    # model said nothing.
                     self._append_assistant_message(
                         turn, step, request, content, chunk_seqs, assembler.usage, interrupted=True
                     )
@@ -504,20 +518,22 @@ class ReactLoopAgent:
                 attempt = retries.total()
                 if action.granted is not None:
                     action.granted()
-                # The loop's own record of the call it is about to make again,
-                # beside `step/start` for the first one (P1): the log's answer
-                # to "how many model calls", whichever row asked for the retry.
-                # `llm/retry` is `llm-retry`'s account of itself and a compaction
-                # retry writes none, so a ceiling counting those undercounts.
+                # The record that the loop itself keeps of the call that it is
+                # about to make again, beside `step/start` for the first call
+                # (P1). It is the answer of the log to "how many model calls",
+                # whichever row asked for the retry. `llm/retry` is the account
+                # that `llm-retry` gives of itself, and a compaction retry
+                # writes none, so a ceiling that counts those records
+                # undercounts.
                 _LOG.append(
                     self.session,
                     "step/retry",
                     {"turn": turn, "step": step, "attempt": attempt, "by": by},
                 )
-                # **The wait is the loop's**, after the waterfall has settled: a
-                # row that slept inside it answered only after a later veto
-                # could no longer save the time, and a gate had to run *ahead*
-                # of it to refuse at all (P1 review).
+                # **The loop does the waiting**, after the waterfall has
+                # settled. A row that slept inside the waterfall answered only
+                # after a later veto could no longer save the time, and a gate
+                # had to run *ahead* of that row to refuse at all (P1 review).
                 if action.delay_ms > 0:
                     await anyio.sleep(action.delay_ms / 1000)
                     self._throw_if_canceled()
@@ -526,7 +542,7 @@ class ReactLoopAgent:
             blocks = assembler.blocks()
             self._append_assistant_message(turn, step, request, blocks, chunk_seqs, assembler.usage)
             if finish.kind == "max-tokens":
-                # Sticky, and checked before dispatch: max-tokens already
+                # Sticky, and checked before dispatch. `max-tokens` already
                 # dropped any truncated tool call, so there is nothing to run.
                 return TurnEndReason(kind="max-tokens")
             tool_calls = [block for block in blocks if isinstance(block, ToolCallBlock)]
@@ -537,11 +553,11 @@ class ReactLoopAgent:
     async def _dispatch_tools(
         self, turn: int, step: int, tool_calls: list[ToolCallBlock]
     ) -> TurnEndReason | None:
-        """Run the step's tool batch; `None` continues the turn with another step.
+        """Run the tool batch of the step. `None` continues the turn with another step.
 
-        Result context is spliced into the next-step inbox rather than appended
-        here, so it lands *after* every `tool/result` and call/result adjacency
-        survives.
+        Result context is spliced into the next-step inbox and not appended
+        here. It therefore lands *after* every `tool/result`, and each call
+        stays adjacent to its result.
         """
         outcome = await execute_tool_calls(
             self.ctx,
@@ -566,11 +582,11 @@ class ReactLoopAgent:
         request: GenerateOptions,
         finish: FinishReason,
     ) -> tuple[RequestErrorAction | None, str]:
-        """The chain's answer, and the row whose listener gave it.
+        """The answer of the chain, and the row whose listener gave it.
 
-        Attributed by cordis rather than claimed on the action (G13): the retry
-        is counted under the plugin that granted it, which a row could otherwise
-        misname and which cordis already knows.
+        Cordis attributes the answer, and the action does not claim it (G13).
+        The retry is counted under the plugin that granted it. A row could
+        misname that plugin, and cordis already knows it.
         """
 
         async def inner(request_failure: RequestFailure) -> RequestErrorAction | None:
@@ -618,10 +634,10 @@ class ReactLoopAgent:
     async def _build_request(
         self, turn: int, step: int, assembly: PromptAssembly, system: str
     ) -> GenerateOptions:
-        """Compose one frozen request and log its header when it changed.
+        """Compose one frozen request, and log its header when the header changed.
 
-        The message list is `session.derive_messages()` and nothing else — the
-        invariant plugin will refuse the request otherwise.
+        The message list is `session.derive_messages()` and nothing else. The
+        invariant plugin refuses the request otherwise.
         """
         session = self.session
         persisted = session.request_header()
@@ -646,12 +662,14 @@ class ReactLoopAgent:
                 "and AgentOptions.model, or supply both via the agent/request waterfall"
             )
 
-        # What the route cannot carry is withheld before the header is logged, so the
-        # header says what was sent and, under `withheld`, what was asked and not.
+        # What the route cannot carry is withheld before the header is logged.
+        # The header therefore says what was sent and, under `withheld`, what
+        # was asked for and not sent.
         llm = self.ctx.require(LLM)
         resolved = llm.resolve_model(proposed.provider, proposed.model)
-        # What each effort sends on the route sent, wherever the waterfall moved it, by
-        # the session's own list; the entry these options came from first.
+        # What each effort sends on the route that is sent, wherever the
+        # waterfall moved it, according to the list of the session itself. The
+        # entry that these options came from is looked up first.
         listed = self.ctx.get(MODELS)
         efforts = (
             listed.efforts_for(proposed.provider, proposed.model, key=self.options.model_key)
@@ -677,8 +695,9 @@ class ReactLoopAgent:
             self._request_header_logged = True
         elif baseline is None or not header_equals(baseline, header):
             _LOG.append(session, "request/header", {"header": header.to_wire(), "reason": "change"})
-        # Cleared once the route is in the log, not when it was read: a request
-        # canceled in the waterfall would otherwise take the reroute with it.
+        # The flag is cleared when the route is in the log, and not when it was
+        # read. Otherwise a request that was canceled in the waterfall would
+        # take the reroute with it.
         self._rerouted = False
 
         request_context = RequestContext(
@@ -688,8 +707,9 @@ class ReactLoopAgent:
             _LOG.append(session, "request/context", request_context.to_wire())
         self._throw_if_canceled()
 
-        # What was not withheld is unset, `default` or an effort the route defines, and
-        # `default` is no key of `efforts` (`ModelRoute`): it sends none.
+        # An effort that was not withheld is unset, `default`, or an effort that
+        # the route defines. `default` is not a key of `efforts` (`ModelRoute`),
+        # so it sends no fields.
         effort = header.config.reasoning_effort
         return GenerateOptions(
             provider=header.config.provider,
@@ -706,10 +726,11 @@ class ReactLoopAgent:
 
 
 def _request_proposal(header: EpochHeader) -> LlmCallConfig:
-    """The config the last request was asked with, for plugins to propose the next from:
-    what was sent, and what was withheld asked for again. Whether a route carries a
-    setting is its answer at the time, so a profile that learns to carry one sends it
-    without a person setting it twice.
+    """The config that the last request was asked with, for plugins to propose the
+    next one from. It is what was sent, with what was withheld asked for again.
+    Whether a route carries a setting is the answer of the route at that time. A
+    profile that learns to carry a setting therefore sends it, and the user does
+    not have to set it twice.
     """
     return header.config.asking(header.withheld) if header.withheld else header.config
 
@@ -733,20 +754,23 @@ def _error_chain(error: BaseException) -> str:
 def _aborted(stop: BaseException, cause: AgentCancelCause | None) -> TurnEndReason:
     """What a stop ends a turn as: `aborted`, whatever a step had decided (C9).
 
-    A step may already have decided how the turn ends when the stop lands: while
-    `agent/turn-stopping` runs, or in a step a steer added. `_turn` records every
-    stop by catching `BaseException`, not `anyio.get_cancelled_exc_class()`, which
-    misses the `BaseExceptionGroup` an anyio task group raises around one, and
-    `KeyboardInterrupt`, and `SystemExit`.
+    A step may already have decided how the turn ends when the stop lands:
+    while `agent/turn-stopping` runs, or in a step that a steer added. `_turn`
+    records every stop by catching `BaseException`. It does not catch
+    `anyio.get_cancelled_exc_class()`, because that misses the
+    `BaseExceptionGroup` that an anyio task group raises around a cancel, and
+    it misses `KeyboardInterrupt` and `SystemExit`.
 
-    **The cause is the one the loop's own `cancel` was told, or none.** A stop
-    from outside has an author the loop cannot see: a person's Ctrl-C and a host's
-    shutdown reach it as the same cancel. It said `user`, which a shutdown is not,
-    and now names nobody, as repair's `interrupted` closer does. What the loop has
-    instead is what the stop said of itself (`reason_of`), kept as the `detail`. A
-    stop sent straight to the loop's token is one of these, and its reason is the
-    detail. A host that wants its reason on record gives it to `cancel`, or to the
-    scope it cancels, as `until_signaled` does with the signal's name.
+    **The cause is the one that the `cancel` of the loop was told, or none.** A
+    stop from outside has an author that the loop cannot see: the Ctrl-C of a
+    user and the shutdown of a host reach the loop as the same cancel. The loop
+    used to record `user`, which a shutdown is not. It now names nobody, as the
+    `interrupted` closer of repair does. What the loop has in its place is what
+    the stop said of itself (`reason_of`), and that is kept as the `detail`. A
+    stop that is sent straight to the token of the loop is one of these, and
+    its reason is the detail. A host that wants its reason on record gives it
+    to `cancel`, or to the scope that it cancels, as `until_signaled` does with
+    the name of the signal.
     """
     if cause is not None:
         return TurnEndReason(kind="aborted", reason=cause)
@@ -756,22 +780,23 @@ def _aborted(stop: BaseException, cause: AgentCancelCause | None) -> TurnEndReas
 def _turn_reason(ends: TurnEndReason | None, capped: bool) -> TurnEndReason:
     """What `turn/end` records, given how the loop left and what it passed through.
 
-    **A cap is not erased by finishing.** A step that hit `max_tokens` cut the
-    model off, and the turn may then have carried on — a steer, a tool call,
-    another step — and ended tidily. Reporting that as `completed` tells the
-    person their answer is whole when part of it was dropped, so `max-tokens`
-    outranks the two endings that mean "nothing went wrong".
+    **Finishing does not erase a cap.** A step that hit `max_tokens` cut the
+    model off. The turn may then have continued (a steer, a tool call, another
+    step) and ended cleanly. Reporting that as `completed` tells the user that
+    their answer is whole when part of it was dropped. So `max-tokens` outranks
+    `completed`, the ending that means "nothing went wrong".
 
-    It does not outrank the three that say more: `aborted`, `blocked` and
-    `error` each name something the reader has to act on, and a cap somewhere in
-    the turn is the smaller fact beside them.
+    It does not outrank the endings that say more. `aborted`, `blocked` and
+    `error` each name something that the reader has to act on, and a cap
+    somewhere in the turn is the smaller fact beside them.
 
-    **No ending reads as `aborted`, never `completed`** (C9). Every exit from
-    `_turn` assigns one first — both `break`s are guarded by `turn_ends is not
-    None`, both `return` paths set it, and every raise is caught — so `None` is a
-    path nobody wrote yet. It used to read as `completed`, and a turn that
-    finished nothing told the resume path there was no open turn to repair and a
-    reader a story the run did not have.
+    **No ending reads as `aborted`, never as `completed`** (C9). Every exit from
+    `_turn` assigns an ending first: both `break`s are guarded by
+    `turn_ends is not None`, both `return` paths set it, and every raise is
+    caught. `None` is therefore a path that nobody has written yet. It used to
+    read as `completed`. A turn that finished nothing then told the resume path
+    that there was no open turn to repair, and told a reader a story that the
+    run did not have.
     """
     if ends is None:
         return TurnEndReason(kind="aborted")
@@ -781,13 +806,14 @@ def _turn_reason(ends: TurnEndReason | None, capped: bool) -> TurnEndReason:
 
 
 def _as_failure(error: Exception) -> LlmFailure:
-    """A raised error as a turn's `reason.error`, keeping its code if it has one.
+    """A raised error as the `reason.error` of a turn. It keeps its code if it has one.
 
-    A harness error's own code rather than `UNKNOWN`, because that is what
-    `HarnessError` is for: *"a failure's routing matters as much as its message —
-    retry policy, the sandbox layer and replay all branch on the code"*. Flattening
-    every one of them left `turn/end` unable to say which failure it was, in the
-    record a client reads to decide whether retrying could possibly help.
+    The failure keeps the code of a harness error and does not become
+    `UNKNOWN`. That is the purpose of `HarnessError`: the routing of a failure
+    matters as much as its message, because retry policy, the sandbox layer and
+    replay all branch on the code. When every error was flattened, `turn/end`
+    could not say which failure it was, in the record that a client reads to
+    decide whether a retry could possibly help.
     """
     coded = error_info(error)
     return LlmFailure(

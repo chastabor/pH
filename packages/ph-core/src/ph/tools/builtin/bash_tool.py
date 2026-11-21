@@ -1,11 +1,11 @@
-"""`tool-bash` — run a command, honestly labeled.
+"""`tool-bash`: run a command, with a description that says what the tool is.
 
-The description matters as much as the code. A model told "run a shell command"
-will reach for `cat` and `sed` over `read` and `edit`, and every one of those
-calls escapes the filesystem gates that make `edit` reviewable. So the
-description points back at the specific tools, which is the only lever a
-registry-side design has over model behavior (C1's "make the registered path
-the convenient path").
+The description matters as much as the code. A model that is told "run a shell
+command" uses `cat` and `sed` in place of `read` and `edit`. Each of those calls
+escapes the filesystem gates that make `edit` reviewable. So the description
+points back at the specific tools. That is the only lever that a registry-side
+design has over the behavior of the model (C1: "make the registered path the
+convenient path").
 
 @module ph.tools.builtin.bash_tool
 """
@@ -29,11 +29,11 @@ from ..presentation import ToolCallView, ToolResultView
 __all__ = ["apply"]
 
 TIMED_OUT = "[ph: timed out; the command was killed and this is what it had printed]"
-"""What a caller's `timeout_ms` looks like to whoever reads the result.
+"""How the `timeout_ms` of a caller appears to the reader of the result.
 
-Shared with `!!` through `ph_app.shell`, for the reason the truncation sentence
-is: two renderings of one event is what `shell_body`'s docstring already promises
-not to do."""
+`!!` shares this text through `ph_app.shell`, for the same reason that it shares
+the truncation sentence. The docstring of `shell_body` already promises that one
+event does not get two renderings."""
 
 DESCRIPTION = """Run a shell command and return its output.
 
@@ -59,7 +59,7 @@ class BashValue(ToolModel):
     stderr: str
     confined_by: str | None = None
     dropped: int = 0
-    """Bytes past the seam's cap that nobody kept (P7-13)."""
+    """The bytes past the cap of the seam that nobody kept (P7-13)."""
     cap: int = 0
     timed_out: bool = False
 
@@ -73,9 +73,10 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
     if value["timed_out"]:
         parts.append(TIMED_OUT)
     if value["dropped"]:
-        # `truncation_marker`, not a wording of its own: the RLM kernel and the
-        # guest runner already say this sentence for the same event, and a reader
-        # comparing a transcript to a log must not find two of them (D4).
+        # `truncation_marker` is used, and not a wording of this tool. The RLM
+        # kernel and the guest runner already say this sentence for the same
+        # event, and a reader who compares a transcript with a log must not find
+        # two sentences (D4).
         parts.append(truncation_marker(value["dropped"], value["cap"]).strip())
     if value["exit_code"] != 0:
         parts.append(f"[exit {value['exit_code']}]")
@@ -87,27 +88,27 @@ async def apply(ctx: Context, config: None) -> None:
     """Register the bash tool."""
 
     async def run_command(args: BashArgs, run: ToolRunContext) -> dict[str, Any]:
-        # The agent, not a directory: `ctx.shell` resolves the cwd and the
-        # workspace environment from it, so this tool states who is running
-        # rather than re-deriving where (D21, E2).
+        # The tool passes the agent and not a directory. `ctx.shell` resolves
+        # the cwd and the workspace environment from the agent, so this tool
+        # states who is running and does not derive again where (D21, E2).
         result = await ctx.require(SHELL).run(
             args.command,
             agent=run.agent,
             timeout_ms=args.timeout_ms,
-            # **The call's own cancellation, handed down** (C7). Nothing between
-            # the pipeline and the child was watching it, so a command with no
-            # `timeout_ms` ran to completion however loudly it was interrupted —
-            # and `tools/timeout`'s child token, which exists to narrow exactly
-            # this, had nowhere to arrive.
+            # **The cancellation of the call itself, passed down** (C7). Nothing
+            # between the pipeline and the child watched it before. A command
+            # with no `timeout_ms` therefore ran to completion, whatever
+            # interrupted it. The child token of `tools-timeout` exists to
+            # narrow exactly this, and it had nowhere to arrive.
             signal=run.signal,
         )
         if result.canceled:
-            # **The pipeline's own word for this** (N3). The child was killed
-            # because somebody pressed stop, and returning a value would report
-            # whatever exit code the kill produced as the command's own —
-            # `[exit -15]` rendered to the model as a command that failed.
+            # **The pipeline has its own class for this** (N3). The child was
+            # killed because somebody pressed stop. A returned value would
+            # report the exit code of the kill as the exit code of the command:
+            # `[exit -15]`, rendered to the model as a command that failed.
             # `registry._failure` maps `Canceled` to `aborted_result`, which is
-            # the vocabulary the rest of the loop already reads.
+            # the vocabulary that the rest of the loop already reads.
             raise Canceled(f"{args.command!r} was canceled")
         return {
             "command": args.command,
@@ -127,7 +128,7 @@ async def apply(ctx: Context, config: None) -> None:
             parameters=BashArgs,
             output=ToolOutput(schema=BashValue, render=_render),
             execute=run_command,
-            # A shell command reaches past the tree by construction; `/revert`
+            # A shell command reaches past the tree by construction. `/revert`
             # restores the worktree, not the world.
             is_irreversible=True,
             present_call=lambda args: ToolCallView(

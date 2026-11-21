@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from ph.tools.json_schema import (
     SUPPORTED_KEYWORDS,
+    object_schema_problems,
     schema_of,
     unsupported_keywords,
     validate_json_schema_value,
@@ -142,6 +143,29 @@ def test_an_unchecked_keyword_inside_an_alternative_is_reported() -> None:
     schema = {"anyOf": [{"type": "string", "format": "email"}, {"type": "null"}]}
 
     assert unsupported_keywords(schema) == {"format"}
+
+
+def test_a_pattern_that_python_cannot_compile_is_reported() -> None:
+    """A pattern that `re` refuses is skipped, so it is reported and not assumed.
+
+    A JSON Schema pattern is an ECMA 262 expression. `\\p{L}` is valid there and
+    is an error in `re`. The validator cannot hold a value to it, and a schema
+    that pH did not author is refused for that (`object_schema_problems`). A
+    pattern that compiles is enforced and is not reported.
+
+    Sabotage: drop the `_compiles` check from `unsupported_keywords`, and the
+    schema below is accepted while `"123"` passes as a word.
+    """
+    unchecked = {"type": "object", "properties": {"word": {"type": "string", "pattern": "\\p{L}+"}}}
+    checked = {"type": "object", "properties": {"word": {"type": "string", "pattern": "^[a-z]+$"}}}
+
+    assert _violations(unchecked, {"word": "123"}) == [], "the validator skips the pattern"
+    assert unsupported_keywords(unchecked) == {"pattern"}
+    assert object_schema_problems(unchecked) == ["it uses keywords pH does not check: pattern"]
+
+    assert unsupported_keywords(checked) == set()
+    assert object_schema_problems(checked) == []
+    assert _violations(checked, {"word": "123"}) != []
 
 
 def test_a_type_nobody_has_heard_of_leaves_the_value_alone() -> None:

@@ -87,7 +87,13 @@ from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret, wire_error_finish
-from ._media import forget_named_handle, load_handles, load_media, media_pointer
+from ._media import (
+    forget_named_handle,
+    load_handles,
+    load_media,
+    media_pointer,
+    referenced_mimes,
+)
 
 __all__ = ["GoogleAdapter", "apply"]
 
@@ -235,10 +241,13 @@ class Config(WireModel):
     accepts: tuple[str, ...] = ACCEPTED_MEDIA
     """The MIME types that this route takes as message content (P7-01)."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
-    """The largest attachment that this route sends, in bytes. The
+    """The largest attachment that this route sends inline, in bytes. The
     `media-degrade` row replaces a larger attachment with a text pointer before
-    the request reaches this adapter. The default is 20 MiB, because this
-    provider limits a whole request to 20 MB."""
+    the request reaches this adapter. A type listed in `uploads` is not held to
+    this limit, because it goes by reference. When its upload gives no file,
+    the adapter sends it inline if it is under this limit, and as a text
+    pointer if it is over. The default is 20 MiB, because this provider limits
+    a whole request to 20 MB."""
     uploads: tuple[str, ...] = UPLOADED_MEDIA
     """The MIME types that this route sends by reference through the Files API (P7-03)."""
     upload_ready_ms: int = UPLOAD_READY_MS
@@ -511,7 +520,12 @@ class GoogleAdapter:
             mimes=frozenset(self.config.uploads),
             session_id=options.session_id,
         )
-        media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
+        media = await load_media(
+            self.ctx.get(ATTACHMENTS),
+            options.messages,
+            skip=handles.keys(),
+            inline_limit=self.config.max_attachment_bytes,
+        )
         names: dict[str, str] = {}
         contents: list[dict[str, Any]] = []
         for message in options.messages:
@@ -593,6 +607,7 @@ class GoogleAdapter:
             credential=self.config.api_key_env,
             sampling=frozenset(SAMPLING_WIRE),
             max_decision_tokens=None,
+            uploads=referenced_mimes(self.ctx, self.config.uploads),
         )
 
 
@@ -701,8 +716,9 @@ def _media_part(
 
     The function is total over its own vocabulary, like every sibling renderer.
     The vocabulary of this wire is already unusually complete: `inlineData` takes
-    any MIME that the route accepts. So the only way to the pointer is a blob
-    that could not be read, which is the race that `media_pointer` exists for.
+    any MIME that the route accepts. So the only ways to the pointer are the
+    two that `media_pointer` names: a blob that could not be read, and a file
+    that has no uploaded handle and is over the inline limit.
     """
     handle = handles.get(attachment.attachment_id)
     if handle is not None:

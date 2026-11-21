@@ -96,6 +96,13 @@ pointer with a logged `attachment/degraded` notice, never a silent drop and neve
 a hard failure: a session begun on a vision model and resumed on a text one must
 still open.
 
+The byte ceiling is the ceiling of an *inline* block. A type that the route
+sends by reference ([`ctx.uploads`](uploads.md), `ResolvedModel.uploads`) passes
+`media-degrade` at any size, because a file API takes what a request cannot. The
+adapter then decides: it references the uploaded file, and when the upload gives
+no handle it sends the file inline if it fits under the ceiling and a text
+pointer if it does not.
+
 ## Collection
 
 `phern attachments gc` folds **every** stored session for referenced digests. Three

@@ -1,16 +1,16 @@
-"""`ctx.system_prompt` — four registration kinds, one assembly.
+"""`ctx.system_prompt`: four kinds of registration, one assembly.
 
-The split that matters is **section vs context** (A12):
+The split that matters is **section and context** (A12):
 
-* a `section` is static and part of the cached prefix;
-* a `context()` is dynamic but cache-safe — it is materialized as a durable
-  user-role `snapshot` message placed *after* retained history, and only when
-  its text changed.
+* A `section` is static and is part of the cached prefix.
+* A `context()` is dynamic but cache-safe. It is materialized as a durable
+  user-role `snapshot` message that is placed *after* retained history, and only
+  when its text changed.
 
-That is how time, workspace state and goal context reach the model without
-busting the prefix on every turn. A plugin that puts changing text in a
-`section` silently doubles the bill; the two names exist so it does not have to
-find that out from an invoice.
+That is how the time, the workspace state and the goal context reach the model
+without a change to the prefix on every turn. A plugin that puts changing text
+in a `section` silently doubles the bill. The two names exist so that the author
+of a plugin does not have to learn that from an invoice.
 
 @module ph.system_prompt.assembly
 """
@@ -69,32 +69,35 @@ __all__ = [
 _VARIABLE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}")
 
 PromptText: TypeAlias = "str | Callable[[AssembleContext], MaybeAwaitable[str]]"
-"""A section's body: literal text, or a provider given the whole request.
+"""The body of a section: literal text, or a provider that is given the whole
+request.
 
-The **request**, not just the scope: a section that needs the agent — the RLM
-child doctrine, which applies only below depth 0 — would otherwise have to
-recover it from `scope.get(AGENT)`, which means a bundle in another package
-knowing how `ph.agent.registry` provisions it, and silently rendering nothing
-whenever an assembly runs outside an agent scope. `AssembleContext` already
-carries both; handing it over costs one parameter.
+The provider gets the **request**, and not only the scope. A section may need
+the agent: the RLM child doctrine applies only below depth 0. With only the
+scope, such a section would have to recover the agent from `scope.get(AGENT)`.
+A bundle in another package would then have to know how `ph.agent.registry`
+provisions the agent, and the section would silently render nothing whenever an
+assembly runs outside an agent scope. `AssembleContext` already carries both,
+and to pass it costs one parameter.
 
-The provider may be async. `assemble` is already a coroutine, and a section that
-has to ask a seam a question — Code Mode listing the namespaces a program can
-actually reach, a workspace section naming the tier it actually got — would
-otherwise have to answer it somewhere that cannot await, which in practice means
-answering it from a stale copy.
+The provider may be async. `assemble` is already a coroutine. A section may have
+to ask a seam a question: Code Mode lists the namespaces that a program can
+actually reach, and a workspace section names the tier that it actually got.
+Such a section would otherwise have to answer somewhere that cannot await, which
+in practice means an answer from a stale copy.
 
-One consequence to know: `assemble` now yields to the event loop between
-sections, so the render is no longer atomic — a registration landing mid-await
-can produce a prompt mixing two registry generations. Providers are pure
-projections of current state, so this is benign today; a provider that is not
+One consequence: `assemble` now yields to the event loop between sections, so
+the render is no longer atomic. A registration that lands during an await can
+produce a prompt that mixes two generations of the registry. Providers are pure
+projections of current state, so this is harmless today. A provider that is not
 pure is wrong for a deeper reason than atomicity."""
 
 ORDER_HARNESS_IDENTITY = -100
 ORDER_DEPLOYMENT_PERSONA = 0
 ORDER_PLAN_POLICY = 50
 ORDER_TOOL_GUIDANCE = 100
-"""The ordering convention, stated once so rows do not invent their own."""
+"""The ordering convention, stated in one place so that rows do not invent their
+own."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +108,8 @@ class PromptSection:
     text: PromptText
     order: int = ORDER_DEPLOYMENT_PERSONA
     complete: bool = False
-    """When true this section is the *sole* prompt — everything else is dropped."""
+    """When true, this section is the *sole* prompt and everything else is
+    dropped."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,29 +126,30 @@ class AssembleContext:
     """What assembly is being run for."""
 
     scope: Context
-    """The **resolved** boundary this prompt is being assembled for.
+    """The **resolved** boundary that this prompt is assembled for.
 
-    A `Context`, never a `Boundary` — this payload is what a *provider* receives,
-    not what a caller states. `assemble` takes the `Boundary` and narrows it
-    once, so a provider is handed a real scope and `PromptText`'s documented
-    `scope.get(AGENT)` shape type-checks. Typed `Boundary` it did not: mypy
-    reported `Item "Deployment" … has no attribute "get"` against the very
-    pattern that alias's own docstring holds up as the thing a provider writes.
+    The type is `Context`, never `Boundary`. This payload is what a *provider*
+    receives, not what a caller states. `assemble` takes the `Boundary` and
+    narrows it one time. A provider therefore gets a real scope, and the
+    `scope.get(AGENT)` shape that `PromptText` documents type-checks. When the
+    field was typed `Boundary`, it did not: mypy reported
+    `Item "Deployment" … has no attribute "get"` against the pattern that the
+    docstring of that alias gives as what a provider writes.
 
-    The same split the tools pipeline makes, and for the same reason:
-    `ToolExecutionInput.scope` is a `Boundary` because a caller builds it;
-    `ToolExecution.scope` is a `Context` because the pipeline hands it on. Input
-    states, downstream carries."""
+    The tools pipeline makes the same split for the same reason.
+    `ToolExecutionInput.scope` is a `Boundary` because a caller builds it.
+    `ToolExecution.scope` is a `Context` because the pipeline passes it on. The
+    input states the boundary, and everything downstream carries the scope."""
     agent: AgentHandle | None = None
 
     @property
     def session(self) -> Session | None:
-        """The session behind the agent, when there is an agent at all.
+        """The session behind the agent, when there is an agent.
 
-        Two optionals, one question. Five readers across three packages each
-        spelled `request.agent.session if request.agent is not None else None`,
-        which is the derivation — not the fact — repeated. `CommandContext` pairs
-        the two the same way.
+        Two optionals answer one question. Five readers across three packages
+        each wrote `request.agent.session if request.agent is not None else None`.
+        That repeats the derivation and not the fact. `CommandContext` pairs the
+        two in the same way.
         """
         return self.agent.session if self.agent is not None else None
 
@@ -182,25 +187,29 @@ def join_context_sections(sections: list[ContextSnapshotSection]) -> str:
 
 
 CONTEXT_PLUGIN = "ph.system-prompt"
-"""The name a context snapshot carries — written and read here, and nowhere else."""
+"""The name that a context snapshot carries. It is written and read in this
+module and nowhere else."""
 
 
 def context_message(assembly: PromptAssembly, shown: Sequence[Message]) -> Message | None:
-    """The `context()` providers as a message, or `None` when `shown` already has them.
+    """The `context()` providers as a message, or `None` when `shown` already has
+    them.
 
-    This is the whole reason `context()` exists separately from `section`:
-    re-sending unchanged context on every step would invalidate the cached
-    prefix each turn (A12).
+    This is the reason that `context()` exists apart from `section`. To send
+    unchanged context again on every step would invalidate the cached prefix on
+    each turn (A12).
 
-    **"Already has" is read from `shown` — the conversation the model is sent —
-    not held** (C12). A snapshot kept by the caller was a promise that the model
-    had been told, and every route around delivery broke it: a rejected step
-    (C3), a cancel before the append, a resume starting with nothing, a
-    compaction that shadowed the message. Here a step that never logged its
-    message re-sends it, and a summary that shadowed it brings it back.
+    **"Already has" is read from `shown`, the conversation that the model is
+    sent. It is not held by the caller** (C12). A snapshot that the caller kept
+    was a promise that the model had been told, and every route around delivery
+    broke the promise: a rejected step (C3), a cancel before the append, a
+    resume that starts with nothing, and a compaction that shadowed the message.
+    Here, a step that never logged its message sends it again, and a summary
+    that shadowed the message brings it back.
 
-    Beside `render_context_sections` because the tag is this module's: the one
-    that writes a snapshot is the one that knows how to find it again.
+    The function is beside `render_context_sections` because the tag belongs to
+    this module. The module that writes a snapshot is the module that knows how
+    to find it again.
     """
     sections = render_context_sections(assembly)
     if not sections:
@@ -215,9 +224,9 @@ def context_message(assembly: PromptAssembly, shown: Sequence[Message]) -> Messa
 
 
 def is_context_snapshot(message: Message) -> bool:
-    """Whether `message` is a context snapshot this module wrote — the one question
-    another package may ask about `CONTEXT_PLUGIN`, answered here so the name stays
-    written and read in this module alone."""
+    """Whether `message` is a context snapshot that this module wrote. This is
+    the one question that another package may ask about `CONTEXT_PLUGIN`. It is
+    answered here so that the name stays written and read in this module alone."""
     source = message.source
     return (
         isinstance(source, PluginSource)
@@ -227,7 +236,8 @@ def is_context_snapshot(message: Message) -> bool:
 
 
 def _shown_context(shown: Sequence[Message]) -> str | None:
-    """The newest snapshot's text in `shown`, or `None` — a later one supersedes it."""
+    """The text of the newest snapshot in `shown`, or `None`. A later snapshot
+    supersedes an earlier one."""
     for message in reversed(shown):
         if is_context_snapshot(message):
             return text_of(message.content)
@@ -235,19 +245,21 @@ def _shown_context(shown: Sequence[Message]) -> str | None:
 
 
 ToolsProvider: TypeAlias = "Callable[[Context], list[ToolSchema]]"
-"""What `SystemPromptService.tools` contributes. Named so the bucket holding it
-can say so — an unnamed `Callable[...]` inside a `list[_Registration[...]]` is
-the point at which a reader stops reading the type."""
+"""What `SystemPromptService.tools` contributes. It has a name so that the
+bucket that holds it can say so. An unnamed `Callable[...]` inside a
+`list[_Registration[...]]` is the point at which a reader stops reading the
+type."""
 
 _Variable: TypeAlias = "tuple[str, Callable[[], str]]"
-"""What `SystemPromptService.variable` contributes: the name and its provider,
-paired at registration so the bucket holds one thing per registration.
+"""What `SystemPromptService.variable` contributes: the name and its provider.
+They are paired at registration, so that the bucket holds one thing for each
+registration.
 
-Underscored, unlike `ToolsProvider` beside it, because nothing outside this
-module names it — `variable(name, provider)` takes the two apart and only the
-bucket ever sees them paired. A `PromptSection | PromptContext` union got no
-alias at all for the same reason one step further: it had a single use site and
-reads in place."""
+The name has an underscore, unlike `ToolsProvider` beside it, because nothing
+outside this module names it. `variable(name, provider)` takes the two apart,
+and only the bucket ever sees them paired. A `PromptSection | PromptContext`
+union got no alias for the same reason, one step further: it had a single use
+site and is readable in place."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,29 +267,29 @@ class _Registration[T]:
     value: T
     """The contribution itself.
 
-    **Parameterized rather than `Any`** — the buckets below are four different
-    kinds and this is the one type standing in for all of them, so `Any` meant
-    `assemble`'s `entry.value.order`, `.name`, `.text` and `.complete` all
-    type-checked as nothing. It cost nothing while `_visible` returned the bare
-    values and the loops read `section.name`, because that was `Any` too; it
-    started costing when P6-29 made the *registration* the unit every consumer
-    handles, which is exactly when the field became load-bearing at four call
-    sites instead of zero.
+    **The type is a parameter and not `Any`.** The buckets below hold four
+    different kinds, and this one type stands in for all of them. With `Any`,
+    the `entry.value.order`, `.name`, `.text` and `.complete` of `assemble` were
+    not type-checked at all. That cost nothing while `_visible` returned the
+    bare values and the loops read `section.name`, because that was `Any` too.
+    It started to cost when P6-29 made the *registration* the unit that every
+    consumer handles. At that point the field became load-bearing at four call
+    sites, where before it was at none.
 
-    Frozen, so the parameter infers covariant and `_Registration[PromptSection]`
-    satisfies the `_Registration[PromptSection | PromptContext]` that `resolve`
-    takes."""
+    The class is frozen, so the parameter is inferred as covariant, and
+    `_Registration[PromptSection]` satisfies the
+    `_Registration[PromptSection | PromptContext]` that `resolve` takes."""
     by: Running
     """Both answers, kept together (P6-29).
 
-    P6-12 found the two questions fused here and in four sibling registries, and
-    split them: `by.layer` is what `_visible`'s `reaches` filters on, `by.owner`
-    is what the disposer hangs from. This field held only the first, under the
-    name `visible_to`, which was honest but incomplete — the owner was resolved
-    and spent in the same expression and never kept, so when P6-29 came to bind
-    a section's body as the row that wrote it, the answer was gone. Keeping the
-    pair is what lets a contribution be *invoked* correctly rather than only
-    filtered and released correctly."""
+    P6-12 found the two questions fused here and in four sibling registries,
+    and split them. `by.layer` is what the `reaches` test of `_visible` filters
+    on, and `by.owner` is what the disposer hangs from. This field used to hold
+    only the first, under the name `visible_to`. That name was accurate but
+    incomplete. The owner was resolved and used in the same expression and
+    never kept. So when P6-29 came to bind the body of a section as the row that
+    wrote it, the answer was gone. Because the pair is kept, a contribution can
+    be *invoked* correctly, and not only filtered and released correctly."""
 
 
 @dataclass(slots=True)
@@ -293,26 +305,31 @@ class SystemPromptService:
     def _register[T](
         self, bucket: list[_Registration[T]], scope: Context | None, value: T
     ) -> Disposer:
-        """Contribute to a bucket, and hand back the disposer that withdraws it.
+        """Contribute to a bucket, and return the disposer that withdraws the
+        contribution.
 
         **Two contexts, because the owner answers two questions** (P6-12).
-        `_Registration.owner` feeds `_visible`'s `reaches` — *who sees this section* —
-        while `add_disposer` decides *when it goes away*. Spelling both as
-        `scope or self.ctx` made a row's section outlive the row.
+        `_Registration.by.layer` feeds the `reaches` test of `_visible`: *who
+        sees this section*. `by.owner` takes the disposer (`add_disposer`),
+        which decides *when the section goes away*. When both were written as
+        `scope or self.ctx`, a section of a row outlived the row.
 
-        **Both are kept, not just spent** (P6-29). Four of this file's buckets hold a
-        *body* — a section's `text`, a context's, a variable's provider, a tool provider —
-        which `assemble` invokes later, and binding needs the owner at invoke time, which
-        means recording it here rather than resolving it and dropping it.
+        **Both are kept, and not only used** (P6-29). All four buckets of this
+        file hold a *body*: the `text` of a section, the `text` of a context,
+        the provider of a variable, and a tool provider. `assemble` invokes the
+        body later, and the binding needs the owner at that time. So the owner
+        is recorded here, and not resolved and dropped.
 
-        The visibility target is unchanged and the lifetime is the activating row's. For a
-        globally mounted row the two agree anyway, and keeping them separate is what makes
-        that true by construction rather than by inspection.
+        The visibility target is unchanged, and the lifetime is the lifetime of
+        the activating row. For a globally mounted row the two agree anyway.
+        Because they are kept separate, that is true by construction and not by
+        inspection.
 
-        Through `claim_entry` rather than a hand-rolled `bucket.remove`, and it is
-        **required rather than tidier**: `@dataclass(slots=True)` defaults to `eq=True`,
-        so `_Registration` compares by *value*, and two rows contributing an equal section
-        would have one disposal take the other's.
+        The entry goes through `claim_entry` and not through a hand-written
+        `bucket.remove`, and that is **required and not only tidier**.
+        `@dataclass(slots=True)` defaults to `eq=True`, so `_Registration`
+        compares by *value*. With `bucket.remove`, when two rows contribute an
+        equal section, one disposal would take the entry of the other.
         """
         by = self.ctx.running_for(scope)
         entry = _Registration(value=value, by=by)
@@ -327,9 +344,9 @@ class SystemPromptService:
     def tools(self, provider: ToolsProvider, *, scope: Context | None = None) -> Disposer:
         """Contribute tool schemas.
 
-        The provider receives the *target* scope, because what a tool set
-        contains is a per-agent question: a restriction or a scoped
-        registration changes the answer (B7).
+        The provider receives the *target* scope, because the content of a tool
+        set is a question for each agent: a restriction or a scoped registration
+        changes the answer (B7).
         """
         return self._register(self._tools, scope, provider)
 
@@ -342,12 +359,13 @@ class SystemPromptService:
         self, bucket: list[_Registration[T]], target: Context
     ) -> list[_Registration[T]]:
         # One visibility rule, shared with event dispatch: a global
-        # registration reaches every agent, an agent-scoped one reaches that
-        # agent alone. Ordering within a bucket stays registration order, which
-        # the `order` field then sorts.
+        # registration reaches every agent, and an agent-scoped registration
+        # reaches that agent alone. The order within a bucket stays the
+        # registration order, and the `order` field then sorts it.
         #
-        # Returns the *registrations*, not their values: every consumer below
-        # invokes the value as a body, and needs `by.owner` to bind it (P6-29).
+        # The method returns the *registrations*, not their values. Every
+        # consumer below invokes the value as a body, and needs `by.owner` to
+        # bind it (P6-29).
         return [entry for entry in bucket if entry.by.layer.reaches(target)]
 
     async def assemble(
@@ -355,22 +373,24 @@ class SystemPromptService:
     ) -> PromptAssembly:
         """Collect, order, interpolate, then run the assemble waterfall.
 
-        **The boundary is a parameter and the payload is built here** — the one narrowing
-        point, as `ToolRuntime._execution` is for a tool call. A caller states a
-        `Boundary`, possibly `DEPLOYMENT`; a provider reads a real `Context`. One object
-        plays one role, and it is the narrowed one, so a `system-prompt/assemble` listener
-        and a `PromptSection.text` cannot see two different scopes for one assembly.
+        **The boundary is a parameter, and the payload is built here.** This is
+        the one narrowing point, as `ToolRuntime._execution` is for a tool call.
+        A caller states a `Boundary`, possibly `DEPLOYMENT`, and a provider
+        reads a real `Context`. One object has one role, and it is the narrowed
+        one. A `system-prompt/assemble` listener and a `PromptSection.text`
+        therefore cannot see two different scopes for one assembly.
         """
         request = AssembleContext(scope=boundary_of(scope, self.ctx), agent=agent)
         target = request.scope
 
         # **Every body below runs as the row that contributed it, for the scope
-        # being assembled** (P6-29). Four buckets, four bodies, and all four ran
-        # unbound: a variable provider, a section's `text`, a context's, a tool
-        # provider. They are the same category as a tool's `execute` — a row's
-        # code a registry invokes — and they are the four P6-26 could not reach
-        # while the binding held one `Context`, because `target` here is the
-        # *layer* and the owner is still whoever registered.
+        # that is being assembled** (P6-29). There are four buckets and four
+        # bodies: a variable provider, the `text` of a section, the `text` of a
+        # context, and a tool provider. All four ran unbound. They are the same
+        # category as the `execute` of a tool: code of a row that a registry
+        # invokes. P6-26 could not reach these four while the binding held one
+        # `Context`, because `target` here is the *layer*, and the owner is
+        # still whoever registered.
         variables: dict[str, str] = {}
         for variable in self._visible(self._variables, target):
             name, read = variable.value
@@ -378,14 +398,15 @@ class SystemPromptService:
                 variables[name] = read()
 
         async def resolve(entry: _Registration[PromptSection | PromptContext]) -> str:
-            # The registration, not two projections of it: `resolve(a.value.text,
-            # b.by.owner)` was silently valid, which is the mis-pairing the pair
-            # exists to prevent, reintroduced one function down (P6-29).
+            # The registration is passed, not two projections of it.
+            # `resolve(a.value.text, b.by.owner)` was silently valid. That is
+            # the wrong pairing that the pair exists to prevent, and it came
+            # back one function down (P6-29).
             text: PromptText = entry.value.text
             with running(entry.by, target):
                 raw = await maybe_await(text(request)) if callable(text) else text
-            # Interpolation is this seam's own work, not the row's, so it is
-            # deliberately outside the binding.
+            # Interpolation is the work of this seam and not of the row, so it
+            # is deliberately outside the binding.
             return _VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), raw)
 
         sections = sorted(
@@ -393,10 +414,11 @@ class SystemPromptService:
             key=lambda one: (one.value.order, one.value.name),
         )
         complete = next((one for one in sections if one.value.complete), None)
-        # Empty means absent, decided here rather than in each renderer: a
-        # section opts out per-assembly by returning "" — the only mechanism that
-        # can answer a per-agent question, since a row registers once — and a
-        # consumer enumerating section names should not see the ones that did.
+        # Empty means absent, and that is decided here and not in each renderer.
+        # A section opts out of one assembly by returning "". That is the only
+        # mechanism that can answer a question for each agent, because a row
+        # registers one time. A consumer that enumerates section names must not
+        # see the sections that opted out.
         rendered: tuple[tuple[str, str], ...]
         if complete is not None:
             rendered = ((complete.value.name, await resolve(complete)),)

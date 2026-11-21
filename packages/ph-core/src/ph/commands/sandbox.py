@@ -1,30 +1,33 @@
-"""`/sandbox` — see what a confined command may reach, and change it without a restart.
+"""`/sandbox`: see what a confined command may reach, and change it without a restart.
 
-The human half of `sandbox-allow`. A refused boundary lands in the transcript as a
-`sandbox/denied` notice that names this command and the line that lifts it; this
-is where that line goes. It shows the posture in force — backend, network mode,
-hosts, extra directories, the refusals this session — and edits the allowances.
+This command is the human side of `sandbox-allow`. A refused boundary appears in
+the transcript as a `sandbox/denied` notice. The notice names this command and
+the line that lifts the refusal, and this command is where that line goes. The
+command shows the posture in force: the backend, the network mode, the hosts,
+the extra directories, and the refusals of this session. It also edits the
+allowances.
 
-**An edit is an override of this session's environment** (session profiles, S4),
-made through the one door, `ph.session_profile.override`: a `profile/override`
-record is written to the session's log and the log written, and only then is the
-`sandbox-allow` row re-applied with the new config — which releases one slot on the
-seam and fills it again: no provider swapped, no probe rerun, no proxy restarted,
-and the agent whose command is running notices nothing until its next command is
-bounded by the new statement. A change whose record cannot be written is not made.
-The next start of this session puts it back from the log; it used to be a drop-in
-beside the profile, which applied to every session on that profile at once.
+**An edit is an override of the environment of this session** (session profiles,
+S4). It goes through one function, `ph.session_profile.override`. A
+`profile/override` record is appended to the log of the session and the log is
+written. Only then is the `sandbox-allow` row applied again with the new config.
+That releases one slot on the seam and fills it again. No provider is swapped,
+no probe runs again and no proxy restarts. The agent whose command is running
+notices nothing until the new statement bounds its next command. A change whose
+record cannot be written is not made. The next start of this session applies the
+change again from the log. An edit used to be a drop-in beside the profile,
+which applied to every session on that profile at once.
 
-**Refuses `/`**, and only that. Allowing the root directory is `danger-full-access`
-spelled to look like an allowlist. Everything narrower is the user's call — the
-row's docstring says what belongs there and what it costs.
+**The command refuses `/`.** To allow the root directory is
+`danger-full-access` written to look like an allowlist. Every narrower
+directory that exists is the decision of the user. The docstring of the row
+says what belongs there and what it costs.
 
 @module ph.commands.sandbox
 """
 
 from __future__ import annotations
 
-import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -44,11 +47,10 @@ from ..text import count_of
 
 __all__ = ["apply"]
 
-log = logging.getLogger("ph.commands.sandbox")
 
 ROW_NAME = "sandbox-allow"
-"""The row this command edits — found by *name*, because a profile addresses rows
-by id and the id is the profile's to choose."""
+"""The row that this command edits. The command finds it by *name*, because a
+profile addresses rows by id and the profile chooses the id."""
 
 USAGE = (
     "usage: /sandbox [allow host <host[:port]> | allow path <dir> | "
@@ -57,8 +59,9 @@ USAGE = (
 HINT = USAGE.removeprefix("usage: /sandbox ")
 
 _HOST = re.compile(r"^(\*\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*(:\d{1,5})?$")
-"""What `allow host` accepts: a host, optionally `*.`-prefixed, optionally `:port`.
-No scheme and no path — those are what people paste, and the proxy matches hosts."""
+"""What `allow host` accepts: a host, with an optional `*.` prefix and an optional
+`:port`. It accepts no scheme and no path. People paste those, but the proxy
+matches hosts."""
 
 
 def _denials_in(session: Session) -> tuple[SessionEvent, ...]:
@@ -67,37 +70,40 @@ def _denials_in(session: Session) -> tuple[SessionEvent, ...]:
 
 
 def denial_count(session: Session) -> int:
-    """How many boundaries this log records being refused — a fold.
+    """The number of refused boundaries that this log records. This is a fold.
 
-    Named, rather than the lambda it was, for the reason every sibling seam names
-    its fold: a fold nobody can import is one nobody can hold to the laws
-    `SessionFoldCache` requires of it and cannot itself check.
+    It was a lambda, and it now has a name for the reason that every sibling
+    seam names its fold. Nobody can import an unnamed fold, so nobody can test
+    it against the laws that `SessionFoldCache` requires of it and cannot check
+    itself.
     """
     return len(_denials_in(session))
 
 
 def extend_denial_count(previous: int, session: Session, from_seq: int) -> int:
-    """`denial_count`, resumed from an already-counted prefix.
+    """`denial_count`, continued from a prefix that is already counted.
 
-    A refusal is rare and `session.seq` moves on every chunk, so the cache misses
-    on nearly every read while a model streams; counting the new slice is what
-    makes the miss cost nothing.
+    A refusal is rare and `session.seq` moves on every chunk, so the cache
+    misses on nearly every read while a model streams. Because only the new
+    slice is counted, the miss costs nothing.
     """
     return previous + sum(1 for event in session.events_from(from_seq) if event.type == DENIED)
 
 
 class _Refused(Exception):
-    """A refusal raised where it has to escape a caller — the `/workspaces` idiom."""
+    """A refusal that is raised where it must escape a caller. This is the
+    `/workspaces` idiom."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Sandbox:
-    """One dispatch's view of the sandbox posture."""
+    """The view that one dispatch has of the sandbox posture."""
 
     ctx: Context
     session: Session | None
     line: str
-    """The command as it was typed — what an override record says asked."""
+    """The command as it was typed. An override record stores it as what asked
+    for the change."""
 
     # -------------------------------------------------------------- reading --
 
@@ -112,9 +118,10 @@ class _Sandbox:
             lines.append(
                 f"confinement: {type(seam.provider).__name__} (enforces {seam.enforcement})"
             )
-        # `describe` is the row's own rendering, which `phern doctor` prints — and
-        # which its docstring already claimed this command shared. It did not: this
-        # re-derived the same three rows and had drifted on the empty-host wording.
+        # `describe` is the rendering of the row itself, which `phern doctor`
+        # prints. Its docstring already claimed that this command shared it. The
+        # command did not: it derived the same three rows again, and its wording
+        # for an empty host list had drifted.
         lines += [f"{label}: {value}" for label, value in describe(seam)]
         if self.session is not None:
             denied = _denials_in(self.session)
@@ -127,15 +134,16 @@ class _Sandbox:
     # -------------------------------------------------------------- editing --
 
     async def edit(self, rest: str, *, adding: bool) -> str:
-        """`allow`/`revoke`, which differ by a verb and a set operation and nothing else.
+        """`allow` and `revoke`, which differ by a verb and a set operation and by
+        nothing else.
 
-        **One path through validation, for both directions**, which is the point of
-        writing it once: `allow host` normalized through `_valid_host` (which
-        lowercases) while `revoke host` compared the raw argument, so
-        `/sandbox allow host GitHub.com` stored `github.com` and
-        `/sandbox revoke host GitHub.com` answered that it was never on the list.
-        Whether an entry is normalized is a property of the *kind* of entry, and now
-        it is spelled once per kind.
+        **One path through validation serves both directions.** That is the
+        reason to write it one time. Before, `allow host` normalized through
+        `_valid_host`, which lowercases, and `revoke host` compared the raw
+        argument. So `/sandbox allow host GitHub.com` stored `github.com`, and
+        `/sandbox revoke host GitHub.com` answered that it was never on the
+        list. Whether an entry is normalized is a property of the *kind* of
+        entry, and it is now written one time for each kind.
         """
         kind, _, value = rest.strip().partition(" ")
         entry = _KINDS.get(kind)
@@ -150,10 +158,11 @@ class _Sandbox:
         )
 
     async def network(self, mode: str) -> str:
-        # Through `NETWORK_MODES`, so a fourth `NetworkMode` cannot be accepted
-        # by the config model and silently refused here — the idiom
-        # `resolve_mode` already uses. Its narrowing is what retired the
-        # `type: ignore[assignment]` this had; `literal_lookup` says why.
+        # The mode is read through `NETWORK_MODES`, so the config model cannot
+        # accept a fourth `NetworkMode` that this command silently refuses.
+        # `resolve_mode` already uses this idiom. The narrowing of the lookup
+        # removed the `type: ignore[assignment]` that this had, and
+        # `literal_lookup` says why.
         chosen = NETWORK_MODES.get(mode)
         if chosen is None:
             return USAGE
@@ -168,7 +177,7 @@ class _Sandbox:
     async def _change(
         self, mutate: Callable[[Allowances], Allowances], said: str, unchanged: str
     ) -> str:
-        """Make an edit an override of this session — recorded, then applied."""
+        """Make an edit an override of this session: recorded first, then applied."""
         row = self._row()
         current = self.ctx.require(SANDBOX).allowances or Allowances()
         updated = mutate(current)
@@ -206,10 +215,10 @@ class _Sandbox:
 
 @dataclass(frozen=True, slots=True)
 class _Kind:
-    """One thing `/sandbox allow` and `/sandbox revoke` can name.
+    """One thing that `/sandbox allow` and `/sandbox revoke` can name.
 
-    A table rather than four branches, so validation, reading and writing are each
-    stated once per kind and both directions are obliged to share them.
+    This is a table and not four branches. Validation, reading and writing are
+    each stated one time for each kind, and both directions must share them.
     """
 
     validate: Callable[[str], str]
@@ -220,8 +229,9 @@ class _Kind:
 
 
 def _with(entries: list[str], entry: str, adding: bool) -> list[str]:
-    """`entries` with `entry` added or removed. Unchanged when there is nothing to
-    do, so `_change` sees no change and says so rather than rewriting the file."""
+    """`entries` with `entry` added or removed. The list is returned unchanged
+    when there is nothing to do. `_change` then sees no change and says so, and
+    does not record an override."""
     if adding:
         return entries if entry in entries else [*entries, entry]
     return [one for one in entries if one != entry]
@@ -276,7 +286,8 @@ _KINDS: dict[str, _Kind] = {
 
 @dataclass(slots=True)
 class _Denials:
-    """The footer's count of refusals, folded at most once per appended event."""
+    """The count of refusals for the footer, folded at most one time for each
+    appended event."""
 
     cache: SessionFoldCache[int] = field(
         default_factory=lambda: SessionFoldCache(denial_count, extend=extend_denial_count)
@@ -328,11 +339,11 @@ async def apply(ctx: Context, config: None) -> None:
         StatusField(id="sandbox", read=denials.reading, order=12),
         label="sandbox(status)",
     )
-    # The lightest of the six folds and still worth polling: this number is the
-    # footer's account of how much the sandbox refused, and a count that drifted
-    # down is the reassuring direction to drift. Declared, the count also goes with
-    # its session, and the footer drawn once more for a session that has gone files
-    # nothing.
+    # This is the lightest of the folds that declare a cache, and it is still
+    # worth polling. The number is the account in the footer of how much the
+    # sandbox refused, and a count that drifts down drifts in the reassuring
+    # direction. The declared count also goes with its session, and a footer
+    # that is drawn one more time for a session that has gone files no entry.
     contribute_fold_cache(
         ctx, id="sandbox-fold-cache", subject="sandbox refusal count", stale=denials.cache.stale
     )

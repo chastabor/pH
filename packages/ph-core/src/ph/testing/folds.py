@@ -1,42 +1,48 @@
-"""Checking that a fold is a fold: the laws `SessionFoldCache` cannot enforce.
+"""Checks that a fold is a fold: the laws that `SessionFoldCache` cannot enforce.
 
-`ph.session.folds` states the contract a cached fold must meet — a pure fold of
-the prefix, whose `extend` from any prefix equals the cold fold — and says
-plainly that nothing there can check it. This is where it is checked: ahead of
-time, from the process that built the log, which is the one place the whole log
-and every prefix of it are both to hand.
+`ph.session.folds` states the contract that a cached fold must meet. The fold
+is a pure fold of the prefix, and its `extend` from any prefix equals the cold
+fold. That module also says that nothing in it can check the contract ahead of
+time. This module does check it ahead of time, from the process that built the
+log. Only that process holds both the whole log and every prefix of it.
 
-The laws are the ones LangGraph's `DeltaChannel` asks of its reducers, in pH's
-shape. That channel requires a reducer to be *deterministic* and
-*batching-invariant*:
+The laws are the ones that the `DeltaChannel` of LangGraph asks of its
+reducers, in the shape of pH. That channel requires a reducer to be
+*deterministic* and *batching-invariant*:
 
     reducer(reducer(state, xs), ys) == reducer(state, xs + ys)
 
-and, like `folds.py`, enforces neither. Here both are run, over every sampled
-prefix of a real log:
+Like `folds.py`, the channel enforces neither law. This module runs both, over
+every sampled prefix of a real log:
 
-* **Determinism.** Two folds of one log agree, and the fold of a replica built
-  by admitting the same events agrees with them: the fold depends on the events
-  and the header, not on anything else the `Session` object happens to hold.
-* **No side effects.** The fold leaves the log the length it found it, and makes
-  no call that reads the clock, the filesystem or a random source. That last is
-  a profiler's view of C calls, so it is a *heuristic*: it catches the common
-  impurities by name and cannot prove their absence — an environment read, say,
-  never reaches a C function it knows.
-* **Batching invariance.** With `extend`: from every sampled prefix, extending
-  to every later prefix equals folding that prefix cold; walking the prefixes
-  one step at a time — what the cache does when it is read after every append —
-  never leaves the cold fold; and extending over an empty slice changes nothing.
-  The first step that diverges is named with its event type, because that event
-  is the one the two paths handle differently.
+* **Determinism.** Two folds of one log agree. The fold of a replica that was
+  built by admitting the same events agrees with them too. So the fold depends
+  on the events and the header, and on nothing else that the `Session` object
+  holds.
+* **No side effects.** The fold leaves the log at the length that it found. It
+  also makes no call that reads the clock, the filesystem or a random source.
+  That second check is the view that a profiler has of C calls, so it is a
+  *heuristic*. It catches the common impurities by name and cannot prove their
+  absence. For example, an environment read never reaches a C function that the
+  check knows.
+* **Batching invariance.** With `extend`, three things hold:
 
-Prefixes start at `first_live_seq` unless told otherwise: a cache holds no entry
-from before its session existed, so a prefix shorter than the constructor's seed
-is one it can never be asked to extend from.
+  - From every sampled prefix, extending to every later prefix equals folding
+    the later prefix cold.
+  - Walking the prefixes one step at a time never leaves the cold fold. The
+    cache does this when it is read after every append.
+  - Extending over an empty slice changes nothing.
 
-A finding is a sentence. `check_fold_laws` returns them, `assert_fold_laws`
-raises with all of them, and `VerifyingFoldCache` is a cache that checks each
-answer at the moment a running service reads it.
+  The first step that diverges is named with its event type, because the two
+  paths handle that event differently.
+
+Prefixes start at `first_live_seq` unless the caller says otherwise. A cache
+holds no entry from before its session existed. So a cache is never asked to
+extend from a prefix that is shorter than the seed of the constructor.
+
+A finding is a sentence. `check_fold_laws` returns the findings.
+`assert_fold_laws` raises with all of them. `VerifyingFoldCache` is a cache
+that checks each answer at the moment when a running service reads it.
 
 @module ph.testing.folds
 """
@@ -54,11 +60,11 @@ from ..session import Session, SessionFoldCache
 __all__ = ["VerifyingFoldCache", "assert_fold_laws", "check_fold_laws", "prefix_of"]
 
 _MAX_DEFAULT_SPLITS = 64
-"""Above this many live events, prefixes are sampled evenly rather than taken all.
+"""Above this number of live events, the prefixes are sampled evenly and not all taken.
 
-Every pair of sampled prefixes is folded, so the pair count is quadratic in the
-sample and the work cubic in the log; a test log of a few hundred events stays
-under a second, a real log would not.
+Every pair of sampled prefixes is folded. So the pair count is quadratic in the
+sample, and the work is cubic in the log. A test log of a few hundred events
+stays under a second. A real log would not.
 """
 
 _PRINTER = reprlib.Repr()
@@ -67,10 +73,11 @@ _PRINTER.maxother = 160
 """How a finding renders a folded value: bounded, and never built in full first."""
 
 
-# C functions whose call inside a fold means it read something other than the log,
-# keyed the way the profiler reports one: module and qualified name, the module
-# `None` for a method of a built-in type. `posix` and `nt` are `os`'s two faces,
-# both listed so the check means the same thing on either platform.
+# C functions whose call inside a fold means that the fold read something other
+# than the log. The key is what the profiler reports: the module and the
+# qualified name. The module is `None` for a method of a built-in type. `posix`
+# and `nt` are the two platform modules behind `os`. Both are listed so that the
+# check means the same thing on either platform.
 _CLOCK = (
     "time",
     "time_ns",
@@ -100,15 +107,16 @@ _IMPURE: dict[tuple[str | None, str], str] = {
 
 
 def prefix_of(session: Session, length: int) -> Session:
-    """This log's first `length` events as a `Session` of their own.
+    """The first `length` events of this log, as a `Session` of their own.
 
-    Through `admit`, which keeps every event as it was — seq, time, payload — and
-    takes a prefix that ends inside a batch, which the seed path refuses as a torn
-    write. The header rides along, because `seed_length` is part of what some
-    folds read.
+    The events go through `admit`, which keeps every event as it was (seq,
+    time, payload). `admit` also accepts a prefix that ends inside a batch,
+    which the seed path refuses as a torn write. The header is copied too,
+    because some folds read `seed_length`.
 
-    :raises ValueError: when the log holds a type this build does not know and
-        cannot ignore — the seed path's rule, which `admit` shares.
+    :raises ValueError: when the log holds a type that this build does not know
+        and cannot ignore. This is the rule of the seed path, which `admit`
+        shares.
     """
     prefix = Session(session.id, header=session.header)
     for event in session.events[:length]:
@@ -123,16 +131,18 @@ def check_fold_laws[T](
     *,
     start: int | None = None,
 ) -> list[str]:
-    """Every way `compute` and `extend` fail to be a pure fold of this log.
+    """Every way in which `compute` and `extend` fail to be a pure fold of this log.
 
     `compute` and `extend` are what a `SessionFoldCache` is built from, in the
-    shapes it calls them: `compute(log)` and `extend(previous, log, from_seq)`.
-    The prefixes folded run from `start` to the end of the log, every one of them
-    until the log is long and then evenly sampled. `start` defaults to
-    `session.first_live_seq`, the earliest seq a cache could have been read at.
+    shapes in which the cache calls them: `compute(log)` and
+    `extend(previous, log, from_seq)`. The folded prefixes run from `start` to
+    the end of the log. Every prefix is taken until the log is long, and then
+    the prefixes are sampled evenly. `start` defaults to
+    `session.first_live_seq`, the earliest seq at which a cache could have been
+    read.
 
-    Empty means every law held over the prefixes tried — never that the fold is
-    pure, which no finite check establishes.
+    An empty list means that every law held over the prefixes that were tried.
+    It never means that the fold is pure, which no finite check establishes.
     """
     findings: list[str] = []
     first = session.first_live_seq if start is None else start
@@ -140,7 +150,8 @@ def check_fold_laws[T](
     prefixes = {k: prefix_of(session, k) for k in points}
 
     # A fold that grows the log has failed before any other law can be read.
-    # Built before the guard because `prefix_of` only admits — it folds nothing.
+    # The prefixes are built before this guard because `prefix_of` only admits.
+    # It folds nothing.
     before = session.seq
     once = compute(session)
     if extend is not None:
@@ -191,19 +202,20 @@ def _batching_findings[T](
 ) -> list[str]:
     """The `extend` laws: resume from anywhere, walk step by step, extend by nothing.
 
-    `compute` is called afresh for every extension rather than once per prefix,
-    because an `extend` is allowed to fold in place — `extend_goals` does — and a
-    value handed to it twice would carry the first extension into the second.
-    Measured against the alternatives: reusing one cold value per prefix reports
-    26 false findings of 55 on the goal log, and deep-copying it instead is 2.3x
-    slower than folding afresh.
+    `compute` is called again for every extension, and not one time per prefix.
+    An `extend` may fold in place, as `extend_goals` does, and a value that was
+    handed to it twice would carry the first extension into the second. The
+    alternatives were measured. Reusing one cold value per prefix reports 26
+    false findings of 55 on the goal log. Deep-copying the value is 2.3x slower
+    than folding again.
     """
     findings: list[str] = []
     points = list(prefixes)
     cold = {k: compute(prefixes[k]) for k in points}
 
-    # Counted rather than collected: only the first disagreement is quoted, and a
-    # thoroughly broken fold would otherwise retain one folded value per pair.
+    # The disagreements are counted and not collected. Only the first one is
+    # quoted, and a thoroughly broken fold would otherwise retain one folded
+    # value per pair.
     disagreements = 0
     worst: tuple[int, int, T] | None = None
     for i, j in combinations(points, 2):
@@ -258,12 +270,13 @@ def assert_fold_laws[T](
 class VerifyingFoldCache[T](SessionFoldCache[T]):
     """A `SessionFoldCache` that checks every answer against the cold fold.
 
-    For a test that drives a real service over a real log: hand the service this
-    in place of its cache and every `read` becomes a check of the contract at the
-    moment the process actually reads it — including the one failure the law
-    checker cannot see, a *reader* that mutated the value it was handed and so
-    poisoned the entry for the next reader. The cold fold on every read is the
-    cost the cache exists to avoid, which is why this is a test double.
+    It is for a test that drives a real service over a real log. Give the
+    service this cache in place of its own. Every `read` then checks the
+    contract at the moment when the process reads the value. That includes the
+    one failure that the law checker cannot see: a *reader* that mutated the
+    value it was given, and so corrupted the entry for the next reader. A cold
+    fold on every read is the cost that the cache exists to avoid, which is why
+    this class is a test double.
     """
 
     def read(self, session: Session) -> T:
@@ -281,11 +294,12 @@ class VerifyingFoldCache[T](SessionFoldCache[T]):
 
 
 def _points(first: int, length: int) -> list[int]:
-    """The prefix lengths to fold: every one up to the cap, evenly sampled past it.
+    """The prefix lengths to fold: every length up to the cap, an even sample past it.
 
-    Clamping the sample size to the span is what makes a short log take all of its
-    prefixes and a long one take `_MAX_DEFAULT_SPLITS` of them — the same
-    arithmetic either way. A span of zero folds the whole log and nothing else.
+    The sample size is clamped to the span. So a short log takes all of its
+    prefixes, and a long log takes `_MAX_DEFAULT_SPLITS` sampled lengths and
+    its full length, with the same arithmetic in both cases. A span of zero
+    folds the whole log and nothing else.
     """
     span = length - first
     steps = min(span, _MAX_DEFAULT_SPLITS)
@@ -293,7 +307,7 @@ def _points(first: int, length: int) -> list[int]:
 
 
 def _impure_calls(run: Callable[[], object]) -> list[str]:
-    """The impure C calls `run` makes, each named once, in the order first seen."""
+    """The impure C calls that `run` makes, each named one time, in the order first seen."""
     found: dict[str, None] = {}
 
     def hook(frame: FrameType, event: str, arg: object) -> None:
@@ -319,14 +333,14 @@ def _impure_calls(run: Callable[[], object]) -> list[str]:
 
 
 def _from_logging(frame: FrameType) -> bool:
-    """Whether a call was `logging`'s own — it stamps every record with the clock,
-    and a fold that logs is noisy, not impure."""
+    """Whether a call came from `logging` itself. `logging` stamps every record
+    with the clock, and a fold that logs is noisy, not impure."""
     name = frame.f_globals.get("__name__", "")
     return isinstance(name, str) and name.split(".")[0] == "logging"
 
 
 def _span(session: Session, start: int, stop: int) -> str:
-    """`seq 4 (turn/end)` for one event, a range and the first few types for more."""
+    """For one event, `seq 4 (turn/end)`. For more, a range and the first few types."""
     events = session.events[start:stop]
     if len(events) == 1:
         return f"seq {start} ({events[0].type})"
@@ -338,9 +352,10 @@ def _span(session: Session, start: int, stop: int) -> str:
 def _show(value: object) -> str:
     """A value, short enough to read in a finding.
 
-    Through `reprlib` rather than a slice of `repr`: the values folds produce are
-    whole rosters and harness states, and slicing renders all of one before
-    throwing most of it away. It also elides the middle of a long container
-    rather than its tail, so the two sides of a disagreement stay comparable.
+    The value is rendered through `reprlib` and not through a slice of `repr`.
+    Folds produce whole rosters and harness states, and a slice renders all of
+    a value before it discards most of it. `reprlib` also elides the middle of
+    a long container and not its tail, so the two sides of a disagreement stay
+    comparable.
     """
     return _PRINTER.repr(value)

@@ -1,9 +1,9 @@
-"""Reading one section out of `phern doctor`'s report.
+"""Reads one section from the report of `phern doctor`.
 
-`report()` returns `list[(title, rows)]` — a shape three test modules in three
-packages were unwrapping by hand, two of them raising a bare `KeyError` when a
-title changed rather than saying which sections did exist. One helper, so a
-renamed section fails with the list in the message.
+`report()` returns `list[(title, rows)]`. Three test modules in three packages
+unwrapped that shape by hand. When a title changed, two of them raised a bare
+`KeyError` and did not say which sections existed. With one helper, a renamed
+section fails with the list of sections in the message.
 
 @module ph.testing.diagnostics
 """

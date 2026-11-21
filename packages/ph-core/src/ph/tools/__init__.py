@@ -1,4 +1,4 @@
-"""`ph.tools` — the registry, the pipeline, and the batch scheduler."""
+"""`ph.tools`: the registry, the pipeline, and the batch scheduler."""
 
 from __future__ import annotations
 
@@ -51,17 +51,19 @@ from .presentation import CardKind, ToolCallView, ToolResultView, simple_views
 from .registry import RUN_CODE, PreparedCall, ToolGuard, ToolRestriction, ToolRuntime
 
 TOOL_DISPATCH_EVENT_TYPES = frozenset({"tool/call", "tool/code-dispatch-start"})
-"""The two records meaning "a tool was let through and is about to run".
+"""The two records that mean "a tool was let through and is about to run".
 
-One per transport: `batch._append_call` writes the first for a native call and
-`code_mode._log_start` writes the second for a dispatch inside a cell, both at
-the same point — after the pipeline decided, before the body ran (B4, P7-15).
-Anything counting *work attempted* wants both, and wanting only the first is how
-a Code Mode cell that read nine files and edited three scores as one (D12).
+There is one for each transport. `batch._append_call` writes the first for a
+native call, and `code_mode._log_start` writes the second for a dispatch inside
+a cell. Both are written at the same point: after the pipeline decided, and
+before the body ran (B4, P7-15). Anything that counts *work attempted* needs
+both. With only the first, a Code Mode cell that read nine files and edited
+three counts as one call (D12).
 
-Declared here, with the two producers, rather than in the packages that fold it:
-`ph_stabilize.limits` and `ph_stabilize.todo` had a copy each, and a third
-transport is added by somebody with no reason to know either file exists.
+The set is declared here, with the two producers, and not in the packages that
+fold it. `ph_stabilize.limits` and `ph_stabilize.todo` each had a copy, and
+somebody who adds a third transport has no reason to know that either file
+exists.
 """
 
 __all__ = [

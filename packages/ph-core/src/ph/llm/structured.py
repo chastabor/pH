@@ -1,27 +1,29 @@
-"""Asking a model for a *value* rather than prose (P7-17).
+"""Ask a model for a *value* and not for prose (P7-17).
 
-Some calls do not want a reply, they want a shape: `rlm-harness`'s review gate
-asks "should this conversation be refined, and why", and its planner asks for a
-list of edits. Both asked for JSON in the prompt and then hoped — `parse_json_object`'s
-own docstring conceded it, in as many words: *"return only JSON is an instruction
-and not a guarantee"*. It stripped fences, retried on a substring, and failed
+Some calls do not want a reply. They want a shape. The review gate of
+`rlm-harness` asks "should this conversation be refined, and why", and its
+planner asks for a list of edits. Both asked for JSON in the prompt and then
+relied on a tolerant parser, `parse_json_object`, which is now removed. The
+docstring of that parser admitted that an instruction to return only JSON is
+not a guarantee. The parser stripped fences, retried on a substring, and failed
 closed when the model wrote a sentence first.
 
-**Three things replace the hoping, and they are not the same thing.** The wire
-constrains where it can (`response_format`, and `ResolvedModel.structured_output`
-says whether this route does); the reply is *validated* against the schema
-whether or not the wire helped; and a reply that fails is sent back once with the
-specific violation named. The middle one is what makes this honest on a route
-with no wire support — Anthropic has no equivalent today, so there a caller gets
-the instruction, the validation and the retry, and not the guarantee.
+**Three separate things replace that reliance.** The wire constrains the reply
+where it can (`response_format`, and `ResolvedModel.structured_output` says
+whether this route does). The reply is *validated* against the schema whether
+or not the wire helped. And a reply that fails is sent back with the specific
+violation named. The second is what makes this correct on a route with no wire
+support. Anthropic has no equivalent today, so a caller there gets the
+instruction, the validation and the retry, and not the guarantee.
 
-**A schema that cannot constrain is warned about at the call, not discovered on
-the third identical retry.** A JSON-Schema-to-grammar converter needs a *type*
-for each field to build a real constraint, so `required` without a matching
-`properties` entry degrades to a near-unconstrained grammar: the model returns
-whatever shape it likes and every correction fails the same way. Ported from
-OpenMono's playbook executor, which documents the failure and warns at step
-start; the cost of not saying it is three model calls and an abort.
+**A schema that cannot constrain causes a warning at the call. It is not
+discovered on the third identical retry.** A converter from JSON Schema to a
+grammar needs a *type* for each field to build a real constraint. `required`
+without a matching `properties` entry therefore degrades to a grammar that
+constrains almost nothing: the model returns whatever shape it likes, and every
+correction fails in the same way. This is ported from the playbook executor of
+OpenMono, which documents the failure and warns at step start. Without the
+warning, the cost is three model calls and an abort.
 
 @module ph.llm.structured
 """
@@ -58,18 +60,20 @@ log = logging.getLogger("ph.llm.structured")
 ATTEMPTS = 3
 """How many times a reply may be asked for before the call gives up.
 
-One more than the *one* a constrained route needs: where the wire enforces the
-schema the correction is itself guaranteed valid, so a second attempt is already
-generous. The budget is for the routes that cannot, where a model writing a
-confirmation sentence instead of the document is the ordinary failure."""
+A route that enforces the schema gets one attempt fewer (`ask_for_shape`).
+Where the wire enforces the schema, the correction is itself guaranteed valid,
+so a second attempt is already generous. The full budget is for the routes that
+cannot enforce it. There, the ordinary failure is a model that writes a
+confirmation sentence in place of the document."""
 
 
 class SchemaViolation(Exception):
-    """A reply that is not the shape it was asked for, with what was wrong.
+    """A reply that is not the shape that was asked for, with what was wrong.
 
-    Carries the violations rather than a sentence, because the next thing that
-    happens to it is being read back to the model — "missing required field(s):
-    severity" is a correction it can act on, where "invalid response" is not.
+    The exception carries the violations and not one sentence, because the next
+    step is to read them back to the model. "missing required field(s):
+    severity" is a correction that the model can act on. "invalid response" is
+    not.
     """
 
     def __init__(self, violations: list[str]) -> None:
@@ -78,15 +82,18 @@ class SchemaViolation(Exception):
 
 
 def structural_warning(schema: dict[str, Any]) -> str | None:
-    """Why this schema may not constrain anything, said before it is used.
+    """Why this schema may not constrain anything, reported before the schema is used.
 
-    `required` naming a field that `properties` does not type is the one that
-    matters: it survives validation here — the field is present, so nothing
-    complains — while producing a grammar that constrains nothing on the wire.
-    A caller sees the same malformed answer three times and no reason.
+    The case that matters is `required` naming a field that `properties` does
+    not type. A reply to such a schema passes validation here: the field is
+    present, so nothing complains. But the schema produces a grammar that
+    constrains nothing on the wire. A caller sees the same malformed answer
+    three times and no reason.
 
-    Unreachable from a caller that passes a pydantic model, which is every caller
-    in this tree; it is here for the dict schemas a row may bring.
+    A caller that passes a pydantic model cannot reach this, and `ask_for_shape`
+    takes only a pydantic model. The warning is for a dict schema: the `output`
+    block of a skill (`ph.seams.skills`), and the output that a child is asked
+    for (`ph.seams.subagents`).
     """
     properties = schema.get("properties")
     required = schema.get("required")
@@ -105,23 +112,25 @@ def structural_warning(schema: dict[str, Any]) -> str | None:
 def _constrains(entry: object) -> bool:
     """Whether one `properties` entry says anything about its value (C11).
 
-    `CONSTRAINING_KEYWORDS` rather than `"type" in entry`, which was the test: an
-    optional field has no top-level `type`, because pydantic renders `str | None`
-    as an `anyOf` and a `Literal` as an `enum`. `required` is about *presence*,
-    not nullability, so a required-and-optional field is ordinary — and every
-    schema with one warned that its grammar would not constrain the reply. A
-    warning that fires on correct input is one people learn to scroll past,
-    which costs the case it was written for.
+    The test is `CONSTRAINING_KEYWORDS`. It was `"type" in entry`. An optional
+    field has no top-level `type`, because pydantic renders `str | None` as an
+    `anyOf` and a `Literal` as an `enum`. `required` is about *presence* and
+    not about nullability, so a field that is both required and optional is
+    ordinary. With the old test, every schema with such a field warned that its
+    grammar would not constrain the reply. People learn to ignore a warning
+    that fires on correct input, and the warning then fails in the case that it
+    was written for.
     """
     return isinstance(entry, dict) and any(key in entry for key in CONSTRAINING_KEYWORDS)
 
 
 def _object_in(text: str) -> JsonValue:
-    """The JSON value in a reply, tolerating a fence or a sentence around it.
+    """The JSON value in a reply. A fence or a sentence around it is tolerated.
 
-    Kept even where the wire enforces the schema, because "enforced" is a
-    property of the *route* and this runs on every route. It is a fallback now
-    rather than the whole mechanism, which is the difference P7-17 is about.
+    This is kept even where the wire enforces the schema, because "enforced" is
+    a property of the *route* and this function runs on every route. It is now
+    a fallback and not the whole mechanism. That is the difference that P7-17
+    is about.
     """
     for candidate in _candidates(text):
         try:
@@ -132,22 +141,24 @@ def _object_in(text: str) -> JsonValue:
 
 
 def _candidates(text: str) -> Iterator[str]:
-    """Spans of `text` that might be the document, widest first, lazily (C11).
+    """Spans of `text` that might be the document, widest first, produced lazily (C11).
 
-    Three readings, in the order they are likely and cheap:
+    There are three readings, in the order of how likely and how cheap they are:
 
-    * the whole reply, for a model that answered with nothing else;
-    * first `{` to last `}`, which is one object wrapped in prose or a fence;
-    * the first *complete* object, for a reply that holds two — `here it is:
-      {"a": 1} and also {"b": 2}` spans both under the second reading and parses
-      as neither, so the caller was told "the reply is not JSON" about a reply
-      that was mostly JSON.
+    * The whole reply, for a model that answered with nothing else.
+    * The first `{` to the last `}`, which is one object wrapped in prose or in
+      a fence.
+    * The first *complete* object, for a reply that holds two. `here it is:
+      {"a": 1} and also {"b": 2}` spans both objects under the second reading
+      and parses as neither. The caller was then told "the reply is not JSON"
+      about a reply that was mostly JSON.
 
-    **A generator, because the third costs a parse.** `raw_decode` scans at
-    ~32 ns/char, which is 628 µs on a 20 KB reply — paid on every attempt, and
-    `ask_for_shape` retries. Widest-first also matters on its own: one object
-    containing another is the common shape, and taking the inner one there would
-    return a fragment that validates against nothing.
+    **This is a generator, because the third reading costs a parse.**
+    `raw_decode` scans at ~32 ns/char, which is 628 µs on a 20 KB reply. That
+    cost would be paid on every attempt, and `ask_for_shape` retries.
+    Widest-first also matters by itself. One object that contains another is
+    the common shape, and taking the inner object there would return a fragment
+    that validates against nothing.
     """
     yield text.strip()
     start, end = text.find("{"), text.rfind("}")
@@ -165,14 +176,15 @@ def validated_shape[Shape: BaseModel](text: str, shape: type[Shape]) -> Shape: .
 @overload
 def validated_shape(text: str, shape: dict[str, Any]) -> JsonObject: ...
 def validated_shape(text: str, shape: type[BaseModel] | dict[str, Any]) -> BaseModel | JsonObject:
-    """The reply as a validated value, or `SchemaViolation` naming what is wrong.
+    """The reply as a validated value, or a `SchemaViolation` that names what is wrong.
 
-    `shape` is the same union `ToolOutput.schema` takes, and for the same reason:
-    a pydantic model is one declaration that produces both the wire schema and
-    the validator, so a caller that has one does not get a *second*, weaker check
-    here and then the real one at home. Given a model it returns the instance;
-    given a dict it returns the dict it validated. Overloaded so that sentence is
-    a *type* rather than a promise a caller has to restate at the call site.
+    `shape` is the same union that `ToolOutput.schema` takes, for the same
+    reason. A pydantic model is one declaration that produces both the wire
+    schema and the validator. A caller that has one therefore does not get a
+    *second*, weaker check here and then the real check in its own code. Given
+    a model, this returns the instance. Given a dict, it returns the dict that
+    it validated. The overloads make that statement a *type*, so a caller does
+    not have to restate it at the call site.
     """
     value = _object_in(text)
     if not isinstance(value, dict):
@@ -193,28 +205,31 @@ async def ask_for_shape[Shape: BaseModel](
     enforced: bool = False,
     attempts: int = ATTEMPTS,
 ) -> Shape:
-    """One call that must come back as `shape`, corrected once if it does not.
+    """One call that must come back as `shape`. A reply that fails is sent back for correction.
 
-    `stream` is `ctx.llm.stream`, passed rather than reached for, so this stays a
-    function over the seam instead of a second thing that resolves it. `shape` is
-    a pydantic model: it becomes the wire schema *and* the validator, so the
-    caller gets a typed instance and the reply is checked once rather than
-    half-checked here and properly at home.
+    `stream` is `ctx.llm.stream`. It is passed in and not looked up here, so
+    this stays a function over the seam and does not become a second thing that
+    resolves the seam. `shape` is a pydantic model. It becomes the wire schema
+    *and* the validator, so the caller gets a typed instance. The reply is
+    checked one time, and not half-checked here and then checked properly by
+    the caller.
 
-    `enforced` is `ResolvedModel.structured_output` — whether this route builds a
-    grammar from the schema. It buys one fewer attempt, because a constrained
-    correction is itself guaranteed valid; and a violation from a route that
-    claimed enforcement is logged as the adapter or provider bug it is, rather
-    than reading as a model that would not comply.
+    `enforced` is `ResolvedModel.structured_output`: whether this route builds
+    a grammar from the schema. An enforced route gets one attempt fewer,
+    because a constrained correction is itself guaranteed valid. A violation
+    from a route that claimed enforcement is logged as a bug of the adapter or
+    of the provider, which it is. It must not read as a model that would not
+    comply.
 
-    The correction turn **offers no tools**. That is not politeness: a tool call
-    is not a document in the schema's shape, so a route asked for both has to
-    break one promise — which is why `options` carrying tools is refused outright
-    rather than being quietly stripped.
+    The correction turn **offers no tools**. That is a requirement and not a
+    courtesy. A tool call is not a document in the shape of the schema, so a
+    route that is asked for both has to break one promise. For that reason,
+    `options` that carry tools are refused outright and are not stripped
+    silently.
 
-    `BlockAssembler` is the loop's own assembly, so a caller cannot disagree with
-    the transcript about what a reply said, and `text_of` drops reasoning blocks
-    rather than handing them to a JSON parser.
+    `BlockAssembler` is the assembly that the loop uses, so a caller cannot
+    disagree with the transcript about what a reply said. `text_of` drops
+    reasoning blocks and does not hand them to a JSON parser.
     """
     if options.tools:
         raise ValueError("a structured reply and tools cannot be asked for in one call")
@@ -230,12 +245,13 @@ async def ask_for_shape[Shape: BaseModel](
         async for chunk in await stream(attempt):
             assembler.push(chunk)
         if assembler.finish.kind == "error":
-            # **The call failed; the shape was never in question** (C11). Raised
-            # as a `SchemaViolation` this told every caller the model had
-            # answered badly — so a rate limit, a context overflow or a dropped
-            # connection arrived under the one exception whose meaning is "the
-            # reply was the wrong shape", carrying none of the provider's code.
-            # `llm-retry` branches on that code, and `SchemaViolation` has none.
+            # **The call failed. The shape was never in question** (C11). When
+            # this was raised as a `SchemaViolation`, every caller was told that
+            # the model had answered badly. A rate limit, a context overflow or
+            # a dropped connection arrived under the one exception that means
+            # "the reply was the wrong shape", and it carried none of the code
+            # of the provider. `llm-retry` branches on that code, and
+            # `SchemaViolation` has none.
             failure = assembler.finish.failure or LlmFailure(
                 message="the model call failed", code="UNKNOWN"
             )
@@ -259,11 +275,11 @@ async def ask_for_shape[Shape: BaseModel](
 
 
 def _corrected(options: GenerateOptions, reply: str, violation: SchemaViolation) -> GenerateOptions:
-    """The follow-up: what came back, and exactly what was wrong with it.
+    """The follow-up request: what came back, and exactly what was wrong with it.
 
-    `replace` rather than a field-by-field rebuild, which is what a frozen
-    dataclass is for — the hand-written version had already dropped `stop`, and
-    would have dropped every field added after it.
+    This uses `replace` and not a field-by-field rebuild, which is what a frozen
+    dataclass is for. The hand-written version had already dropped `stop`, and
+    it would have dropped every field that was added after it.
     """
     return replace(
         options,
@@ -272,10 +288,11 @@ def _corrected(options: GenerateOptions, reply: str, violation: SchemaViolation)
             create_message(
                 role="assistant",
                 content=[{"type": "text", "text": reply}],
-                # The route that said it, because `ModelSource` names one — this
-                # message is the model's own reply being handed back to it, and
-                # attributing it to anything else would be the falsehood the
-                # source field exists to prevent.
+                # The source is the route that produced the reply, because
+                # `ModelSource` names one. This message is the reply of the
+                # model, handed back to it. Attributing it to anything else
+                # would be the false statement that the source field exists to
+                # prevent.
                 source={"kind": "model", "provider": options.provider, "model": options.model},
             ),
             create_message(

@@ -70,7 +70,13 @@ from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret, wire_error_finish
-from ._media import forget_named_handle, load_handles, load_media, media_pointer
+from ._media import (
+    forget_named_handle,
+    load_handles,
+    load_media,
+    media_pointer,
+    referenced_mimes,
+)
 
 __all__ = ["AnthropicAdapter", "apply"]
 
@@ -214,9 +220,12 @@ class Config(WireModel):
     attachments then go as pointers, and it sends no request that the far end
     rejects."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
-    """The largest attachment that this route sends, in bytes. The
+    """The largest attachment that this route sends inline, in bytes. The
     `media-degrade` row replaces a larger attachment with a text pointer before
-    the request reaches this adapter. The default is 5 MiB."""
+    the request reaches this adapter. A type listed in `uploads` is not held to
+    this limit, because it goes by reference. When its upload gives no file,
+    the adapter sends it inline if it is under this limit, and as a text
+    pointer if it is over. The default is 5 MiB."""
     uploads: tuple[str, ...] = ()
     """The MIME types that this route sends by *reference* through the Files API,
     and not inline (P7-03).
@@ -385,7 +394,12 @@ class AnthropicAdapter:
         # This runs after the handles and skips them. A referenced file must not
         # also be read and encoded, because that is the cost that uploading
         # removes.
-        media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
+        media = await load_media(
+            self.ctx.get(ATTACHMENTS),
+            options.messages,
+            skip=handles.keys(),
+            inline_limit=self.config.max_attachment_bytes,
+        )
         caching = self.config.cache_control
         messages = [_to_anthropic(message, media, handles) for message in options.messages]
         if caching:
@@ -486,6 +500,7 @@ class AnthropicAdapter:
             credential=self.config.api_key_env,
             sampling=frozenset(SAMPLING_WIRE),
             max_decision_tokens=None,
+            uploads=referenced_mimes(self.ctx, self.config.uploads),
         )
 
 

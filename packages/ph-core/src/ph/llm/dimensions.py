@@ -1,28 +1,30 @@
-"""An image's pixel dimensions, from its header and nothing else (P7-03).
+"""The pixel dimensions of an image, from its header and nothing else (P7-03).
 
-**Reading a header is not decoding an image**, and conflating the two is what
-kept `AttachmentRef.width` empty until now: its own docstring said measuring an
-image "means decoding it, and the decoder is exactly the dependency
-`media-transform` (P7-02) exists to keep optional". That is true of resizing and
-false of measuring. Every format pH accepts as an image writes its dimensions in
-the first few dozen bytes, in fixed positions, as plain integers — so this is
-`int.from_bytes` four times and no dependency at all: no Pillow, no ImageMagick,
-no `ffmpeg`, nothing to install and nothing to sandbox.
+**Reading a header is not decoding an image.** Confusing the two kept
+`AttachmentRef.width` empty before P7-03. The docstring of `AttachmentRef` said
+that measuring an image "means decoding it, and the decoder is exactly the
+dependency `media-transform` (P7-02) exists to keep optional". That is true of
+resizing and false of measuring. Every format that pH accepts as an image
+writes its dimensions in its header as plain integers. Every format except JPEG
+writes them in the first few dozen bytes, in fixed positions. So this file is a
+few calls of `int.from_bytes` and no dependency at all: no Pillow, no
+ImageMagick, no `ffmpeg`, nothing to install and nothing to sandbox.
 
-What it buys, now that something reads it: a route can say how many pixels it can
-actually use, and a person who attaches a 4000-pixel screenshot to a model that
-will scale it to 1568 can be *told* — rather than paying for the upload on every
-turn of the session and never learning why. `ph.llm.media` is where that judgement
-lives; this file only answers the measurement.
+The benefit, now that something reads the dimensions: a route can say how many
+pixels it can use. A user who attaches a 4000-pixel screenshot to a model that
+will scale it to 1568 can be *told*. Without that, the user pays for the upload
+on every turn of the session and never learns why. `ph.llm.media` makes that
+judgement. This file only supplies the measurement.
 
-**Never raises and never guesses.** A truncated file, a format not listed here,
-or bytes that are not an image at all all return `None`, which every caller
-already handles — `AttachmentRef`'s measurement fields have been optional since
-P7-01 and the token estimate falls back to a flat figure. A wrong number would be
-worse than no number, so anything this file is not certain of, it declines.
+**It never raises and never guesses.** A truncated file, a format that is not
+listed here, and bytes that are not an image all return `None`. Every caller
+already handles `None`: the measurement fields of `AttachmentRef` have been
+optional since P7-01, and the token estimate falls back to a flat figure. A
+wrong number would be worse than no number, so this file declines anything that
+it is not certain of.
 
-Deliberately not `imghdr`: it was removed in Python 3.13, and it answers "what
-format is this" rather than "how big is it".
+It deliberately does not use `imghdr`. That module was removed in Python 3.13,
+and it answers "what format is this" and not "how big is it".
 
 @module ph.llm.dimensions
 """
@@ -34,26 +36,27 @@ __all__ = ["HEADER_BUDGET", "IMAGE_MIMES", "image_dimensions"]
 HEADER_BUDGET = 1 << 20
 """How far into a file a dimension may be looked for.
 
-Only JPEG can need a search at all — every other format here writes its size at a
-fixed offset — and a megabyte is orders of magnitude past any real frame header.
-It bounds the pathological case instead: bytes that open like a JPEG and contain
-no frame."""
+Only JPEG can need a search at all, because every other format here writes its
+size at a fixed offset. A megabyte is orders of magnitude past any real frame
+header. The budget bounds the pathological case: bytes that open like a JPEG and
+contain no frame."""
 
 IMAGE_MIMES: frozenset[str] = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
-"""The formats this file can measure.
+"""The formats that this file can measure.
 
-`AttachmentStore.save_bytes` gates on it rather than probing every blob, which is
-what keeps this an answer a caller can act on instead of an affordance nobody
-uses — and what keeps a 40 MB video out of the JPEG walk below."""
+`AttachmentStore.save_bytes` checks this set and does not probe every blob. So
+the measurement is an answer that a caller can act on, and not a function that
+nobody uses. The check also keeps a 40 MB video out of the JPEG walk below."""
 
 _SOF_MARKERS: frozenset[int] = frozenset(
     {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
 )
-"""JPEG start-of-frame markers, which are the ones carrying the frame size.
+"""The JPEG start-of-frame markers, which are the markers that carry the frame size.
 
-`0xC4`, `0xC8` and `0xCC` sit inside this range and are *not* frame headers —
-they are the Huffman table, an extension, and the arithmetic-coding table. Taking
-the range wholesale reads two bytes of a Huffman table as a picture's height."""
+`0xC4`, `0xC8` and `0xCC` are inside this range and are *not* frame headers.
+They are the Huffman table, an extension, and the arithmetic-coding table. Code
+that takes the whole range reads two bytes of a Huffman table as the height of a
+picture."""
 
 
 def _png(data: bytes) -> tuple[int, int] | None:
@@ -75,10 +78,10 @@ def _webp(data: bytes) -> tuple[int, int] | None:
     """The three WebP chunk layouts, which do not agree with each other.
 
     A container that says `WEBP` can hold lossy (`VP8 `), lossless (`VP8L`) or
-    extended (`VP8X`, which is what an animation or an image with alpha gets), and
-    each writes its size differently — different offsets, different widths,
-    different biases. Reading one layout and assuming the others match is how a
-    1920-pixel animation measures as 14 pixels.
+    extended (`VP8X`) data. An animation or an image with alpha is extended.
+    Each layout writes its size differently: different offsets, different
+    widths, different biases. Code that reads one layout and assumes that the
+    others match measures a 1920-pixel animation as 14 pixels.
     """
     if len(data) < 30:
         return None
@@ -109,17 +112,20 @@ def _webp(data: bytes) -> tuple[int, int] | None:
 def _jpeg(data: bytes) -> tuple[int, int] | None:
     """Walk the marker segments to the frame header.
 
-    JPEG is the one format here without a fixed offset: the frame header follows
-    however many application and quantization segments the encoder wrote, so it
-    has to be walked. Bounded three ways — the loop cannot pass the end, a segment
-    length below its own two bytes is refused rather than looped on, and the scan
-    stops at start-of-scan, after which the bytes are compressed image data that
-    would resynchronize on anything.
+    JPEG is the one format here without a fixed offset. The frame header follows
+    however many application and quantization segments the encoder wrote, so the
+    segments must be walked. The walk is bounded in three ways:
+
+    * The loop cannot pass the end.
+    * A segment length below its own two bytes is refused and not looped on.
+    * The scan stops at start-of-scan. The bytes after it are compressed image
+      data that would resynchronize on anything.
     """
-    # Bounded by a header budget, not by the file. A real frame header is within
-    # a few kilobytes of the start; a *corrupt* JPEG with no frame and no scan
-    # marker would otherwise walk to the end four bytes at a time — 1.1 s for a
-    # 20 MB file, on the event loop, before `save_bytes` even reaches its thread.
+    # The walk is bounded by a header budget and not by the file. A real frame
+    # header is within a few kilobytes of the start. Without the budget, a
+    # *corrupt* JPEG with no frame and no scan marker would be walked to the end
+    # four bytes at a time. That took 1.1 s for a 20 MB file, on the event loop,
+    # before `save_bytes` even reaches its thread.
     end = min(len(data), HEADER_BUDGET)
     index = 2
     while index + 9 <= end:
@@ -135,8 +141,8 @@ def _jpeg(data: bytes) -> tuple[int, int] | None:
         if length < 2:
             return None
         if marker in _SOF_MARKERS:
-            # precision(1) then height(2) then width(2) — height first, which is
-            # the opposite of every other format in this file.
+            # precision(1), then height(2), then width(2). Height comes first,
+            # which is the opposite of every other format in this file.
             return (
                 int.from_bytes(data[index + 7 : index + 9], "big"),
                 int.from_bytes(data[index + 5 : index + 7], "big"),
@@ -148,9 +154,9 @@ def _jpeg(data: bytes) -> tuple[int, int] | None:
 def image_dimensions(data: bytes) -> tuple[int, int] | None:
     """`(width, height)` in pixels, or `None` when they cannot be read.
 
-    Dispatched on the magic bytes rather than on a declared MIME: the MIME on an
+    The dispatch is on the magic bytes and not on a declared MIME. The MIME on an
     `AttachmentRef` comes from a filename in the human-attach path, and a `.png`
-    that is really a JPEG should measure correctly rather than not at all.
+    that is really a JPEG should measure correctly, and not fail to measure.
     """
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return _png(data)

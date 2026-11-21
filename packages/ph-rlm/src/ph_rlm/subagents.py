@@ -919,7 +919,9 @@ class RlmChildProvider:
         without revoking it.
 
         The seam ended the child already and said why (`_abandon`). A refusal is
-        not a deletion, so this is `_release` without the tombstone.
+        not a deletion, so this is `_release` without the tombstone. The `task`
+        tool also calls this, after it revoked a child whose wait was canceled.
+        `_release` took that child already, and this then does nothing.
         """
         child = self._take(run_id)
         if child is not None:

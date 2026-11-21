@@ -1,33 +1,34 @@
 """Code Mode: one transport, and every binding call governed (C1-C3).
 
-This is the file the whole containment argument rests on. A `run_code` cell is
-*one* tool call, but a cell that writes forty files must not be *one* governance
-evaluation — that is exactly the collapse the feature map records in
-prime-agent, where `ToolName = "ipython"` reduces permission, approval, call
-limits, offload and `fs/write-intent` to a single decision per cell.
+The whole containment argument depends on this file. A `run_code` cell is *one*
+tool call. But a cell that writes forty files must not be *one* governance
+evaluation. The feature map records that collapse in prime-agent, where
+`ToolName = "ipython"` reduces permission, approval, call limits, offload and
+`fs/write-intent` to a single decision per cell.
 
-So the bridge re-enters the **complete** pipeline per binding call:
+So the bridge enters the **complete** pipeline again for each binding call:
 
-* each `await tools.<name>(...)` is a sub-call with the outer execution's opaque
-  token as `parent`, dispatched through `tools/pre-execute` → approval → guards
-  → `tools/execute` → `tools/body` → body → `tools/post-execute` (C1);
-* each one logs `tool/code-dispatch-start` at entry and `tool/code-dispatch` at
-  settle, so forty writes are forty durable records rather than one stdout blob
-  (C2). Both are log-only: `derive_messages()` ignores them, so sub-calls never
-  re-enter model context;
-* a **denial fails the whole run** (C3, Q9). This is pH's one deliberate
-  divergence from dsh, and the reason is that a program which can `except` a
-  refusal can route around it — retry with a different path, fall back to
-  `subprocess`. Failing the run puts the refusal in the model's context and
-  bounds partial state to *about* one cell: the bound is best-effort in time,
-  because the abort is a signal ladder that stops the program at its next yield
-  point (see `Kernel.cancel_grace` in `ph_rlm.kernel.manager`). A *failed* call
-  (timeout, bad arguments) keeps dsh's `ToolCallError` semantics, because that is
-  the model's to handle.
+* Each `await tools.<name>(...)` is a sub-call. Its `parent` is the opaque
+  token of the outer execution. It is dispatched through `tools/pre-execute` →
+  approval → guards → `tools/execute` → `tools/body` → body →
+  `tools/post-execute` (C1).
+* Each sub-call logs `tool/code-dispatch-start` at entry and
+  `tool/code-dispatch` at settle. So forty writes are forty durable records and
+  not one stdout blob (C2). Both records are log-only. `derive_messages()`
+  ignores them, so sub-calls never enter the model context again.
+* A **denial fails the whole run** (C3, Q9). This is the one deliberate
+  divergence of pH from dsh. A program that can `except` a refusal can route
+  around it: it can retry with a different path, or fall back to `subprocess`.
+  Failing the run puts the refusal in the context of the model, and limits the
+  partial state to *about* one cell. The limit is best-effort in time, because
+  the abort is a signal ladder that stops the program at its next yield point
+  (see `Kernel.cancel_grace` in `ph_rlm.kernel.manager`). A *failed* call
+  (timeout, bad arguments) keeps the `ToolCallError` semantics of dsh, because
+  the model is the one that handles that failure.
 
-Budgets (C4) are enforced here rather than by the runtime: one approved cell
-must not be able to issue unbounded governed calls, and the bridge is the only
-place that sees them all.
+Budgets (C4) are enforced here and not by the runtime. One approved cell must
+not be able to issue unbounded governed calls, and the bridge is the only place
+that sees all of them.
 
 @module ph.tools.code_mode
 """
@@ -84,18 +85,18 @@ log = logging.getLogger("ph.tools.code_mode")
 MAX_DISPATCHES_PER_RUN = 256
 """How many governed calls one cell may issue (C4).
 
-A cell the human approved is still one decision; without a cap it could issue
-unbounded governed calls on the strength of it."""
+A cell that the human approved is still one decision. Without a cap, that one
+approval would let the cell issue unbounded governed calls."""
 
 MAX_SUBAGENT_SPAWNS_PER_RUN = 32
-"""How many children one cell may spawn (C4). Counted by bindings that declare
-`counts_as_spawn`."""
+"""How many children one cell may spawn (C4). Each call of a binding that
+declares `counts_as_spawn` counts as one spawn."""
 
 events.declare(
     "tools/code-dispatch-log",
     "waterfall",
     owner="ph.tools.code_mode",
-    doc="One settled sub-dispatch about to be logged; the spill policy reshapes it here.",
+    doc="One settled sub-dispatch about to be logged; a listener may reshape its content here.",
 )
 
 
@@ -110,12 +111,13 @@ class ToolCallError(HarnessError):
 class CodeRunFailure(HarnessError):
     """The whole run is over.
 
-    `kind: "denied"` is the C3 case: a refusal the program is not allowed to
-    catch, because catching it is how a program routes around policy.
+    `kind: "denied"` is the C3 case. The program is not allowed to catch this
+    refusal, because a program that catches a refusal can route around policy.
 
-    All three kinds end the run; they do not mean the same thing to a consumer,
-    so each declares its own `failure_kind`. A budget is the tool failing (the
-    program asked for too much), a denial is policy, an abort is cancellation.
+    All three kinds end the run. They do not mean the same thing to a consumer,
+    so each kind declares its own `failure_kind`. A budget is the tool failing
+    (the program asked for too much), a denial is policy, and an abort is
+    cancellation.
     """
 
     _FAILURE_KINDS: ClassVar[dict[str, FailureKind]] = {
@@ -137,26 +139,27 @@ class CodeRunFailure(HarnessError):
         self.concludes_turn = concludes_turn
         """Set when the sub-result that stopped the run ended the turn (C13).
 
-        Not implied by any `kind`: `max_dispatches` and `max_spawns` also settle
-        as `budget` and end only the program, which is the whole difference
-        between a cell's own ceiling and the turn's."""
+        No `kind` implies it. `max_dispatches` and `max_spawns` also settle as
+        `budget`, and they end only the program. That is the difference between
+        the ceiling of a cell and the ceiling of the turn."""
 
 
 class CodeDispatchRef(WireModel):
-    """Which dispatch this is — the identity its two records share.
+    """Which dispatch this is: the identity that its two records share.
 
-    A dispatch writes twice: `tool/code-dispatch-start` before the binding's body
-    runs (B4, P7-15) and `tool/code-dispatch` once it settles. **Readers pair
-    them by these fields**, and by nothing else — the TUI adapter looks up the
-    parent card by `parentCallId` and the dispatch card by `subCallId`, and
-    `/revert` reads `parentCallId` and `name` off the start record to list what a
-    run did outside the tree it restored.
+    A dispatch writes two records: `tool/code-dispatch-start` before the body
+    of the binding runs (B4, P7-15), and `tool/code-dispatch` when it settles.
+    **Readers pair the two records by these fields**, and by nothing else. The
+    TUI adapter looks up the parent card by `parentCallId` and the dispatch card
+    by `subCallId`. `/revert` reads `parentCallId` and `name` from the start
+    record, to list what a run did outside the tree that it restored.
 
-    One type, so the pairing cannot drift. The start record used to be a
-    hand-written camelCase dict while the settle went through `to_wire()`: four
-    fields spelled twice, where renaming one — or changing `wire_alias` — moves
-    the settle record and silently leaves the start record's literals behind,
-    unpairing every reader at once with nothing failing.
+    Both records use this one type, so the pairing cannot drift. The start
+    record was at first a hand-written camelCase dict, and the settle went
+    through `to_wire()`. Four fields were spelled twice. A rename of one field,
+    or a change to `wire_alias`, moved the settle record and left the literals
+    of the start record behind. Every reader then lost the pairing at the same
+    time, and nothing failed.
     """
 
     root_call_id: str
@@ -171,30 +174,27 @@ class CodeDispatchLog(CodeDispatchRef):
     is_error: bool
 
 
-# `TOOL_DISPATCH` — the pair a dispatch's two records make — is declared in
-# `ph.session.kinds` with ph-core's other kinds (T4), with `DISPATCH_INTERRUPTED`,
-# the body its repaired settle carries. The leaf spells `CodeDispatchRef`'s wire keys
-# (`DISPATCH_REF_KEYS`) because it cannot import this model; a test holds them equal.
+# `TOOL_DISPATCH` is the pair that the two records of a dispatch make. It is
+# declared in `ph.session.kinds` with the other kinds of ph-core (T4), together
+# with `DISPATCH_INTERRUPTED`, the body that its repaired settle carries. That
+# leaf module spells the wire keys of `CodeDispatchRef` (`DISPATCH_REF_KEYS`),
+# because it cannot import this model. A test holds the two equal.
 
 
 @dataclass(frozen=True, slots=True)
 class CodeBindingsRequest:
-    """What a namespace factory is told about the run it is binding for.
+    """What a namespace factory is told about the run that it binds for.
 
-    `bridge is None` means the namespace is being *described* rather than
-    bound — the SDK prompt section asks the factories the same question the run
-    does, so the block cannot list a namespace the program could not reach, or
-    omit one it can. Two fields only: the bridge already carries the execution
-    and the session, and a second copy of either would be one more thing the two
-    construction sites could disagree about.
+    `bridge is None` means that the namespace is being *described* and not
+    bound. The SDK prompt section asks the factories the same question that the
+    run asks. So the block cannot list a namespace that the program could not
+    reach, or omit one that it can reach. There are only two fields. The bridge
+    already carries the execution and the session, and a second copy of either
+    would be one more thing on which the two construction sites could disagree.
     """
 
     scope: Context
     bridge: DispatchBridge | None = None
-
-    @property
-    def describing(self) -> bool:
-        return self.bridge is None
 
 
 @dataclass(slots=True)
@@ -213,18 +213,18 @@ class DispatchBridge:
     _spawned: int = 0
     _failure: CodeRunFailure | None = None
     _concluded_turn: bool = False
-    """Whether a sub-result ended the *outer* turn, not just this program (C13).
+    """Whether a sub-result ended the *outer* turn, and not only this program (C13).
 
-    The program stopping and the turn ending are two facts, and only the first
-    one used to travel: `run_code` returns an ordinary successful cell value, so
-    a ceiling that ended the turn inside a program left the loop running and the
-    model spent another step discovering it. Read by `run_code`, which is the
-    only thing holding both this bridge and the `ToolRunContext` that can say
-    so."""
+    That the program stopped and that the turn ended are two facts, and at first
+    only the first fact reached the loop. `run_code` returns an ordinary
+    successful cell value. So a ceiling that ended the turn inside a program
+    left the loop running, and the model spent another step to discover it.
+    `run_code` reads this flag. It is the only code that holds both this bridge
+    and the `ToolRunContext` that can report the fact."""
     _limiter: anyio.CapacityLimiter = field(init=False)
     _journal: IntentJournal = field(init=False)
     _started: dict[str, Claim] = field(init=False, default_factory=dict)
-    """Each dispatch's intent, by sub-call id, from its start to its settle."""
+    """The intent of each dispatch, by sub-call id, from its start to its settle."""
 
     def __post_init__(self) -> None:
         self._limiter = anyio.CapacityLimiter(max(1, self.max_parallel))
@@ -246,17 +246,17 @@ class DispatchBridge:
         *,
         concludes_turn: bool = False,
     ) -> CodeRunFailure:
-        # Once the run is settled, later awaits stop immediately rather than
-        # racing to do more work the outcome has already discarded.
+        # After the run is settled, later awaits stop immediately. They do not
+        # race to do more work that the outcome has already discarded.
         self._failure = CodeRunFailure(kind, message, concludes_turn=concludes_turn)
         return self._failure
 
     async def call(self, binding: CodeBinding, arguments: object) -> Any:  # noqa: ANN401
         """Dispatch one binding call through the full pipeline.
 
-        :raises ToolCallError: the call failed; the program may handle it.
-        :raises CodeRunFailure: the call was denied or a budget was reached;
-            the program may not.
+        :raises ToolCallError: the call failed. The program may handle it.
+        :raises CodeRunFailure: the call was denied or a budget was reached.
+            The program may not handle it.
         """
         if self._failure is not None:
             raise self._failure
@@ -273,12 +273,13 @@ class DispatchBridge:
                     "budget", f"this program reached max_subagent_spawns_per_run={self.max_spawns}"
                 )
 
-        # Deterministic and ordered, so a reader can pair a start with its settle
-        # and see submission order without a timestamp.
+        # The id is deterministic and ordered. So a reader can pair a start with
+        # its settle, and can see the submission order without a timestamp.
         sub_call_id = f"{self.execution.call_id}:code:{self._dispatched}"
         self._dispatched += 1
-        # One lossless snapshot proves the arguments are JSON; `create_execution`
-        # accepts the frozen form directly, so it is not thawed again for the call.
+        # One lossless snapshot proves that the arguments are JSON.
+        # `create_execution` accepts the frozen form directly, so the snapshot
+        # is not thawed again for the call.
         snapshot = freeze_json_value(arguments, frozen_input=True)
 
         ref = CodeDispatchRef(
@@ -310,19 +311,20 @@ class DispatchBridge:
                 raise
 
         failure = result.error
-        # **A result that ends the turn ends the program** (D7), and it is asked
-        # first because it is the broadest of the three: a ceiling that stops
-        # the turn used to arrive as an ordinary `ToolCallError`, which a
-        # generated program can `except` — so the posture meant to surface a
-        # breach most loudly was the one a program could swallow, and it would
-        # then spend the rest of the turn on calls that could only fail.
+        # **A result that ends the turn ends the program** (D7). This check
+        # comes first because it is the broadest of the three. A ceiling that
+        # stops the turn at first arrived as an ordinary `ToolCallError`, which
+        # a generated program can `except`. So the posture that was meant to
+        # report a breach most loudly was the one that a program could
+        # suppress. The program then spent the rest of the turn on calls that
+        # could only fail.
         #
-        # Read off `concludes_turn` rather than a second failure kind, because
-        # that is the flag the loop itself stops on: whatever ends the turn out
-        # there ends the run in here, without this needing a list of the rows
-        # that can do it. Above `is_error` for the same reason — `conclude_turn`
-        # is public on `ToolRunContext` and a *successful* "you are done here"
-        # result is exactly what a tool will use it for.
+        # The check reads `concludes_turn` and not a second failure kind,
+        # because the loop itself stops on that flag. Whatever ends the turn
+        # outside ends the run in here, and this code needs no list of the rows
+        # that can do it. The check is above `is_error` for the same reason.
+        # `conclude_turn` is public on `ToolRunContext`, and a *successful*
+        # "you are done here" result is exactly what a tool will use it for.
         if result.concludes_turn:
             self._concluded_turn = True
             stopped = failure.message if failure is not None else "the turn was concluded"
@@ -344,22 +346,25 @@ class DispatchBridge:
         return result.value
 
     def _log_start(self, ref: CodeDispatchRef, prepared: PreparedCall) -> None:
-        """The dispatch, recorded once the pipeline has decided and before it runs.
+        """Record the dispatch after the pipeline has decided and before it runs.
 
-        The same point `execute_tool_calls` writes `tool/call` (B4, P7-15): a
-        dispatch parked on an approval is not yet something the program *did*,
-        and `/revert` reads these records as the list of what it did.
+        This is the same point at which `execute_tool_calls` writes `tool/call`
+        (B4, P7-15). A dispatch that is parked on an approval is not yet
+        something that the program *did*, and `/revert` reads these records as
+        the list of what the program did.
 
-        `execution.arguments` unconditionally: `create_execution` sets it from the
-        snapshot this dispatch passed in, and the only thing that ever replaces it
-        is approval's substitution — which is exactly what this should record.
-        (`batch.py`'s ternary is *not* removable for the same shape: there the
-        unsubstituted branch is the model's original bytes, a different object.)
+        The record takes `execution.arguments` unconditionally. `create_execution`
+        sets it from the snapshot that this dispatch passed in. Only the
+        substitution of approval ever replaces it, and that is exactly what this
+        record must hold. (The ternary in `batch.py` has the same shape but
+        cannot be removed. There the unsubstituted branch is the original bytes
+        of the model, which is a different object.)
 
-        **With whether a workspace restore takes it back** (`restoreCovered`, S4), as
-        `prepare` answered for the call about to run: `/revert` reads this rather than
-        asking after its restore, when a link the run made and the restore removed
-        would hide a write that left the tree.
+        **The record also says whether a workspace restore takes the call back**
+        (`restoreCovered`, S4). The value is the answer that `prepare` gave for
+        the call that is about to run. `/revert` reads this value and does not
+        ask again after its restore. At that time, a link that the run made and
+        the restore removed would hide a write that left the tree.
         """
         if self.session is None:
             return
@@ -375,13 +380,14 @@ class DispatchBridge:
         )
 
     def _abandon(self, ref: CodeDispatchRef) -> None:
-        """Settle a dispatch whose own settle will not come — a cancel, or a raise in
-        the pipeline or the log waterfall — `outcome-unknown`, as `journal.claim`
-        settles its own (S15).
+        """Settle as `outcome-unknown` a dispatch whose own settle will not come,
+        in the way that `journal.claim` settles its own intent (S15). The causes
+        are a cancel, or a raise in the pipeline or in the log waterfall.
 
-        Left open, the dispatch read as running in the live log, and its card with
-        it, until a restart's repair closed it. Synchronous, so it completes inside a
-        canceled scope; nothing, when the start was never recorded or is settled.
+        Left open, the dispatch read as running in the live log, and so did its
+        card, until the repair of a restart closed it. The method is synchronous,
+        so it completes inside a canceled scope. It does nothing when the start
+        was never recorded or is already settled.
         """
         started = self._started.pop(ref.sub_call_id, None)
         if started is not None and self.session is not None:
@@ -394,24 +400,26 @@ class DispatchBridge:
             return blocks
 
         record = CodeDispatchLog(**ref.__dict__, is_error=result.is_error)
-        # The spill policy replaces an oversized dispatch content *individually*
-        # here (C5), so one large read does not melt its siblings into a blob.
+        # A spill policy can replace an oversized dispatch content *individually*
+        # here (C5), so that one large read is not merged with its siblings
+        # into one blob.
         shaped = await self.ctx.waterfall(
             "tools/code-dispatch-log", record, result.content, inner=inner
         )
         if self.session is None:
             return
         data = {**record.to_wire(), "content": [block.to_wire() for block in shaped]}
-        # Always opened: the pipeline writes the start for every call its gate
-        # decides, a refusal included (`ToolRuntime.prepare`, P7-15), so a settle
-        # always has its intent — and one that did not would be a bug to surface,
-        # not a record to write on its own.
+        # The intent is always open here. The pipeline writes the start for
+        # every call that its gate decides, a refusal included
+        # (`ToolRuntime.prepare`, P7-15). So a settle always has its intent. A
+        # settle without one would be a bug to report, and not a record to
+        # write on its own.
         started = self._started.pop(ref.sub_call_id)
         self._journal.settle(self.session, started, data)
 
 
 class Config(WireModel):
-    """Row config for the Code Mode transport."""
+    """The row config for the Code Mode transport."""
 
     max_dispatches_per_run: int = MAX_DISPATCHES_PER_RUN
     max_subagent_spawns_per_run: int = MAX_SUBAGENT_SPAWNS_PER_RUN
@@ -436,8 +444,8 @@ async def apply(ctx: Context, config: Config) -> None:
         program = args.get("program") if isinstance(args, Mapping) else None
         if not isinstance(program, str) or not program.strip():
             raise ToolCallError(run.name, "program must be a non-empty string")
-        # The run's namespace is the calling agent's id, so a call with no agent
-        # has nowhere to put its bindings.
+        # The namespace of the run is the id of the calling agent. So a call
+        # with no agent has nowhere to put its bindings.
         if run.agent is None:
             raise ToolCallError(run.name, "this tool has to be called by an agent")
         runtime = ctx.require(CODE_RUNTIME).require()
@@ -463,13 +471,14 @@ async def apply(ctx: Context, config: Config) -> None:
         )
         if bridge.concluded_turn:
             # **The other way out** (C13). A `CodeRunFailure` that escapes this
-            # function carries `concludes_turn` on itself and `registry._failure`
-            # reads it — that is the path when the bridge raises into the caller.
-            # Over the kernel wire it does not escape: the dispatch fails, the
-            # program dies in the guest, and the runtime *returns* an outcome
-            # holding the error. Then this is the only thing still holding the
-            # fact, and `ToolRunContext.conclude_turn` is the loop's own way to
-            # say a successful result is terminal.
+            # function carries `concludes_turn` on itself, and
+            # `registry._failure` reads it. That is the path when the bridge
+            # raises into the caller. Over the kernel wire the failure does not
+            # escape. The dispatch fails, the program dies in the guest, and the
+            # runtime *returns* an outcome that holds the error. Then only this
+            # bridge still holds the fact, and `ToolRunContext.conclude_turn`
+            # is the way that the loop provides to mark a successful result as
+            # terminal.
             run.conclude_turn()
         return CodeCellValue(
             logs=outcome.logs,
@@ -496,8 +505,9 @@ async def apply(ctx: Context, config: Config) -> None:
                 render=lambda _args, value: text_content(_render_run(value)),
             ),
             execute=run_code,
-            # A cell is model-authored raw Python, and this is the tool a profile
-            # renames — so a name-keyed gate is inert exactly here (P6-16).
+            # A cell is raw Python that the model wrote, and this is the tool
+            # that a profile renames. So a gate that is keyed by name has no
+            # effect exactly here (P6-16).
             is_irreversible=True,
         )
     )
@@ -548,17 +558,19 @@ class CodeCellValue(WireModel):
 async def _namespaces(
     tools: ToolRuntime, request: CodeBindingsRequest
 ) -> tuple[CodeBindingNamespace, ...]:
-    """Every namespace this program may reach, `tools` first.
+    """Every namespace that this program may reach, with `tools` first.
 
-    `tools` is built here rather than registered because it is not optional:
-    Code Mode without the registry as a namespace is a transport to nowhere. The
-    rest come from `register_code_namespace` claims, read off the same view the
-    tool surface is — name conflicts already failed at registration.
+    `tools` is built here and not registered, because it is not optional. Code
+    Mode without the registry as a namespace is a transport to nowhere. The
+    other namespaces come from `register_code_namespace` claims. They are read
+    from the same view as the tool surface, and name conflicts already failed
+    at registration.
     """
     view = tools.view(request.scope)
-    # Contributed namespaces first, so `tools` can be built knowing which tools
-    # already have a namespaced face. The order the *program* sees is still
-    # `tools` first — it is the one namespace that is never optional.
+    # The contributed namespaces are built first, so that `tools` can be built
+    # with the knowledge of which tools another namespace already presents. The
+    # *program* still sees `tools` first, because it is the one namespace that
+    # is never optional.
     contributed: list[CodeBindingNamespace] = []
     presented: set[str] = set()
     for name in sorted(view.code_namespaces):
@@ -583,23 +595,24 @@ def _tools_namespace(
 ) -> CodeBindingNamespace:
     """The `tools` namespace: every visible tool, as a governed binding.
 
-    With no bridge the namespace is descriptive — for rendering the SDK — and
-    carries no dispatch closures.
+    With no bridge, the namespace only describes the tools, for rendering the
+    SDK. It carries no dispatch closures.
     """
     view = tools.view(scope)
     bindings: list[CodeBinding] = []
     for name in sorted(view.visible):
-        # `transport_name`, not `RUN_CODE`: under a profile that renames it the
-        # transport is visible under the new name, and binding it into `tools`
-        # would hand the program a way to re-enter itself.
+        # Compare with `transport_name`, not `RUN_CODE`. Under a profile that
+        # renames the transport, it is visible under the new name. A binding
+        # for it in `tools` would give the program a way to enter itself again.
         if name == view.transport_name:
             continue
-        # A tool another namespace already presents (`rlm.run` for `rlm_run`),
-        # as declared by that namespace's own bindings. Still dispatchable and
-        # still addressable by policy — just not offered twice, under two names,
-        # in one SDK block. `AbstractSet` and not `Container` on the parameter
-        # because this is one membership test per visible tool: a `list` would
-        # satisfy `Container` and quietly make the loop O(n·m).
+        # Skip a tool that another namespace already presents (`rlm.run` for
+        # `rlm_run`), as the bindings of that namespace declare. The tool can
+        # still be dispatched, and policy can still address it. It is only not
+        # offered two times, under two names, in one SDK block. The parameter
+        # is an `AbstractSet` and not a `Container` because this is one
+        # membership test per visible tool. A `list` would satisfy `Container`
+        # and would make the loop O(n·m) without a warning.
         if name in presented:
             continue
         definition = view.visible[name]
@@ -636,14 +649,18 @@ def governed_binding(
     *,
     counts_as_spawn: bool = False,
 ) -> CodeBinding:
-    """One registered tool, as a namespaced binding a program may await.
+    """One registered tool, as a namespaced binding that a program may await.
 
-    The one place that knows the protocol every namespace has to follow: the
-    binding the *program* writes may be named differently from the tool it
-    dispatches (`rlm.run` for `rlm_run`), the dispatch closure is omitted when
-    the namespace is being described rather than bound, and the binding handed to
-    the bridge carries the *tool's* name so `tool/code-dispatch-start` records
-    the governed capability rather than the alias.
+    This is the one place that knows the protocol that every namespace must
+    follow:
+
+    * The binding that the *program* writes may have a different name from the
+      tool that it dispatches (`rlm.run` for `rlm_run`).
+    * The dispatch closure is omitted when the namespace is being described and
+      not bound.
+    * The binding that is passed to the bridge carries the name of the *tool*,
+      so that `tool/code-dispatch-start` records the governed capability and
+      not the alias.
     """
     governed = CodeBinding(
         name=definition.name,

@@ -263,8 +263,9 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
 
     `load_handles` swallows an upload failure and the attachment goes inline —
     which is what every route did before this row. For a clip under the inline cap
-    that is a working turn; over it, `media-degrade` turns it into a pointer. Both
-    are better than a turn that fails because a transcoder was slow.
+    that is a working turn; over it, the adapter sends a pointer
+    (`test_a_clip_over_the_inline_limit_goes_by_reference`). Both are better than
+    a turn that fails because a transcoder was slow.
     """
     wire.processing = 1_000  # never ready inside the budget
     ctx: Context = await mount(_impatient(), profile=PROFILE)
@@ -280,6 +281,81 @@ async def test_a_file_that_never_becomes_ready_falls_back_to_the_bytes(
     # The failed attempt is on record as *maybe sent* (S9); what must not be
     # there is a settled one, which would name a file nothing can use yet.
     assert not live_settles(session, "attachment/uploaded")
+
+
+async def test_a_clip_over_the_inline_limit_goes_by_reference(
+    mount: MountProfile, wire: _FileApi
+) -> None:
+    """The case that the Files API exists for: a video too large for a request.
+
+    `maxAttachmentBytes` is the ceiling of an inline block. `media-degrade`
+    applied it to every block before this adapter ran, so a clip over the
+    ceiling became a pointer and was never uploaded. That is most videos: the
+    provider limits a whole request to 20 MB. The route now reports the types
+    that it uploads (`ResolvedModel.uploads`), and such a clip reaches the
+    adapter and goes by reference.
+
+    Sabotage: report `uploads=frozenset()` from `resolve_model`, and nothing is
+    uploaded and the body carries the pointer.
+    """
+    ctx: Context = await mount(_impatient(maxAttachmentBytes=100), profile=PROFILE)
+    session = ctx.require(SESSIONS).create("large")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+    assert len(CLIP) > 100
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    assert wire.uploaded == ["files/clip1"]
+    (body,) = wire.bodies
+    assert wire.referenced(body) == ["https://files.example/files/clip1"]
+    assert "was not sent" not in str(body)
+    assert not [one for one in session.events if one.type == "attachment/degraded"]
+
+
+async def test_a_clip_over_the_inline_limit_with_no_file_becomes_a_pointer(
+    mount: MountProfile, wire: _FileApi
+) -> None:
+    """The fallback of an upload is inline, and a clip over the ceiling cannot
+    go inline: the provider would refuse the whole request.
+
+    The clip is left out and the model reads the pointer. The turn ends
+    normally, and a later step tries the upload again.
+
+    Sabotage: pass `inline_limit=None` to `load_media` in `_body`, and the clip
+    goes inline over the limit.
+    """
+    wire.processing = 1_000  # never ready inside the budget
+    ctx: Context = await mount(_impatient(maxAttachmentBytes=100), profile=PROFILE)
+    session = ctx.require(SESSIONS).create("large-and-slow")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    assert session.events[-1].type == "turn/end"
+    body = wire.bodies[-1]
+    assert wire.referenced(body) == [], "nothing was referenced"
+    assert "inlineData" not in str(body), "a clip over the inline limit went inline"
+    assert 'attachment "clip.mp4" was not sent' in str(body)
+
+
+async def test_a_route_that_uploads_nothing_still_degrades_a_large_clip(
+    mount: MountProfile, wire: _FileApi
+) -> None:
+    """A gateway that sets `uploads: []` gets inline bytes, so the inline
+    ceiling is its only ceiling, and `media-degrade` applies it as before."""
+    ctx: Context = await mount(_impatient(maxAttachmentBytes=100, uploads=[]), profile=PROFILE)
+    session = ctx.require(SESSIONS).create("no-uploads")
+    agent = ctx.require(AGENTS).create(session, OPTIONS)
+
+    agent.followup(await _attached(ctx))
+    await agent.run()
+
+    assert wire.uploaded == []
+    (degraded,) = [one for one in session.events if one.type == "attachment/degraded"]
+    assert "over the 100-byte limit" in str(degraded.data)
+    assert "inlineData" not in str(wire.bodies[-1])
 
 
 def _impatient(**config: object) -> dict[str, Any]:
@@ -410,7 +486,7 @@ async def test_a_file_the_provider_rejects_is_not_remembered(
     agent.followup(await _attached(ctx))
     await agent.run()
 
-    adapter = ctx.require(LLM).adapter_for("google")
+    adapter = ctx.require(LLM)._route("google").adapter
     assert isinstance(adapter, GoogleAdapter)
     assert adapter._pending == {}, "a file that will never work was remembered"
     assert "inlineData" in str(wire.bodies[-1])

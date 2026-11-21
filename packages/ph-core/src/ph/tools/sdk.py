@@ -1,26 +1,26 @@
-"""The `tools:sdk` prompt section: what Code Mode offers instead of schemas.
+"""The `tools:sdk` prompt section: what Code Mode offers in place of schemas.
 
-Under `mode: code` the model is handed **one** callable and a generated SDK
-listing. The SDK is the thing that makes C1 work: every capability the model
-could have called natively is reachable as `await tools.<name>(...)`, each of
-those is a governed binding that re-enters the pipeline, and the prompt says so
-in the runtime's own language so the model does not have to guess a calling
+Under `mode: code` the model is given **one** callable and a generated SDK
+listing. The SDK is what makes C1 work. Every capability that the model could
+have called natively is reachable as `await tools.<name>(...)`. Each of those is
+a governed binding that enters the pipeline again. The prompt says so in the
+language of the runtime, so the model does not have to guess a calling
 convention.
 
-Two renderers ship (Python and TypeScript). They are registered on
-`ctx.code_runtime` by the Code Mode row, and that seam is the *only* place a
-renderer is looked up — a runtime whose language has none fails prompt assembly
-rather than shipping a listing in the wrong syntax, since a model given
-TypeScript signatures for a Python runtime writes code that cannot run and the
+Two renderers ship, one for Python and one for TypeScript. The Code Mode row
+registers them on `ctx.code_runtime`, and that seam is the *only* place where a
+renderer is looked up. A runtime whose language has no renderer fails prompt
+assembly, and does not ship a listing in the wrong syntax. A model that is given
+TypeScript signatures for a Python runtime writes code that cannot run, and the
 failure looks like a model problem.
 
-**The TypeScript one is registered and currently unselectable**, because the
-renderer is chosen by the *runtime's* `language` and every runtime pH ships is
-Python. It is kept because the seam's fail-loud lookup only pays off if the
-renderer it finds is correct, and because P6-08 would otherwise re-derive it —
-but nothing in a shipped profile can reach it today.
-`docs/dev-notes/typescript-code-runtime.md` records what would make it live, and
-which of that work is already done.
+**The TypeScript renderer is registered and currently cannot be selected.** The
+`language` of the *runtime* chooses the renderer, and every runtime that pH
+ships is Python. The renderer is kept for two reasons. The lookup of the seam
+fails loudly, and that is useful only if the renderer that it finds is correct.
+Also, P6-08 would otherwise have to derive the renderer again. But nothing in a
+shipped profile can reach it today. `docs/dev-notes/typescript-code-runtime.md`
+records what would make it live, and which part of that work is already done.
 
 @module ph.tools.sdk
 """
@@ -71,9 +71,9 @@ def _properties(binding: CodeBinding) -> list[tuple[str, dict[str, Any], bool]]:
 
 
 def parameter_names(binding: CodeBinding) -> list[str]:
-    """A binding's parameters in the order the listing declares them — what a runtime
-    binds positional arguments to, so a call written from the listing means what it
-    says (`ph_runtime.proxies`)."""
+    """The parameters of a binding, in the order in which the listing declares
+    them. A runtime binds positional arguments to these names, so a call that is
+    written from the listing means what it says (`ph_runtime.proxies`)."""
     return [name for name, _definition, _required in _properties(binding)]
 
 

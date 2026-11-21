@@ -1929,7 +1929,7 @@ reducer, and enforces in a docstring; pH runs them.)
 **At runtime, as an invariant** (`SessionFoldCache.stale`, one row per cache:
 `goal-fold-cache`, `schedule-fold-cache`, `subagent-fold-cache`,
 `sandbox-fold-cache` in `ph-base`, the limits and harness rows with their own
-bundles). The check lives on the cache class for `ToolRegistry.stale_views`'
+bundles). The check lives on the cache class for `ToolRuntime.stale_views`'
 reason — `_entries` is its own secret, and a check written from outside is one a
 rename disables silently — and each owning row declares it through
 `contribute_fold_cache`, so a profile that drops a seam drops the claim with it.
@@ -2023,7 +2023,11 @@ header with **no dependency at all** — no Pillow, no ImageMagick, no `ffmpeg` 
 which is what turned the pixel ceiling from a knob wired to nothing into a
 refusal and a warning (P7-03). Over `max_image_edge` nothing is sent; over
 `usable_image_edge` everything works and `attachment/oversized` says the surplus
-is being uploaded every turn and discarded.
+is being uploaded every turn and discarded. One limit is not settled above the
+adapter: `max_attachment_bytes` is the ceiling of an *inline* block, so a type
+that the route sends by reference (`ResolvedModel.uploads`) passes
+`media-degrade` at any size. Its adapter uploads it, and when the upload gives no
+handle the adapter sends the file inline if it fits and a pointer if it does not.
 
 **`ctx.uploads` is the one cache in the tree that is deliberately not in the
 log.** A provider's file API takes bytes once and returns a handle; that handle is

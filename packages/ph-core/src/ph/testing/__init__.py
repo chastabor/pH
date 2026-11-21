@@ -1,17 +1,17 @@
-"""`ph.testing` — the builders, stubs and fixtures a test stands a profile up with.
+"""`ph.testing`: the builders, stubs and fixtures that a test uses to set up a profile.
 
-**Nothing here is mounted by a plugin row.** The fake adapter, the replay adapter
-and the stub code runtime are rows a deployment can mount by name, so they live
-with the seams they implement (`ph.llm.fake`, `ph.llm.replay`,
-`ph.seams.code_runtime_stub`) and are re-exported below for tests. What is left
-is scaffolding: no shipped module imports it, which is what lets it depend on
-whatever a test needs.
+**No plugin row mounts anything here.** The fake adapter, the replay adapter
+and the stub code runtime are rows that a deployment can mount by name. They
+live with the seams that they implement (`ph.llm.fake`, `ph.llm.replay`,
+`ph.seams.code_runtime_stub`), and this module re-exports them for tests. The
+rest is scaffolding. No shipped module imports it, so it can depend on whatever
+a test needs.
 
-`.git` and `.jj` are the exception to the re-export, and deliberately: they drive
-real binaries, their fixtures are only useful to a test that carries the matching
-`needs_git`/`needs_jj` marker, and a name that reads `git` here would shadow the
-submodule it came from. A caller names them — `from ph.testing.git import
-git_repo` — the way `ph-rlm`'s suite already did.
+`.git` and `.jj` are deliberately not re-exported, for three reasons. They
+drive real binaries. Their fixtures are useful only to a test that carries the
+matching `needs_git` or `needs_jj` marker. A name `git` here would shadow the
+submodule that it came from. A caller imports from the submodule, as in
+`from ph.testing.git import git_repo`. The `ph-rlm` suite already did this.
 
 @module ph.testing
 """
@@ -120,26 +120,27 @@ from .stub_workspace import (
 )
 
 MountProfile: TypeAlias = "Callable[..., Awaitable[Context]]"
-"""`await mount(*rows)` → a mounted root, disposed when the test ends.
+"""`await mount(*rows)` returns a mounted root, which is disposed when the test ends.
 
-The type of the root conftest's `mount` fixture, declared **here** rather than
-there so a test can annotate its parameter without `from conftest import
-MountProfile`. That import is the shape issue 32 removed: `conftest` resolved to
-whichever tree won the name under full collection.
+This is the type of the `mount` fixture of the root conftest. It is declared
+**here** so that a test can annotate its parameter without
+`from conftest import MountProfile`. Issue 32 removed that form of import,
+because `conftest` resolved to whichever tree won the name under full
+collection.
 
-It is also the lever that closed the row. 673 test signatures said
-`mount: Any`, so `await mount()` was `Any`, so every `ctx.<service>` read off it
-was invisible to the checker — 1,581 of them, which is what issue 32 counted.
-Naming the type is what let mypy find them.
+The alias also let issue 32 be closed. 673 test signatures said `mount: Any`,
+so `await mount()` was `Any`, and the checker could not see any `ctx.<service>`
+read from it. Issue 32 counted 1,581 such reads. With the type named, mypy
+found them.
 """
 
 ReapedHost: TypeAlias = "Callable[..., Path]"
-"""`reaped_host(...)` → a `$PH_HOME` whose daemon is reaped when the test ends.
+"""`reaped_host(...)` returns a `$PH_HOME` whose daemon is reaped when the test ends.
 
-Here for the reason above, and it was the same five-file sprawl: the root
-conftest declares the fixture, and four suites had each written the alias out
-again rather than reach for `from conftest import`, which is the import issue 32
-removed.
+The alias is here for the same reason as `MountProfile`, and it had spread
+across the same five files. The root conftest declares the fixture, and four
+suites had each written the alias again to avoid `from conftest import`, which
+is the import that issue 32 removed.
 """
 
 __all__ = [

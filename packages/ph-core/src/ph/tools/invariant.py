@@ -1,20 +1,22 @@
 """Runtime invariant: a memoized tool view equals a freshly built one (P6-01, I6).
 
-`ToolRegistry.view` caches per isolation chain and invalidates on a generation
-counter that `_changed()` bumps. That makes the cache a **projection** in exactly
-I6's sense — a stored answer that must equal the fold that produced it — and it
-has the failure mode every cache has: a registration path that mutates a layer
-without bumping the generation serves an answer that was true a moment ago.
+`ToolRuntime.view` caches one view for each isolation chain. It invalidates the
+cache on a generation counter that `_changed()` increments. The cache is
+therefore a **projection** in exactly the sense of I6: a stored answer that must
+equal the fold that produced it. It has the failure mode of every cache. A
+registration path that mutates a layer and does not increment the generation
+serves an answer that was true a moment ago.
 
-**What that costs is not a stale listing.** The view is what decides which tools
-an agent can call and, through `_build_view`'s shadowing rules, which
-registration wins a name. A stale view hands a narrowed child the set its parent
-had, or keeps a tool callable after the row that owns it unloaded — a capability
-outliving its scope, which is I2's failure wearing a cache's clothes.
+**The cost of that failure is more than a stale listing.** The view decides
+which tools an agent can call. Through the shadowing rules of `_build_view`, it
+also decides which registration wins a name. A stale view gives a narrowed child
+the set that its parent had, or keeps a tool callable after the row that owns it
+unloaded. That is a capability that outlives its scope, which is the failure of
+I2 in the form of a cache.
 
-Rebuilding every cached view is O(cached chains * registrations), which is why
-this is polled rather than asserted on read: checking on the read path would
-cost exactly the memoization it is checking.
+A rebuild of every cached view costs O(cached chains * registrations). So the
+invariant is polled, and not asserted on read: a check on the read path would
+cost exactly the memoization that it checks.
 
 @module ph.tools.invariant
 """
@@ -31,21 +33,22 @@ __all__ = ["apply", "violations"]
 def violations(ctx: Context) -> list[str]:
     """Every cached view that no longer equals what the registry would build.
 
-    Asked of the registry rather than computed here: see `ToolRegistry.stale_views`
-    for why the check lives with the cache it checks.
+    The registry is asked, and the check is not computed here. See
+    `ToolRuntime.stale_views` for why the check is kept with the cache that it
+    checks.
     """
     return list(ctx.require(TOOLS).stale_views())
 
 
 @plugin("tools-invariant", affects="deployment", inject=[TOOLS])
 async def apply(ctx: Context, config: None) -> None:
-    """Declare the view cache's half of I6, pollable.
+    """Declare the view-cache half of I6 as a pollable invariant.
 
-    `inject=[TOOLS]` for the reason `skills-invariant` states: guarding on
-    `ctx.get(TOOLS) is None` would report this invariant as *holding* in a
-    deployment that has no tool registry, which is the reassuring answer given
-    where it is least earned. An unmet key means the row never activates, so the
-    invariant leaves the report with its subject.
+    `inject=[TOOLS]` is here for the reason that `skills-invariant` states. A
+    guard on `ctx.get(TOOLS) is None` would report this invariant as *holding*
+    in a deployment that has no tool registry. That is a reassuring answer where
+    it is least justified. With an unmet key the row never activates, so the
+    invariant is absent from the report when its subject is absent.
     """
     contribute(
         ctx,

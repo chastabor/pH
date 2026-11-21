@@ -1,10 +1,10 @@
-"""`llm-fake` — a scripted adapter, so Phase 0 is testable without a provider.
+"""`llm-fake`: a scripted adapter, so that pH can be tested without a provider.
 
-Emits the same chunk protocol a real adapter does — `block-start`, deltas,
-`block-end`, `usage`, `finish` — so the loop, the assembler and the log are
-exercised against the real contract rather than a shortcut. Phase 1's
-`llm-replay` (P1-24) replaces the *script* with a recorded session and keeps
-this shape.
+The adapter emits the same chunk protocol that a real adapter does:
+`block-start`, deltas, `block-end`, `usage`, `finish`. The loop, the assembler
+and the log are therefore exercised against the real contract and not against a
+shortcut. `llm-replay` (P1-24) replaces the *script* with a recorded session and
+keeps this shape.
 
 @module ph.llm.fake
 """
@@ -59,10 +59,11 @@ class FakeAdapter:
     """What `resolve_model` answers, for a test that needs this route to declare
     media (P7-01, P7-03).
 
-    `None` — the default — is text-only, which is what a provider that has said
-    nothing declares and the safe answer `media-degrade` exists to give for free.
-    A whole `ResolvedModel` rather than a field per capability, so a route
-    capability added there needs no second declaration here."""
+    `None`, the default, is text-only. That is what a provider declares when it
+    has said nothing. It is also the safe answer, and `media-degrade` exists to
+    give it at no cost. The field is a whole `ResolvedModel` and not one field
+    for each capability, so a route capability that is added there needs no
+    second declaration here."""
     requests: list[GenerateOptions] = field(default_factory=list)
 
     async def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]:
@@ -86,14 +87,14 @@ class FakeAdapter:
     def resolve_model(self, provider: str, model: str) -> ResolvedModel:
         if self.route is None:
             return ResolvedModel(context_window=self.context_window)
-        # The window stays this adapter's unless the override names one: it is
-        # what every limits and compaction test is sized against, and a route set
-        # to declare an image should not silently move it.
+        # The window stays the window of this adapter unless the override names
+        # one. Every limits test and compaction test is sized against it, and a
+        # route that is set to declare an image should not move it silently.
         return replace(self.route, context_window=self.route.context_window or self.context_window)
 
 
 def _estimate_tokens(options: GenerateOptions) -> int:
-    """A four-chars-per-token estimate over visible text, as dsh's meter does."""
+    """An estimate of four characters per token over visible text, as the meter of dsh does."""
     characters = sum(
         len(block.text)
         for message in options.messages
@@ -107,9 +108,11 @@ class Config(WireModel):
     """Row config for `llm-fake`: which routes it answers, and with what."""
 
     providers: Annotated[tuple[str, ...], Field(min_length=1)] = ("fake",)
-    """`min_length`, so `providers: []` is refused rather than silently read as
-    the default. The raw-dict reading this replaced substituted for any falsy
-    value, which is the quiet no-op this row's own config rules now reject."""
+    """The provider names that this row answers for. `min_length` refuses
+    `providers: []`, which would otherwise be read silently as the default. The
+    raw-dict reading that this replaced substituted the default for any falsy
+    value. That is the silent no-op that the config rules of this row now
+    reject."""
     replies: tuple[str, ...] = ()
 
 

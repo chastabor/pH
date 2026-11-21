@@ -1,16 +1,19 @@
-"""`ctx.llm` — the model adapter seam.
+"""`ctx.llm`: the model adapter seam.
 
-Definition, Provider, Consumer (invariant I5). The *definition* is
-`LlmAdapter`; a *provider* is any plugin calling `ctx.llm.register_adapter`;
-the *consumer* is the loop, which never learns which adapter answered.
+Definition, Provider, Consumer (invariant I5). The *definition* is `LlmAdapter`.
+A *provider* is any plugin that calls `ctx.llm.register_adapter`. The *consumer*
+is the loop, which never learns which adapter answered.
 
-Every call goes through the `llm/stream` waterfall, which is where retry,
-replay and session-title attach, then `llm/send`, where a barrier waits. An adapter that
-raises is normalized into a terminal `finish{error}` chunk before any consumer
-sees it, so a consumer never handles two shapes for the same failure.
+Every call goes through the `llm/stream` waterfall and then through `llm/send`.
+A row that must check or change a request before it is sent listens on
+`llm/stream`: `agent-loop-invariant` and `media-degrade` attach there. A barrier
+waits on `llm/send`. If an adapter raises, the seam normalizes the error into a
+terminal `finish{error}` chunk before any consumer sees it. So a consumer never
+handles two shapes for the same failure.
 
-A route may also *decide* (`DecisionAdapter`): typed questions about a state,
-answered with probabilities rather than text. `ctx.llm.decide` is that door.
+A route may also *decide* (`DecisionAdapter`). It answers typed questions about
+a state with probabilities, and not with text. `ctx.llm.decide` is the call for
+that.
 
 @module ph.llm.adapter
 """
@@ -19,9 +22,9 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
+from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
 import anyio
 
@@ -64,6 +67,7 @@ __all__ = [
     "LlmError",
     "LlmRuntime",
     "MediaRoute",
+    "ModelResolver",
     "Noul",
     "NoulAnswer",
     "Question",
@@ -83,20 +87,21 @@ log = logging.getLogger("ph.llm")
 _LOG = log_writer(__name__)
 
 DECIDED = "llm/decided"
-"""A decision model answered questions on a route for a session's agent: the
-route, how many questions, and the provider's `usage` when it reports one. A
-record that spends tokens (`ph.seams.token_meter.SPENDING_TYPES`)."""
+"""A decision model answered questions on a route for the agent of a session. The
+record carries the route, the number of questions, and the `usage` of the
+provider when the provider reports one. It is a record that spends tokens
+(`ph.seams.token_meter.SPENDING_TYPES`)."""
 
 DECISION_FAILED = "llm/decision-failed"
-"""A route would not decide: the route, how many questions, and the failure's
-`code` and `reason`."""
+"""A route would not decide. The record carries the route, the number of
+questions, and the `code` and `reason` of the failure."""
 
 events.declare(
     "llm/stream",
     "waterfall",
     GenerateOptions,
     owner="ph.llm",
-    doc="Wraps every model call. Retry, replay and recording attach here.",
+    doc="Wraps every model call. Media degradation and the stream invariant attach here.",
 )
 events.declare(
     "llm/send",
@@ -117,7 +122,7 @@ events.declare(
 class LlmError(Exception):
     """A structured model-call failure.
 
-    Carries the provider's own facts rather than a flattened string, because
+    It carries the facts of the provider and not a flattened string, because
     `turn/end{error}` records them verbatim and a later reader needs the code.
     """
 
@@ -134,98 +139,124 @@ class ResolvedModel:
     context_window: int | None = None
     default_max_tokens: int | None = None
     accepts: frozenset[str] = frozenset()
-    """MIME types this route takes as message *content* (P7-01).
+    """The MIME types that this route takes as message *content* (P7-01).
 
-    Empty means text only, which is every route until an adapter says otherwise —
-    the safe default, since the failure it prevents is a media block reaching a
-    wire that silently drops it. A caller that finds a block outside this set
-    degrades it to a text pointer and logs a notice; it never sends it and hopes,
-    and never fails the turn, because a session begun on a vision model and
-    resumed on a text one must still open."""
+    Empty means text only. That is every route until an adapter says otherwise,
+    and it is the safe default: the failure that it prevents is a media block
+    that reaches a wire that silently drops it. A caller that finds a block
+    outside this set degrades it to a text pointer and logs a notice. It never
+    sends the block in the hope that it works. It also never fails the turn,
+    because a session that began on a vision model and is resumed on a text
+    model must still open."""
     max_attachment_bytes: int | None = None
-    """Per-attachment ceiling, when the route publishes one.
+    """The ceiling for one attachment that goes *inline*, when the route
+    publishes one.
 
-    A limit and not just `accepts`, because it is what lets an over-sized block
-    degrade to a pointer here rather than be rejected at the provider."""
+    It is a limit and not only `accepts`, because with it an over-sized block
+    degrades to a pointer here and is not rejected at the provider. It does not
+    apply to a MIME type in `uploads`."""
+    uploads: frozenset[str] = frozenset()
+    """The MIME types that the adapter of this route sends by reference, through
+    the file API of its provider (P7-03).
+
+    A file of one of these types is not held to `max_attachment_bytes`, because
+    that number is the ceiling of an inline block. On the Google route it is
+    the 20 MB limit of a whole request, and a video of 300 MB is fine by
+    reference. `media-degrade` used to apply the inline ceiling to every block
+    before the adapter ran, so such a video became a pointer and was never
+    uploaded. The adapter now decides: it references the file, and when the
+    upload gives no handle it sends a file under the ceiling inline and a file
+    over it as a pointer.
+
+    Empty means that nothing is uploaded. That is the answer of a route with no
+    file API, and of any route in a deployment where `ctx.uploads` is not
+    mounted."""
     max_image_edge: int | None = None
-    """Longest edge in pixels the route will *accept*, when it publishes one.
+    """The longest edge in pixels that the route will *accept*, when it publishes one.
 
-    This docstring's neighbor used to say a pixel ceiling had to wait for
-    `media-transform` (P7-02) because "declaring one now would be a knob wired to
-    nothing". Two things wired it (P7-03): `ph.llm.dimensions` reads an image's
-    size from its header with no dependency, and a limit does not need a resizer
-    to be worth declaring — refusing with a sentence the model can read is an
-    action, and it is the same one `max_attachment_bytes` already takes."""
+    An earlier docstring beside this one said that a pixel ceiling had to wait
+    for `media-transform` (P7-02), because "declaring one now would be a knob
+    wired to nothing". Two things changed that (P7-03). `ph.llm.dimensions` reads
+    the size of an image from its header with no dependency. And a limit does
+    not need a resizer to be worth declaring: a refusal with a sentence that the
+    model can read is an action, and `max_attachment_bytes` already takes the
+    same action."""
     structured_output: bool = False
     """Whether this route enforces `GenerateOptions.response_schema` on the wire.
 
-    Declared rather than assumed, and defaulting to *no*, for the reason `accepts`
-    does: the failure it prevents is a caller believing a shape was guaranteed
-    when the provider ignored the field. OpenAI-compatible endpoints take
-    `response_format: {"type": "json_schema", …}`; Anthropic has no equivalent
-    today, so a caller there gets the instruction and the validation and not the
-    guarantee — which is a real difference and one `structured` says out loud
-    rather than papering over."""
+    It is declared and not assumed, and it defaults to *no*, for the same reason
+    as `accepts`: the failure that it prevents is a caller that believes a shape
+    was guaranteed when the provider ignored the field. OpenAI-compatible
+    endpoints take `response_format: {"type": "json_schema", …}`. Anthropic has
+    no equivalent today, so a caller there gets the instruction and the
+    validation, and not the guarantee. That is a real difference, and
+    `ph.llm.structured` states it and does not hide it."""
     usable_image_edge: int | None = None
-    """Longest edge the route can actually *use*, when it is smaller than it accepts.
+    """The longest edge that the route can *use*, when that is less than it accepts.
 
-    Providers scale a large image down before the model sees it — Anthropic at
-    1568 px, and it accepts up to 8000 — so pixels above this are uploaded, paid
-    for, and discarded at the far end. Separate from `max_image_edge` because the
-    outcomes differ in kind: over that, nothing is sent; over this, everything
-    works and a person is quietly overpaying, which is the failure that lasts for
-    a whole session because nothing announces it."""
+    Providers scale a large image down before the model sees it. Anthropic
+    scales to 1568 px, and it accepts up to 8000. So pixels above this edge are
+    uploaded, paid for, and discarded at the far end. This field is separate
+    from `max_image_edge` because the outcomes differ in kind. Over
+    `max_image_edge`, nothing is sent. Over this edge, everything works and the
+    user quietly overpays. That failure lasts for a whole session, because
+    nothing announces it."""
     sampling: frozenset[SamplingSetting] | None = None
-    """The sampling settings this route's API takes (A1), or `None` when its adapter has
-    not said.
+    """The sampling settings that the API of this route takes (A1), or `None` when
+    its adapter has not said.
 
-    A setting outside it is dropped before the request reaches the adapter, with a
-    warning once per route and setting, and the `models` row names it in `phern
-    doctor`: graceful degradation, since a route that runs without a recommended
-    setting still works, where one refused would not. `None` drops and warns about
-    nothing, since a guess would either warn falsely or send a field a strict server
+    A setting outside this set is dropped before the request reaches the adapter.
+    The seam warns one time for each route and setting, and the `models` row
+    names the setting in `phern doctor`. This is graceful degradation: a route
+    that runs without a recommended setting still works, and a route that is
+    refused does not. `None` drops nothing and warns about nothing, because a
+    guess would either warn falsely or send a field that a strict server
     refuses."""
     credential: str | None = None
-    """The credential this route resolves at the adapter edge, **by name** (I-3) —
-    the `apiKeyEnv` its row names — or `None` for a route that needs none.
+    """The credential that this route resolves at the adapter edge, **by name**
+    (I-3). It is the `apiKeyEnv` that the row of the route names, or `None` for a
+    route that needs none.
 
-    What lets anything above the edge ask "can this route run here, now?" without
-    holding a value: the resume check (T5) reads it and asks `ctx.credentials.has`,
-    so a session whose key is missing waits for it by name rather than starting and
-    failing at its first request. Checked against the mounted profile's adapters,
-    never a name copied into the log, because a profile that renamed the variable
-    must be asked about the new name."""
+    With the name, anything above the edge can ask "can this route run here,
+    now?" without holding a value. The resume check (T5) reads the name and asks
+    `ctx.credentials.has`. So a session whose key is missing waits for the key
+    by name, and does not start and then fail at its first request. The check
+    reads the adapters of the mounted profile and never a name that was copied
+    into the log, because a profile that renamed the variable must be asked
+    about the new name."""
     max_decision_tokens: int | None = None
-    """The most tokens one decision on this route may carry, where its row says.
+    """The most tokens that one decision on this route may carry, when its row
+    gives a number.
 
-    A fact about the server rather than the model, and one a llama.cpp does not
-    publish: it reads a decision in one physical batch, so its limit is
-    `--ubatch-size` — 512 unless it was started with more — and not its context
-    window. `None` for a route that says nothing, and for every route that does
-    not decide. `LlmRuntime.decision_limit` is what an asker reads, since a
-    refusal can teach less than this says."""
+    This is a fact about the server and not about the model, and a llama.cpp
+    server does not publish it. That server reads a decision in one physical
+    batch, so its limit is `--ubatch-size`, which is 512 unless the server was
+    started with more. The limit is not its context window. The value is `None`
+    for a route that gives no number, and for every route that does not decide.
+    An asker reads `LlmRuntime.decision_limit`, because a refusal can teach a
+    lower limit than this field gives."""
 
 
 class MediaRoute(Protocol):
-    """The route facts a config declares and `ResolvedModel` carries.
+    """The route facts that a config declares and that `ResolvedModel` carries.
 
-    Read-only members on purpose: the three configs disagree about the *types* —
-    Anthropic states a pixel edge as `int` where the other two allow `None` — and
-    a property is covariant where a mutable attribute would not be, so each may
-    narrow its own field and still satisfy this.
+    The members are read-only on purpose. The three configs disagree about the
+    *types*: Anthropic states a pixel edge as `int`, and the other two allow
+    `None`. A property is covariant and a mutable attribute is not, so each
+    config may narrow its own field and still satisfy this Protocol.
 
-    Declared rather than duck-typed, which is what makes `resolved` below more
-    than a shortcut: a config that grows out of step with `ResolvedModel` fails at
-    the call site instead of quietly reporting a default.
+    The Protocol is declared and not duck-typed. That makes `resolved` below
+    more than a shortcut: a config that falls out of step with `ResolvedModel`
+    fails at the call site, and does not quietly report a default.
 
-    **Beside `ResolvedModel` rather than beside the adapters that satisfy it.**
-    Its member list *is* that dataclass's field list, so the two have to move
-    together — and living in an application package's private module would have
-    meant a third-party adapter importing `ph_app.adapters._media` or writing the
-    seventh copy of the projection, which is the drift this exists to stop. It is
-    also the only side of the boundary where the invariant can be checked at all:
-    a rename here and a matching edit there cannot pass one suite and fail the
-    other.
+    **It is beside `ResolvedModel` and not beside the adapters that satisfy
+    it.** Its members are the six fields of that dataclass that `resolved` reads
+    from a config, so the two must change together. In a private module of an
+    application package, a third-party adapter would have had to import
+    `ph_app.adapters._media` or write a fourth copy of the projection, and
+    that drift is what this Protocol exists to stop. This is also the only side
+    of the boundary where the invariant can be checked at all: a rename here and
+    a matching edit there cannot pass one suite and fail the other.
     """
 
     @property
@@ -249,29 +280,40 @@ def resolved(
     credential: str | None,
     sampling: frozenset[SamplingSetting],
     max_decision_tokens: int | None,
+    uploads: frozenset[str],
 ) -> ResolvedModel:
-    """One route's config as the `ResolvedModel` every layer above reads.
+    """The config of one route as the `ResolvedModel` that every layer above reads.
 
-    **The projection, not the values.** What a route accepts, how large a file it
-    takes and what it does with pixels are per-provider facts that stay in each
-    config with the paragraph arguing them; what was copied three times is the
-    *field list* — six lines mapping one name onto the same name — and that list
-    is `ResolvedModel`'s vocabulary rather than any adapter's.
+    **This is the projection, not the values.** What a route accepts, how large
+    a file it takes, and what it does with pixels are facts about each provider.
+    They stay in each config, with the paragraph that argues them. What was
+    copied three times is the *field list*: six lines that map one name onto the
+    same name. That list is the vocabulary of `ResolvedModel` and not of any
+    adapter.
 
-    The cost of the copies was a seventh capability being three edits, where an
-    adapter that missed one reports the default instead of the route's number and
-    `media-degrade` then applies the wrong rule for that provider alone. Now it is
-    one edit here, and a config that has not caught up fails to type-check.
+    The cost of the copies was that a seventh capability took three edits. An
+    adapter that missed one reported the default and not the number of the
+    route, and `media-degrade` then applied the wrong rule for that provider
+    alone. Now it takes one edit here, and a config that has not caught up fails
+    to type-check.
 
-    `structured_output` is passed rather than read, because it is the one field
-    that is not a config value: it is a claim about the *wire*, argued at each
-    call site, and a route that declared it in config could promise a guarantee
-    its adapter does not implement. `credential` is passed for the plainer reason
-    that it is not a media fact: it is the name the adapter resolves at its edge,
-    and **required** so an adapter cannot forget to say (T5). `sampling` is the
-    wire's too, and required for the same reason. So is `max_decision_tokens`,
-    which is config but not a media fact: an adapter that does not decide says
-    `None`, and one that does cannot drop its route's limit unnoticed.
+    The other five arguments are passed and not read from the config:
+
+    * `structured_output` is the one field that is not a config value. It is a
+      claim about the *wire*, argued at each call site. A route that declared it
+      in config could promise a guarantee that its adapter does not implement.
+    * `credential` is not a media fact. It is the name that the adapter resolves
+      at its edge, and it is **required** so that an adapter cannot forget to
+      give it (T5).
+    * `sampling` also belongs to the wire, and it is required for the same
+      reason.
+    * `max_decision_tokens` is config but not a media fact, and it is required
+      too. An adapter that does not decide passes `None`, and an adapter that
+      does decide cannot drop the limit of its route unnoticed.
+    * `uploads` is what the adapter *will* reference, which is less than what
+      the config lists when no upload service is mounted or the wire has no
+      reference shape for a type. It is required, so that an adapter with a
+      file API cannot leave its large files to the inline ceiling.
     """
     return ResolvedModel(
         context_window=route.context_window,
@@ -284,22 +326,36 @@ def resolved(
         credential=credential,
         sampling=sampling,
         max_decision_tokens=max_decision_tokens,
+        uploads=uploads,
     )
 
 
 class LlmAdapter(Protocol):
-    """The one required method is `stream`; `resolve_model` is optional."""
+    """`stream` is the one required method. `resolve_model` is optional, and
+    `ModelResolver` declares it."""
 
     def stream(self, options: GenerateOptions) -> AsyncIterator[StreamChunk]: ...
+
+
+@runtime_checkable
+class ModelResolver(Protocol):
+    """An adapter that knows what its routes can do. **Optional capability.**
+
+    `LlmRuntime.resolve_model` asks with `isinstance`, for the reason that
+    `DecisionAdapter` gives. An adapter that does not implement this is not an
+    instance, and every route of it resolves to the defaults of `ResolvedModel`.
+    """
+
+    def resolve_model(self, provider: str, model: str) -> ResolvedModel: ...
 
 
 @dataclass(frozen=True, slots=True)
 class Noul:
     """A yes-or-no question, answered with how likely *yes* is (`NoulAnswer`).
 
-    The three kinds of question carry the decision API's own names — `noul`,
-    `choice`, `score` — and so do their fields, so a reader of the wire and a
-    reader of this module are reading one vocabulary."""
+    The three kinds of question carry the names of the decision API: `noul`,
+    `choice`, `score`. Their fields carry its names too. So a reader of the wire
+    and a reader of this module read one vocabulary."""
 
     instructions: str
 
@@ -310,8 +366,9 @@ class Choice:
 
     instructions: str
     criteria: Mapping[str, str]
-    """Each option's key, and what choosing it means; `""` for a key that says
-    it. Two at least, in the order a tie is broken in."""
+    """The key of each option, and what choosing it means. The meaning is `""` for
+    a key that explains itself. There are at least two options, in the order
+    that breaks a tie."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,7 +377,7 @@ class Score:
 
     instructions: str
     criteria: tuple[str, ...]
-    """What each level means, lowest first. Two to ten."""
+    """What each level means, lowest first. There are two to ten levels."""
 
 
 Question: TypeAlias = Noul | Choice | Score
@@ -331,9 +388,9 @@ Question: TypeAlias = Noul | Choice | Score
 class DecisionRequest:
     """Questions about one state, on one route.
 
-    Not a conversation: `state` is what is judged, as text, and each question is
-    answered by itself, so one answer never colors another and several are one
-    request."""
+    This is not a conversation. `state` is the thing that is judged, as text.
+    Each question is answered by itself, so one answer never influences another,
+    and several questions are one request."""
 
     provider: str
     model: str
@@ -347,8 +404,8 @@ class NoulAnswer:
     """A `Noul`'s answer."""
 
     noul: float
-    """How likely *yes* is, from 0 to 1. A probability, never a verdict: where
-    to draw the line is the asker's rule."""
+    """How likely *yes* is, from 0 to 1. This is a probability and never a verdict.
+    The asker has the rule for where to draw the line."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,8 +417,8 @@ class ChoiceAnswer:
     probabilities: Mapping[str, float]
     """Each option's share, adding up to 1, in the order the criteria were given."""
     confidence: float | None = None
-    """How far from an even split the shares are, from 0 to 1, when the
-    provider says. Not a measure of how often it is right."""
+    """How far the shares are from an even split, from 0 to 1, when the provider
+    reports it. It does not measure how often the answer is right."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,10 +426,11 @@ class ScoreAnswer:
     """A `Score`'s answer."""
 
     score: float
-    """The expected level, counted from 0 at the lowest; it can fall between two."""
+    """The expected level, counted from 0 at the lowest. It can fall between two levels."""
     probabilities: tuple[float, ...]
-    """Each level's share, lowest first. The wire keys them `"0"`, `"1"`, …; the
-    order is the key, and the question's `criteria` are the legend."""
+    """The share of each level, lowest first. The wire keys them `"0"`, `"1"`, ….
+    Here the order is the key, and the `criteria` of the question are the
+    legend."""
     confidence: float | None = None
     """As `ChoiceAnswer.confidence`."""
 
@@ -389,19 +447,21 @@ _ANSWERS: Mapping[type[Question], type[Answer]] = {
 
 @dataclass(frozen=True, slots=True)
 class Decisions:
-    """One answer a question, under the question's name.
+    """One answer for each question, under the name of the question.
 
-    Each is the kind its question is owed, which `LlmRuntime.decide` holds every
-    adapter to: a caller that asked a `Noul` reads a `NoulAnswer`."""
+    Each answer is the kind that its question is owed, and `LlmRuntime.decide`
+    holds every adapter to that. A caller that asked a `Noul` reads a
+    `NoulAnswer`."""
 
     answers: Mapping[str, Answer]
     input_tokens: int | None = None
-    """What the provider says the request cost, when it says. A decision model
-    scores and writes nothing, so there are no output tokens to report."""
+    """What the provider reports that the request cost, when it reports a cost. A
+    decision model scores and writes nothing, so there are no output tokens to
+    report."""
 
     def answer[A: Answer](self, name: str, kind: type[A]) -> A:
-        """The answer to `name`, as the `kind` its question was owed — the reader
-        that lets a caller skip narrowing what `decide` already checked.
+        """The answer to `name`, as the `kind` that its question was owed. With this
+        reader, a caller does not narrow what `decide` already checked.
 
         :raises LlmError: `BAD_DECISION`, for a question with no answer or with
             an answer of another kind.
@@ -419,14 +479,14 @@ class Decisions:
 class DecisionAdapter(Protocol):
     """An adapter that can decide. **Optional capability.**
 
-    Its own Protocol beside `LlmAdapter`, and asked with `isinstance`, never a
-    `getattr` probe — the rule this tree states for every optional capability:
-    a probe reports an adapter whose method is misnamed as one that cannot. An
-    adapter for a provider with no decision API implements none of this and is
-    simply not an instance.
+    It is its own Protocol beside `LlmAdapter`, and a caller asks with
+    `isinstance` and never with a `getattr` probe. This tree states that rule
+    for every optional capability: a probe reports an adapter whose method is
+    misnamed as an adapter that cannot decide. An adapter for a provider with no
+    decision API implements none of this, and is not an instance.
 
-    The credential is resolved inside `decide`, at the adapter's edge, as it is
-    for `stream`: a caller hands a state and questions in and gets answers
+    The credential is resolved inside `decide`, at the edge of the adapter, as
+    it is for `stream`. A caller hands in a state and questions and gets answers
     back, and at no point holds a key.
     """
 
@@ -444,21 +504,21 @@ _TOO_LONG = (
     "too large to process",
     "too long",
 )
-"""How embeddings and decision servers say an input did not fit. llama.cpp:
-*"input (1602 tokens) is too large to process"*, with a 500; OpenAI: *"maximum
-context length is 8192 tokens"*, with a 400. Phrases, because the status says
-nothing either way."""
+"""How embeddings servers and decision servers report that an input did not fit.
+llama.cpp answers *"input (1602 tokens) is too large to process"* with a 500.
+OpenAI answers *"maximum context length is 8192 tokens"* with a 400. The list
+holds phrases, because the status says nothing either way."""
 
 
 def input_too_long(body: str) -> bool:
     """Whether an embeddings or decision server refused a request because an
     input did not fit.
 
-    The one list, for every client of such an API, because a refusal one of them
-    reads as "too long" and another as a plain failure sends the same server's
-    answer down two roads: one sends a smaller input and goes on, the other ends
-    the run. Classified as `CONTEXT_WINDOW_EXCEEDED`, which is what a caller can
-    act on."""
+    Every client of such an API uses this one list. If one client read a refusal
+    as "too long" and another read it as a plain failure, the same answer from
+    one server would have two outcomes: one client sends a smaller input and
+    continues, and the other ends the run. The refusal is classified as
+    `CONTEXT_WINDOW_EXCEEDED`, which a caller can act on."""
     lowered = body.lower()
     return any(phrase in lowered for phrase in _TOO_LONG)
 
@@ -468,16 +528,17 @@ _READS = (r"batch size: (\d+)", r"maximum context length is (\d+)")
 
 
 def too_long_facts(body: str) -> tuple[int | None, int | None]:
-    """What a refusal `input_too_long` recognizes says in numbers: how many
-    tokens the input was, and how many the server takes. Either may be missing.
+    """The numbers in a refusal that `input_too_long` recognizes: how many tokens
+    the input was, and how many the server takes. Either may be missing.
 
-    A llama.cpp says both — *"input (702 tokens) is too large to process …
-    (current batch size: 512)"* — and so does OpenAI. They are worth reading
-    because they are exact where a caller's own count is an estimate: the first
-    says how far over the input was, so the next one is aimed rather than
-    halved, and the second is the server's real limit, which is not always the
-    one it reports when asked. Beside `_TOO_LONG` because both read the same
-    servers' prose; a refusal in other words simply has no numbers."""
+    A llama.cpp server gives both: *"input (702 tokens) is too large to process
+    … (current batch size: 512)"*. OpenAI gives both too. They are worth reading
+    because they are exact, and the count of a caller is an estimate. The first
+    number says how far over the input was, so the next input is aimed and not
+    halved. The second number is the real limit of the server, which is not
+    always the limit that it reports when asked. This function is beside
+    `_TOO_LONG` because both read the prose of the same servers. A refusal in
+    other words has no numbers."""
 
     def found(patterns: tuple[str, ...]) -> int | None:
         for pattern in patterns:
@@ -490,10 +551,12 @@ def too_long_facts(body: str) -> tuple[int | None, int | None]:
 
 
 def failure_of(message: str, code: str, *, said: str = "", status: int | None = None) -> LlmFailure:
-    """A provider's failure, `message` as it is shown. A refusal as too long
-    carries the two numbers it gave (`too_long_facts`) as fields, read here once
-    from all of what the provider `said` — the message, unless a builder cut it
-    down for showing — so no caller reads them again out of a shortened one."""
+    """The failure of a provider, with `message` as it is shown.
+
+    A refusal as too long carries the two numbers that it gave (`too_long_facts`)
+    as fields. They are read here, one time, from everything that the provider
+    `said`. That is the message, unless a builder cut the message down for
+    showing. So no caller reads the numbers again out of a shortened message."""
     sent, reads = (
         too_long_facts(said or message) if code == CONTEXT_WINDOW_EXCEEDED else (None, None)
     )
@@ -503,10 +566,10 @@ def failure_of(message: str, code: str, *, said: str = "", status: int | None = 
 
 
 def refused_share(sent: int | None, reads: int | None) -> float | None:
-    """The share of a refused input the server reads, by the two numbers its
-    refusal gave (`too_long_facts`), or `None` when it did not give both or gave
-    a limit the input was within. What a caller aims its next, shorter input by,
-    a margin under."""
+    """The share of a refused input that the server reads, from the two numbers
+    that its refusal gave (`too_long_facts`). It is `None` when the refusal did
+    not give both, or gave a limit that the input was within. A caller aims its
+    next, shorter input by this share, less a margin."""
     return reads / sent if sent and reads and sent > reads else None
 
 
@@ -516,15 +579,17 @@ class AdapterHandle:
 
     adapter: LlmAdapter
     by: Running
-    """Who registered it (P6-29). An adapter's `stream` is row code this registry
-    invokes, and it ran unbound — the same category as a tool's `execute`.
+    """Who registered it (P6-29). The `stream` of an adapter is row code that this
+    registry invokes, and it used to run unbound. That is the same category as
+    the `execute` of a tool.
 
-    Missed by P6-29 because both P6-30 walks look for a `Callable`: an adapter is
-    an *object satisfying a Protocol*, so `AdapterHandle.adapter: LlmAdapter`
-    names none, and this registers without a `claim_*` helper at all. Resolved
-    from the ambient binding rather than a `scope=`, because `register_adapter`
-    has never taken one — a row calling it from its own `apply` is the only
-    caller shape there is, and that is exactly what `running_for(None)` reads."""
+    P6-29 missed it because both P6-30 walks look for a `Callable`. An adapter is
+    an *object that satisfies a Protocol*, so `AdapterHandle.adapter: LlmAdapter`
+    names no `Callable`, and this registers without a `claim_*` helper at all.
+    The value is resolved from the ambient binding and not from a `scope=`
+    argument, because `register_adapter` has never taken one. A row that calls
+    it from its own `apply` is the only shape of caller, and that is exactly
+    what `running_for(None)` reads."""
     providers: tuple[str, ...]
     _runtime: LlmRuntime
     _disposed: bool = False
@@ -545,21 +610,22 @@ class LlmRuntime:
     _registrations: list[AdapterHandle] = field(default_factory=list)
     _routes: dict[str, AdapterHandle] = field(default_factory=dict)
     _warned: set[str] = field(default_factory=set)
-    """Each warning about a withheld setting already given, so a session warns once
-    rather than on every request."""
+    """Each warning about a withheld setting that was already given. So a session
+    warns one time, and not on every request."""
     _decision_limits: dict[tuple[str, str], int] = field(default_factory=dict)
-    """The most tokens a route was found to read in one decision, by route, as
-    its refusals said (`too_long_facts`). Kept so the next asker sizes its state
-    to fit rather than spending a refusal to learn it again; only ever lowered,
-    and kept for the life of the process — a server restarted with a bigger
-    batch is read at the smaller one until then, which shows an asker less and
-    fails nothing."""
+    """The most tokens that a route was found to read in one decision, by route, as
+    its refusals reported (`too_long_facts`). It is kept so that the next asker
+    sizes its state to fit, and does not spend a refusal to learn the limit
+    again. A limit is only ever lowered, and it is kept for the life of the
+    process. A server that is restarted with a bigger batch is read at the
+    smaller limit until the process ends. That shows an asker less and fails
+    nothing."""
 
     def register_adapter(self, providers: Sequence[str], adapter: LlmAdapter) -> AdapterHandle:
         """Claim one or more provider routes for `adapter`.
 
-        The caller's scope owns the handle's `dispose`, so unloading the plugin
-        unregisters the routes.
+        The caller adds the `dispose` of the handle to its own scope, so unloading
+        the plugin unregisters the routes.
         """
         handle = AdapterHandle(
             adapter=adapter,
@@ -580,15 +646,13 @@ class LlmRuntime:
     def list_providers(self) -> list[str]:
         return sorted(self._routes)
 
-    def adapter_for(self, provider: str) -> LlmAdapter:
-        return self._route(provider).adapter
-
     def _route(self, provider: str) -> AdapterHandle:
-        """The whole registration, for the two paths that call into the adapter.
+        """The whole registration, for the three paths that call into the adapter:
+        `stream`, `decide` and `resolve_model`.
 
-        `adapter_for` stays the public spelling — one out-of-package caller reads
-        it — and the binding needs what it discards, which is who registered the
-        thing it returns.
+        It is the registration and not the adapter alone, because the binding
+        needs to know who registered the adapter. Raises `LlmError` with
+        `NO_ADAPTER` when no adapter is registered for `provider`.
         """
         handle = self._routes.get(provider)
         if handle is None:
@@ -596,9 +660,10 @@ class LlmRuntime:
         return handle
 
     def decision_limit(self, provider: str, model: str) -> int | None:
-        """The most tokens one decision on this route may carry, where anything
-        says: the route's own `max_decision_tokens`, or what a refusal taught,
-        whichever is less. `None` when neither says, and the asker assumes."""
+        """The most tokens that one decision on this route may carry, when anything
+        gives a number. It is the `max_decision_tokens` of the route or what a
+        refusal taught, whichever is less. It is `None` when neither gives a
+        number, and the asker then assumes a limit."""
         said = (
             self.resolve_model(provider, model).max_decision_tokens,
             self._decision_limits.get((provider, model)),
@@ -606,8 +671,9 @@ class LlmRuntime:
         return min((one for one in said if one is not None), default=None)
 
     def decides(self, provider: str) -> bool:
-        """Whether the adapter registered for `provider` can decide. `False` for a
-        provider nothing is registered for, too: there is no adapter to ask."""
+        """Whether the adapter that is registered for `provider` can decide. It is
+        also `False` for a provider with no registered adapter: there is no
+        adapter to ask."""
         handle = self._routes.get(provider)
         return handle is not None and isinstance(handle.adapter, DecisionAdapter)
 
@@ -620,25 +686,29 @@ class LlmRuntime:
     ) -> Decisions:
         """Ask `request.questions` of the adapter that owns its route.
 
-        Run as the row that registered the adapter, like `stream`. Refused with a
-        code when the route has no adapter (`NO_ADAPTER`), its adapter cannot
-        decide (`NO_DECISIONS`), or the answers are not the ones the questions
-        are owed (`BAD_DECISION`), each naming the provider.
+        The call runs as the row that registered the adapter, like `stream`. It
+        is refused with a code that names the provider in three cases:
 
-        **`timeout_s` is how long the asker will wait**, and a route that takes
-        longer is refused as `TIMEOUT`. Here rather than around the call, so a
-        decision given up on is recorded like any other that failed: whoever
-        asks is usually holding something up until the answer comes — a turn
-        about to end — and an adapter's own patience is a model call's.
+        * The route has no adapter (`NO_ADAPTER`).
+        * Its adapter cannot decide (`NO_DECISIONS`).
+        * The answers are not the ones that the questions are owed
+          (`BAD_DECISION`).
 
-        **`session` is whose spend it is.** A decision is not a turn's request,
-        so nothing else in a log says a route was used: given a session, what
-        the request cost is recorded in it (`DECIDED`), where a budget and a
-        child's account read every other spend, and so is a request the route
-        refused or failed (`DECISION_FAILED`), with why. Without one the caller
-        is deciding for nobody's account, and nothing is recorded. What was
-        *asked* and *answered* is the asker's to record: it knows what the
-        answer was for."""
+        **`timeout_s` is how long the asker will wait.** A route that takes
+        longer is refused as `TIMEOUT`. The timeout is applied here, and not by
+        the asker around its call, so that a decision that the asker gave up on
+        is recorded like any other failed decision. The asker is usually holding
+        something up until the answer comes, such as a turn that is about to
+        end. The patience of an adapter itself is that of a model call.
+
+        **`session` says whose spend it is.** A decision is not a request of a
+        turn, so nothing else in a log says that a route was used. With a
+        session, the cost of the request is recorded in it (`DECIDED`), where a
+        budget and the account of a child read every other spend. A request that
+        the route refused or failed is recorded there too (`DECISION_FAILED`),
+        with the reason. Without a session, the caller decides for no account,
+        and nothing is recorded. The asker records what was *asked* and
+        *answered*, because it knows what the answer was for."""
         account: dict[str, JsonValue] = {
             "provider": request.provider,
             "model": request.model,
@@ -683,8 +753,9 @@ class LlmRuntime:
         return result
 
     def _learn(self, request: DecisionRequest, error: Exception) -> None:
-        """Keep the limit a refusal names (`decision_limit`): a route that said
-        its input was too long, and said how long a one it reads."""
+        """Keep the limit that a refusal names (`decision_limit`). The refusal comes
+        from a route that reported that its input was too long, and reported how
+        long an input it reads."""
         if not isinstance(error, LlmError) or error.code != CONTEXT_WINDOW_EXCEEDED:
             return
         reads = error.failure.limit_tokens
@@ -698,25 +769,26 @@ class LlmRuntime:
             handle = self._route(provider)
         except LlmError:
             return ResolvedModel()
-        resolver: Callable[..., Any] | None = getattr(handle.adapter, "resolve_model", None)
-        if resolver is None:
+        adapter = handle.adapter
+        if not isinstance(adapter, ModelResolver):
             return ResolvedModel()
         with running(handle.by):
-            resolved = resolver(provider, model)
-        return resolved if isinstance(resolved, ResolvedModel) else ResolvedModel()
+            return adapter.resolve_model(provider, model)
 
     def withhold(
         self, config: LlmCallConfig, route: ResolvedModel, efforts: Collection[str]
     ) -> tuple[LlmCallConfig, dict[CallSetting, float | int | str]]:
-        """`config` as `route` can carry it, and what it withholds, by the values asked:
-        a sampling setting its API does not take (`Sampling.uncarried`), and a reasoning effort
-        its profile's `efforts` do not define (`unmapped_effort`). Each with a warning the
-        first time, since someone asked for it.
+        """`config` as `route` can carry it, and what it withholds, with the values that
+        were asked. It withholds a sampling setting that the API of the route does
+        not take (`Sampling.uncarried`), and a reasoning effort that the `efforts`
+        of its profile do not define (`unmapped_effort`). Each is warned about the
+        first time, because someone asked for it.
 
-        The agent loop's, before it logs the header of the request it sends, so the log
-        says what was sent and what was asked and not (`EpochHeader.withheld`). A request
-        that reaches the seam another way is held to the sampling half at the edge
-        (`_carried`), and sends an effort only as the `effort_fields` it is given."""
+        The agent loop calls this before it logs the header of the request that it
+        sends. So the log says what was sent, and what was asked and not sent
+        (`EpochHeader.withheld`). A request that reaches the seam another way is
+        held to the sampling half at the edge (`_carried`), and it sends an effort
+        only as the `effort_fields` that it is given."""
         withheld: dict[CallSetting, float | int | str] = {}
         if route.sampling is not None:
             dropped = self._uncarried(
@@ -737,8 +809,9 @@ class LlmRuntime:
         return (config.without(withheld) if withheld else config), withheld
 
     def _carried(self, request: GenerateOptions) -> GenerateOptions:
-        """`request` as its route can carry it: a sampling setting its API does not take
-        is dropped, with a warning the first time (`ResolvedModel.sampling`)."""
+        """`request` as its route can carry it. A sampling setting that the API of the
+        route does not take is dropped, with a warning the first time
+        (`ResolvedModel.sampling`)."""
         if request.sampling.is_empty():
             return request
         carried = self.resolve_model(request.provider, request.model).sampling
@@ -754,8 +827,9 @@ class LlmRuntime:
         sampling: Sampling,
         carried: frozenset[SamplingSetting],
     ) -> dict[SamplingSetting, float | int]:
-        """What of `sampling` a route carrying `carried` cannot send, by the value asked,
-        each warned about the first time: both drop paths' one step."""
+        """The part of `sampling` that a route carrying `carried` cannot send, with the
+        values that were asked. Each setting is warned about the first time. Both
+        drop paths share this one step."""
         dropped = sampling.uncarried(carried)
         for setting in dropped:
             self._warn_once(
@@ -782,21 +856,21 @@ class LlmRuntime:
             await self.ctx.serial("llm/send", request)
             # The binding goes *inside* the generator (C10). Both
             # `adapter.stream(...)` and `_normalized(...)` are async-generator
-            # calls, so this line only constructs them — nothing of the adapter
-            # ran here, and the whole stream used to be pulled later, outside any
-            # `running`. Every registration the adapter made mid-stream landed on
-            # the seam instead of the row, and outlived it.
+            # calls, so this line only constructs them, and no adapter code runs
+            # here. Before, the whole stream was pulled later, outside any
+            # `running`. Every registration that the adapter made mid-stream then
+            # landed on the seam and not on the row, and outlived the row.
             return _normalized(handle.adapter.stream(request), request, handle.by)
 
         return await self.ctx.waterfall("llm/stream", options, inner=inner)
 
 
 def _owed(request: DecisionRequest, result: Decisions) -> None:
-    """Refuse `result` unless every question has the kind of answer it is owed.
+    """Refuse `result` unless every question has the kind of answer that it is owed.
 
-    Here rather than in each adapter, so what a caller may assume of `Decisions`
-    is one rule: an answer read as a likelihood that was a choice would be a
-    decision made on a number nobody gave."""
+    The check is here and not in each adapter, so that what a caller may assume
+    of `Decisions` is one rule. If an answer that was a choice were read as a
+    likelihood, a decision would be made on a number that nobody gave."""
     for name, question in request.questions.items():
         try:
             result.answer(name, _ANSWERS[type(question)])
@@ -805,10 +879,11 @@ def _owed(request: DecisionRequest, result: Decisions) -> None:
 
 
 def _failure_of(error: Exception) -> LlmFailure:
-    """What an adapter's raise says, as a failure: an `LlmError`'s own, and any
-    other exception's message under `UNKNOWN`. One reading for a stream that
-    ends in error and a decision that does, so a route that fails both ways is
-    recorded with one code."""
+    """What the raise of an adapter says, as a failure. For an `LlmError` it is the
+    failure of the error. For any other exception it is the message under
+    `UNKNOWN`. A stream that ends in error and a decision that ends in error are
+    read the same way, so a route that fails both ways is recorded with one
+    code."""
     if isinstance(error, LlmError):
         return error.failure
     return LlmFailure(message=str(error) or type(error).__name__, code="UNKNOWN")
@@ -819,27 +894,28 @@ async def _normalized(
 ) -> AsyncIterator[StreamChunk]:
     """Turn an adapter raise into a terminal `finish{error}`.
 
-    The loop's contract is that a stream always ends with a finish. Without this
-    the loop would need a second failure path, and `agent/request-error` would
-    not see provider failures uniformly.
+    The contract of the loop is that a stream always ends with a finish. Without
+    this function the loop would need a second failure path, and
+    `agent/request-error` would not see provider failures uniformly.
 
-    **`by` is entered around each pull rather than around construction** (C10).
-    An adapter's body is row code this seam drives, so it runs as an effect of
-    the row that registered it (P6-25) — and a generator's body runs at
-    `__anext__`, on whatever task is consuming it. The binding therefore wraps
-    the *await*, not the `__anext__()` call that merely builds the coroutine,
-    which is the same mistake one level down. Entered and left per chunk rather
-    than held across the `yield`, because a binding held across a suspension is
-    released on whichever task resumes it — `_hooks`' reason for returning a
-    list rather than a generator.
+    **`by` is entered around each pull, and not around construction** (C10). The
+    body of an adapter is row code that this seam drives, so it runs as an
+    effect of the row that registered it (P6-25). The body of a generator runs
+    at `__anext__`, on whatever task consumes it. So the binding wraps the
+    *await*, and not the `__anext__()` call, which only builds the coroutine.
+    To wrap that call would be the same mistake one level down. The binding is
+    entered and left for each chunk, and not held across the `yield`, because a
+    binding that is held across a suspension is released on whichever task
+    resumes it. `_hooks` returns a list and not a generator for the same reason.
 
-    **`running` and not the inline `_ACTIVATING.set/reset` `_invoke` uses**, and
-    the difference between the two is a layer rather than a preference. That one
-    is inside cordis and may touch its own ContextVar; reaching for it from here
-    would be a private import across two packages to save a measured 291 ns per
-    chunk — 0.3 ms on a thousand-chunk stream, against a stream that takes
-    seconds. `_invoke`'s note about the context manager's own frame is about a
-    path with no such boundary to cross.
+    **This uses `running`, and not the inline `_ACTIVATING.set/reset` that
+    `_invoke` uses.** The difference between the two is a layer and not a
+    preference. `_invoke` is inside cordis and may touch its own ContextVar. To
+    reach for that ContextVar from here would be a private import across two
+    packages, to save a measured 291 ns per chunk. That is 0.3 ms on a stream of
+    a thousand chunks, against a stream that takes seconds. The note of
+    `_invoke` about the frame of a context manager is about a path with no such
+    boundary to cross.
     """
     pull = source.__anext__
     try:

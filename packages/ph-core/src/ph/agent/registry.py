@@ -1,11 +1,11 @@
-"""`ctx.agents` — agent creation, and the events every agent publishes.
+"""`ctx.agents`: agent creation, and the events that every agent publishes.
 
 An agent is a handle: an id, a session, a **scoped context**, an inbox, a
-status and a cancel. The registry owns the scope — it creates it, provides the
-handle into it as `agent`, and disposes it — and the driver runs inside it.
-That split is what keeps the loop a replaceable row (invariant I1): a second
-driver inherits the scope tree, the `agent` provision and the lifecycle events
-without reproducing them.
+status and a cancel. The registry owns the scope. It creates the scope, provides
+the handle into it as `agent`, and disposes it. The driver runs inside the
+scope. That split keeps the loop a replaceable row (invariant I1): a second
+driver inherits the scope tree, the `agent` provision and the lifecycle events,
+and does not reproduce them.
 
 @module ph.agent.registry
 """
@@ -101,10 +101,10 @@ class AgentRegistry:
     _agents: dict[str, AgentDriver] = field(default_factory=dict)
 
     def register_driver(self, factory: DriverFactory) -> Callable[[], None]:
-        """Claim the driver used by `create()`.
+        """Claim the driver that `create()` uses.
 
-        The loop is a plugin like any other (invariant I1): swapping it is a row
-        change, not a fork.
+        The loop is a plugin like any other (invariant I1). Swapping it is a row
+        change and not a fork.
         """
         self.driver_factory = factory
 
@@ -121,31 +121,34 @@ class AgentRegistry:
         *,
         parent: AgentHandle | None = None,
     ) -> AgentDriver:
-        """Build an agent and the scope it owns.
+        """Build an agent and the scope that it owns.
 
-        **`parent` puts the child's scope inside its parent's** (P6-27), which is what
-        makes containment structural instead of materialized. Three things then stop being
-        remembered:
+        **`parent` puts the scope of the child inside the scope of its parent**
+        (P6-27). Containment is then structural and not materialized. Three
+        things no longer have to be remembered:
 
-        * **visibility inherits**, because `isolation_chain` reaches the parent's layers
-          and the existing masking already walks it;
-        * **disposal cascades**, because `Context.dispose` already unwinds `_children`;
-        * **a parent can reach its child**, which is what makes a supervisor able to
-          diagnose one.
+        * **Visibility inherits**, because `isolation_chain` reaches the layers
+          of the parent and the existing masking already walks it.
+        * **Disposal cascades**, because `Context.dispose` already unwinds
+          `_children`.
+        * **A parent can reach its child**, so a supervisor is able to diagnose
+          one.
 
-        Optional and defaulting to a root agent with no parent.
+        `parent` is optional. Without it, the agent is a root agent.
         """
         if self.driver_factory is None:
             raise RuntimeError("no agent driver is registered; mount an agent-loop row")
         base = parent.ctx if parent is not None else self.ctx
         scope = base.scope(f"agent:{session.id}")
-        # **The agent's log is written as the last thing its scope unwinds**, whoever
-        # unwinds it. Registered first so it runs last: the teardown ahead of it
-        # appends — a workspace records `workspace/disposed` as it lets go — and a
-        # settled child is never reopened for anything to write those later. On
-        # the scope rather than after `dispose(agent_id)`, which a parent's
-        # `Context.dispose` cascading into a nested child never calls (S12). A
-        # mount's own unwind is `write_on_unwind`'s (F2); by then this finds
+        # **The log of the agent is written as the last thing that its scope
+        # unwinds**, whoever unwinds it. The disposer is registered first so
+        # that it runs last. The teardown ahead of it appends: a workspace
+        # records `workspace/disposed` as it lets go. And a settled child is
+        # never reopened for anything to write those records later. The
+        # disposer is on the scope and not after `dispose(agent_id)`, because
+        # the `Context.dispose` of a parent that cascades into a nested child
+        # never calls `dispose(agent_id)` (S12). The unwind of a mount itself
+        # belongs to `write_on_unwind` (F2). By then this disposer finds
         # nothing owed.
         written = scope.add_disposer(
             lambda: session_written(self.ctx, session), label=f"agents.written({session.id})"
@@ -153,29 +156,31 @@ class AgentRegistry:
         try:
             agent = self.driver_factory(scope, session, options or AgentOptions())
         except BaseException:
-            # **No agent, so nothing of one is left.** A driver refuses a log it
-            # cannot replay — an inbox record a newer build wrote. The scope stayed
-            # under `base` with the write above still on it, and when `base` went
-            # that wrote a session its opener had long since let go: after the
-            # ending the seam had written into the same log from a second copy of
-            # it. The write is dropped, the session being its opener's again, and
-            # the scope is unwound for whatever the driver registered before it
-            # raised.
+            # **There is no agent, so nothing of one is left.** A driver refuses
+            # a log that it cannot replay, for example an inbox record that a
+            # newer build wrote. The scope used to stay under `base` with the
+            # write above still on it. When `base` went, that disposer wrote a
+            # session that its opener had released long before: after the
+            # ending the seam had written into the same log from a second copy
+            # of it. So the write is dropped, because the session belongs to
+            # its opener again. The scope is unwound for whatever the driver
+            # registered before it raised.
             written.drop()
             base.detach(scope.dispose(), label=f"agents.unmade({session.id})", at_dispose="finish")
             raise
         scope.provide(AGENT, agent)
         self._agents[agent.id] = agent
-        # **The roster entry is an effect of the scope it describes**, which it
-        # had to become the moment P6-27 nested agents: `dispose(agent_id)` used
-        # to be the only thing that popped `_agents`, and a parent's
-        # `Context.dispose` now tears a child's scope down without going through
-        # it. That left `agents.get(child)` handing back a live-looking handle
-        # over a dead context, `agents.list()` — "every live agent, for a sweep
-        # that must visit all of them" — including it, and `agent/disposed`
-        # never firing. Structural for the same reason the lifetime is: a second
-        # provider that nests without registering a teardown effect of its own
-        # cannot leak a handle it never had to remember.
+        # **The roster entry is an effect of the scope that it describes.** It
+        # had to become one when P6-27 nested agents. `dispose(agent_id)` used
+        # to be the only thing that popped `_agents`, and the `Context.dispose`
+        # of a parent now tears down the scope of a child without going through
+        # it. That left three faults. `agents.get(child)` returned a handle
+        # that looked live over a dead context. `agents.list()`, which is
+        # "every live agent, for a sweep that must visit all of them", included
+        # it. And `agent/disposed` never fired. The entry is structural for the
+        # same reason that the lifetime is: a second provider that nests
+        # without registering a teardown effect of its own cannot leak a handle
+        # that it never had to remember.
         scope.add_disposer(lambda: self._forget(agent), label=f"agents.entry({agent.id})")
         scope.emit("agent/created", agent)
         scope.emit("agent/session-start", agent, session)
@@ -184,51 +189,59 @@ class AgentRegistry:
     def get(self, agent_id: str) -> AgentDriver | None:
         """The live agent by id, or `None`. The symmetric read to `ctx.sessions.get`.
 
-        A plugin that has an agent id — a runtime keyed by it, a policy folding
-        its session — reaches the agent's scope and session through here, instead
-        of shadowing the registry with its own `agent/created` side table.
+        A plugin that has an agent id (a runtime keyed by it, a policy that
+        folds its session) reaches the scope and the session of the agent
+        through here. It does not shadow the registry with its own side table
+        built from `agent/created`.
 
-        **Live means its scope is up** (S3), as `scope_of` answers. The roster entry
-        is taken back by the scope's own teardown, near its end, so for the whole of
-        that teardown the entry named an agent that was going: a message sent to it
-        was acknowledged and steered into an inbox its dispose had cleared. Declined
-        here, a sender asks the seam to wake it (`ensure_addressable`), whose
-        provider knows the agent it still holds is ending and refuses, and the
-        sender is told the message did not land.
+        **Live means that its scope is up** (S3), which is also the answer of
+        `scope_of`. The teardown of the scope takes the roster entry back, near
+        its end. For the whole of that teardown the entry therefore named an
+        agent that was going. A message sent to it was acknowledged and steered
+        into an inbox that its dispose had cleared. Such an agent is declined
+        here. A sender then asks the seam to wake it (`ensure_addressable`). The
+        provider of that seam knows that the agent it still holds is ending,
+        and refuses. The sender is told that the message did not land.
         """
         agent = self._agents.get(agent_id)
         return agent if agent is not None and agent.ctx.active else None
 
     def scope_of(self, agent_id: str) -> Context | None:
-        """The live agent's own scope, or `None` when nobody knows the id or its
+        """The scope of the live agent, or `None` when nobody knows the id or its
         scope is down.
 
-        For whoever acquires something *for* an agent it has only the id of — a
-        workspace, a kernel — and makes it that agent's effect. A scope that is
-        down is declined: a registration on a dead lifetime is one nothing unwinds.
+        This is for a caller that acquires something *for* an agent of which it
+        has only the id (a workspace, a kernel) and makes it an effect of that
+        agent. A scope that is down is declined, because nothing unwinds a
+        registration on a dead lifetime.
         """
         agent = self.get(agent_id)
         return agent.ctx if agent is not None else None
 
     def list(self) -> list[AgentDriver]:
-        """Every live agent, for a sweep that must visit all of them."""
-        return list(self._agents.values())
+        """Every live agent, for a sweep that must visit all of them.
+
+        Live has the meaning that `get` gives it. An agent whose scope is going
+        is left out.
+        """
+        return [agent for agent in self._agents.values() if agent.ctx.active]
 
     def _forget(self, agent: AgentDriver) -> None:
-        """Drop the roster entry and announce it, once, whoever unwound the scope.
+        """Drop the roster entry and announce it, one time, whoever unwound the scope.
 
-        Both doors reach here: `dispose(agent_id)` below, and a parent scope
-        cascading into this one. **The pop comes first, and it is the guard**: the
-        explicit path calling `scope.dispose()` afterwards runs this a second time and
-        finds nothing, so the agent is announced once whichever door got here first,
-        and a listener that disposes again cannot announce it twice. A listener is
-        handed the agent, so it has no need to look it up in the roster it has left —
-        and an async one runs after this returns either way, since `emit` schedules it
-        without awaiting it.
+        Both paths reach here: `dispose(agent_id)` below, and a parent scope
+        that cascades into this one. Both go through the teardown of the scope
+        of the agent, which runs this as a disposer. **The pop comes first, and
+        it is the guard.** The agent is therefore announced one time, and a
+        listener that disposes again cannot announce it twice. A listener is handed the agent,
+        so it has no need to look the agent up in the roster that it has left.
+        An async listener runs after this returns in any case, because `emit`
+        schedules it and does not await it.
         """
-        # **Only this agent's entry** (Holdings rule 4): one made again for the same
-        # session while this one was still ending holds the id now, and this
-        # teardown taking it out left that agent listed nowhere.
+        # **Only the entry of this agent** (Holdings rule 4). An agent that was
+        # made again for the same session while this one was still ending holds
+        # the id now. When this teardown took that entry out, the new agent was
+        # listed nowhere.
         if self._agents.get(agent.id) is not agent:
             return
         del self._agents[agent.id]
@@ -239,9 +252,10 @@ class AgentRegistry:
         if agent is None:
             return
         await agent.dispose()
-        # `_forget` rides the scope's own teardown, so the announcement and the
-        # roster drop happen exactly once whichever way the scope goes — and so
-        # does writing the log the teardown appended to (`create`).
+        # `_forget` runs in the teardown of the scope. The announcement and the
+        # roster drop therefore happen exactly one time, whichever way the
+        # scope goes. The same holds for writing the log that the teardown
+        # appended to (`create`).
         await agent.ctx.dispose()
 
 

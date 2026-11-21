@@ -829,9 +829,11 @@ class SubagentRun(WireForm):
     children cannot be waited on."""
     dispose: Disposer | None = None
     """Stops and lets go of a child the seam would not admit, **without revoking it**:
-    no tombstone, since a refusal is not a deletion. Called once, after the seam has
-    ended the child (`SubagentService._abandon`). A parent's teardown, and a delete,
-    reach a provider's children by other paths, and those revoke."""
+    no tombstone, since a refusal is not a deletion. It writes nothing, so its
+    caller ends the child first: the seam does (`SubagentService._abandon`), and
+    the `task` tool revokes a child whose wait was canceled before it calls
+    this. A parent's teardown, and a delete, reach a provider's children by
+    other paths, and those revoke."""
     grant: Grant | None = None
     """What this child was bounded to, stamped by the seam once it has applied it.
 

@@ -1,13 +1,13 @@
 """The provider-neutral message and streaming vocabulary.
 
-Ported from dsh `packages/llm/llm/src/{types,message}.ts`. Adapters alone
-translate provider wire formats; everything above this line — the loop, the
-session log, every plugin, the TUI — speaks only these types.
+Ported from dsh `packages/llm/llm/src/{types,message}.ts`. Only an adapter
+translates a provider wire format. Everything above the adapters speaks only
+these types: the loop, the session log, every plugin, and the TUI.
 
-The one field worth calling out is `Message.source`. It is what lets a consumer
-tell *typed human input* from *injected context* without a second channel: a
-file-change notice, a skill body and a subagent's reply are all user-role
-messages, and only `source` distinguishes them.
+`Message.source` is the field to know. It lets a consumer tell *typed human
+input* from *injected context* without a second channel. A file-change notice,
+the body of a skill and the reply of a subagent are all user-role messages, and
+only `source` distinguishes them.
 
 @module ph.llm.types
 """
@@ -109,72 +109,75 @@ class ReasoningBlock(WireModel):
     type: Literal["reasoning"] = "reasoning"
     text: str
     provider_state: dict[str, Any] | None = None
-    """Whatever the producing adapter must send back with this block (G8).
+    """What the adapter that produced this block must send back with it (G8).
 
-    `dict[str, Any]` rather than `JsonObject`, which `ph.json` rules out as a
-    pydantic annotation: the alias expands eagerly and never finishes building
-    its validator. This is the boundary that module names as the one place the
-    `Any` stays.
+    The type is `dict[str, Any]` and not `JsonObject`. `ph.json` rules out
+    `JsonObject` as a pydantic annotation: pydantic expands the alias eagerly,
+    and the model never finishes building its validator. `ph.json` names this
+    boundary as the one place where the `Any` stays.
 
-    **Opaque, and read only by the adapter that wrote it** — the same contract
-    `ModelSource.replay_state` states, one level down, because this is per-*block*
-    state and that one is per-message. A single assistant message can hold several
-    thinking blocks, so a map beside them would need an index, and that index
-    desynchronizes the moment the list is filtered: `blocks()` drops tool calls
-    under max-tokens and `interrupted_blocks()` keeps a prefix.
+    **The value is opaque, and only the adapter that wrote it reads it.**
+    `ModelSource.replay_state` has the same contract for a whole message. This
+    field holds state for one *block*. One assistant message can hold several
+    thinking blocks. A map beside the blocks would need an index, and the index
+    goes out of step as soon as the list is filtered: `blocks()` drops tool
+    calls under max-tokens, and `interrupted_blocks()` keeps a prefix.
 
-    It has to live on the block rather than in the adapter because the log is the
-    state: a resumed session rebuilds its history from these events, and anything
-    the adapter held in memory is gone by then. Anthropic signs every thinking
-    block and **rejects a conversation that sends one back without its
-    signature**, which makes this the difference between a session with extended
-    thinking that continues and one whose every later request fails.
+    The state is on the block and not in the adapter, because the log is the
+    state. A resumed session rebuilds its history from these events, and by then
+    everything that the adapter held in memory is gone. Anthropic signs every
+    thinking block and **rejects a conversation that sends one back without its
+    signature**. With this field, a session with extended thinking continues.
+    Without it, every later request of that session fails.
 
-    A dict rather than a named `signature` field so the next provider costs
-    nothing here: Gemini's `thought_signature` and the OpenAI Responses API's
-    `encrypted_content` are the same shape of secret, and naming each one on this
-    neutral type would make every other adapter learn to ignore it.
+    The field is a dict and not a named `signature` field, so that the next
+    provider needs no change here. The `thought_signature` of Gemini and the
+    `encrypted_content` of the OpenAI Responses API are secrets of the same
+    shape. A named field for each one on this neutral type would make every
+    other adapter learn to ignore it.
 
-    `None` for a provider that needs nothing back, and for reasoning logged
-    before this existed — the adapter decides what to do without it, which for
-    Anthropic is to leave the block out rather than have the request refused.
+    The value is `None` for a provider that needs nothing back, and for
+    reasoning that was logged before this field existed. The adapter decides
+    what to do without it. The Anthropic adapter leaves the block out, so that
+    the request is not refused.
     """
     redacted: bool = False
-    """Whether `text` is an opaque blob the provider encrypted rather than prose.
+    """Whether `text` is an opaque blob that the provider encrypted, and not prose.
 
     Anthropic sends `redacted_thinking` when its own safety systems withhold the
-    reasoning; the payload is ciphertext that only it can read, and it must still
-    be passed back for the conversation to continue.
+    reasoning. The payload is ciphertext that only Anthropic can read, and it
+    must still be passed back for the conversation to continue.
 
-    **Not adapter-private, which is why it is a named field and not part of
-    `provider_state`:** it is the one thing a *neutral* reader has to know.
-    Readers show `ph.text.redacted_marker`, which says why.
+    **This fact is not private to the adapter. That is why it is a named field
+    and not part of `provider_state`.** It is the one thing that a *neutral*
+    reader must know. Readers show `ph.text.redacted_marker`, which says why.
     """
 
 
 class AttachmentRef(WireModel):
     """Where an attachment's bytes are, and what a reader needs without opening them.
 
-    The log is lossless JSON (A1), so bytes never enter it — a message carries
-    this reference and `ctx.attachments` resolves it. `attachment_id` is
-    `sha256:<hex>` of the content, which is what makes two sessions attaching one
-    photo share one file and what lets a fork reference its parent's media
-    without owning a directory.
+    The log is lossless JSON (A1), so bytes never enter it. A message carries
+    this reference, and `ctx.attachments` resolves it. `attachment_id` is
+    `sha256:<hex>` of the content. So two sessions that attach one photo share
+    one file, and a fork can reference the media of its parent without owning a
+    directory.
 
-    The measurement fields stay *optional* — a video's duration and a PDF's page
-    count are still facts an ingester happened to know — but `width` and `height`
-    are no longer among them: `ph.llm.dimensions` reads them out of the file
-    header with no dependency at all, and `AttachmentStore.save_bytes` fills them
-    in. This docstring used to say that measuring an image "means decoding it,
-    and the decoder is exactly the dependency `media-transform` (P7-02) exists to
-    keep optional", which conflated resizing with reading four integers at a
-    fixed offset (P7-03). Present, they make the token estimate accurate and let
-    a route say the picture is larger than it can use; absent, the estimate falls
-    back to a flat figure.
+    The measurement fields are *optional*. The duration of a video and the page
+    count of a PDF are still facts that an ingester supplies only when it knows
+    them. `width` and `height` are no longer such facts: `ph.llm.dimensions`
+    reads them from the file header with no dependency at all, and
+    `AttachmentStore.save_bytes` fills them in (P7-03). An earlier version of
+    this docstring said that measuring an image "means decoding it, and the
+    decoder is exactly the dependency `media-transform` (P7-02) exists to keep
+    optional". That confused resizing with reading two integers from a
+    header. When `width` and `height` are present, the token estimate is
+    accurate, and a route can say that the picture is larger than it can use.
+    When they are absent, the estimate falls back to a flat figure.
     """
 
     attachment_id: str
-    """`sha256:<hex>` — the content digest, and the store's whole index."""
+    """`sha256:<hex>`: the content digest. It is the only index of the store."""
     mime: str
     bytes: int
     name: str | None = None
@@ -186,24 +189,25 @@ class AttachmentRef(WireModel):
 
 
 class MediaBlock(WireModel):
-    """Durable, MIME-typed media the model may be shown.
+    """Durable, MIME-typed media that the model may be shown.
 
-    One block keyed on MIME rather than a family of per-medium blocks. Providers
-    *do* distinguish them on the wire — Anthropic `image` against `document`,
-    OpenAI `image_url` against `input_audio` against `file` — but that branching
-    belongs in the adapter, where the differences actually live, rather than in a
-    union that grows a member every time a provider learns a format. It is also
-    the shape pH's other media path already has: the kernel's `display` frame is
-    `{mime, data}`, and the two are meant to become one.
+    There is one block keyed on MIME, and not a family of blocks with one for
+    each medium. Providers *do* distinguish media on the wire: Anthropic has
+    `image` and `document`, and OpenAI has `image_url`, `input_audio` and
+    `file`. That branching belongs in the adapter, where the differences are. A
+    union here would grow a member every time a provider learns a format. The
+    other media path of pH already has this shape: the `display` frame of the
+    kernel is `{mime, data}`. The two are meant to become one.
 
-    Deliberately *not* a general file block. What a provider ingests as content —
-    images, PDFs at some routes, audio at a few — belongs here; a CSV or an
-    archive belongs in the workspace with a path the model can `read`, which the
-    spill store, the `read` tool and `rlm-context-loader` already answer three
-    ways. A block that accepted anything would claim a capability no provider has.
+    This is deliberately *not* a general file block. It holds what a provider
+    ingests as content: images, PDFs at some routes, audio at a few. A CSV or an
+    archive belongs in the workspace, with a path that the model can `read`. The
+    spill store, the `read` tool and `rlm-context-loader` already handle that
+    case in three ways. A block that accepted anything would claim a capability
+    that no provider has.
 
-    Role-neutral by design: user content carries one today, and a route that
-    generates images will carry one back.
+    The block is role-neutral by design. User content carries one today, and a
+    route that generates images will carry one back.
     """
 
     type: Literal["media"] = "media"
@@ -215,10 +219,10 @@ class ToolCallBlock(WireModel):
 
     type: Literal["tool-call"] = "tool-call"
     id: str
-    """Provider-issued call id; correlates with the matching tool result."""
+    """The call id that the provider issued. It correlates with the matching tool result."""
     name: str
     arguments: str
-    """Raw JSON string exactly as the model produced it — never re-serialized."""
+    """The raw JSON string, exactly as the model produced it. It is never re-serialized."""
 
 
 class ToolResultBlock(WireModel):
@@ -240,15 +244,16 @@ ToolResultBlock.model_rebuild()
 MessageContent: TypeAlias = Sequence[ContentBlock | JsonObject]
 """What a message is built from: declared blocks, their wire form, or a mix.
 
-Both, because the constructors below validate through `Message.model_validate`,
-which coerces a raw block dict and passes an instance through — and callers use
-each: an adapter holds `ContentBlock`s it just assembled, while a row writing one
-message inline spells the dict.
+Both forms are allowed because the constructors below validate through
+`Message.model_validate`. That call coerces a raw block dict and passes an
+instance through, and callers use each form. An adapter holds the
+`ContentBlock`s that it just assembled. A row that writes one message inline
+writes the dict.
 
-The wire half is the arm to watch. Every site in this tree that uses it passes a
-single text block, which `user_text` and `TextBlock` already name — so the union
-describes what callers happen to do rather than a contract worth keeping, and it
-narrows to `Sequence[ContentBlock]` the day they stop.
+The wire form is the arm to watch. Every site in this tree that uses it passes
+only text blocks, which `user_text` and `TextBlock` already name. So the union
+describes what callers do today, and not a contract that is worth keeping. It
+narrows to `Sequence[ContentBlock]` on the day that they stop.
 """
 
 _CONTENT_BLOCKS: TypeAdapter[list[ContentBlock]] = TypeAdapter(list[ContentBlock])
@@ -265,16 +270,17 @@ def text_of(
     placeholder: Callable[[str], str] | None = None,
     separator: str = "\n",
 ) -> str:
-    """The text of a block list, joined by `separator` — newlines by default.
+    """The text of a block list, joined by `separator`. The default is a newline.
 
-    Non-text blocks are skipped, or rendered through `placeholder(type)` when a
-    caller wants a marker — the one join every mode and adapter needs.
+    Non-text blocks are skipped. A caller that wants a marker passes
+    `placeholder`, and each non-text block is then rendered through
+    `placeholder(type)`. Every mode and adapter needs this one join.
 
-    `separator` is for the one wire that cannot take the default: an assistant
+    `separator` is for the one wire that cannot take the default. An assistant
     message on the OpenAI wire concatenates its text fragments with no join, and
-    changing those bytes would invalidate the cached prefix (A12). A parameter
-    rather than a second hand-rolled comprehension at that call site, so the
-    "which blocks count as text" rule stays in one place.
+    a change to those bytes would invalidate the cached prefix (A12). It is a
+    parameter here, and not a second comprehension written by hand at that call
+    site, so that the rule for which blocks count as text stays in one place.
     """
     parts: list[str] = []
     for block in blocks:
@@ -286,17 +292,18 @@ def text_of(
 
 
 def attachment_of(block: ContentBlock) -> AttachmentRef | None:
-    """The attachment a block carries, or `None` — for readers that want only that.
+    """The attachment that a block carries, or `None`, for a reader that wants only that.
 
-    Beside `text_of` for the same reason that exists: a walk that asks one
-    question about every block should not spell the answer by hand. Its callers
-    are the loops that collect or measure attachments and ignore the rest.
+    It is beside `text_of` for the same reason that `text_of` exists: a walk
+    that asks one question about every block should not write the answer by
+    hand. Its callers are the loops that collect or measure attachments and
+    ignore the rest.
 
-    **Not for a dispatch that must stay exhaustive.** Returning `Optional` erases
-    the union, so a renderer using it narrows nothing and a variant it forgot
-    falls through silently — which is what hid the missing `media` arms. Those
-    match `MediaBlock` directly and close on `assert_never`;
-    `test_exhaustive_dispatch` enforces it.
+    **Do not use it for a dispatch that must stay exhaustive.** A return type of
+    `Optional` erases the union. A renderer that uses it narrows nothing, and a
+    variant that the renderer forgot falls through silently. That is what hid
+    the missing `media` arms. Those renderers match `MediaBlock` directly and
+    close on `assert_never`, and `test_exhaustive_dispatch` enforces it.
     """
     return block.attachment if isinstance(block, MediaBlock) else None
 
@@ -308,15 +315,15 @@ ContextForm: TypeAlias = Literal[
 ]
 """What kind of thing a piece of injected context is.
 
-Deliberately semantic, never visual: a value says the content is a file's
-instructions or a catalog, and the consumer decides what that looks like.
-Colors, icons and collapse defaults are the consumer's business and must not
-enter this union.
+The value is deliberately semantic and never visual. It says that the content is
+the instructions of a file, or that it is a catalog, and the consumer decides
+what that looks like. Colors, icons and collapse defaults belong to the consumer
+and must not enter this union.
 
 `compaction` is the one form that is also a *claim about the surface*: this text
-stands in for conversation that has left the derivation (A3). It is what lets a
-reader tell a compaction summary from the other plugin-authored replacement — an
-offloaded paste — without guessing from the shape of the replace op.
+stands in for conversation that has left the derivation (A3). With it, a reader
+can tell a compaction summary from the other replacement that a plugin writes,
+which is an offloaded paste, without guessing from the shape of the replace op.
 """
 
 CONTEXT_SUMMARY_MAX_CHARS = 120
@@ -342,19 +349,22 @@ class PluginSource(WireModel):
     plugin: str
     form: ContextForm | None = None
     summary: str | None = None
-    """Required for `notice`: the one-line account shown without expanding —
-    made one, and cut to `CONTEXT_SUMMARY_MAX_CHARS`, as it is set (`_one_line`)."""
+    """Required for `notice`: the one-line account that is shown without expanding.
+    The validator `_one_line` puts it on one line and cuts it to
+    `CONTEXT_SUMMARY_MAX_CHARS` when it is set."""
     sections: list[ContextSnapshotSection] | None = None
     """Required for `snapshot`: the named contributions, in order."""
 
     @field_validator("summary")
     @classmethod
     def _one_line(cls, value: str | None) -> str | None:
-        """A summary is a row, so it is put on one line and cut to its bound here
-        (`ph.text.one_line`), once, rather than by every producer. Four did it by
-        hand, two ways, and one that did not was refused — a notice lost to a
-        sentence a little too long. Idempotent, so a summary read back from a
-        log is the one written."""
+        """Put a summary on one line and cut it to its bound (`ph.text.one_line`).
+
+        A summary is a row. This validator does the work one time, here, so that
+        no producer has to. Four producers did it by hand, in two ways. One
+        producer did not, and its notice was refused because a sentence was a
+        little too long. The function is idempotent, so a summary that is read
+        back from a log is the summary that was written."""
         return None if value is None else one_line(value, CONTEXT_SUMMARY_MAX_CHARS)
 
     @model_validator(mode="after")
@@ -413,8 +423,8 @@ def create_message(
     source: object,
     message_id: str | None = None,
 ) -> Message:
-    """Create one identified message: `message_id` when the caller derives one, else a
-    fresh id."""
+    """Create one identified message. The id is `message_id` when the caller derives
+    one, and a fresh id otherwise."""
     return Message.model_validate(
         {"id": message_id or new_message_id(), "role": role, "content": content, "source": source}
     )
@@ -427,13 +437,14 @@ def create_user_message(
 
 
 def user_text(text: str) -> Message:
-    """One plain-text message from the person — the commonest user message there is.
+    """One plain-text message from the user: the most common user message.
 
-    The three-key incantation it replaces was written out verbatim at four sites
-    across three packages: a prompt from the TUI, a prompt over the socket, an
-    approval's redirecting `reason`. Each is the same claim — *this text came from
-    a human, at a step boundary* — and `source={"kind": "user"}` is the part that
-    makes it true, so it is the part worth having one copy of.
+    It replaces three keys that were written out verbatim at four sites across
+    three packages: a prompt from the TUI, a prompt over the socket, the
+    redirecting `reason` of an approval. Each site makes the same claim: *this
+    text came from a human, at a step boundary*. `source={"kind": "user"}` is
+    the part that makes the claim true, so it is the part that should have one
+    copy.
     """
     return create_user_message(content=[{"type": "text", "text": text}], source={"kind": "user"})
 
@@ -468,10 +479,10 @@ def create_tool_result_message(*, call_id: str, content: MessageContent, is_erro
 class TokenUsage(WireModel):
     """Token accounting for one model call.
 
-    Counts are DISJOINT: `input_tokens` is uncached input only, and cached input
+    Counts are DISJOINT. `input_tokens` is uncached input only, and cached input
     is reported separately. An adapter whose provider folds cache hits into one
-    prompt total subtracts them out — otherwise every cache hit is billed twice
-    in pH's own accounting.
+    prompt total subtracts them out. Otherwise the accounting of pH would bill
+    every cache hit twice.
     """
 
     input_tokens: int
@@ -484,17 +495,18 @@ class TokenUsage(WireModel):
     def total(self) -> int:
         """Everything the provider billed for this call.
 
-        The four terms, in one place, which `TokenMeter.baseline` and the TUI's
-        footer both read. Each once spelled them out — the footer's docstring saying
-        "same four terms as `TokenMeter.baseline`", which is a comment doing a
-        type's job — and P5-07's budget arrived as a third definition with only *two*,
-        so a cache-heavy run spent most of its input outside the budget while
-        the footer showed a larger number for the same word.
+        The four terms are in one place, and `TokenMeter.baseline` and the footer
+        of the TUI both read it. Each of them used to spell the terms out. The
+        docstring of the footer said "same four terms as `TokenMeter.baseline`",
+        which is a comment that does the job of a type. The budget of P5-07 then
+        arrived as a third definition with only *two* terms. So a cache-heavy
+        run spent most of its input outside the budget, while the footer showed
+        a larger number for the same word.
 
-        `reasoning_tokens` is deliberately out: providers that report it count
-        it inside `output_tokens`, so adding it bills the same tokens twice —
-        which is the mistake this model's own docstring warns about for cached
-        input.
+        `reasoning_tokens` is deliberately left out. Providers that report it
+        count it inside `output_tokens`, so adding it would bill the same tokens
+        twice. The docstring of this model warns about the same mistake for
+        cached input.
         """
         return (
             self.input_tokens
@@ -505,10 +517,10 @@ class TokenUsage(WireModel):
 
 
 class LlmFailure(WireModel):
-    """Serializable provider or transport failure facts.
+    """Serializable facts about a provider or transport failure.
 
-    Facts only: policy decides whether they are retryable (Phase 1's retry
-    plugin), and compaction keys off `CONTEXT_WINDOW_EXCEEDED`.
+    Facts only. Policy decides whether a failure is retryable (the `llm-retry`
+    row), and compaction keys off `CONTEXT_WINDOW_EXCEEDED`.
     """
 
     message: str
@@ -518,57 +530,60 @@ class LlmFailure(WireModel):
     request_id: str | None = None
     sent_tokens: int | None = None
     """For a request refused as too long (`CONTEXT_WINDOW_EXCEEDED`): how many
-    tokens the provider counted in it, where its refusal said."""
+    tokens the provider counted in it, when its refusal gave the number."""
     limit_tokens: int | None = None
-    """And how many it reads, where its refusal said: what a shorter request is
-    aimed at. Both read once, from the provider's whole answer, by whoever built
-    the failure (`ph.llm.adapter.too_long_facts`) — not again from a message
+    """For the same refusal: how many tokens the provider reads, when its refusal
+    gave the number. A shorter request is aimed at this limit. Whoever builds the
+    failure reads both numbers one time, from the whole answer of the provider
+    (`ph.llm.adapter.too_long_facts`). Nothing reads them again from a message
     that may have been cut down for showing."""
 
 
 CONTEXT_WINDOW_EXCEEDED = "CONTEXT_WINDOW_EXCEEDED"
 TIMEOUT = "TIMEOUT"
-"""A request that did not finish in the time it was given: a transport's read or
-connect timeout, a provider's own deadline, or the time a caller said it would
-wait (`LlmRuntime.decide`)."""
+"""A request that did not finish in the time it was given. The limit can be the
+read or connect timeout of a transport, the deadline of a provider, or the time
+that a caller said it would wait (`LlmRuntime.decide`)."""
 NO_DECISIONS = "NO_DECISIONS"
 """The adapter registered for a provider does not decide."""
 BAD_DECISION = "BAD_DECISION"
-"""A route answered a decision in another shape than it was asked in: a question
-with no answer, or an answer of another kind than its question."""
+"""A route answered a decision in a shape other than the one it was asked in: a
+question with no answer, or an answer of another kind than its question."""
 MISSING_CREDENTIAL = "MISSING_CREDENTIAL"
-"""A route's key is not set where it is resolved. Named here, beside the other
-codes a caller routes on, because the embedders that resolve a key outside an
-adapter have to say it the way an adapter does."""
+"""The key of a route is not set in the place where it is resolved. The code is
+named here, beside the other codes that a caller routes on, because the
+embedders that resolve a key outside an adapter must report it in the way that
+an adapter does."""
 EMPTY_RESPONSE = "EMPTY_RESPONSE"
 FILE_EXPIRED = "FILE_EXPIRED"
-"""A request referenced an uploaded file the provider no longer has (P7-03).
+"""A request referenced an uploaded file that the provider no longer has (P7-03).
 
-Its own code because the remedy is specific and automatic: the handle has already
-been forgotten by the time this is raised, so the next attempt re-uploads and
-succeeds. `CONTEXT_WINDOW_EXCEEDED` is the opposite case and the reason this
-codebase classifies rather than blanket-retries — that one will not fit on the
-second attempt either."""
+It has its own code because the remedy is specific and automatic. The handle has
+already been forgotten when this is raised, so the next attempt uploads the file
+again and succeeds. `CONTEXT_WINDOW_EXCEEDED` is the opposite case: that request
+will not fit on the second attempt either. That case is the reason that this
+codebase classifies failures and does not retry all of them."""
 
 
 SamplingSetting: TypeAlias = Literal[
     "temperature", "topP", "topK", "minP", "presencePenalty", "frequencyPenalty"
 ]
-"""A sampling setting, spelled as a route sets it (`ModelRoute`) and as a warning or
-`phern doctor` names it: what model makers' recommended settings consist of. Each API
-takes some of them (`ResolvedModel.sampling`), and one a route's API cannot carry is
-dropped with a warning rather than refused."""
+"""A sampling setting, spelled as a route sets it (`ModelRoute`) and as a warning
+or `phern doctor` names it. The recommended settings of a model maker consist of
+these. Each API takes some of them (`ResolvedModel.sampling`). A setting that the
+API of a route cannot carry is dropped with a warning, and not refused."""
 
 
 class Sampling(WireModel):
-    """The sampling settings, as one value every layer carries whole: a route sets it
-    (`ModelRoute.sampling`), an agent's options and the logged call config carry it, and
-    a request sends it. A setting added here reaches all of them, where six fields on
-    each layer had to be added on each and copied between them by hand.
+    """The sampling settings, as one value that every layer carries whole. A route
+    sets it (`ModelRoute.sampling`), the options of an agent and the logged call
+    config carry it, and a request sends it. A setting that is added here reaches
+    all of them. Before this model, each layer had six fields, and a new setting
+    had to be added on each layer and copied between them by hand.
 
-    Each field's alias is its `SamplingSetting`, so a route's YAML, a warning and
-    `phern doctor` spell a setting one way (`topP`). Unset is `None`, and absent from
-    what an adapter sends.
+    The alias of each field is its `SamplingSetting`, so the YAML of a route, a
+    warning and `phern doctor` spell a setting one way (`topP`). An unset setting
+    is `None`, and it is absent from what an adapter sends.
     """
 
     temperature: float | None = None
@@ -579,63 +594,70 @@ class Sampling(WireModel):
     frequency_penalty: float | None = None
 
     def is_empty(self) -> bool:
-        """Whether this sets nothing: what a route or a header that sets none carries,
-        and leaves off its wire form, which is then as it was before there was one."""
+        """Whether this sets nothing. A route or a header that sets no sampling
+        carries an empty value and leaves it off its wire form. The wire form is
+        then the same as before this model existed."""
         return not self.settings()
 
     def settings(self) -> dict[SamplingSetting, float | int]:
-        """The settings this sets, by name. Unset is absent, so an adapter sends nothing
-        for it."""
+        """The settings that this sets, by name. An unset setting is absent, so an
+        adapter sends nothing for it."""
         return cast("dict[SamplingSetting, float | int]", self.to_wire())
 
     def uncarried(self, carried: frozenset[SamplingSetting]) -> dict[SamplingSetting, float | int]:
-        """The settings this sets that a route carrying `carried` cannot send, by the value
-        asked: what the `llm` seam drops and `phern doctor` names, by one rule."""
+        """The settings that this sets and that a route carrying `carried` cannot send,
+        with the values that were asked. The `llm` seam drops these settings and
+        `phern doctor` names them, by this one rule."""
         return {name: value for name, value in self.settings().items() if name not in carried}
 
     def without(self, settings: Collection[str]) -> Sampling:
-        """This, with `settings` unset: the one drop rule, for the call config the loop
-        logs and for a request that reaches the seam another way."""
+        """This value with `settings` unset. It is the one drop rule, for the call
+        config that the loop logs and for a request that reaches the seam another
+        way."""
         kept = {name: value for name, value in self.settings().items() if name not in settings}
         return Sampling.model_validate(kept)
 
     def on_wire(self, wire: Mapping[SamplingSetting, str]) -> dict[str, float | int]:
-        """The settings this sets that a wire names, under its names: an adapter's
-        request fields, from its own map of what its API takes."""
+        """The settings that this sets and that a wire names, under the names of the
+        wire. An adapter builds its request fields with it, from its own map of what
+        its API takes."""
         return {wire[name]: value for name, value in self.settings().items() if name in wire}
 
 
 DEFAULT_EFFORT: Final = "default"
-"""The reasoning effort that asks for the provider's own: nothing is sent, so the
-provider's default applies. Not a setting of pH's, so no profile defines it
-(`ModelRoute.efforts`) and nothing warns about it; a route, a spawn or a skill names it
-to run at the provider's default over an effort its route sets."""
+"""The reasoning effort that asks for the default of the provider. Nothing is sent,
+so the provider default applies. It is not a setting of pH, so no profile defines
+it (`ModelRoute.efforts`) and nothing warns about it. A route, a spawn or a skill
+names it to run at the provider default in place of an effort that its route
+sets."""
 
 EffortFields: TypeAlias = JsonObject
-"""The request body fields one reasoning effort sends on a route's API, as its profile
-wrote them (`ModelRoute.efforts`): opaque to all but the adapter that merges them
-(`wire_effort`)."""
+"""The request body fields that one reasoning effort sends on the API of a route,
+as its profile wrote them (`ModelRoute.efforts`). They are opaque to everything
+except the adapter that merges them (`wire_effort`)."""
 
 CallSetting: TypeAlias = SamplingSetting | Literal["reasoningEffort"]
-"""A call setting a route may be unable to carry, spelled as a route sets it: a
-sampling setting its API does not take, or a reasoning effort its profile does not say
-how to send (`ModelRoute.efforts`). What `EpochHeader.withheld` is keyed by: a sampling
-setting's alias on `Sampling`, and the effort's on `LlmCallConfig`."""
+"""A call setting that a route may be unable to carry, spelled as a route sets it.
+It is a sampling setting that the API of the route does not take, or a reasoning
+effort that its profile does not say how to send (`ModelRoute.efforts`).
+`EpochHeader.withheld` is keyed by it: by the alias of a sampling setting on
+`Sampling`, and by the alias of the effort on `LlmCallConfig`."""
 
 
 def unmapped_effort(effort: str | None, efforts: Collection[str]) -> TypeGuard[str]:
-    """Whether `effort` is asked for and a route whose profile defines `efforts` cannot
-    send it: what the `llm` seam withholds and `phern doctor` names, by one rule. Unset
-    and `DEFAULT_EFFORT` ask for nothing to be sent, so neither is."""
+    """Whether `effort` is asked for and a route whose profile defines `efforts`
+    cannot send it. The `llm` seam withholds such an effort and `phern doctor`
+    names it, by this one rule. Unset and `DEFAULT_EFFORT` ask for nothing to be
+    sent, so neither is unmapped."""
     return effort is not None and effort != DEFAULT_EFFORT and effort not in efforts
 
 
 class LlmCallConfig(WireModel):
-    """The conversation's call configuration: route plus its sampling.
+    """The call configuration of the conversation: the route plus its sampling.
 
-    Separated from `GenerateOptions` because this is the part that is *durable* —
-    it is what `request/header` snapshots and what header equality compares, so
-    a request that differs only in its message list appends no new header.
+    It is separate from `GenerateOptions` because this is the part that is
+    *durable*. `request/header` snapshots it, and header equality compares it.
+    So a request that differs only in its message list appends no new header.
     """
 
     provider: str
@@ -646,19 +668,20 @@ class LlmCallConfig(WireModel):
     stop: list[str] | None = None
 
     def without(self, settings: Collection[CallSetting]) -> LlmCallConfig:
-        """This, with `settings` unset: what a route that cannot carry them is sent.
+        """This config with `settings` unset: what a route that cannot carry them is sent.
 
-        `asking` is its inverse, and the two are the one place a `CallSetting` is told
-        apart: a sampling setting is `sampling`'s, and `reasoningEffort` is this model's
-        own."""
+        `asking` is its inverse. These two methods are the one place that tells
+        the two kinds of `CallSetting` apart: a sampling setting belongs to
+        `sampling`, and `reasoningEffort` belongs to this model."""
         effort = None if "reasoningEffort" in settings else self.reasoning_effort
         return self.model_copy(
             update={"sampling": self.sampling.without(settings), "reasoning_effort": effort}
         )
 
     def asking(self, withheld: Mapping[CallSetting, float | int | str]) -> LlmCallConfig:
-        """This, with what `without` took off asked for again (`EpochHeader.withheld`):
-        validated, since what comes back from a log is only a value."""
+        """This config with what `without` removed asked for again
+        (`EpochHeader.withheld`). The result is validated, because what comes back
+        from a log is only a value."""
         restored = {name: value for name, value in withheld.items() if name != "reasoningEffort"}
         data = {**self.to_wire(), "sampling": {**self.sampling.settings(), **restored}}
         if "reasoningEffort" in withheld:
@@ -676,22 +699,24 @@ class ToolSchema(WireModel):
 
 # ------------------------------------------------------------ stream chunks --
 #
-# Chunks are per-token hot-path values (D4), so they are frozen dataclasses on
-# `WireDataclass` rather than pydantic models. Their wire form still follows the
-# one alias rule.
+# Chunks are values on the per-token hot path (D4), so they are frozen
+# dataclasses on `WireDataclass` and not pydantic models. Their wire form still
+# follows the one alias rule.
 
 
 FinishKind: TypeAlias = Literal["stop", "tool-calls", "max-tokens", "aborted", "error"]
-"""Why a response stopped, as the five answers every consumer branches on.
+"""Why a response stopped, as the five answers that every consumer branches on.
 
-A name rather than an inline literal because an adapter has to *return* one, and
-the third one to be written spelled the union out again to say so — which is the
-same list in a second place, free to grow a sixth member nothing else handles.
+It is a name and not an inline literal because an adapter must *return* one. The
+third adapter to be written spelled the union out again to say so. That put the
+same list in a second place, where it could grow a sixth member that nothing
+else handles.
 
-`aborted` is the one no adapter in this repo produces: a canceled run reaches
-the loop as an exception, never as a chunk, so `TurnEndReason` carries that
-answer instead. It stays here for an adapter whose provider can report a
-cancellation on the wire, and `driver.py` routes it alongside `error`."""
+`aborted` is the one answer that no adapter in this repo produces. A canceled
+run reaches the loop as an exception and never as a chunk, so `TurnEndReason`
+carries that answer. The value stays here for an adapter whose provider can
+report a cancellation on the wire, and `ph.agent_loop.driver` routes it together
+with `error`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -755,13 +780,18 @@ class Finish(WireDataclass):
 StreamChunk: TypeAlias = (
     "BlockStart | TextDelta | ReasoningDelta | ToolCallDelta | BlockEnd | UsageChunk | Finish"
 )
-"""The raw streaming protocol adapters emit.
+"""The raw streaming protocol that adapters emit.
 
-Contract: block indexes correlate interleaved deltas; `block-end` carries the
-assembled block; `usage` precedes the terminal `finish` and nothing follows it;
-tool arguments stay raw JSON strings until `block-end`. An adapter may raise,
-and the runtime normalizes that into a terminal `finish{error}` before any
-consumer sees it — so a consumer never has to handle both shapes.
+Contract:
+
+* Block indexes correlate interleaved deltas.
+* `block-end` carries the assembled block.
+* `usage` precedes the terminal `finish`, and nothing follows `finish`.
+* Tool arguments stay raw JSON strings until `block-end`.
+
+An adapter may raise. The runtime normalizes that into a terminal
+`finish{error}` before any consumer sees it, so a consumer never has to handle
+both shapes.
 """
 
 
@@ -769,45 +799,49 @@ _CHUNKS: TypeAdapter[StreamChunk] = TypeAdapter(
     Annotated[StreamChunk, Field(discriminator="type")],
     config=ConfigDict(alias_generator=wire_alias, populate_by_name=True, extra="ignore"),
 )
-"""The tagged union, decoded the way `ContentBlock` already is.
+"""The tagged union, decoded in the way that `ContentBlock` already is.
 
-**The read side is not hot** — `ph.session.events` says the same of its own
-dataclass, and for the same reason: D4 is about *constructing* a chunk per token,
-which an adapter does per streamed message and this never touches. There is one
-caller, `ph.llm.replay`, reading a log back.
+**The read side is not hot.** `ph.session.events` says the same of its own
+dataclass, for the same reason. D4 is about *constructing* a chunk for each
+token. An adapter does that as it streams a message, and this decoder is never
+on that path. It has one caller, `ph.llm.replay`, which reads a log back.
 
-So the eight-branch ladder this replaces was the second answer in one file to a
-problem `content_from_wire` had already solved. It also had a hole: the chunks
-are frozen dataclasses and validate nothing, so a missing key raised but a
-*mis-typed* one built silently — `{"index": "x"}` produced a `BlockStart` whose
-index was a string, and handed it to an assembler that indexes and concatenates.
+This replaced a ladder of eight branches. The ladder was the second answer in
+one file to a problem that `content_from_wire` had already solved. It also had a
+hole. The chunks are frozen dataclasses and validate nothing. A missing key
+raised, but a *mis-typed* key built silently: `{"index": "x"}` produced a
+`BlockStart` whose index was a string, and handed it to an assembler that
+indexes and concatenates.
 
-`extra="ignore"` rather than `WireModel`'s `forbid`: a log is read by builds older
-than the one that wrote it, so a key added later is skipped rather than condemning
-the step. That is the ladder's behavior, kept.
+The config says `extra="ignore"` and not the `forbid` of `WireModel`. A log is
+read by builds older than the build that wrote it, so a key that was added later
+is skipped and does not condemn the step. The ladder behaved this way, and that
+behavior is kept.
 """
 
 
 def chunk_from_wire(wire: JsonObject) -> StreamChunk:
     """Rebuild one stream chunk from its logged JSON form (replay fidelity).
 
-    A malformed chunk is reported as `ValueError` naming the chunk kind and the
-    field path, so a replay reader can say which line was wrong rather than
-    surfacing a `KeyError` from three frames down.
+    A malformed chunk is reported as a `ValueError` that names the chunk kind and
+    the field path. A replay reader can then say which line was wrong, and does
+    not surface a `KeyError` from three frames down.
     """
     try:
-        # `thaw_json` first: the log freezes payloads into `MappingProxyType` and
-        # `tuple`, and pydantic refuses those for a *dataclass* target — `WireModel`
-        # thaws them in `_thaw_frozen_input`, which a `WireDataclass` has no
-        # equivalent of. A whole-tree thaw, not the shallow `dict(...)` this used
-        # to carry, which left nested frozen containers in `replay_state`.
+        # `thaw_json` comes first. The log freezes payloads into
+        # `MappingProxyType` and `tuple`, and pydantic refuses those for a
+        # *dataclass* target. `WireModel` thaws them in `_thaw_frozen_input`, and
+        # a `WireDataclass` has no equivalent. The thaw covers the whole tree.
+        # The shallow `dict(...)` that was here before left nested frozen
+        # containers in `replay_state`.
         return _CHUNKS.validate_python(thaw_json(wire))
     except ValidationError as error:
         raise ValueError(f"malformed stream chunk: {validation_errors(error)}") from error
 
 
 def is_token_delta(chunk: StreamChunk) -> bool:
-    """Whether a chunk carries visible output — the first-token boundary.
+    """Whether a chunk carries visible output. The first such chunk is the
+    first-token boundary.
 
     Empty deltas (heartbeats, empty tool-call frames) do not count.
     """
@@ -819,16 +853,17 @@ def is_token_delta(chunk: StreamChunk) -> bool:
 
 
 def is_error_finish(chunk: StreamChunk) -> bool:
-    """Whether this chunk is a stream saying it failed — nothing after it counts.
+    """Whether this chunk is a stream reporting that it failed. Nothing after it counts.
 
-    Both wires report a failed request *inside* a 200 response, and an adapter
-    that kept reading past one went on to close its half-written blocks and
-    append a second `Finish` reading "stop", which is what the turn was then
-    recorded as. Each adapter carried a `failed` flag to notice; the flag was a
-    round trip through mutable state for a fact the chunk already states, and a
-    second code path emitting an error `Finish` would have had to remember to
-    set it. Derived here instead, once, for every adapter including ones this
-    repo does not own.
+    A provider wire can report a failed request *inside* a 200 response. An
+    adapter that kept reading past such a report went on to close its
+    half-written blocks and to append a second `Finish` that read "stop", and
+    the turn was then recorded as "stop". Each adapter carried a `failed` flag
+    to notice the report. The flag was a round trip through mutable state for a
+    fact that the chunk already states, and a second code path that emitted an
+    error `Finish` would have had to remember to set it. The fact is derived
+    here, in one place, for every adapter, including adapters that this repo
+    does not own.
     """
     return isinstance(chunk, Finish) and chunk.reason.kind == "error"
 
@@ -846,45 +881,48 @@ class GenerateOptions:
     system: str | None = None
     tools: tuple[ToolSchema, ...] = ()
     effort_fields: EffortFields | None = None
-    """The reasoning effort asked for, as this route's API spells it: the request body
-    fields its profile gives that effort (`ModelRoute.efforts`), which the adapter merges
-    into its body (`wire_effort`). No adapter spells an effort of its own, so `None`
-    sends none and the provider's default applies. Request body like any other, so an
-    `llm/stream` listener that moves a request to another route owns them, as it owns
-    `max_tokens`: the request names no effort to look up on the new one."""
+    """The reasoning effort that is asked for, as the API of this route spells it.
+    These are the request body fields that the profile gives that effort
+    (`ModelRoute.efforts`), and the adapter merges them into its body
+    (`wire_effort`). No adapter spells an effort of its own, so `None` sends none
+    and the provider default applies. The fields are request body like any
+    other. So an `llm/stream` listener that moves a request to another route owns
+    them, as it owns `max_tokens`: the request names no effort to look up on the
+    new route."""
     sampling: Sampling = field(default_factory=Sampling)
     max_tokens: int | None = None
     stop: tuple[str, ...] = ()
     response_schema: dict[str, Any] | None = None
-    """A JSON Schema the reply's *text* must satisfy (P7-17).
+    """A JSON Schema that the *text* of the reply must satisfy (P7-17).
 
-    For the calls that want a value rather than prose — `rlm-harness`'s review
-    gate and its planner ask for JSON today and then hope, with a tolerant parser
-    whose own docstring concedes that *"return only JSON is an instruction and
-    not a guarantee"*. A schema turns that into something the wire can enforce.
+    It is for the calls that want a value and not prose. The review gate and the
+    planner of `rlm-harness` are such calls. Before this field, they asked for
+    JSON in the prompt and read the reply with a tolerant parser. An instruction
+    to return only JSON is not a guarantee. With a schema, the wire can enforce
+    the shape.
 
-    **Not a `LlmCallConfig` field**, deliberately: that class is what
-    `request/header` snapshots and what header equality compares, so a schema
-    there would put one caller's shape into the cached prefix of a conversation
-    that has nothing to do with it (A12). This is per request, like `tools`.
+    **This is deliberately not a `LlmCallConfig` field.** `request/header`
+    snapshots that class, and header equality compares it. A schema there would
+    put the shape of one caller into the cached prefix of a conversation that
+    has nothing to do with it (A12). The schema is per request, like `tools`.
 
-    **Not combined with tools.** A tool call is not a JSON document in the
-    schema's shape, so a route asked for both would have to break one promise;
-    callers that want structure ask for it on a call that offers no tools, and
-    `structured` refuses the combination rather than letting a provider decide
-    which to honor."""
+    **It is not combined with tools.** A tool call is not a JSON document in the
+    shape of the schema, so a route that was asked for both would have to break
+    one promise. A caller that wants structure asks for it on a call that offers
+    no tools. `ph.llm.structured.ask_for_shape` refuses the combination, and
+    does not let a provider decide which to honor."""
     session_id: str | None = None
-    purpose: Literal["compaction", "session-title", "refine"] | None = None
-    """Why an auxiliary call is being made. Ordinary conversation requests leave
-    it unset — so a session-bound request with no `purpose` *is* a loop request,
+    purpose: Literal["compaction", "refine"] | None = None
+    """Why an auxiliary call is being made. An ordinary conversation request leaves
+    it unset. So a session-bound request with no `purpose` *is* a loop request,
     and the "model-visible means logged" invariant holds it to the log. Nothing
     outside the loop can opt a conversation request out by leaving a flag at its
-    default; it would have to name a purpose it does not have.
+    default. It would have to name a purpose that it does not have.
 
-    A closed set rather than a free string, for that reason: opting out has to be
-    a declaration this file can enumerate. `refine` is the Continual Harness's
-    planner and its review gate (P3-16) — calls *about* the conversation, whose
-    prompt is deliberately not its derivation."""
+    For that reason the set is closed and is not a free string: opting out must
+    be a declaration that this file can enumerate. `refine` is the planner and
+    the review gate of the Continual Harness (P3-16). Those calls are *about*
+    the conversation, and their prompt is deliberately not its derivation."""
 
     @property
     def is_loop_request(self) -> bool:
@@ -892,10 +930,12 @@ class GenerateOptions:
 
 
 def wire_effort(body: dict[str, Any], options: GenerateOptions) -> None:
-    """Merge into an adapter's request `body` the fields `options`' reasoning effort
-    means on its route (`GenerateOptions.effort_fields`), after the adapter's own: an
-    object merges key by key, so a profile can reach into `generationConfig` beside the
-    fields the adapter put there, and anything else replaces what was there."""
+    """Merge the effort fields of `options` (`GenerateOptions.effort_fields`) into
+    the request `body` of an adapter. These are the fields that its reasoning
+    effort means on its route. The merge runs after the adapter has set its own
+    fields. An object merges key by key, so a profile can reach into
+    `generationConfig` beside the fields that the adapter put there. Any other
+    value replaces what was there."""
     if options.effort_fields is not None:
         _merge(body, options.effort_fields)
 

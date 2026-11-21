@@ -1,7 +1,7 @@
 """Runtime invariant: a memoized skill reach equals a freshly built one (P6-01, I6).
 
 `SkillService.reach` memoizes per isolation chain and invalidates on a generation
-counter, which is `ToolRegistry.view`'s arrangement and has `ToolRegistry.view`'s
+counter, which is `ToolRuntime.view`'s arrangement and has `ToolRuntime.view`'s
 failure mode: a registration path that mutates the table without bumping the
 counter serves an answer that was true a moment ago.
 

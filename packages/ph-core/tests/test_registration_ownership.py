@@ -1279,7 +1279,7 @@ async def test_a_prompt_provider_runs_as_its_row_for_the_scope_being_assembled(
 async def test_a_refused_registration_does_not_reassign_the_survivor(mount: MountProfile) -> None:
     """The pair is written only once the mutation it describes is accepted.
 
-    `_Layer.by` is a dict parallel to `_Layer.tools`, which is the shape the five
+    `_Layer.by` is a dict parallel to `_Layer.tools`, which is the shape the six
     sibling registries rejected in favor of a `_Registered(value, by)` record.
     It survives in the tools registry for a structural reason — `_claim`'s
     `mutate`/`undo` closures are built before the pair is known — and this is the

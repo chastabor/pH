@@ -1,26 +1,27 @@
 """The agent inbox: durable, replayable pending input.
 
-Three delivery semantics, ported exactly, because the difference is what makes
-steering feel instant and injection feel invisible:
+The inbox has three delivery semantics, ported exactly. The difference between
+them is what makes steering feel instant and injection feel invisible:
 
-| call | lands at | wakes an idle agent |
+| Call | Lands at | Wakes an idle agent |
 |---|---|---|
 | `followup(msg)` | next **turn** | yes |
 | `steer(msg)` | next **step** | yes |
-| `inject(msg)` | next **step** | **no** — it waits for another message |
+| `inject(msg)` | next **step** | **no**: it waits for another message |
 
 Every mutation is logged as `agent/inbox/spliced` *before* the projection
-changes, so a resumed agent reconstructs its queue from the log rather than
-losing whatever the user typed before the crash.
+changes. A resumed agent therefore rebuilds its queue from the log, and does
+not lose what the user typed before the crash.
 
-**A claim is proposed, then taken** (S3). The driver has to decide about a batch —
-`agent/pre-step` is an await, and a listener in it may make a model call whose
-barrier flushes the log — before the batch reaches the conversation. Taken first,
-a crash inside that await left the prompt out of the inbox on disk and nowhere in
-the conversation. So `propose` says what a step would take without taking it, and
-`claim` takes it in one `Session.batch()` with the records the caller appends beside
-it: the splice that removes a prompt from the inbox and the `user/message` that puts
-it in the conversation land together, or neither does.
+**A claim is proposed, then taken** (S3). The driver has to decide about a
+batch before the batch reaches the conversation. That decision,
+`agent/pre-step`, is an await, and a listener in it may make a model call whose
+barrier flushes the log. When the batch was taken first, a crash inside that
+await left the prompt out of the inbox on disk and nowhere in the conversation.
+So `propose` says what a step would take and takes nothing. `claim` takes it in
+one `Session.batch()` together with the records that the caller appends. The
+splice that removes a prompt from the inbox and the `user/message` that puts it
+in the conversation are written together, or neither is written.
 
 @module ph.agent.inbox
 """
@@ -58,39 +59,41 @@ class InboxNotifications:
 
 @dataclass(frozen=True, slots=True)
 class InboxBatch:
-    """What one step would take from the inbox — proposed, and not yet taken.
+    """What one step would take from the inbox: proposed, and not yet taken.
 
-    Built by `Inbox.propose` and taken by `Inbox.claim`. Holding one takes nothing:
-    the messages stay pending, on disk and in the projection, until it is claimed.
+    `Inbox.propose` builds one and `Inbox.claim` takes it. Holding one takes
+    nothing. The messages stay pending, on disk and in the projection, until
+    the batch is claimed.
     """
 
     steps: tuple[Message, ...]
-    """Every `next-step` message pending when it was proposed."""
+    """Every `next-step` message that was pending when the batch was proposed."""
     turn: tuple[Message, ...]
-    """At a turn boundary, the one queued turn it takes; otherwise empty."""
+    """At a turn boundary, the one queued turn that the batch takes. Otherwise empty."""
 
     @property
     def messages(self) -> tuple[Message, ...]:
-        """The batch in the order the step is shown it."""
+        """The batch, in the order in which the step sees it."""
         return (*self.steps, *self.turn)
 
 
 class InboxSplice(WireModel):
     """One inbox mutation, as `agent/inbox/spliced` carries it.
 
-    Declared rather than hand-built and hand-parsed, the way every other durable
-    payload is (`UserQuestion`, `RequestContext`, `Message`): `WireModel` owns the
-    camelCase aliases and the log's frozen mapping, so `splice` writing a key and
-    `_apply` reading one cannot drift, and `ph_app.tui.adapter` has something to
-    validate against instead of re-spelling `inserted` and `removedCount`.
+    The payload is declared, as every other durable payload is (`UserQuestion`,
+    `RequestContext`, `Message`). It is not built by hand and parsed by hand.
+    `WireModel` owns the camelCase aliases and the frozen mapping of the log.
+    The key that `splice` writes and the key that `_apply_splice` reads
+    therefore cannot drift apart. `ph_app.tui.adapter` could validate against it
+    too. It still reads `inserted` and `removedCount` by hand.
 
-    `removed_count` is `None` rather than `0` when absent, and `outcome` likewise,
-    because `to_wire()` omits `None` — an insert-only splice must not start
-    emitting `"removedCount": 0` into logs that never carried it.
+    `removed_count` is `None` and not `0` when it is absent, and `outcome`
+    likewise, because `to_wire()` omits `None`. An insert-only splice must not
+    start to emit `"removedCount": 0` into logs that never carried it.
 
-    `extra="ignore"` overrides `WireModel`'s `forbid`: a log is read by builds
-    older than the one that wrote it, and a key added later must be skipped on
-    replay rather than condemn the whole session.
+    `extra="ignore"` overrides the `forbid` of `WireModel`. A log is read by
+    builds older than the build that wrote it. A key that was added later must
+    be skipped on replay, and must not condemn the whole session.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -100,22 +103,22 @@ class InboxSplice(WireModel):
     inserted: list[Message]
     removed_count: int | None = None
     outcome: Literal["canceled"] | None = None
-    """Whether the removed messages were canceled or consumed. Written and not
-    yet read back: live, the difference is `_notify.discarded` against
-    `_notify.claimed`, and on replay this key is the only thing that still knows
-    which happened."""
+    """Whether the removed messages were canceled or consumed. Live, the
+    difference is `_notify.discarded` against `_notify.claimed`. On replay this
+    key is the only record of which one happened, and `ph_app.tui.adapter`
+    reads it to report canceled messages."""
 
 
 class Inbox:
-    """A replay-once projection that incrementally consumes later splices."""
+    """A projection that replays the log one time and then applies each later splice."""
 
     __slots__ = ("_notify", "_session", "_state")
 
     def __init__(self, session: Session, notifications: InboxNotifications) -> None:
         self._session = session
         self._notify = notifications
-        # Replay only this lifecycle's splices: a fork inherits its parent's
-        # transcript, not its parent's unanswered queue.
+        # Replay only the splices of this lifecycle. A fork inherits the
+        # transcript of its parent, and not the unanswered queue of its parent.
         self._state: dict[str, list[Message]] = replay_pending(session.own_events())
 
     @property
@@ -136,11 +139,11 @@ class Inbox:
         self.splice("next-turn", 0, len(self._state["next-turn"]), [])
 
     def propose(self, target: InboxTarget) -> InboxBatch:
-        """The batch one step would take, without taking it.
+        """The batch that one step would take, without taking it.
 
-        Always every pending `next-step` message, plus — at a turn boundary —
-        exactly one queued turn. Claiming more than one turn would merge two
-        user prompts into one model call.
+        The batch always holds every pending `next-step` message. At a turn
+        boundary it also holds exactly one queued turn. Claiming more than one
+        turn would merge two user prompts into one model call.
         """
         turn = tuple(self._state["next-turn"][:1]) if target == "next-turn" else ()
         return InboxBatch(steps=tuple(self._state["next-step"]), turn=turn)
@@ -154,17 +157,18 @@ class Inbox:
             _LOG.append(batch, "user/message", message.to_wire(), SurfaceIntent("append"))
         ```
 
-        The splices are written into the batch the block receives, so they commit
-        with the block's records or not at all: a block that raises, a batch the
-        surface refuses, or a process that dies before the flush leaves every
-        message pending. Only once the batch has committed does the projection
-        change and `claimed` fire — after the durable event, as every splice here
-        is, so a `session/event` observer still sees the lists as they were.
+        The splices are written into the batch that the block receives, so they
+        commit with the records of the block or not at all. A block that raises,
+        a batch that the surface refuses, or a process that dies before the
+        flush leaves every message pending. The projection changes and `claimed`
+        fires only after the batch has committed. That is after the durable
+        event, as for every splice here, so a `session/event` observer still
+        sees the lists as they were.
 
-        Synchronous inside, as `Session.batch` requires.
+        The block must be synchronous, as `Session.batch` requires.
 
         :raises RuntimeError: when the front of a queue is no longer what was
-            proposed — something took it in between, which a single driver
+            proposed. Something took it in between, which a single driver
             cannot do to itself.
         """
         queues: tuple[tuple[InboxTarget, tuple[Message, ...]], ...] = (
@@ -190,8 +194,8 @@ class Inbox:
             self._notify.claimed(message, turn)
 
     def take(self, proposed: InboxBatch, turn: int) -> None:
-        """`claim` with nothing beside it: the batch is consumed and reaches no step —
-        a step a pre-step rejected, or one it emptied."""
+        """`claim` with nothing appended beside it. The batch is consumed and reaches
+        no step: a step that a pre-step rejected, or a step that a pre-step emptied."""
         with self.claim(proposed, turn):
             pass
 
@@ -201,7 +205,7 @@ class Inbox:
     def splice(
         self, target: InboxTarget, start: int, delete_count: int, inserted: Sequence[Message]
     ) -> list[Message]:
-        """Standard splice semantics, durably recorded; removed messages are canceled."""
+        """Standard splice semantics, durably recorded. Removed messages are canceled."""
         pending = self._state[target]
         start = min(max(start, 0), len(pending))
         delete_count = min(max(delete_count, 0), len(pending) - start)
@@ -214,12 +218,14 @@ class Inbox:
             removed_count=delete_count or None,
             outcome="canceled" if delete_count else None,
         )
-        # The one rule a write can still break. The coordinates are clamped above
-        # and the values are already typed, so there is nothing here to parse.
+        # This is the one rule that a write can still break. The coordinates
+        # are clamped above and the values are already typed, so there is
+        # nothing here to parse.
         _unique_in(self._state, target, start, delete_count, inserted)
-        # The durable event commits BEFORE the live projection mutates, so a
-        # synchronous `session/event` observer sees the pre-splice lists and can
-        # reconstruct exactly what was removed from the normalized coordinates.
+        # The durable event commits BEFORE the live projection changes. A
+        # synchronous `session/event` observer therefore sees the lists as they
+        # were before the splice, and can reconstruct exactly what was removed
+        # from the normalized coordinates.
         _LOG.append(self._session, "agent/inbox/spliced", splice.to_wire())
         removed = pending[start : start + delete_count]
         pending[start : start + delete_count] = inserted
@@ -235,15 +241,16 @@ class Inbox:
 def replay_pending(events: Iterable[SessionEvent]) -> dict[str, list[Message]]:
     """What is pending after replaying every `agent/inbox/spliced` among `events`.
 
-    **A pure fold, and the one `Inbox` is built from** (P13-01). A reader holding a
-    stored log and no `Session` — the live-roots index deciding whether a root died
-    with a prompt nobody claimed — asks the same question the constructor does, and a
-    second replay written there would be a second account of splice semantics that
-    could drift from this one. The caller chooses the slice: `Inbox` replays only
-    its own lifecycle's splices (`own_events`), since a fork inherits its parent's
-    transcript and not its parent's unanswered queue.
+    **This is a pure fold, and `Inbox` is built from it** (P13-01). A reader may
+    hold a stored log and no `Session`: the live-roots index does, when it
+    decides whether a root died with a prompt that nobody claimed. That reader
+    asks the same question that the constructor asks. A second replay written
+    there would be a second account of splice semantics, and it could drift
+    from this one. The caller chooses the slice. `Inbox` replays only the
+    splices of its own lifecycle (`own_events`), because a fork inherits the
+    transcript of its parent and not the unanswered queue of its parent.
 
-    :raises ValueError: for a splice the queues cannot take, naming its seq.
+    :raises ValueError: for a splice that the queues cannot take, naming its seq.
     """
     state: dict[str, list[Message]] = {"next-turn": [], "next-step": []}
     for event in events:
@@ -263,9 +270,10 @@ def _apply_splice(state: dict[str, list[Message]], splice: JsonObject) -> None:
     parsed = InboxSplice.model_validate(splice)
     pending = state[parsed.target]
     removed_count = parsed.removed_count or 0
-    # That the coordinates fall inside the queue they name. Replay only: `splice`
-    # clamps both into range before it writes, so on the write path these
-    # branches cannot fail and checking them there would read as though they could.
+    # Check that the coordinates fall inside the queue that they name. Only
+    # replay needs this. `splice` clamps both into range before it writes, so on
+    # the write path these branches cannot fail, and a check there would read
+    # as though they could.
     if (
         not 0 <= parsed.start <= len(pending)
         or not 0 <= removed_count <= len(pending) - parsed.start
@@ -282,10 +290,12 @@ def _unique_in(
     removed_count: int,
     inserted: Sequence[Message],
 ) -> None:
-    """That no message id would end up pending twice, across both queues — the one
-    rule the write path and replay share. Messages rather than a payload: `splice` is
-    holding the `Message` list it just built and has no reason to serialize it and
-    read the ids back out."""
+    """Check that no message id would be pending twice, across both queues.
+
+    This is the one rule that the write path and replay share. It takes messages
+    and not a payload: `splice` holds the `Message` list that it just built, and
+    has no reason to serialize it and read the ids back out.
+    """
     pending = state[target]
     other: InboxTarget = "next-step" if target == "next-turn" else "next-turn"
     candidate = [

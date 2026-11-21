@@ -71,6 +71,7 @@ from rlm_fixtures import (
 
 from ph.agent.types import AgentHandle
 from ph.agent_loop.driver import ReactLoopAgent
+from ph.cancel import CancelToken
 from ph.cordis import Context
 from ph.json import as_obj, as_seq
 from ph.keys import (
@@ -141,7 +142,7 @@ from ph.testing import (
     stored_types,
 )
 from ph.testing.git import WORKTREE_ROWS, git_repo
-from ph.tools.definition import NotDone
+from ph.tools.definition import NotDone, ToolExecutionInput, ToolExecutionResult
 from ph_rlm.bindings import RUN_TOOL
 from ph_rlm.subagents import (
     PROVIDER_NAME,
@@ -1554,6 +1555,66 @@ async def test_a_child_caught_mid_turn_climbs_the_ladder_with_its_task_re_presen
     assert len(tasks) == 2, "the task was not presented again, so the retry answers nothing"
     assert "the harness stopped while you were working" in tasks[-1]
     assert "this is attempt 2" in tasks[-1]
+
+
+async def test_a_canceled_task_wait_revokes_the_child(
+    delegating: MountedRuntime, gate: ModelGate, mount: MountProfile
+) -> None:
+    """A `task` call whose wait is canceled ends its child for good (C7).
+
+    The tool used to call `SubagentRun.dispose` and nothing else. That stops the
+    child and writes nothing, because the seam uses it for a child that the seam
+    has already ended. The log of the child therefore still read `running`. The
+    roster showed a child at work that no process ran, and the next start of the
+    harness put the child back to work for a wait that nobody held.
+
+    The cancel is now a revocation: `canceled` and a tombstone in the log of the
+    child, on its disk, before the tool reports the abort.
+
+    Sabotage: call only `handle.dispose()` in `_collected`, and the child is
+    `running`, is not deleted, and reaches the model a second time after the
+    restart.
+    """
+    ctx, session, parent = await delegating(maxConcurrent=1)
+    token = CancelToken()
+    results: list[ToolExecutionResult] = []
+
+    async def call() -> None:
+        results.append(
+            await ctx.require(TOOLS).execute(
+                ToolExecutionInput(
+                    call_id="call-1",
+                    name="task",
+                    arguments={"prompt": "only"},
+                    scope=parent.ctx,
+                    session=session,
+                    agent=parent,
+                    cancel=token,
+                )
+            )
+        )
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(call)
+        await settled(lambda: gate.arrived == 1, "the child to reach the model")
+        token.cancel("the user pressed stop")
+
+    (result,) = results
+    assert result.error is not None
+    assert result.error.kind == "aborted"
+    (child,) = (
+        await ctx.require(SUBAGENTS).load_children(session.id, session.header.family)
+    ).values()
+    assert child.status == "canceled"
+    assert child.deleted, "a canceled wait left a child that a restart would run again"
+    assert ctx.require(SUBAGENTS).list() == []
+
+    await _persisted(ctx, session)
+    revived_ctx, _revived, _parent = await _restart(mount, session.id)
+    await settle_background(revived_ctx)
+
+    assert revived_ctx.require(SUBAGENTS).list() == []
+    assert gate.arrived == 1, "the revoked child reached the model again"
 
 
 async def test_a_child_that_replied_before_a_restart_is_not_announced_as_silent(

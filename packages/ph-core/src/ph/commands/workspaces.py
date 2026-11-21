@@ -1,53 +1,54 @@
-"""`/workspaces` — the human half of the disposal policy (E15).
+"""`/workspaces`: the human side of the disposal policy (E15).
 
-The `worktree` tier commits an agent's work to `ph/<session>/<agent>` and takes
-the checkout back: the branch is the artifact, a directory is a resource the
-agent borrowed. That is the right default and it *creates* an accumulation
-problem — one branch per agent that wrote something, with nothing in the harness
-to see or finish them. `wtp`'s README opens with exactly this complaint about
-bare git ("remove worktree, forget to delete the branch, orphaned branches
-accumulate") and answers it with `remove --with-branch`; this is that answer,
-scoped to the branches pH made.
+The `worktree` tier commits the work of an agent to `ph/<session>/<agent>` and
+takes the checkout back. The branch is the artifact, and a directory is a
+resource that the agent borrowed. That is the right default, and it *creates* an
+accumulation problem: one branch for each agent that wrote something, and
+nothing in the harness to see the branches or finish them. The README of `wtp`
+opens with exactly this complaint about bare git ("remove worktree, forget to
+delete the branch, orphaned branches accumulate") and answers it with
+`remove --with-branch`. This command is that answer, limited to the branches
+that pH made.
 
-**Rows are branches.** They were checkouts for one round, which meant this
-command could see exactly the two states that are *not* the ordinary one — a
-tree a live agent holds, and a tree disposal failed to remove — and reported
-every agent that finished cleanly as nothing at all. A checkout is now extra
-information attached to a row rather than the thing being listed.
+**Rows are branches.** For one round they were checkouts. This command could
+then see exactly the two states that are *not* the ordinary state: a tree that a
+live agent holds, and a tree that disposal failed to remove. It reported every
+agent that finished cleanly as nothing. A checkout is now extra information on a
+row, and not the thing that is listed.
 
 **Three refusals, and each is the interesting part.**
 
-A workspace a *live agent holds* is refused. The seam is asked, not the
-filesystem, because a checkout that is clean this instant belongs to an agent
-that may write to it in the next — and it is matched by **ref**, the one name
-every tier puts on a `Workspace` and carries, rather than by inverting a
-directory name back into an agent id, because `sanitize_ref` is lossy and an id
-that does not sanitize to itself would read as unheld and lose its protection.
+A workspace that a *live agent holds* is refused. The command asks the seam and
+not the filesystem, because a checkout that is clean at this instant belongs to
+an agent that may write to it in the next. The workspace is matched by **ref**,
+which is the one name that every tier puts on a `Workspace` and carries. It is
+not matched by turning a directory name back into an agent id. `sanitize_ref` is
+lossy, and an id that does not sanitize to itself would read as unheld and lose
+its protection.
 
-**Nothing here spells `git` any more.** This command listed branches, joined them
-against `git worktree list`, merged and deleted with `git`, which made every verb
-git-shaped twice over. A `workspace-jj` stray had no path, no `dirty` and no way to
-be removed, and a live one was not even protected — and worse, **jj embeds its own
-git**, so a deployment running that tier need not have the binary at all, and there
-the branch listing returned nothing while this command reported that there was
-nothing left behind. `ArtifactProvider` is every one of those verbs, asked of
-whichever tier is mounted.
+**Nothing here names `git` any more.** This command listed branches, joined them
+against `git worktree list`, and merged and deleted with `git`, so every verb
+was git-shaped in two ways. A `workspace-jj` stray had no path, no `dirty` and
+no way to be removed, and a live one was not even protected. Worse, **jj embeds
+its own git**, so a deployment that runs that tier need not have the binary.
+There the branch listing returned nothing, and this command reported that
+nothing was left behind. `ArtifactProvider` and `EnumeratingProvider` are those
+verbs, asked of whichever tier is mounted.
 
-A branch is deleted with `-d`, never `-D`, unless `--force-branch` says so, and
-a row with no checkout refuses a bare `remove` outright. Every disposed agent is
-such a row, so deleting the branch anyway would make `--with-branch` decorative
-and throw away the artifact disposal went to the trouble of saving.
+A branch is deleted with `-d`, never `-D`, unless `--force-branch` says so. A
+row with no checkout refuses a bare `remove` outright. Every disposed agent is
+such a row, so to delete the branch anyway would make `--with-branch` decorative
+and would discard the artifact that disposal saved.
 
-Nothing outside `BRANCH_PREFIX` is listed or touched. That prefix is the whole
-of the guard now that rows are branches — a person's own `feature/x` never
-becomes a row, so `remove` can never be aimed at it.
+Nothing outside `BRANCH_PREFIX` is listed or touched. Now that rows are
+branches, that prefix is the whole of the guard. The own `feature/x` of a user
+never becomes a row, so `remove` can never be aimed at it.
 
 @module ph.commands.workspaces
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,35 +67,35 @@ from ..seams.workspace import stored_survivors
 
 __all__ = ["KeptWorktree", "apply"]
 
-log = logging.getLogger("ph.commands.workspaces")
 
 USAGE = (
     "usage: /workspaces [list | export <agent> | merge <agent> "
     "| remove <agent> [--with-branch] [--force-branch]]"
 )
 HINT = USAGE.removeprefix("usage: /workspaces ")
-"""The palette's hint is the usage line, so the two cannot drift — they already
-had, with `--force-branch` in one and not the other."""
+"""The hint in the palette is the usage line, so the two cannot drift. They had
+already drifted: `--force-branch` was in one and not in the other."""
 
 
 @dataclass(frozen=True, slots=True)
 class KeptWorktree:
-    """One artifact pH left behind: a branch, and whatever checkout is still on it."""
+    """One artifact that pH left behind: a branch, and any checkout that is still
+    on it."""
 
     branch: str
     agent_id: str
     session_id: str
     path: Path | None
-    """The checkout, when one still exists — which is no longer the normal case.
+    """The checkout, when one still exists. That is no longer the normal case.
 
-    Disposal commits and removes, so a directory here means one of exactly two
-    things: a live agent is working in it, or disposal could not remove it. Both
-    are worth seeing; neither is the artifact."""
+    Disposal commits and removes. A directory here therefore means one of
+    exactly two things: a live agent is working in it, or disposal could not
+    remove it. Both are worth showing, and neither is the artifact."""
     dirty: bool
     held: bool
-    """Whether a live agent still has it. A held workspace is a *current* one, not
-    a leftover, and is listed as such rather than hidden — an operator wondering
-    where the disk went should see all of them."""
+    """Whether a live agent still has it. A held workspace is a *current*
+    workspace and not a leftover. It is listed as held and not hidden, because
+    an operator who wonders where the disk space went should see all of them."""
 
     def describe(self) -> str:
         state = (
@@ -112,17 +113,18 @@ class KeptWorktree:
 async def apply(ctx: Context, config: None) -> None:
     """Register `/workspaces`.
 
-    No `root` setting any more. It existed to filter the worktree join and had to be
-    kept equal to `workspace-git-worktree`'s own — one fact in two places, where a
-    deployment that moved one and not the other got a command that could see none of
-    its checkouts. The tier answers now, and it knows where it puts them.
+    There is no `root` setting any more. The setting existed to filter the
+    worktree join, and it had to be kept equal to the `root` of
+    `workspace-git-worktree`. That was one fact in two places. A deployment that
+    moved one and not the other got a command that could see none of its
+    checkouts. The tier answers now, and the tier knows where it puts them.
     """
 
     def verb(
         act: Callable[[_Workspaces, str], Awaitable[str]], *, record: CommandRecord = "before"
     ) -> CommandVerb:
-        """One `/workspaces` verb: `act` on a fresh view, a refusal said rather than
-        raised."""
+        """One `/workspaces` verb: `act` on a fresh view, with a refusal returned
+        as text and not raised."""
 
         async def run(rest: str, _invocation: CommandContext) -> str:
             try:
@@ -156,71 +158,76 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 class _Refused(Exception):
-    """A refusal raised where it has to escape a caller.
+    """A refusal that is raised where it must escape a caller.
 
-    Only `_find` raises it — every other refusal is `return`ed, because the
-    verbs already return the sentence a person reads and an exception caught two
-    lines below its raise is a `return` spelled longer.
+    `find` raises it, and `export` raises it for a missing name. Every other
+    refusal is returned. The verbs already return the sentence that the user
+    reads, and an exception that is caught two lines below its raise is a longer
+    way to write `return`.
     """
 
 
 @dataclass(frozen=True, slots=True)
 class _Workspaces:
-    """One dispatch's view of the branches pH left behind.
+    """The view that one dispatch has of the branches that pH left behind.
 
-    A value rather than five functions threading `(ctx, base)`: both are fixed for
-    the whole of one `/workspaces` invocation.
+    This is a value and not five functions that each pass `(ctx, base)` along.
+    Both are fixed for the whole of one `/workspaces` invocation.
     """
 
     ctx: Context
     base: Path
     _refs: list[list[str]] = field(default_factory=list)
-    """One invocation's ref listing, asked once.
+    """The ref listing of one invocation, asked for one time.
 
-    `merge <name>` asked for it twice — once through `kept()` and again in
-    `_branch_for`'s fallback — which is two `git branch --list` / `jj bookmark list`
-    spawns for one question. The value is fixed for the whole of one dispatch, which
-    is the argument this frozen value object already makes about `base`; a one-slot
-    list is how a frozen dataclass holds a memo.
+    `merge <name>` asked for it twice: through `kept()`, and again in the
+    fallback of `_branch_for`. That was two `git branch --list` or
+    `jj bookmark list` spawns for one question. The value is fixed for the whole
+    of one dispatch, which is the argument that this frozen value object already
+    makes about `base`. A one-slot list is how a frozen dataclass holds a memo.
     """
 
     async def kept(self, *, with_status: bool = True) -> list[KeptWorktree]:
-        """Every artifact pH left in this repository: one row per `ph/*` branch.
+        """Every artifact that pH left in this repository: one row for each `ph/*`
+        branch.
 
-        **Branches, not directories, because a branch is what disposal leaves.** A
-        checkout is a resource an agent borrows and disposal takes back; the branch
-        is what survives it, and it is what `export`, `merge` and `remove` already
-        name. Enumerating checkouts listed only the two states that are *not* the
-        ordinary one — a tree a live agent still holds, and a tree disposal failed
-        to remove — and reported every successfully disposed agent as nothing at
-        all.
+        **Branches, not directories, because a branch is what disposal leaves.**
+        A checkout is a resource that an agent borrows and that disposal takes
+        back. The branch is what survives, and it is what `export`, `merge` and
+        `remove` already name. A listing of checkouts showed only the two states
+        that are *not* the ordinary state: a tree that a live agent still holds,
+        and a tree that disposal failed to remove. It reported every
+        successfully disposed agent as nothing.
 
-        **The checkout join is the tier's**, not this command's. It used to be `git
-        worktree list --porcelain` here, and **a jj workspace is not a git
-        worktree** — so a stray one had no path in the listing, no `dirty`, and no
-        verb that could remove it, while a live one read as unheld and
-        `remove --with-branch --force-branch` deleted the branch of an agent still
-        working in it. Asking the seam is also what let this command stop carrying a
-        `root` setting that had to be kept equal to the tier's own.
+        **The checkout join belongs to the tier**, not to this command. It used
+        to be `git worktree list --porcelain` here, and **a jj workspace is not
+        a git worktree**. A stray jj workspace had no path in the listing, no
+        `dirty`, and no verb that could remove it. A live one read as unheld,
+        and `remove --with-branch --force-branch` deleted the branch of an agent
+        that was still working in it. Because the seam is asked, this command
+        also no longer carries a `root` setting that had to be kept equal to the
+        setting of the tier.
 
-        `held` is the seam's too, matched on `ref`: it is the one name every tier
-        puts on a `Workspace` and *carries*, where a directory name has been through
-        a lossy `sanitize_ref` and an id that does not sanitize to itself would read
-        as unheld and lose its protection.
+        `held` also comes from the seam, matched on `ref`. The ref is the one
+        name that every tier puts on a `Workspace` and *carries*. A directory
+        name has been through a lossy `sanitize_ref`, and an id that does not
+        sanitize to itself would read as unheld and lose its protection.
 
-        **The ref listing is the tier's too**, and it was the half that failed
-        *silently*. It was `git branch --list ph/*`, and jj embeds its own git — so a
-        jj deployment need not have the binary, and there this returned nothing and
-        the command answered "no agent workspaces are left behind" with the bookmarks
-        sitting right there. The tier is asked, and it filters nothing.
+        **The ref listing belongs to the tier too**, and it was the half that
+        failed *silently*. It was `git branch --list ph/*`, and jj embeds its
+        own git. A jj deployment need not have the binary. There the listing
+        returned nothing, and the command answered "no agent workspaces are left
+        behind" while the bookmarks existed. The tier is asked, and it filters
+        nothing.
 
-        `BRANCH_PREFIX` is applied **here**, because pH's own prefix is the whole of
-        what keeps this from being a command that offers to delete a person's
-        `feature/x` — a guard belongs with the verb it guards, not with the tier that
-        would have to be trusted to apply it.
+        `BRANCH_PREFIX` is applied **here**. The prefix of pH is the whole of
+        what keeps this from being a command that offers to delete the
+        `feature/x` of a user. A guard belongs with the verb that it guards, and
+        not with the tier, which would have to be trusted to apply it.
 
-        `with_status=False` for the verbs that only need a name: measuring a stray
-        costs a subprocess per checkout and `merge`/`remove` never read `dirty`.
+        `with_status=False` is for the verbs that need only a name. To measure a
+        stray costs a subprocess for each checkout, and `merge` and `remove`
+        never read `dirty`.
         """
         branches = [ref for ref in await self._all_refs() if ref.startswith(PREFIX)]
         if not branches:
@@ -244,7 +251,7 @@ class _Workspaces:
         return rows
 
     async def _all_refs(self) -> list[str]:
-        """Every ref the mounted tier knows, once per dispatch."""
+        """Every ref that the mounted tier knows, asked one time for each dispatch."""
         if not self._refs:
             self._refs.append(await self.ctx.require(WORKSPACE).refs(self.base))
         return self._refs[0]
@@ -266,18 +273,20 @@ class _Workspaces:
         return "\n".join(row.describe() for row in kept)
 
     async def export(self, name: str) -> str:
-        """Put an agent's work on a branch, whichever tier it worked in.
+        """Put the work of an agent on a branch, whichever tier it worked in.
 
-        **Asks the seam, not the tier.** A worktree agent has been committing to
-        its branch all along and the answer is that branch's name; an overlay
-        agent's work is in a delta until somebody assembles a commit from it. One
-        verb covers both because `ExportingProvider` is what answers, so this
-        command never learns which provider is mounted.
+        **The command asks the seam, not the tier.** A worktree agent has
+        committed to its branch all along, and the answer is the name of that
+        branch. The work of an overlay agent is in a delta until somebody
+        assembles a commit from it. One verb covers both because
+        `ExportingProvider` is what answers, so this command never learns which
+        provider is mounted.
 
-        Found through the *records* rather than through `git worktree list`,
-        which is what `list` and `merge` use: an overlay has no worktree to
-        enumerate, so the git-shaped lookup cannot see one. The records are the
-        log's own, which is the only enumeration both tiers appear in.
+        The agent is found through the *records* and not through the ref
+        listing that `list` and `merge` use. An overlay has no branch to list
+        until it is exported, so the ref listing cannot see one. The records
+        come from the stored session logs, which are the only enumeration in
+        which both a worktree agent and an overlay agent appear.
         """
         if not name:
             raise _Refused(USAGE)
@@ -295,28 +304,31 @@ class _Workspaces:
         return f"exported {name} to {ref} — merge it with: /workspaces merge {ref}"
 
     async def merge(self, name: str) -> str:
-        """Merge an agent's branch into the checkout the person is standing in.
+        """Merge the branch of an agent into the checkout that the user is in.
 
-        Deliberately *not* `--no-ff` or squashed or rebased: which of those a
-        project wants is a project's policy, and a management command that
-        picked one would be making it. This is the plain merge a person would
-        type, offered where they already are.
+        The merge is deliberately *not* `--no-ff`, squashed or rebased. Which of
+        those a project wants is the policy of the project, and a management
+        command that picked one would be making that policy. This is the plain
+        merge that a person would type, offered where the user already is.
         """
         branch = await self._branch_for(name)
-        # The tier's own sentence when it is not a clean merge, and that is not always
-        # a failure: jj records conflicts in the commit and exits zero, so "merged,
-        # with conflicts at these paths" is a true answer only it can give.
+        # When the merge is not clean, the tier gives its own sentence, and that
+        # is not always a failure. jj records conflicts in the commit and exits
+        # zero, so "merged, with conflicts at these paths" is a true answer that
+        # only the tier can give.
         trouble = await self.ctx.require(WORKSPACE).merge(self.base, branch)
         return trouble or f"merged {branch}"
 
     async def _branch_for(self, name: str) -> str:
-        """The branch to merge: an agent's, or a ref `export` just made.
+        """The branch to merge: the branch of an agent, or a literal ref such as
+        the one that `export` just made.
 
-        The agent lookup first, because that is what a person names most of the
-        time. Falling through to a literal ref is what makes `export`'s own closing
-        sentence true: an overlay's branch is not under `BRANCH_PREFIX`, so the
-        prefixed enumeration cannot find it and the name a person was just handed
-        would refuse.
+        The agent lookup comes first, because that is what a user names most of
+        the time. If it finds nothing, a literal ref that the mounted tier lists
+        is accepted. The fallback exists so that the closing sentence of
+        `export` is true: a ref outside `BRANCH_PREFIX` is not in the prefixed
+        enumeration, and without the fallback the name that the user was just
+        given would be refused.
         """
         try:
             return (await self.find(name)).branch
@@ -343,10 +355,11 @@ class _Workspaces:
             )
 
         if row.path is None:
-            # The ordinary row now: disposal already took the checkout back, so the
-            # branch is all there is and removing it cannot be the default. The two
-            # flags keep the meanings they had — this only stops the verb reading
-            # "remove nothing" for every successfully disposed agent.
+            # This is now the ordinary row. Disposal already took the checkout
+            # back, so the branch is all that exists, and its removal cannot be
+            # the default. The two flags keep the meanings that they had. This
+            # case only stops the verb from meaning "remove nothing" for every
+            # successfully disposed agent.
             if "--with-branch" not in flags:
                 return (
                     f"refusing: {row.agent_id} has no checkout to remove — its work is on "
@@ -364,9 +377,10 @@ class _Workspaces:
         force = "--force-branch" in flags
         refused = await self.ctx.require(WORKSPACE).delete_ref(self.base, row.branch, force=force)
         if refused:
-            # The refusal is the mechanism working, so it reads as a fact plus the
-            # flag that overrides it — not as an error to decode. Both tiers refuse a
-            # ref holding work nothing else has; only the wording is theirs.
+            # The refusal is the mechanism at work. So the reply is a fact plus
+            # the flag that overrides it, and not an error to decode. Every tier
+            # refuses a ref that holds work nothing else has, and only the
+            # wording belongs to the tier.
             return (
                 f"{removed}, but kept branch {row.branch}: {refused}\n"
                 "pass --force-branch to delete it anyway"
@@ -375,12 +389,13 @@ class _Workspaces:
 
 
 def _identify(branch: str) -> tuple[str, str]:
-    """`ph/<session>/<agent>` into the two ids, as `(agent, session)`.
+    """`ph/<session>/<agent>` split into the two ids, as `(agent, session)`.
 
-    `sanitize_ref` collapses `/` out of both components at acquire, so a
-    well-formed branch has exactly three parts. Anything else under the prefix is
-    somebody's own branch and is reported whole rather than mis-attributed — a
-    wrong agent id here is a `remove` aimed at the wrong row.
+    `sanitize_ref` replaces `/` in both components at acquire, so a well-formed
+    branch has exactly three parts. Anything else under the prefix is a branch
+    that somebody else made. It is reported whole and not attributed to the
+    wrong agent, because a wrong agent id here is a `remove` aimed at the wrong
+    row.
     """
     parts = branch.split("/")
     if len(parts) != 3:

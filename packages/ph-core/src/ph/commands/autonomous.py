@@ -1,39 +1,39 @@
-"""`/autonomous` — work toward a goal until its gates pass or a budget stops it.
+"""`/autonomous`: work toward a goal until its gates pass or a budget stops it.
 
-**A policy plugin on `agent/turn-stopping`** (§6.7), which is the whole design:
-the driver is not a daemon, a scheduler or a second loop, it is a listener on
-the boundary the agent loop already fires. When a turn is about to end with a
-goal still open, this asks three questions in order and either lets the turn
-stop or steers the agent into another one. `agent/turn-stopping` is `serial` and
-a listener objects *by steering* rather than by reaching into loop state, which
-is why continuing costs no new machinery.
+**A policy plugin on `agent/turn-stopping`** (§6.7). That is the whole design.
+The driver is not a daemon, a scheduler or a second loop. It is a listener on
+the boundary that the agent loop already fires. When a turn is about to end with
+a goal still open, the listener asks three questions in order. It then lets the
+turn stop, or steers the agent into another turn. `agent/turn-stopping` is
+`serial`, and a listener objects *by steering* and does not reach into loop
+state. That is why continuing needs no new machinery.
 
-The three questions, in the order that makes the answers honest:
+The three questions, in the order that keeps the answers correct:
 
-1. **Is a budget spent?** If so the run stops as `budget_limited`, naming which
-   one. Asked first, because a run that has exhausted its allowance must not get
-   one more "free" gate pass smuggled in after the fact.
-2. **Do the gates pass?** All of them, against the current tree → `achieved`.
-3. **Otherwise** record a continuation and steer, which is what turns "the
-   model thinks it is done" into "the gates disagree, keep going".
+1. **Is a budget spent?** If so, the run stops as `budget_limited` and names the
+   budget. This question is first, because a run that has used up its allowance
+   must not get one more "free" gate pass afterwards.
+2. **Do the gates pass?** If all of them pass against the current tree, the run
+   is `achieved`.
+3. **Otherwise** the listener records a continuation and steers. This step turns
+   "the model thinks it is done" into "the gates disagree, keep going".
 
-Everything reaches `ctx.goals` and `ctx.shell`, so the run's whole history — the
-objective, each continuation, each gate verdict and the ending — is in the
-session log where `/revert` and the trajectory can see it (C2).
+Everything goes through `ctx.goals` and `ctx.shell`. The whole history of the
+run is therefore in the session log, where `/revert` and the trajectory can see
+it (C2): the objective, each continuation, each gate verdict and the ending.
 
-**Gates are memoized against the worktree's tree hash.** A gate that failed
-against a tree the agent has not touched cannot have changed its mind, and
-re-running a test suite to learn nothing spends the very budget that decides
-whether the run continues. Where there is no worktree to fingerprint — the
-`shared` tier — the memo simply never fires and every gate runs, which is the
-honest degradation rather than a memo keyed on nothing.
+**Gates are memoized against the tree hash of the worktree.** A gate that failed
+against a tree that the agent has not touched cannot have a different result. To
+run a test suite again and learn nothing spends the same budget that decides
+whether the run continues. Where there is no worktree to fingerprint (the
+`shared` tier), the memo never fires and every gate runs. That is the correct
+degradation, and it is better than a memo keyed on nothing.
 
 @module ph.commands.autonomous
 """
 
 from __future__ import annotations
 
-import logging
 import secrets
 
 from pydantic import Field
@@ -55,22 +55,21 @@ from ..seams.workspace import workspace_of
 from ..session import Session, now_ms
 from ..wire import WireModel
 
-log = logging.getLogger("ph.commands.autonomous")
-
 __all__ = ["Config", "apply", "run_gates"]
 
 USAGE = "/autonomous <objective> [-- <gate>; <gate>]  ·  /autonomous stop"
-"""The syntax, once, for both the hint and the empty-goal reply — two spellings
-drift about whether the gates are optional."""
+"""The syntax, written one time for both the hint and the empty-goal reply. Two
+spellings drift on whether the gates are optional."""
 
 
 class Config(WireModel):
-    """Row config, so a deployment can set the budgets without editing this file.
+    """The budgets of an `/autonomous` run, as row config, so that a deployment
+    can set them without editing this file.
 
-    They were pydantic field defaults, which made `base.yaml`'s own promise —
-    "a later bundle or the user's profile addresses these rows by id" —
-    unkeepable for this row: there was nothing to address. `limits` takes every
-    ceiling as a field for exactly this reason.
+    The budgets were pydantic field defaults before. That made the promise of
+    `base.yaml`, "A later bundle or the profile of the user addresses these rows
+    by id", impossible to keep for this row: there was nothing to address.
+    `limits` takes every ceiling as a field for the same reason.
     """
 
     max_continuations: int = 3
@@ -78,24 +77,25 @@ class Config(WireModel):
     max_tokens: int = 80_000
     timeout_ms: int = 30 * 60 * 1000
     token_sources: list[TokenSource] = Field(default_factory=own_tokens_only)
-    """Whose tokens `maxTokens` charges — `Budget.token_sources` (P2)."""
+    """The sources whose tokens `maxTokens` charges. See `Budget.token_sources`
+    (P2)."""
 
 
 async def run_gates(
     ctx: Context, session: Session, agent: AgentDriver, state: GoalState, goals: GoalService
 ) -> tuple[bool, list[str]]:
-    """Run this goal's gates against the current tree. Returns `(passed, notes)`.
+    """Run the gates of this goal against the current tree. Returns `(passed, notes)`.
 
-    The tree hash is taken **once**, before any gate runs: a suite that writes a
-    cache file would otherwise change the fingerprint underneath the gate that
-    follows it, and two gates in one pass would be recorded against two
-    different trees.
+    The tree hash is taken **one time**, before any gate runs. Otherwise a suite
+    that writes a cache file would change the fingerprint before the next gate
+    runs, and two gates in one pass would be recorded against two different
+    trees.
     """
     workspace = workspace_of(ctx, agent)
-    # Through the seam, not the git tier: the fingerprint and the restore point are
-    # one token by design, so asking `capture` is what keeps a gate memo and a
-    # `/revert` from disagreeing about whether the work changed — and it is what
-    # gives a jj deployment a fingerprint at all.
+    # The hash comes through the seam and not from the git tier. The fingerprint
+    # and the restore point are one token by design, so a call to `capture`
+    # keeps a gate memo and a `/revert` from disagreeing about whether the work
+    # changed. It is also what gives a jj deployment a fingerprint.
     tree = "" if workspace is None else (await ctx.require(WORKSPACE).capture(workspace) or "")
     notes: list[str] = []
     passed = True
@@ -104,9 +104,9 @@ async def run_gates(
             notes.append(f"{gate}: still failing (unchanged since it last ran)")
             passed = False
             continue
-        # Recorded before it runs (S16), as a person's `!!` is: a gate that takes the
-        # daemon down still shows it was started, and one the log cannot hold does
-        # not run.
+        # The gate is recorded before it runs (S16), as the `!!` of a user is. A
+        # gate that takes the daemon down still shows that it was started, and a
+        # gate that the log cannot record does not run.
         result, _settled = await ctx.require(SHELL).run_recorded(
             gate, agent=agent, session=session, gate=state.goal.id
         )
@@ -122,12 +122,13 @@ async def apply(ctx: Context, config: Config) -> None:
     """Register `/autonomous`, and the turn-stopping policy that drives it."""
 
     def budget_of() -> Budget:
-        """The row's budgets, as the model a `Goal` actually carries.
+        """The budgets of the row, as the model that a `Goal` carries.
 
-        `Config` and `Budget` declare the same four fields for different reasons
-        — one is what a deployment addresses by row id, the other what a goal
-        records — so this re-validates rather than maps. Returning the dump
-        instead would let the two drift with nothing to say so.
+        `Config` and `Budget` declare the same five fields for different
+        reasons. `Config` is what a deployment addresses by row id, and `Budget`
+        is what a goal records. So this function validates again and does not
+        map field by field. If it returned the dump, the two could drift and
+        nothing would report it.
         """
         return Budget.model_validate(config.model_dump())
 
@@ -154,17 +155,18 @@ async def apply(ctx: Context, config: Config) -> None:
             return
 
         # Write-ahead: the continuation is recorded before the steer that spends
-        # it, so a crash between the two costs an allowance rather than handing
-        # a resumed run a free one.
+        # it. A crash between the two therefore costs an allowance, and does not
+        # give a resumed run a free one.
         goals.continued(session, state.goal.id)
         agent.steer(
             create_user_message(
                 content=[{"type": "text", "text": _nudge(state, notes)}],
-                # Tagged as this plugin's, not as the person's. Every other
-                # plugin→inbox message in the tree carries a `PluginSource`, and
-                # the TUI draws an untagged one as a **user** row — so without
-                # this the transcript attributes the harness's own steering to
-                # whoever is reading it.
+                # The message is tagged as the message of this plugin, not of
+                # the user. Every other message from a plugin to the inbox
+                # carries a `PluginSource`, and the TUI draws an untagged
+                # message as a **user** row. Without the tag, the transcript
+                # would attribute the steering of the harness to whoever reads
+                # it.
                 source=PluginSource(
                     plugin="ph.commands.autonomous",
                     form="notice",
@@ -220,13 +222,14 @@ async def apply(ctx: Context, config: Config) -> None:
 def _nudge(state: GoalState, notes: list[str]) -> str:
     """What the agent is told when the gates disagree that it is finished.
 
-    **Deliberately not the todo list**, which P5-16 added and then removed. The
-    prompt layer already delivers it: `_project_context` composes a `todos`
-    section whenever the list changes, and `tool-todo` is its only producer — so
-    a nudge can only fire when the model already has the list in context, and
-    restating it here duplicated model-visible tokens on every continuation. The
-    premise that this is "the one moment the loop composes a message" was simply
-    false; the layer below composes the same one.
+    **The text deliberately leaves out the todo list**, which P5-16 added and
+    then removed. The prompt layer already delivers the list. `tool-todo`
+    registers a `todos` context, which reaches the model as a snapshot whenever
+    the list changes, and `tool-todo` is the only producer of that context. A
+    nudge can therefore fire only when the model already has the list in
+    context, and a second copy here duplicated model-visible tokens on every
+    continuation. The premise that this is "the one moment the loop composes a
+    message" was false. The prompt layer composes the same message.
     """
     said = "; ".join(notes) if notes else "no gates are defined"
     return (
@@ -236,7 +239,8 @@ def _nudge(state: GoalState, notes: list[str]) -> str:
 
 
 def _status(goals: GoalService, session: Session, state: GoalState | None) -> str:
-    """What the open goal has spent — its sub-agents' included — or that there is none."""
+    """What the open goal has spent, including the spend of its sub-agents, or a
+    statement that no goal is open."""
     if state is None:
         return f"no goal is open — {USAGE}"
     spent, budget = goals.spent(session, state), state.goal.budget

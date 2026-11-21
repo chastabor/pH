@@ -1,16 +1,19 @@
 """The Anthropic SSE envelope, for tests that simulate that provider.
 
-Two of them now do, for two different reasons — P6-13 needs a wire that reports
-prefix-cache usage, P7-03 needs one that hands out file ids and can be made to
-forget one — and both had spelled out the same six events to say "the model
-replied with this text". That is the part neither test is about, and the part
-that goes wrong quietly: a `message_delta` missing its `usage` leaves the reply
-looking free rather than failing.
+Two test modules simulate the provider, for two different reasons. P6-13 needs
+a wire that reports prefix-cache usage. P7-03 needs a wire that issues file ids
+and can be made to forget one. Both had written out the same six events to say
+"the model replied with this text". Neither test is about that part, and that
+part goes wrong silently: a `message_delta` without its `usage` makes the reply
+look free and does not fail. A third module,
+`packages/phern/tests/test_adapters.py`, takes the first three events to build
+a stream that fails after the answer has begun.
 
-**A dict builder, not an adapter.** It composes the frames `_StreamState.consume`
-reads and nothing else, so it imports no `ph_app` and stays on the right side of
-the package layering — the test that owns the simulation still owns every
-decision in it, and gets the envelope for nothing.
+**A dict builder, not an adapter.** It composes the frames that the
+`_StreamState.consume` of the Anthropic adapter reads, and nothing else. So it
+does not import `ph_app`, and the package layering holds. The test that owns
+the simulation still owns every decision in it, and does not have to write the
+envelope.
 
 @module ph.testing.anthropic_wire
 """
@@ -27,11 +30,11 @@ def anthropic_reply(
 ) -> list[tuple[str, dict[str, Any]]]:
     """One text reply as `(event, payload)` pairs, ready to yield.
 
-    `usage` rides `message_start` because that is where this provider reports
-    input accounting — including the cache counters P6-13 asserts on — while
-    output tokens arrive at the end, on `message_delta`. Splitting them is the
-    provider's shape, not a convenience, and a test that merged them would agree
-    with an adapter that read either one.
+    `usage` goes on `message_start`, because this provider reports input
+    accounting there. That includes the cache counters that P6-13 asserts on.
+    Output tokens arrive at the end, on `message_delta`. The split is the shape
+    of the provider and not a convenience. A test that merged the two would
+    agree with an adapter that read either one.
     """
     return [
         (

@@ -1,13 +1,14 @@
-"""`tools-timeout` — the `tools/execute` wrapper that makes `timeout_ms` true.
+"""`tools-timeout`: the `tools/execute` wrapper that enforces `timeout_ms`.
 
-A `ToolDefinition` may declare a cooperative budget. Declaring it is a promise
-the tool forwards `run.signal` and can reach quiescence when asked; this row is
-what asks. A budget with nothing enforcing it would be worse than none — a tool
-author who set `timeout_ms=5_000` and got no timeout has been told something
+A `ToolDefinition` may declare a cooperative budget. By declaring it, the tool
+promises that it forwards `run.signal` and can come to a stop when asked. This
+row is what asks. A budget that nothing enforced would be worse than no budget:
+a tool author who set `timeout_ms=5_000` and got no timeout was told something
 false by the type.
 
-Its own row rather than registry code, as in dsh (`dsh-tool-call-timeout-policy`):
-a deployment that wants a different timeout policy swaps the row.
+This is a row of its own and not registry code, as in dsh
+(`dsh-tool-call-timeout-policy`). A deployment that wants a different timeout
+policy swaps the row.
 
 @module ph.tools.timeout
 """
@@ -35,29 +36,31 @@ async def apply(ctx: Context, config: None) -> None:
         next_: Next[ToolExecutionResult],
     ) -> ToolExecutionResult:
         definition = ctx.require(TOOLS).get(execution.name, scope=execution.scope)
-        # Two different `None`s, and the `getattr` this replaces answered for both
-        # with one: a tool this scope cannot see, and a tool that declared no
-        # budget. Unbounded is the right answer to each — but only the second is
-        # a decision, and the first is a dispatch that is about to fail anyway.
+        # There are two different `None`s here: a tool that this scope cannot
+        # see, and a tool that declared no budget. The `getattr` that this code
+        # replaced gave one answer for both. Unbounded is the right answer to
+        # each. But only the second is a decision. The first is a dispatch that
+        # is about to fail anyway.
         if definition is None or definition.timeout_ms is None:
             return await next_()
         budget = definition.timeout_ms
-        # The body observes the same cancellation the pipeline does, narrowed:
-        # a child token can be canceled by the timeout or by anything above it,
-        # but cannot outlive its parent's cancellation.
+        # The body observes the same cancellation as the pipeline, narrowed. The
+        # timeout or anything above it can cancel a child token, but a child
+        # token cannot outlive the cancellation of its parent.
         #
-        # **And the body is handed it** (C6). The child was minted and cancelled
-        # and never passed on, so `ToolExecution.signal`'s own contract — "a
-        # `tools/execute` wrapper may replace it for its delegated lifetime" —
-        # was written for a replacement that did not happen. A cooperative tool
-        # polling `raise_if_canceled` saw the *parent*, which the timeout never
-        # touches, so cancellation was a no-op: a thread-bound body ran to
-        # completion and its result was discarded by the scope above it, which is
-        # the budget bounding the caller's wait and nothing else.
+        # **And the body is given the child token** (C6). The child used to be
+        # created and canceled and never passed on. The contract of
+        # `ToolExecution.signal` says that a `tools/execute` wrapper may replace
+        # the signal for its delegated lifetime, and that replacement did not
+        # happen. A cooperative tool that polled `raise_if_canceled` saw the
+        # *parent*, which the timeout never touches, so cancellation did
+        # nothing. A thread-bound body ran to completion, and the scope above it
+        # discarded its result. The budget then bounded the wait of the caller
+        # and nothing else.
         child = execution.signal.child() if execution.signal is not None else None
         with anyio.move_on_after(budget / 1000) as scope:
-            # `replace` unconditionally: with no parent there is no child, and
-            # `signal=None` is the field's value either way.
+            # `replace` is unconditional. With no parent there is no child, and
+            # `signal=None` is the value of the field in both cases.
             result = await next_(replace(execution, signal=child))
         if scope.cancelled_caught:
             if child is not None:

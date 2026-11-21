@@ -87,7 +87,13 @@ from ph.session import now_ms
 from ph.wire import WireModel
 
 from ._http import HttpClient, resolve_secret, wire_error_finish
-from ._media import forget_named_handle, load_handles, load_media, media_pointer
+from ._media import (
+    forget_named_handle,
+    load_handles,
+    load_media,
+    media_pointer,
+    referenced_mimes,
+)
 
 __all__ = ["OpenAiCompatibleAdapter", "apply"]
 
@@ -283,9 +289,12 @@ class ProviderProfile(WireModel):
     model was promised capabilities that it does not have. A route that takes no
     media sets `accepts: []`."""
     max_attachment_bytes: int = MAX_ATTACHMENT_BYTES
-    """The largest attachment that this route sends, in bytes. The
+    """The largest attachment that this route sends inline, in bytes. The
     `media-degrade` row replaces a larger attachment with a text pointer before
-    the request reaches this adapter. The default is 20 MiB."""
+    the request reaches this adapter. A type listed in `uploads` is not held to
+    this limit, because it goes by reference. When its upload gives no file,
+    the adapter sends it inline if it is under this limit, and as a text
+    pointer if it is over. The default is 20 MiB."""
     sampling_extras: tuple[Literal["topK", "minP"], ...] = ()
     """The sampling settings that this server takes beyond those of OpenAI (A1).
     llama.cpp and vLLM take `topK` and `minP`. The default is empty, because
@@ -474,7 +483,12 @@ class OpenAiCompatibleAdapter:
             mimes=frozenset(self.profile.uploads) & _FILE_MIMES,
             session_id=options.session_id,
         )
-        media = await load_media(self.ctx.get(ATTACHMENTS), options.messages, skip=handles.keys())
+        media = await load_media(
+            self.ctx.get(ATTACHMENTS),
+            options.messages,
+            skip=handles.keys(),
+            inline_limit=self.profile.max_attachment_bytes,
+        )
         messages: list[dict[str, Any]] = []
         if options.system:
             messages.append({"role": "system", "content": options.system})
@@ -592,6 +606,7 @@ class OpenAiCompatibleAdapter:
             credential=self.profile.api_key_env,
             sampling=self.sampling,
             max_decision_tokens=self.profile.max_decision_tokens,
+            uploads=referenced_mimes(self.ctx, frozenset(self.profile.uploads) & _FILE_MIMES),
         )
 
     @property

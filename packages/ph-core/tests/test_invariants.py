@@ -217,7 +217,7 @@ async def test_a_stale_derivation_trips_the_session_invariant(mount: MountProfil
 async def test_a_layer_changed_without_a_generation_bump_trips_the_tool_invariant() -> None:
     """I6 applied to a cache, and the reason it is worth applying there.
 
-    `ToolRegistry.view` memoizes per isolation chain and invalidates on a
+    `ToolRuntime.view` memoizes per isolation chain and invalidates on a
     counter. What a stale entry serves is not a stale *listing* — it is the set
     of tools an agent may call, so a registration path that forgot `_changed()`
     keeps a tool callable after the row owning it unloaded. That is a capability
@@ -266,7 +266,7 @@ async def test_a_registry_change_empties_the_cache_rather_than_ageing_it() -> No
 async def test_a_reach_cache_that_outlived_its_generation_trips_the_skill_invariant() -> None:
     """The same I6 the tool view gets, on the registry where drift costs the ceiling.
 
-    `SkillService.reach` is `ToolRegistry.view`'s arrangement — chain-keyed, memoized
+    `SkillService.reach` is `ToolRuntime.view`'s arrangement — chain-keyed, memoized
     against a counter — and has its failure mode. But `reach` is the one place skill
     filters compose, so a stale entry does not serve a stale *listing*: it keeps a
     skill reachable after the row owning it unloaded.

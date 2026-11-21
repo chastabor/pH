@@ -1,15 +1,17 @@
 """A `ctx.subagents` provider that answers without running an agent.
 
-The real one is `rlm-child`, which drives a whole child agent through
-`ctx.jobs`. A row in ph-core that *uses* delegation — `subagent-task` — must be
-testable without that: what it is responsible for is the request it builds, the
-wait, and how it reports an outcome, none of which needs a model.
+The real provider is `rlm-child`, which drives a whole child agent through
+`ctx.jobs`. A row in ph-core that *uses* delegation (`subagent-task`) must be
+testable without it. That row is responsible for the request that it builds,
+for the wait, and for how it reports an outcome. None of these needs a model.
 
-What this deliberately keeps is the shape a caller can be wrong about: `result`
-is `None` unless asked for, because "this provider's children cannot be waited
-on" is a real answer a blocking caller has to handle, and `granted` may be
-narrower than `requested`, because that downgrade is the one fact a parent is
-owed and the one a stub is tempted to skip.
+The stub deliberately keeps the parts of the shape that a caller can get wrong:
+
+- `result` can be left as `None` (`waitable=False`). "The children of this
+  provider cannot be waited on" is a real answer that a blocking caller must
+  handle.
+- `granted` may be narrower than `requested`. That downgrade is the one fact
+  that a parent must be told, and the one that a stub is tempted to skip.
 
 @module ph.testing.stub_subagent
 """
@@ -44,37 +46,41 @@ class StubSubagentProvider:
     status: SubagentStatus = "done"
     error: str | None = None
     value: dict[str, Any] | None = None
-    """What a child with an `output` returned, as a provider's drive settles it."""
+    """The value that a child with an `output` returned, as the drive of a
+    provider settles it."""
     grants: Access | None = None
     """What the child actually gets. `None` grants what was asked."""
     downgrade_reason: DowngradeReason | None = None
     waitable: bool = True
-    """`False` leaves `result` unset — a provider whose children only reply by
-    message, which a blocking caller must refuse rather than hang on."""
+    """`False` leaves `result` unset. That is a provider whose children reply
+    only by message. A blocking caller must refuse such a provider and must not
+    hang on it."""
     root: Any = None
-    """A context to fall back to when a request names no parent. Set it to
-    exercise narrowing.
+    """A context, set to exercise narrowing. The stub reads only whether it is
+    set: the child gets a scope only when it is.
 
-    **The scope is made under `request.parent` when there is one**, because that
-    is what `AgentRegistry.create` does since P6-27 — a child's scope nests
-    inside its parent's, and the ceiling is inherited through the isolation
-    chain rather than applied. This field said the opposite until then, and
-    argued for it: *"a real child's scope is its parent's sibling; a stub that
-    nested one would pass a ceiling test that production fails."* True when it
-    was written, and exactly inverted by the row that nested them — which is why
-    the stub takes its shape from the production path now instead of restating
-    it in prose that nobody re-reads."""
+    **The scope is made under `request.parent`**, because
+    `AgentRegistry.create` has done that since P6-27. The scope of a child
+    nests inside the scope of its parent, and the ceiling is inherited through
+    the isolation chain and not applied. Until then this field said the
+    opposite, and argued for it: *"a real child's scope is its parent's
+    sibling; a stub that nested one would pass a ceiling test that production
+    fails."* That was true when it was written, and the row that nested the
+    scopes inverted it exactly. So the stub now takes its shape from the
+    production path, and does not restate that path in prose that nobody reads
+    again."""
     requests: list[SubagentRequest] = field(default_factory=list)
-    """Every request this provider was handed, in order."""
+    """Every request that this provider was given, in order."""
 
     async def start(self, request: SubagentRequest) -> SubagentRun:
         self.requests.append(request)
         index = len(self.requests)
         granted: Access = self.grants or request.access
         run_id = f"run-{index}"
-        # A log of its own, opened through the door a real provider's is (Phase 11):
-        # the seam writes the child's admission into it and refuses a child without
-        # one — so a stubbed spawn meets the check a real one does.
+        # The child gets a log of its own, opened through `open_child_log` as a
+        # real provider opens one (Phase 11). The seam writes the admission of
+        # the child into that log and refuses a child without one. So a stubbed
+        # spawn meets the same check as a real one.
         parent_log = request.parent.session
         session_id = f"session-{index}"
         if parent_log is not None and request.parent.ctx.get(SESSIONS) is not None:
@@ -91,12 +97,12 @@ class StubSubagentProvider:
             downgrade_reason=self.downgrade_reason,
         )
         if self.root is not None:
-            # `root` still decides *whether* there is a scope — a provider that
-            # hands back none is the fail-closed case `_enforce` refuses, and a
-            # test needs to be able to be one. What changed is *where*: under the
-            # request's parent when it has one, which is what
-            # `AgentRegistry.create` does since P6-27, so a stubbed child
-            # inherits the ceiling the same way a real one does.
+            # `root` still decides *whether* there is a scope. A provider that
+            # hands back none is the fail-closed case that `_enforce` refuses,
+            # and a test must be able to be that provider. What changed is
+            # *where* the scope is made: under the parent of the request, as
+            # `AgentRegistry.create` has done since P6-27. So a stubbed child
+            # inherits the ceiling in the same way as a real one.
             owner = request.parent.ctx
             run.scope = owner.scope(f"agent:{run.id}")
         if self.waitable:
@@ -109,7 +115,7 @@ class StubSubagentProvider:
         )
 
     def last(self) -> SubagentRequest:
-        """The most recent request, for a test asserting what was delegated."""
+        """The most recent request, for a test that asserts what was delegated."""
         return self.requests[-1]
 
 
@@ -118,15 +124,16 @@ class HoldingProvider:
     """Holds its first spawn mid-build until `go` is set, and passes the rest
     straight to `inner`.
 
-    So the spawns after the first are judged while that one is past its guards and
-    not yet admitted, which is where one step's tool calls, run side by side, leave
-    each other. A test sets `go` once it has spawned what it came to."""
+    The spawns after the first are then judged while the first is past its
+    guards and not yet admitted. That is the state in which the tool calls of
+    one step, which run side by side, leave each other. A test sets `go` when
+    it has spawned what it needs."""
 
     inner: StubSubagentProvider
     first: SubagentRequest | None = None
-    """The first spawn, as the seam handed it over."""
+    """The first spawn, as the seam passed it."""
     building: anyio.Event = field(default_factory=anyio.Event)
-    """Set once the first spawn is being held."""
+    """Set when the first spawn is being held."""
     go: anyio.Event = field(default_factory=anyio.Event)
 
     async def start(self, request: SubagentRequest) -> SubagentRun:
@@ -139,7 +146,7 @@ class HoldingProvider:
 
 @dataclass(frozen=True, slots=True)
 class RefusingProvider:
-    """Refuses every child it is asked to build, once the seam's guards have passed."""
+    """Refuses every child that it is asked to build, after the guards of the seam pass."""
 
     reason: str = "no room for this child"
 

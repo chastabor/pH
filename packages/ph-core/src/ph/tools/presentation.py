@@ -1,10 +1,10 @@
-"""UI render intents: what a card *is*, not what it looks like.
+"""UI render intents: what a card *is*, and not how it looks.
 
-A tool says "this call is a diff" or "this is a terminal run"; the front-end
-decides typography. The vocabulary is deliberately semantic (the same rule as
-`ContextForm`) and every view is computed from `args` plus the durable result —
-never from live execution state — because a UI renders these during streaming
-*and* during a log replay, and the two must agree.
+A tool says "this call is a diff" or "this is a terminal run", and the front end
+decides the typography. The vocabulary is deliberately semantic, which is the
+same rule as for `ContextForm`. Every view is computed from `args` and the
+durable result, and never from live execution state. A UI renders these views
+during streaming *and* during a log replay, and the two must agree.
 
 @module ph.tools.presentation
 """
@@ -21,9 +21,10 @@ from ..wire import WireModel
 from .json_schema import parse_arguments
 
 if TYPE_CHECKING:
-    # `definition` imports this module for `ToolCallView`/`ToolResultView`, so the
-    # edge only runs the other way for the checker. Annotation-only: these are
-    # function signatures, not a runtime alias, so nothing resolves them.
+    # `definition` imports this module for `ToolCallView` and `ToolResultView`,
+    # so the import in this direction exists only for the type checker. The
+    # names are used only in the annotations of function signatures, and not in
+    # a runtime alias, so nothing resolves them at run time.
     from .definition import ToolDefinition, ToolResult
     from .registry import ToolRuntime
 
@@ -51,19 +52,20 @@ class ToolCallView(WireModel):
     title: str
     subtitle: str | None = None
     input: str | None = None
-    """The call's salient input as one line — a path, a command, a query."""
+    """The salient input of the call as one line: a path, a command, a query."""
     body: str | None = None
-    """The call's full input, when a card is meant to show it — the program of a
-    code cell, a whole command. `input` is the one-line header; this is what a
-    widget renders underneath, and leaving it unset keeps the header-only card
-    every other tool gets (P3-19)."""
+    """The full input of the call, when a card is meant to show it: the program
+    of a code cell, or a whole command. `input` is the one-line header, and a
+    widget renders this field underneath. When this field is unset, the card has
+    only the header, as for every other tool (P3-19)."""
 
 
 class ToolResultView(WireModel):
     """How to present a settled call.
 
-    `meta` is the tool's own durable payload (a diff, a match count), threaded
-    verbatim from the `tool/result` event so replay reproduces the card exactly.
+    `meta` is the durable payload of the tool itself (a diff, a match count). It
+    is passed through verbatim from the `tool/result` event, so that a replay
+    reproduces the card exactly.
     """
 
     card: CardKind = "generic"
@@ -72,32 +74,33 @@ class ToolResultView(WireModel):
     body: str | None = None
     is_error: bool = False
     meta: dict[str, Any] | None = None
-    """The tool's own durable payload. `Any` and not `JsonValue` like the
-    `ToolResult.meta` it comes from: this is a pydantic field, and `JsonValue` is
-    a *recursive* alias whose schema pydantic cannot build — the same reason
-    `ApprovalRequest.arguments` keeps `Any`. `test_every_wire_model_is_built_at_import`
-    is what says so."""
+    """The durable payload of the tool itself. The values are `Any` and not
+    `JsonValue` as in the `ToolResult.meta` that it comes from. This is a
+    pydantic field, and `JsonValue` is a *recursive* alias whose schema pydantic
+    cannot build. `ApprovalRequest.arguments` keeps `Any` for the same reason.
+    `test_every_wire_model_is_built_at_import` checks this."""
 
 
 def render_call_view(tools: ToolRuntime | None, name: str, arguments: str) -> ToolCallView | None:
-    """Ask the tool how its pending call looks. `None` when it cannot say.
+    """Ask the tool how its pending call looks. `None` when the tool cannot say.
 
-    `arguments` is a `str` because that is what the writer records — the model's
-    own bytes, unparsed (`batch._append_call`). A log another build wrote could
-    hold something else there; its reader narrows, so such a call arrives here as
-    no arguments rather than as a shape `parse_arguments` would refuse.
+    `arguments` is a `str` because that is what the writer records: the bytes
+    from the model, unparsed (`batch._append_call`). A log that another build
+    wrote could hold something else there. The reader of that log narrows, so
+    such a call arrives here as no arguments, and not as a shape that
+    `parse_arguments` would refuse.
 
-    **Here rather than in either front end**, because there are now two callers
-    and they must not drift: the terminal renders in process, and the daemon
-    renders the same view to send to a browser that has no registry to ask. The
-    split between them is exactly what the sidecar exists to close, so stating
-    the rule twice would reopen it one edit later.
+    **The function is here and not in either front end**, because there are two
+    callers and they must not drift. The terminal renders in process. The daemon
+    renders the same view and sends it to a browser that has no registry to ask.
+    The sidecar exists to close exactly that split between them, so a rule that
+    was stated twice would reopen the split one edit later.
 
-    `None` covers every ordinary absence — a tool this deployment no longer
-    mounts, a definition with no hook, a hook that raised — and a caller then
-    renders the generic card built from the log alone. A presentation hook is a
-    row's body and may do anything; a card that cannot be rendered is a plainer
-    card, never a dropped event.
+    `None` covers every ordinary absence: a tool that this deployment no longer
+    mounts, a definition with no hook, a hook that raised. A caller then renders
+    the generic card that is built from the log alone. A presentation hook is
+    the body of a row and may do anything. A card that cannot be rendered
+    becomes a plainer card, and never a dropped event.
     """
     definition = _presentable(tools, name)
     if definition is None or definition.present_call is None:
@@ -116,10 +119,11 @@ def render_result_view(
     arguments: str,
     result: ToolResult,
 ) -> ToolResultView | None:
-    """Ask the tool how its settled call looks. `None` when it cannot say.
+    """Ask the tool how its settled call looks. `None` when the tool cannot say.
 
-    `arguments` are the *call's*, not the result's: a tool presents its outcome
-    against what it was asked to do, and `tool/call` is what recorded that (B4).
+    `arguments` belongs to the *call* and not to the result. A tool presents its
+    outcome against what it was asked to do, and `tool/call` is the record of
+    that (B4).
     """
     definition = _presentable(tools, name)
     if definition is None or definition.present_result is None:
@@ -137,19 +141,20 @@ def render_result_view(
 def _presentable(tools: ToolRuntime | None, name: str) -> ToolDefinition | None:
     """The definition behind a card, for presentation only.
 
-    `DEPLOYMENT` and not an agent's scope (P6-32): this renders a call the *log*
-    already recorded, and `tool/call` events carry no agent, so "which agent's
-    presentation" is unanswerable from what the log holds.
+    The lookup uses `DEPLOYMENT` and not the scope of an agent (P6-32). The
+    function renders a call that the *log* already recorded, and `tool/call`
+    events carry no agent. So the log cannot answer "the presentation of which
+    agent".
 
-    **Best available, not exact, in two ways** (§5 rule 6): a name that was
-    agent-*shadowed* at execution time renders under the global definition — a
-    wrong card, not a blank one — and an agent-*scoped* tool renders with no
-    definition at all, because `DEPLOYMENT` is the mount's chain, not a union
-    over agents. Both are presentation-only, and both have the same real fix:
-    record the executing agent on `tool/call`, which is a log-schema row rather
-    than a boundary choice here.
+    **The answer is the best available and not exact, in two ways** (§5 rule 6).
+    A name that an agent *shadowed* at execution time renders under the global
+    definition, which gives a wrong card and not a blank one. An agent-*scoped*
+    tool renders with no definition at all, because `DEPLOYMENT` is the chain of
+    the mount and not a union over agents. Both affect presentation only, and
+    both have the same real fix: record the executing agent on `tool/call`. That
+    is a change to the log schema, and not a choice of boundary here.
 
-    Nothing is gated on the answer; it supplies a title and a renderer.
+    Nothing is gated on the answer. It supplies a title and a renderer.
     """
     if tools is None:
         return None
@@ -163,11 +168,13 @@ CARD_VIEWS: Mapping[str, type[ToolCallView] | type[ToolResultView]] = {
     "tool/call": ToolCallView,
     "tool/result": ToolResultView,
 }
-"""Which session event types carry a card view, and which model each carries.
+"""The session event types that carry a card view, and the model that each one
+carries.
 
-One table because it was three spellings: a set of event types in the daemon,
-an `if` in the daemon's renderer, and an `if/elif` in the client's reader. A
-third card event was three edits and a silent miss if one was forgotten."""
+This is one table because the same fact used to be written in three places: a
+set of event types in the daemon, an `if` in the renderer of the daemon, and an
+`if/elif` in the reader of the client. A third card event needed three edits,
+and one forgotten edit was a silent miss."""
 
 
 class ToolViews(TypedDict):
@@ -178,17 +185,20 @@ class ToolViews(TypedDict):
 
 
 def simple_views(card: CardKind, title: str, key: str) -> ToolViews:
-    """`present_call`/`present_result` for the common "one salient argument" tool.
+    """`present_call` and `present_result` for the common tool that has one
+    salient argument.
 
-    Most tools present as a fixed title over one argument — a path, a pattern.
-    Returned as kwargs so a definition reads `**simple_views("read", "Read", "path")`.
+    Most tools present as a fixed title over one argument, such as a path or a
+    pattern. The result is returned as keyword arguments, so a definition reads
+    `**simple_views("read", "Read", "path")`.
     """
 
     def salient(args: JsonObject) -> str:
-        # `str` and not `as_str`: two of these keys hold a *list* — `code_index`
-        # and `text_index` are both `simple_views(..., "paths")` over a
-        # `list[str]` — and the card's line is that value's repr. Narrowing blanked
-        # them, which is what `test_json_narrowing.py` exempts this expression for.
+        # `str` and not `as_str`, because two of these keys hold a *list*:
+        # `code_index` and `text_index` are both `simple_views(..., "paths")`
+        # over a `list[str]`. The line of the card is the repr of that value.
+        # Narrowing made those lines blank, so `test_json_narrowing.py` exempts
+        # this expression.
         return str(args.get(key, ""))
 
     return ToolViews(

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ from workspace_layout import REPO
 from ph.bundles import BASE, HEADLESS
 from ph.cordis import Context, Profile, ProfileDocument, load_profile_documents
 from ph.cordis.loader import compose_rows
-from ph.testing import ReapedHost
+from ph.testing import MountProfile, ReapedHost
 
 pytest_plugins = ["app_fixtures", "local_server", "rlm_fixtures"]
 """The per-package fixture sets, and the live gate's, registered from the **one**
@@ -46,8 +46,6 @@ ROW` resolved to whichever conftest won the name under full collection, so
 ph-rlm's row constants were reachable from the app's tree and vice versa.
 `pytest_plugins` is only honored in a *root* conftest, which is the other
 reason the registration lives here."""
-
-MountProfile = Callable[..., Awaitable[Context]]
 
 NEEDS_BINARY = {
     "needs_git": ("git", "the worktree tier needs git"),

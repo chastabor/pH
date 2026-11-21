@@ -1,4 +1,4 @@
-"""`ph.agent_loop` — the ReAct driver, mounted as a row like anything else."""
+"""`ph.agent_loop`: the ReAct driver, mounted as a row like anything else."""
 
 from __future__ import annotations
 
@@ -16,9 +16,11 @@ __all__ = ["Config", "ReactLoopAgent", "apply"]
 class Config(WireModel):
     """Row config for the loop.
 
-    `max_parallel_tool_calls` is the native batch pool width — an agent-loop
-    setting, as in dsh (`agentLoop.config.maxParallelToolCalls`), distinct from
-    the Code Mode row's `max_parallel_sub_calls` for one program's sub-calls.
+    `max_parallel_tool_calls` is the width of the pool for a native tool batch.
+    It is a setting of the agent loop, as in dsh
+    (`agentLoop.config.maxParallelToolCalls`). It is distinct from the
+    `max_parallel_sub_calls` of the Code Mode row, which is for the sub-calls of
+    one program.
     """
 
     max_parallel_tool_calls: int = 10
@@ -32,8 +34,7 @@ class Config(WireModel):
 )
 async def apply(ctx: Context, config: Config) -> None:
     """Register `ReactLoopAgent` as the driver `ctx.agents.create()` uses."""
-    # Annotated, so mypy holds the driver to `AgentDriver` here — `ctx.agents` is
-    # untyped, so `register_driver` would take anything.
+    # The annotation makes mypy hold the driver to `AgentDriver` on this line.
     factory: DriverFactory = partial(
         ReactLoopAgent, max_parallel_tool_calls=config.max_parallel_tool_calls
     )

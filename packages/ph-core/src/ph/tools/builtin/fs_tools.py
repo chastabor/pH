@@ -1,18 +1,18 @@
-"""`tool-fs` — read, write, edit, glob, grep.
+"""`tool-fs`: read, write, edit, glob, grep.
 
-Every one of these is a thin shell over `ctx.fs`, and that is the point: the
-policy gates (`fs/write-intent`, `fs/edit-intent`), the read-before-edit rule
-and the workspace root all live in the seam, so a second editing tool — or a
-Code Mode binding — inherits them instead of re-implementing them.
+Each of these tools is a thin wrapper over `ctx.fs`, and that is the purpose.
+The policy gates (`fs/write-intent`, `fs/edit-intent`), the read-before-edit
+rule and the workspace root all live in the seam. A second editing tool, or a
+Code Mode binding, therefore inherits them and does not implement them again.
 
-The `output` declarations carry real schemas rather than free text, so the
-durable record is structured: a card renders from `content` plus `meta` with no
-access to the live call, which is what lets a replayed session look identical to
-the live one.
+The `output` declarations carry real schemas and not free text, so the durable
+record is structured. A card renders from `content` plus `meta` with no access
+to the live call. That is why a replayed session looks identical to the live
+session.
 
-Reads classify as concurrency-safe; writes and edits do not. A read cannot
-disturb a sibling, while two edits to one file in the same batch are a race
-whose outcome depends on scheduling — so they serialize (B6).
+Reads are classified as concurrency-safe. Writes and edits are not. A read
+cannot disturb a sibling. Two edits to one file in the same batch are a race
+whose outcome depends on scheduling, so they are serialized (B6).
 
 @module ph.tools.builtin.fs_tools
 """
@@ -120,17 +120,18 @@ class GrepValue(ToolModel):
 def _render_read(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     first = value["offset"] + 1
     last = value["offset"] + value["lines"]
-    # The marker goes in the header, which is already unambiguously the harness
-    # talking. Appended to the body it abutted the file's own last byte —
-    # terminator included since J7 — so this had to know where the window ended.
+    # The marker goes in the header, which is clearly the text of the harness.
+    # When the marker was appended to the body, it touched the last byte of the
+    # file (the terminator included, since J7), so this function had to know
+    # where the window ended.
     more = f"; re-read with offset={last}" if value["truncated"] else ""
     header = f"{value['path']} (lines {first}-{last} of {value['total_lines']}{more})"
     return text_content(f"{header}\n{value['text']}")
 
 
 def _holds_exactly(target: Path, expected: bytes) -> bool:
-    """Whether `target` is a file holding `expected` — the size first, so a file
-    that differs in length is answered without reading it."""
+    """Whether `target` is a file that holds `expected`. The size is compared
+    first, so a file of a different length is answered without a read."""
     if not target.is_file() or target.stat().st_size != len(expected):
         return False
     return target.read_bytes() == expected
@@ -193,25 +194,26 @@ async def apply(ctx: Context, config: None) -> None:
             session=run.session,
         )
         return {
-            # The name the workspace knows it by, never the machine's — see
-            # `FsService.named`.
+            # The name that the workspace knows the file by, never the name on
+            # the machine. See `FsService.named`.
             "path": fs.named(written.path, agent=run.agent),
             "bytes": written.bytes,
             "created": written.created,
         }
 
     async def reconciled_write(args: Any, _call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
-        """Did a write a crash interrupted land? The file says (P10-13).
+        """Did a write that a crash interrupted land? The file says (P10-13).
 
-        **Exact or `Unknown`.** Done when the file holds the call's bytes exactly
-        — the effect is there, whoever finished it — and not done when the file
-        is missing or holds something else: the call never reached it, or
-        somebody changed it since, and either way writing it again is what the
-        call asked for. The path is resolved
-        the way the call resolved it, against the agent's own root as its log
-        records it (a fresh-root workspace still open, else the deployment's), since
-        no agent exists to ask at resume. Anything that cannot be read is
-        `Unknown`, which keeps today's text.
+        **Exact or `Unknown`.** The answer is done when the file holds the bytes
+        of the call exactly: the effect is there, whoever finished it. The answer
+        is not done when the file is missing or holds something else. Either the
+        call never reached the file or somebody changed it since, and in both
+        cases writing it again is what the call asked for. The path is resolved
+        in the way that the call resolved it, against the root of the agent as
+        its log records it: a fresh-root workspace that is still open, or else
+        the root of the deployment. No agent exists to ask at resume. Anything
+        that cannot be read is `Unknown`, which keeps the `TOOL_OUTCOME_UNKNOWN`
+        text of repair.
         """
         body = as_obj(args)
         path, content = body.get("path"), body.get("content")
@@ -232,14 +234,16 @@ async def apply(ctx: Context, config: None) -> None:
         return Done({"path": fs.named(target, root=root), "bytes": len(expected), "created": False})
 
     def inside_workspace(args: JsonValue, agent: AgentHandle | None) -> bool:
-        """Whether a `write` or an `edit` lands in the agent's workspace (S4).
+        """Whether a `write` or an `edit` lands in the workspace of the agent (S4).
 
-        Where its path really resolves, links followed as the write follows them,
-        against the tree a restore resets — the agent's workspace, not merely its
-        cwd, which are one only where the lifecycle rebases `ctx.fs`. An absolute
-        path, an allowance or a link out of that tree is a write a restore does not
-        take back, so it is not covered: the checkpoint policy makes its record
-        durable first, and `/revert` lists it as not undone. No workspace, no tree.
+        The test uses where the path really resolves, with links followed as the
+        write follows them. It tests against the tree that a restore resets. That
+        tree is the workspace of the agent and not only its cwd. The two are the
+        same only where the lifecycle rebases `ctx.fs`. An absolute path, an
+        allowance or a link out of that tree is a write that a restore does not
+        take back, so it is not covered. The checkpoint policy makes its record
+        durable first, and `/revert` lists it as not undone. With no workspace
+        there is no tree, and the answer is false.
         """
         path = as_obj(args).get("path")
         workspace = workspace_of(ctx, agent)
@@ -279,16 +283,17 @@ async def apply(ctx: Context, config: None) -> None:
             "truncated": len(matches) >= GREP_LIMIT,
         }
 
-    # Every one of these bounds its own output and offers the model a way to
-    # ask for more — `read` takes an offset and a limit, `glob`/`grep` cap
-    # their match lists, `write`/`edit` return a confirmation. Declared so
-    # the offload row (G2) can leave their results inline without another
-    # package keeping a list of this package's tool names.
+    # Each of these tools bounds its own output and offers the model a way to
+    # ask for more. `read` takes an offset and a limit, `glob` and `grep` cap
+    # their match lists, and `write` and `edit` return a confirmation. The
+    # declaration lets the offload row (G2) leave their results inline, without
+    # another package that keeps a list of the tool names of this package.
     for definition in (
-        # The three that only look are `effect_free`; the two that write answer
-        # `effects_confined_to_workspace` per call (S4), since their path can leave
-        # the tree. `/revert` therefore lists none of them as things it failed to
-        # undo unless one did reach past the tree (N3).
+        # The three tools that only look are `effect_free`. The two that write
+        # answer `effects_confined_to_workspace` for each call (S4), because
+        # their path can leave the tree. `/revert` therefore lists none of them
+        # as a call that it failed to undo, unless one did reach past the tree
+        # (N3).
         define_tool(
             "read",
             "Read a file, or a window of one. Prefer this over shelling out to cat.",
@@ -310,9 +315,10 @@ async def apply(ctx: Context, config: None) -> None:
             reconcile=reconciled_write,
             effects_confined_to_workspace=inside_workspace,
             self_limits=True,
-            # The file body is a payload this call delivered, not an instruction
-            # the model refers back to — and the file is on disk, where `read`
-            # can fetch it. Retained history may elide it under pressure.
+            # The file body is a payload that this call delivered, and not an
+            # instruction that the model refers back to. The file is also on
+            # disk, where `read` can fetch it. Retained history may elide the
+            # body under pressure.
             arguments_disposable=True,
             **simple_views("diff", "Write", "path"),
         ),

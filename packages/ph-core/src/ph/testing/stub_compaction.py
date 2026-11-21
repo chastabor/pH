@@ -1,9 +1,9 @@
-"""A compaction engine that compacts nothing and says where it would.
+"""A compaction engine that compacts nothing and reports where it would compact.
 
-Three suites had each written this class out — two inline in one file, a third one
-package over — and every copy grew `trigger_fraction` by hand when the protocol
-did. A row that only *reads* the engine (ph-clm's readouts, the seam's own
-registration rule) needs the share, not a summary.
+Three suites had each written out this class: two inline in one file, and a
+third in another package. Each copy gained `trigger_fraction` by hand when the
+protocol gained it. A row that only *reads* the engine (the readouts of ph-clm,
+the registration rule of the seam itself) needs the share and not a summary.
 
 @module ph.testing.stub_compaction
 """

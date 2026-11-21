@@ -1,22 +1,25 @@
-"""Scheduling one assistant step's tool calls.
+"""Scheduling the tool calls of one assistant step.
 
-Two properties have to hold at once, and they pull in opposite directions:
+Two properties must hold at the same time, and they conflict:
 
-* **dispatch may overlap** — two slow reads should not run in series;
-* **policy, results and result context stay in model order** — the transcript
-  the model reads next must match the order it asked for, or a later turn
-  reasons about a conversation that never happened.
+* **Dispatch may overlap.** Two slow reads must not run in series.
+* **Policy, results and result context stay in model order.** The transcript
+  that the model reads next must match the order that the model asked for.
+  Otherwise a later turn reasons about a conversation that never happened.
 
-The resolution is dsh's: `prepare` (pre-execute → approval → guards) is *started*
-in model order and may overlap — see its docstring — and results commit through a window that
-advances across *contiguous* settled slots. A call that finishes early waits its
-turn.
+The solution comes from dsh. `prepare` (pre-execute, then approval, then
+guards) is *started* in model order, and the prepares may overlap. The
+docstring of `ToolRuntime.prepare` gives the details. Results commit through a
+window that advances across *contiguous* settled slots. A call that finishes
+early waits for its turn.
 
-`execution_mode` is re-read before every start, so a tool registered or
-restricted mid-batch can still create a barrier for the calls after it.
+`execution_mode` is read again before every start. So a tool that is registered
+or restricted in the middle of a batch can still create a barrier for the calls
+after it.
 
-Abort records a synthetic result for every call it skipped: replay must see a
-result for each `tool/call`, or the pairing every provider requires is broken.
+An abort records a synthetic result for every call that it skipped. Replay must
+see a result for each `tool/call`. Without one, the pairing that every provider
+requires is broken.
 
 @module ph.tools.batch
 """
@@ -88,8 +91,8 @@ async def execute_tool_calls(
     tools: ToolRuntime = ctx.require(TOOLS)
     session = agent.session
     if session is None:
-        # The Protocol admits a session-less handle because `StubAgent` is one;
-        # a batch has nowhere to record its calls without a log.
+        # The Protocol allows a handle with no session, because `StubAgent` is
+        # one. Without a log, a batch has nowhere to record its calls.
         raise RuntimeError(f'agent "{agent.id}" has no session to record tool calls in')
     planned = [
         _Planned(
@@ -109,14 +112,15 @@ async def execute_tool_calls(
 
     index = 0
     covered = 0
-    """How far the calls are answered if what runs now raises: a group answers its
-    own on the way out (`_run_group`), so while one runs, through its end."""
+    """The index up to which the calls are answered if the code that runs now
+    raises. A group answers its own calls on the way out (`_run_group`). So while
+    a group runs, this index is the end of that group."""
     concluded = False
     try:
         while index < len(planned):
             covered = index
-            # Classified fresh each round, so a registry change between groups can
-            # still turn a later call into a barrier.
+            # The mode is classified again in each round. So a registry change
+            # between groups can still make a later call a barrier.
             mode = tools.execution_mode(planned[index].call).kind
             group = planned[index:] if mode == "parallel" else [planned[index]]
             covered = index + len(group)
@@ -130,24 +134,27 @@ async def execute_tool_calls(
                     _append_skipped(session, turn, step, skipped.block)
                 return BatchOutcome(concluded=concluded, aborted=True)
             if concluded:
-                # **A group that ended the turn ends the step** (C13). `concluded`
-                # was folded here and read by the driver, but the loop went on
-                # opening the next barrier — so an exclusive call queued behind a
-                # parallel run dispatched *after* the turn was over.
-                # `Deny.concludes_turn` promises "the batch already in flight still
-                # settles — what ends is what comes after it", and a group that has
-                # not started is what comes after it. It bites hardest on a fan-out,
-                # which is the shape where a ceiling is most likely to be reached
-                # mid-step and where the calls behind it spawn children.
+                # **A group that ended the turn ends the step** (C13). Before
+                # this check, `concluded` was folded here and the driver read
+                # it, but the loop continued and opened the next barrier. So an
+                # exclusive call that was queued behind a parallel run was
+                # dispatched *after* the turn was over. The docstring of
+                # `Deny.concludes_turn` says that the batch already in flight
+                # still settles, and that what ends is what comes after it. A
+                # group that has not started is what comes after it. The effect
+                # is worst on a fan-out. There a ceiling is most likely to be
+                # reached in the middle of a step, and the calls behind it
+                # spawn children.
                 for skipped in planned[index:]:
                     _append_skipped(session, turn, step, skipped.block, concluded_result())
                 return BatchOutcome(concluded=True, aborted=False)
     except BaseException:
-        # **The calls behind a group that raised are answered too** (T1). A raise
-        # from a group, or a stop from outside the token, left every call queued
-        # behind it as a `tool_use` with no `tool_result`: the turn then closed, so
-        # repair had nothing open to close, and every later request was refused.
-        # Synchronous appends, so nothing here can be cut short by the stop.
+        # **The calls behind a group that raised are answered too** (T1). Before
+        # this handler, a raise from a group, or a stop from outside the token,
+        # left every call queued behind it as a `tool_use` with no
+        # `tool_result`. The turn then closed, so repair had nothing open to
+        # close, and the provider refused every later request. The appends are
+        # synchronous, so the stop cannot cut them short.
         for skipped in planned[covered:]:
             _append_skipped(session, turn, step, skipped.block)
         raise
@@ -178,8 +185,8 @@ async def _run_group(
     )
 
     async def commit_ready() -> None:
-        # `committed` advances only across contiguous settled slots — the
-        # model-order window (B6).
+        # `committed` advances only across contiguous settled slots. This is
+        # the model-order window (B6).
         nonlocal committed, concluded
         while committed < len(group):
             slot = slots[committed]
@@ -231,38 +238,41 @@ async def _run_group(
                 and mode == "parallel"
                 and tools.execution_mode(group[started].call).kind != "parallel"
             ):
-                # An exclusive call ends this pool and opens the caller's next
-                # barrier; it must not join a group already in flight.
+                # An exclusive call ends this pool and opens the next barrier of
+                # the caller. It must not join a group that is already in flight.
                 break
             in_flight.add(started)
             scope.start_soon(run_one, started)
             started += 1
 
     def answer_uncommitted() -> None:
-        """Close every call this group logged and did not answer (C8).
+        """Close every call that this group logged and did not answer (C8).
 
-        **A raise is not a cancellation, and only the cancellation path had this.**
-        `commit_ready` advances across *contiguous* settled slots — the model-order
-        window B6 exists for — so when one call raises, every call behind it in the
-        group may have run, settled, and still hold no `tool/result`. The turn then
-        ends carrying `tool_use` blocks nothing answers, which the provider rejects
-        on the next request; and the crash repair does not reach it, because repair
-        closes pairs in a turn the log left *open* and this one closed normally.
+        **A raise is not a cancellation, and at first only the cancellation path
+        closed these calls.** `commit_ready` advances across *contiguous*
+        settled slots. That is the model-order window that B6 requires. So when
+        one call raises, every call behind it in the group may have run and
+        settled and still have no `tool/result`. The turn then ends with
+        `tool_use` blocks that nothing answers, and the provider rejects them on
+        the next request. The crash repair does not reach this case. Repair
+        closes pairs in a turn that the log left *open*, and this turn closed
+        normally.
 
-        Two spellings, and the difference is what the model is owed. A slot that
-        holds a result ran to completion and the batch simply never got to commit
-        it — `aborted` after dispatch, which says "this may have happened". A slot
-        still empty never dispatched, which is safe to retry. A call past `started`
-        was never logged at all, so it needs the pair `_append_skipped` writes.
+        The aborted result has two forms, and they differ in what the model is
+        told. A slot that holds a result ran to completion, and the batch did
+        not commit it. It gets `aborted` after dispatch, which says "this may
+        have happened". A slot that is still empty never dispatched, and that is
+        safe to retry. A call past `started` was never logged, so it needs the
+        pair that `_append_skipped` writes.
         """
         for index in range(committed, len(group)):
             block = group[index].block
             if index >= started or call_seqs[index] < 0:
                 _append_skipped(session, turn, step, block)
                 continue
-            # A call still in flight when a stop arrived was dispatched, and may
-            # have done what it was asked: not the "safe to retry" of one that
-            # never reached its body.
+            # A call that was still in flight when a stop arrived was dispatched,
+            # and it may have done what it was asked to do. It does not get the
+            # "safe to retry" result of a call that never reached its body.
             began = slots[index] is not None or index in in_flight
             _append_result(
                 session, turn, step, block, aborted_result(started=began), call_seqs[index]
@@ -277,15 +287,18 @@ async def _run_group(
                 await commit_ready()
                 aborted = aborted or token.canceled
                 if failure is not None:
-                    # Stop replenishing; the task group still drains what started.
+                    # Stop refilling the pool. The task group still drains the
+                    # calls that started.
                     break
                 await fill_pool(scope)
         await commit_ready()
     except BaseException:
-        # **A stop from outside the token answers too** (T1): `SIGINT` on a
-        # one-shot, a released root's task. It reaches the group as a cancellation
-        # of the task group, and skipped every answer written below it. The same
-        # synchronous appends, so the stop cannot cut them short.
+        # **A stop from outside the token is answered too** (T1). Examples are
+        # `SIGINT` on a one-shot run, and the task of a released root. Such a
+        # stop reaches the group as a cancellation of the task group. Before
+        # this handler, it skipped every answer that the code below writes. The
+        # appends here are the same synchronous appends, so the stop cannot cut
+        # them short.
         answer_uncommitted()
         raise
     finally:
@@ -304,14 +317,16 @@ async def _run_group(
 def _append_call(
     session: Session | SessionBatch, turn: int, step: int, block: ToolCallBlock, arguments: str
 ) -> int:
-    """Log the call once the gate has decided, and return the seq its result cites.
+    """Log the call after the gate has decided, and return the seq that the result
+    of the call cites.
 
-    `arguments` is the caller's to choose, and the choice is "what will run":
-    the model's own bytes in the ordinary case — re-encoding every call would
-    change the log for a formatting difference, and a malformed string the model
-    sent is preserved as text so the tool can report it (`parse_arguments`) — or
-    the substitution serialized the way the log serializes everything, since
-    there is no model text for it.
+    The caller chooses `arguments`, and it passes what will run. In the ordinary
+    case that is the bytes that the model sent. Encoding every call again would
+    change the log for a difference in formatting. A malformed string from the
+    model is kept as text, so that the tool can report it (`parse_arguments`).
+    When approval substituted the arguments, the caller passes the substitution,
+    serialized in the way that the log serializes everything, because there is
+    no model text for it.
     """
     event = _LOG.append(
         session,
@@ -335,10 +350,10 @@ def _append_result(
     result: ToolExecutionResult,
     call_seq: int,
 ) -> None:
-    # Built as the wire dict directly: the content blocks are already validated
-    # WireModels from `render()`, and `derive_messages()` validates the whole
-    # message on the way back out, so an intermediate `Message` here would be a
-    # third traversal that proves nothing new.
+    # The message is built directly as the wire dict. The content blocks are
+    # already validated WireModels from `render()`, and `derive_messages()`
+    # validates the whole message when it is read back. So an intermediate
+    # `Message` here would be a third traversal that proves nothing new.
     message: dict[str, Any] = {
         "id": new_message_id(),
         "role": "user",
@@ -374,14 +389,16 @@ def _append_skipped(
     block: ToolCallBlock,
     result: ToolExecutionResult | None = None,
 ) -> None:
-    """A call never dispatched still gets its durable call/result pair.
+    """Write the durable call/result pair of a call that was never dispatched.
 
-    The default is cancellation, which is what skipped a call before C13 added
-    the second reason. A turn that concluded passes its own result: both mean
-    "this never ran", and only one of them means somebody cancelled it.
+    The default result is a cancellation. Cancellation was the only reason to
+    skip a call before C13 added the second reason. A turn that concluded passes
+    its own result. Both results mean "this never ran", and only one of them
+    means that somebody canceled the call.
 
-    **One batch** (S14): a torn tail that kept the call and lost its result read,
-    once repaired, as a call that may have happened — for one that never ran.
+    **The pair is written in one batch** (S14). Written separately, a torn tail
+    could keep the call and lose its result. After repair, that call read as one
+    that may have happened, although it never ran.
     """
     settled = aborted_result(started=False) if result is None else result
     with session.batch() as batch:

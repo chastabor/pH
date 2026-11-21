@@ -40,6 +40,7 @@ from itertools import pairwise
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 from pydantic_core import PydanticUndefined
 
 from .loader import ENTRY_POINT_GROUP, entry_point_targets, resolve_plugin
@@ -89,6 +90,10 @@ def render_annotation(annotation: object) -> str:
     """
     if annotation is None or annotation is type(None):
         return "null"
+    if annotation is Ellipsis:
+        # `tuple[str, ...]`: a tuple of any length. `str(...)` is `Ellipsis`,
+        # which nobody writes.
+        return "..."
     if isinstance(annotation, type):
         return annotation.__name__
     origin, args = typing.get_origin(annotation), typing.get_args(annotation)
@@ -148,6 +153,40 @@ def _nested_doc(annotation: object) -> str:
     return " ".join((models[0].__doc__ or "").split())
 
 
+def _default_of(field: FieldInfo) -> str | None:
+    """The default of a config field as text, or `None` for a field that has none.
+
+    A default that a factory builds (`Field(default_factory=list)`) is built
+    here and printed. Without that, the catalog showed a blank cell for the
+    option, and a blank cell reads as "no default". A factory that cannot be
+    called with no arguments, or that raises, gives `None`: a blank cell is a
+    worse answer than the value and a better one than no catalog.
+    """
+    if field.is_required():
+        return None
+    if field.default_factory is None:
+        return None if field.default is PydanticUndefined else repr(_as_written(field.default))
+    try:
+        built = field.get_default(call_default_factory=True)
+    except Exception:
+        return None
+    return repr(_as_written(built))
+
+
+def _as_written(value: object) -> object:
+    """A default in the form that a profile writes it. A config model becomes
+    its mapping, with the keys that a profile uses (`onMount`, not `on_mount`).
+    The `repr` of the model itself would name a Python class and Python
+    attributes, and a profile contains neither."""
+    if isinstance(value, BaseModel):
+        return value.model_dump(by_alias=True)
+    if isinstance(value, Mapping):
+        return {key: _as_written(one) for key, one in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_as_written(one) for one in value)
+    return value
+
+
 def _fields(
     model: type[BaseModel], parent: str | None = None, within: tuple[type[BaseModel], ...] = ()
 ) -> list[dict[str, Any]]:
@@ -179,9 +218,7 @@ def _fields(
                 "parent": parent,
                 "type": render_annotation(field.annotation),
                 "required": required,
-                "default": None
-                if required or field.default is PydanticUndefined
-                else repr(field.default),
+                "default": _default_of(field),
                 "doc": field.description or docs.get(name) or _nested_doc(field.annotation),
             }
         )

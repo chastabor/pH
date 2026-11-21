@@ -1,17 +1,18 @@
-"""The JSON-Schema subset pH validates, and where it comes from.
+"""The JSON Schema subset that pH validates, and where a schema comes from.
 
 A tool declares its arguments and its canonical output. Both are JSON Schema on
-the wire, because that is what a provider accepts and what an MCP server hands
-over. Inside pH a declaration may instead be a **pydantic model**, which is
-strictly better when the tool is written in Python: one definition produces the
-schema *and* the validator, and the body receives a typed object.
+the wire, because a provider accepts that form and an MCP server supplies it.
+Inside pH a declaration may instead be a **pydantic model**. That is strictly
+better when the tool is written in Python: one definition produces the schema
+*and* the validator, and the body receives a typed object.
 
-The raw-dict path exists for schemas pH did not author (MCP, a subagent's
-declared shape). It validates a deliberate subset — `type`, `enum`, `const`,
-`required`, `properties`, `items`, `additionalProperties`, and the numeric and
-string bounds — and **says so**: a keyword outside the subset is ignored rather
-than silently treated as satisfied, and `unsupported_keywords` reports what was
-skipped so a caller can refuse a schema pH cannot fully enforce.
+The raw-dict path exists for schemas that pH did not author (MCP, the declared
+shape of a subagent). It validates a deliberate subset: `type`, `enum`, `const`,
+`required`, `properties`, `items`, `additionalProperties`, `anyOf`, `pattern`,
+and the numeric, length and item-count bounds. The module **reports the limits
+of that subset**. A keyword outside the subset is ignored, but it is not
+silently treated as satisfied: `unsupported_keywords` reports what was skipped,
+so a caller can refuse a schema that pH cannot fully enforce.
 
 @module ph.tools.json_schema
 """
@@ -72,22 +73,23 @@ SUPPORTED_KEYWORDS: frozenset[str] = frozenset(
 CONSTRAINING_KEYWORDS: frozenset[str] = frozenset(
     {"type", "anyOf", "oneOf", "allOf", "$ref", "enum", "const"}
 )
-"""Keywords that make a `properties` entry say something about its value.
+"""The keywords that make a `properties` entry say something about its value.
 
-Beside `SUPPORTED_KEYWORDS` because both are this module's vocabulary, and
-**deliberately not a subset of it**: that one lists what *pH's own validator*
-enforces, this one what a **grammar built from the schema** would constrain, and
-`oneOf`/`allOf` are in the second and not the first. A route that compiles the
-schema honors them; `validate_json_schema_value` does not, and
-`unsupported_keywords` correctly says so. `anyOf` is in both: it is how pydantic
-writes `str | None`, so a pydantic model's schema is one pH can hold a value to. Two
-questions, one place, so the next reader sees the difference rather than discovering
-it.
+This set is beside `SUPPORTED_KEYWORDS` because both are the vocabulary of this
+module. It is **deliberately not a subset of it**. `SUPPORTED_KEYWORDS` lists
+what *the validator of pH* enforces. This set lists what a **grammar built from
+the schema** would constrain. `oneOf` and `allOf` are in this set and not in
+`SUPPORTED_KEYWORDS`. A route that compiles the schema honors them.
+`validate_json_schema_value` does not, and `unsupported_keywords` correctly
+reports that. `anyOf` is in both sets. Pydantic writes `str | None` as an
+`anyOf`, so the schema of a pydantic model is one that pH can hold a value to.
+The two questions are answered in one place, so that the next reader sees the
+difference and does not have to discover it.
 
-Read by `llm.structured.structural_warning`, which used `"type" in entry` alone
-— so every schema with an optional required field warned that its grammar would
-not constrain the reply, because pydantic renders `str | None` as an `anyOf` and
-a `Literal` as an `enum` (C11).
+`llm.structured.structural_warning` reads this set. It used to test
+`"type" in entry` alone. Every schema with an optional required field then
+warned that its grammar would not constrain the reply, because pydantic renders
+`str | None` as an `anyOf` and a `Literal` as an `enum` (C11).
 """
 
 _TYPE_CHECKS: dict[str, Any] = {
@@ -110,29 +112,38 @@ def schema_of(declaration: type[BaseModel] | dict[str, Any]) -> dict[str, Any]:
 
 @cache
 def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
-    """One model's schema, built once.
+    """The schema of one model, built one time.
 
-    Pydantic does not memoize `model_json_schema()` — measured at 903 µs for
-    `RefinementProposal` and 226 µs for `ReviewVerdict`, every call — and a
-    class's schema is a constant. It matters because `ask_for_shape` asks for one
-    per model request, where it was the largest single cost the structured path
-    introduced.
+    Pydantic does not memoize `model_json_schema()`. Every call was measured at
+    903 µs for `RefinementProposal` and 226 µs for `ReviewVerdict`, and the
+    schema of a class is a constant. This matters because `ask_for_shape` asks
+    for one schema for each model request. There it was the largest single cost
+    that the structured path introduced.
 
-    Keyed on the class, which is a process-lifetime object, so the cache is
-    bounded by the number of declarations rather than by anything a caller
-    supplies."""
+    The cache is keyed on the class, which lives as long as the process. So the
+    number of declarations bounds the cache, and nothing that a caller supplies
+    does."""
     return model.model_json_schema()
 
 
 def unsupported_keywords(schema: object) -> set[str]:
     """Every keyword in `schema` that this validator does not enforce.
 
-    Reported rather than assumed: a schema pH cannot fully check should be
-    refused by its author, not quietly half-validated.
+    The keywords are reported, and are not assumed to hold. A schema that pH
+    cannot fully check should be refused by its author, and not silently
+    half-validated.
+
+    `pattern` is reported when Python cannot compile it. A JSON Schema pattern
+    is an ECMA 262 expression, and `re` does not accept all of them (`\\p{L}` is
+    one). The validator skips such a pattern, so the keyword is not enforced
+    there.
     """
     found: set[str] = set()
     if isinstance(schema, dict):
         found.update(key for key in schema if key not in SUPPORTED_KEYWORDS)
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and not _compiles(pattern):
+            found.add("pattern")
         for key in ("properties", "$defs", "definitions"):
             nested = schema.get(key)
             if isinstance(nested, dict):
@@ -149,14 +160,26 @@ def unsupported_keywords(schema: object) -> set[str]:
     return found
 
 
-def object_schema_problems(schema: object) -> list[str]:
-    """Why `schema` cannot be the declared shape of a value pH holds a caller to: not a
-    mapping, a root that is not `type: object`, or a keyword this validator does not
-    enforce. Empty when it can.
+def _compiles(pattern: str) -> bool:
+    """Whether `re` accepts `pattern`."""
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
 
-    For a schema pH did not author, a skill's or a spawn's `output`, so one that uses a
-    keyword pH would skip is refused rather than half-checked (`unsupported_keywords`).
-    An object at the root, because the value is also a tool's arguments.
+
+def object_schema_problems(schema: object) -> list[str]:
+    """Why `schema` cannot be the declared shape of a value that pH holds a caller to.
+
+    The possible problems are: it is not a mapping, its root is not
+    `type: object`, or it uses a keyword that this validator does not enforce.
+    The list is empty when the schema can be that shape.
+
+    This is for a schema that pH did not author: the `output` of a skill or of a
+    spawn. A schema that uses a keyword that pH would skip is refused, and not
+    half-checked (`unsupported_keywords`). The root must be an object, because
+    the value is also the arguments of a tool.
     """
     schema = thaw_json(schema)
     if not isinstance(schema, dict):
@@ -171,9 +194,9 @@ def object_schema_problems(schema: object) -> list[str]:
 
 
 def checked_object_schema(schema: object) -> dict[str, Any]:
-    """`schema` as the plain dict a value is held to, or `ValueError` saying why it
-    cannot be one (`object_schema_problems`): one check for every caller that takes a
-    declared shape."""
+    """`schema` as the plain dict that a value is held to. Raises `ValueError`
+    with the reason when it cannot be one (`object_schema_problems`). This is
+    the one check for every caller that takes a declared shape."""
     plain = thaw_json(schema)
     problems = object_schema_problems(plain)
     if problems or not isinstance(plain, dict):
@@ -184,15 +207,16 @@ def checked_object_schema(schema: object) -> dict[str, Any]:
 def validate_json_schema_value(
     schema: type[BaseModel] | dict[str, Any], value: object
 ) -> list[str]:
-    """Violations of `value` against `schema`, in validation order.
+    """The violations of `value` against `schema`, in validation order.
 
-    An empty list means valid. A pydantic declaration delegates to pydantic, so
-    the tool's own model is the validator.
+    An empty list means that the value is valid. A pydantic declaration
+    delegates to pydantic, so the model of the tool is the validator.
 
-    Either JSON shape is checked, frozen (`MappingProxyType`/`tuple`, as a tool's
-    arguments and a logged schema arrive) or plain: thawed here, once, because the
-    checks below are `dict` and `list` checks, and a frozen schema read as one would
-    pass everything below its root unchecked.
+    Both JSON forms are checked: frozen (`MappingProxyType` and `tuple`, which
+    is how the arguments of a tool and a logged schema arrive) and plain. The
+    function thaws them here, one time, because the checks below are `dict` and
+    `list` checks. A frozen schema that was not thawed would pass everything
+    below its root unchecked.
     """
     if isinstance(schema, type) and issubclass(schema, BaseModel):
         try:
@@ -208,7 +232,7 @@ def validate_json_schema_value(
 
 
 def _resolve(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
-    """Follow a local `$ref` one hop at a time; a foreign ref stays unresolved."""
+    """Follow a local `$ref` one hop at a time. A foreign ref stays unresolved."""
     seen: set[str] = set()
     while isinstance(schema, dict) and isinstance(schema.get("$ref"), str):
         ref: str = schema["$ref"]
@@ -226,8 +250,8 @@ def _resolve(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
-# (keyword, comparison) pairs. Spelled out rather than built from lambdas so the
-# comparison direction is readable where it is declared.
+# (keyword, comparison) pairs. They are written out and not built from lambdas,
+# so that the direction of each comparison is readable where it is declared.
 _NUMERIC_BOUNDS: tuple[tuple[str, str], ...] = (
     ("minimum", ">="),
     ("maximum", "<="),
@@ -317,8 +341,8 @@ def _validate(
                 if re.search(pattern, value) is None:
                     out.append(f"{where}: does not match {pattern!r}")
             except re.error:
-                # A schema pH cannot compile is a schema it does not enforce;
-                # `unsupported_keywords` is where that gets reported.
+                # A pattern that pH cannot compile is a pattern that it does not
+                # enforce. `unsupported_keywords` reports it.
                 pass
 
     if isinstance(value, list):
@@ -353,18 +377,20 @@ def _validate(
 
 
 def parse_arguments(raw: str) -> JsonValue:
-    """Parse model arguments, preserving invalid JSON as text.
+    """Parse the arguments from the model, and keep invalid JSON as text.
 
-    A malformed argument string is the *tool's* problem to report, not the
-    loop's to crash on: the tool sees the raw text and fails with a message the
-    model can act on. `JsonValue` says exactly that and costs nothing to say — a
-    `str` is one — and the raw text is read downstream: `ph_stabilize`'s
-    destructive gate scans it for a call whose JSON never parsed.
+    A malformed argument string is a problem for the *tool* to report, and not
+    one for the loop to crash on. The tool sees the raw text and fails with a
+    message that the model can act on. `JsonValue` states exactly that at no
+    cost, because a `str` is a `JsonValue`. The raw text is also read
+    downstream: the destructive gate of `ph_stabilize` scans it for a call whose
+    JSON never parsed.
 
-    Here, in the package's leaf module, because `presentation.py` needs it too
-    and `batch` is three imports above it — `presentation` → `batch` →
-    `definition` → `presentation` is a cycle. It was never a batch concern: it
-    is `json.loads` with one documented fallback.
+    The function is here, in the leaf module of the package, because
+    `presentation.py` needs it too, and `batch` is three imports above
+    `presentation.py`: `presentation` → `batch` → `definition` → `presentation`
+    is a cycle. It was never a concern of the batch. It is `json.loads` with one
+    documented fallback.
     """
     if not raw:
         return {}

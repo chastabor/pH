@@ -84,6 +84,9 @@ def test_a_model_whose_source_cannot_be_read_contributes_no_prose() -> None:
         (dict[str, int], "dict[str, int]"),
         (Literal["a", "b"], "Literal[a, b]"),
         (list[str] | None, "list[str] | null"),
+        # A tuple of any length. `str(...)` is `Ellipsis`, which nobody writes.
+        (tuple[str, ...], "tuple[str, ...]"),
+        (tuple[str | int, ...] | None, "tuple[str | int, ...] | null"),
     ],
 )
 def test_types_render_the_way_a_profile_would_write_them(annotation: object, rendered: str) -> None:
@@ -196,6 +199,50 @@ def test_the_options_of_a_nested_model_are_listed_under_the_path_a_profile_write
     assert fields["many"]["doc"] == "What one leaf is."
     assert fields["named"]["doc"] == "The leaves by name."
     assert fields["either"]["doc"] == ""
+
+
+def _needs_the_other_fields(data: dict[str, object]) -> int:
+    return len(data)
+
+
+class _Shaped(WireModel):
+    on_mount: bool = True
+    paths: list[str] = Field(default_factory=lambda: ["."])
+
+
+class _Defaults(WireModel):
+    plain: int = 3
+    built: list[str] = Field(default_factory=lambda: ["KEY", "TOKEN"])
+    empty: dict[str, int] = Field(default_factory=dict)
+    shaped: _Shaped = Field(default_factory=_Shaped)
+    several: tuple[_Shaped, ...] = (_Shaped(),)
+    unbuildable: int = Field(default_factory=_needs_the_other_fields)
+    required: str
+
+
+def test_a_default_that_a_factory_builds_is_printed() -> None:
+    """A field with `default_factory` showed a blank default, and a blank cell
+    reads as "no default". The factory is called and its value is printed.
+
+    A config model is printed as the mapping that a profile writes, with the
+    keys of a profile (`onMount`). A factory that needs the other fields cannot
+    be called here, and its cell stays blank. A required field has no default.
+
+    Sabotage: report `None` for every field that has a `default_factory`, as
+    `_fields` did, and `built`, `empty` and `shaped` are blank.
+    """
+    defaults = {field["name"]: field["default"] for field in _fields(_Defaults)}
+
+    assert defaults["plain"] == "3"
+    assert defaults["built"] == "['KEY', 'TOKEN']"
+    assert defaults["empty"] == "{}"
+    assert defaults["shaped"] == "{'onMount': True, 'paths': ['.']}"
+    assert defaults["several"] == "({'onMount': True, 'paths': ['.']},)"
+    assert defaults["unbuildable"] is None
+    assert defaults["required"] is None
+    # The options of the nested model keep their own defaults.
+    assert defaults["shaped.onMount"] == "True"
+    assert defaults["shaped.paths"] == "['.']"
 
 
 def test_a_shipped_row_lists_the_options_of_its_nested_models() -> None:

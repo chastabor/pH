@@ -1407,6 +1407,7 @@ async def test_an_agents_scope_is_answered_only_while_it_can_take_an_effect(
 
 async def test_an_ending_agent_is_not_handed_out(mount: MountProfile) -> None:
     """S3. `get` answers the live agent, and an agent whose scope is down is ending.
+    `list` gives "live" the same meaning.
 
     The roster entry is taken back by the scope's own teardown, near its end, so for
     the whole of that teardown `get` handed out an agent that was going: a message
@@ -1415,18 +1416,23 @@ async def test_an_ending_agent_is_not_handed_out(mount: MountProfile) -> None:
     is ending and says so, and the sender is told the message did not land.
 
     Sabotage: answer the roster entry whatever its scope's state, and `during`
-    holds the agent.
+    holds the agent. List every roster entry whatever its scope's state, and
+    `listed` holds it.
     """
     ctx = await mount()
     agents = ctx.require(AGENTS)
     agent = agents.create(ctx.require(SESSIONS).create("s"), FAKE)
     during: list[object] = []
+    listed: list[object] = []
     agent.ctx.add_disposer(lambda: during.append(agents.get(agent.id)), label="asks")
+    agent.ctx.add_disposer(lambda: listed.extend(agents.list()), label="lists")
 
     assert agents.get(agent.id) is agent
+    assert agents.list() == [agent]
     await agent.ctx.dispose()
 
     assert during == [None]
+    assert listed == []
 
 
 async def test_an_ending_agents_roster_entry_takes_only_itself_out(mount: MountProfile) -> None:

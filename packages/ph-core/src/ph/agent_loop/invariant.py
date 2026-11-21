@@ -1,16 +1,16 @@
 """Runtime invariant: model-visible means logged (P0-14, invariant I3).
 
-Every message reaching a model request must be exactly `derive_messages()` at
-that step. Not "equivalent", not "a superset" — *identical*, because that
-equality is what makes the session log a complete trace: anything the model saw
-can be audited, replayed and offloaded only if the log is the sole source it
-came from.
+Every message that reaches a model request must be exactly `derive_messages()`
+at that step. It must be *identical*, and not "equivalent" or "a superset".
+That equality is what makes the session log a complete trace. Anything that the
+model saw can be audited, replayed and offloaded only if the log is the sole
+source that it came from.
 
-The check runs as a `llm/stream` listener, so it sees the request the adapter
-is about to receive rather than the one the loop believed it built. A request
-is held to the invariant when it is session-bound and names no other purpose
-(`GenerateOptions.is_loop_request`) — a conversation request cannot opt out by
-leaving a flag at its default.
+The check runs as a `llm/stream` listener. It therefore sees the request that
+the adapter is about to receive, and not the request that the loop believed it
+built. A request is held to the invariant when it is session-bound and names no
+other purpose (`GenerateOptions.is_loop_request`). A conversation request
+cannot opt out by leaving a flag at its default.
 
 @module ph.agent_loop.invariant
 """
@@ -38,8 +38,8 @@ async def apply(ctx: Context, config: None) -> None:
     async def check(
         request: GenerateOptions, next_: Next[AsyncIterator[StreamChunk]]
     ) -> AsyncIterator[StreamChunk]:
-        # `is_loop_request` implies a session id, but through a property the
-        # checker cannot see into; the explicit test is what lets `get` be typed.
+        # `is_loop_request` implies a session id, but through a property that
+        # the checker cannot see into. The explicit test lets `get` be typed.
         session_id = request.session_id
         session = (
             ctx.require(SESSIONS).get(session_id)
@@ -49,9 +49,9 @@ async def apply(ctx: Context, config: None) -> None:
         if session is not None:
             derived = session.derive_messages()
             sent = request.messages
-            # A request built from the cache satisfies `is`; equality is the
-            # fallback for one rebuilt from equal values, and is far cheaper
-            # than re-serializing the whole conversation.
+            # A request built from the cache satisfies `is`. Equality is the
+            # fallback for a request rebuilt from equal values, and it is far
+            # cheaper than serializing the whole conversation again.
             if len(sent) != len(derived) or any(
                 left is not right and left != right
                 for left, right in zip(sent, derived, strict=True)
@@ -63,16 +63,16 @@ async def apply(ctx: Context, config: None) -> None:
                 )
         return await next_()
 
-    # Prepended so the check runs before any listener that could rewrite the
-    # request — the invariant is about what the LOOP built, not what middleware
-    # made of it.
+    # Prepended, so that the check runs before any listener that could rewrite
+    # the request. The invariant is about what the LOOP built, and not about
+    # what middleware made of it.
     ctx.on("llm/stream", check, prepend=True)
 
-    # Declared as well as enforced (P6-01). Whether I3 holds has always been a
-    # property of the *profile* — this row is optional — and nothing said so.
-    # `check=None` because there is no state between requests to poll: what this
-    # invariant can honestly report is that every request was held to it, never
-    # that it holds right now.
+    # The invariant is declared as well as enforced (P6-01). Whether I3 holds
+    # has always been a property of the *profile*, because this row is
+    # optional, and nothing said so. `check=None` because there is no state
+    # between requests to poll. What this invariant can correctly report is
+    # that every request was held to it, and never that it holds right now.
     contribute(
         ctx,
         Invariant(

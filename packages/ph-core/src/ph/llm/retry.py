@@ -1,23 +1,23 @@
-"""`llm-retry` — bounded retries, and the one failure it deliberately declines.
+"""`llm-retry`: bounded retries, and the one failure that it deliberately does not retry.
 
-Retrying is easy to get wrong in two directions. Retrying nothing makes a
-harness fragile against ordinary rate limits; retrying everything turns a
-context-window overflow into an infinite loop that bills for every attempt.
+Retrying can go wrong in two directions. A harness that retries nothing is
+fragile against ordinary rate limits. A harness that retries everything turns a
+context-window overflow into an infinite loop that is billed for every attempt.
 
 So the classification is explicit:
 
-* **transient** (rate limits, 5xx, timeouts, empty responses) → retry with
-  exponential backoff, honoring a provider's own `retry_after` when it sent one,
-  because the provider knows better than the backoff curve does;
-* **`FILE_EXPIRED`** → retry, and it is the clearest case in the list: the
-  adapter has already dropped the dead handle, so the second attempt is against
-  a freshly uploaded file rather than the same request twice;
-* **`CONTEXT_WINDOW_EXCEEDED`** → **do not retry**. The request cannot fit, and
-  it will not fit on the second attempt either. This is the signal compaction
-  keys off (G4, Phase 4); consuming it here would hide the one error that has a
-  real remedy;
-* **everything else** → do not retry. An unknown failure retried is an unknown
-  failure billed twice.
+* **Transient** (rate limits, 5xx, timeouts, empty responses): retry with
+  exponential backoff. When the provider sent its own `retry_after`, the retry
+  honors it, because the provider knows better than the backoff curve does.
+* **`FILE_EXPIRED`**: retry. It is the clearest case in the list. The adapter
+  has already dropped the dead handle, so the second attempt is against a
+  freshly uploaded file and is not the same request twice.
+* **`CONTEXT_WINDOW_EXCEEDED`**: **do not retry**. The request cannot fit, and
+  it will not fit on the second attempt either. Compaction acts on this signal
+  (G4, Phase 4). Consuming it here would hide the one error that has a real
+  remedy.
+* **Everything else**: do not retry. An unknown failure that is retried is an
+  unknown failure that is billed twice.
 
 @module ph.llm.retry
 """
@@ -40,11 +40,11 @@ __all__ = ["RETRIED", "ROW", "TRANSIENT_CODES", "apply", "is_transient"]
 log = logging.getLogger("ph.llm.retry")
 
 RETRIED = "llm/retry"
-"""The attempt record: what was retried, when and why. An audit trail — the count
-the budget spends is the loop's, on `RequestFailure.retries_by`."""
+"""The attempt record: what was retried, when and why. It is an audit trail. The
+count that the budget spends belongs to the loop, on `RequestFailure.retries_by`."""
 
 ROW = "llm-retry"
-"""This row's id, and the key its own retries are counted under."""
+"""The id of this row, and the key that its own retries are counted under."""
 
 TRANSIENT_CODES: frozenset[str] = frozenset(
     {
@@ -56,10 +56,11 @@ TRANSIENT_CODES: frozenset[str] = frozenset(
         "CONNECTION_ERROR",
         "OVERLOADED",
         EMPTY_RESPONSE,
-        # Transient in the strict sense this module means: the state that caused
-        # it is already gone. An adapter raising this has invalidated the handle
-        # first (P7-03), so the retry rebuilds the request against a fresh
-        # upload rather than repeating the one that failed.
+        # Transient in the strict sense that this module means: the state that
+        # caused the failure is already gone. An adapter that raises this code
+        # has invalidated the handle first (P7-03). The retry therefore builds
+        # the request again against a fresh upload, and does not repeat the
+        # request that failed.
         FILE_EXPIRED,
     }
 )
@@ -70,7 +71,7 @@ _TRANSIENT_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 def is_transient(failure: LlmFailure) -> bool:
     """Whether this failure is worth a second attempt."""
     if failure.code == CONTEXT_WINDOW_EXCEEDED:
-        # Never: the remedy is compaction, and swallowing the signal here would
+        # Never. The remedy is compaction, and consuming the signal here would
         # take that remedy away.
         return False
     if failure.code in TRANSIENT_CODES:
@@ -85,14 +86,16 @@ class Config(WireModel):
     base_delay_ms: int = 500
     max_delay_ms: int = 20_000
     count_all_retries: bool = False
-    """Whether every row's retries spend this row's budget, or only its own (G13).
+    """Whether the retries of every row spend the budget of this row, or only its
+    own retries do (G13).
 
-    Off by default, which is what this row always did: only its own retries
+    The default is off, which is what this row always did. Only its own retries
     count, so a step that was compacted and retried after an overflow still has
-    every transient retry it was configured for. On, a compaction retry — or any
-    other row's — is one fewer, for a hard ceiling on model calls per step.
-    Either way the number is the loop's (`RequestFailure.retries_by`, attributed
-    by cordis); this row holds its opt-in and nothing else."""
+    every transient retry that it was configured for. When the setting is on, a
+    compaction retry, or a retry by any other row, leaves one retry fewer. That
+    gives a hard ceiling on model calls for each step. In both cases the number
+    belongs to the loop (`RequestFailure.retries_by`, attributed by cordis).
+    This row holds its opt-in and nothing else."""
 
 
 @plugin(ROW, affects="environment", config=Config, inject=[SESSIONS])
@@ -119,8 +122,8 @@ async def apply(ctx: Context, config: Config) -> None:
 
         delay_ms = min(settings.base_delay_ms * (2**seen), settings.max_delay_ms)
         if failure.provider_retry_after_ms is not None:
-            # The provider's own number beats our curve: it knows when the
-            # bucket refills.
+            # The number of the provider wins over our curve, because the
+            # provider knows when the bucket refills.
             delay_ms = max(delay_ms, failure.provider_retry_after_ms)
 
         account = {

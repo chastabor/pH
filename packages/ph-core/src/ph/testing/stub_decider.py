@@ -1,8 +1,9 @@
 """A decision adapter that answers from a script.
 
-Two suites had each written one — ph-core's for the seam's records and ph-stabilize's
-for the row that asks — and the second grew what the first lacked. One here, so a
-test of a new asker starts from the same double the seam is tested against.
+Two suites had each written one: ph-core for the records of the seam, and
+ph-stabilize for the row that asks. The second gained what the first lacked.
+With one adapter here, a test of a new asker starts from the same double that
+the seam is tested against.
 
 @module ph.testing.stub_decider
 """
@@ -33,21 +34,28 @@ from ..llm.types import GenerateOptions, StreamChunk
 __all__ = ["StubDecider"]
 
 _Reply: TypeAlias = float | Decisions | LlmError
-"""One scripted reply: a number answers every question as its kind is owed
-(`StubDecider`), a `Decisions` is sent as it is — for a reply in another shape — and
-an `LlmError` is raised."""
+"""One scripted reply. A number answers every question in the form that its
+kind requires (see `StubDecider`). A `Decisions` is sent as it is, for a reply
+in another shape. An `LlmError` is raised."""
 
 
 class StubDecider:
     """A decision model, as far as `ctx.llm` is concerned.
 
-    Each request gets the next of `replies`, and the last again once they run out;
-    every request is kept in `asked`. A number answers a `Noul` with that likelihood,
-    a `Choice` with its first criterion certain and a `Score` at its lowest level
-    certain, and says the request cost `input_tokens`. `hangs` never answers at all,
-    for a caller's timeout. `route` is what `resolve_model` answers — a whole
-    `ResolvedModel`, as `FakeAdapter.route` is, so a route fact a test needs is no
-    second declaration here.
+    Each request gets the next of `replies`. When they run out, every later
+    request gets the last reply again. Every request is kept in `asked`.
+
+    A number reports that the request cost `input_tokens`, and answers each
+    kind of question as follows:
+
+    - a `Noul` with that likelihood
+    - a `Choice` with its first criterion certain
+    - a `Score` at its lowest level, certain
+
+    `hangs` never answers, for a test of the timeout of a caller. `route` is
+    the answer of `resolve_model`. It is a whole `ResolvedModel`, as
+    `FakeAdapter.route` is, so a route fact that a test needs has no second
+    declaration here.
     """
 
     def __init__(

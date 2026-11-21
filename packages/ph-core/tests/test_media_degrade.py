@@ -69,12 +69,37 @@ def _takes(*mimes: str, limit: int | None = None) -> ResolvedModel:
 
 
 def test_every_way_an_attachment_can_be_unusable_has_a_sentence() -> None:
-    """Four unrelated situations, one remedy — the model can act on a pointer
+    """Unrelated situations, one remedy — the model can act on a pointer
     and can do nothing with a wire error."""
     assert "no attachment store" in (unusable_reason(_ref(), None, _takes("image/png")) or "")
     assert "does not accept" in (unusable_reason(_ref(), _Store(), _takes()) or "")
     assert "over the" in (unusable_reason(_ref(), _Store(), _takes("image/png", limit=8)) or "")
     assert unusable_reason(_ref(), _Store(), _takes("image/png")) is None
+
+
+def test_a_type_the_route_uploads_is_not_held_to_the_inline_ceiling() -> None:
+    """The byte ceiling is the ceiling of an inline block, and a file that goes
+    by reference is not inline.
+
+    The Google route limits a whole request to 20 MB and takes a video of any
+    size through its Files API. The ceiling was applied to every block before
+    the adapter ran, so a large video became a pointer and was never uploaded.
+    A type in `ResolvedModel.uploads` now passes at any size, and its adapter
+    decides what to send. Every other type is held to the ceiling as before,
+    and the other reasons still apply to an uploaded type.
+
+    Sabotage: drop the `uploads` clause from `unusable_reason`, and the video is
+    refused for its size.
+    """
+    route = ResolvedModel(
+        accepts=frozenset({"video/mp4", "image/png"}),
+        max_attachment_bytes=8,
+        uploads=frozenset({"video/mp4"}),
+    )
+
+    assert unusable_reason(_ref("video/mp4"), _Store(), route) is None
+    assert "over the" in (unusable_reason(_ref("image/png"), _Store(), route) or "")
+    assert "no attachment store" in (unusable_reason(_ref("video/mp4"), None, route) or "")
 
 
 def test_a_missing_blob_is_a_reason_not_a_crash() -> None:

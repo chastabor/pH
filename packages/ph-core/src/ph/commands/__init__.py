@@ -1,11 +1,12 @@
-"""Human slash commands: things a person asks the harness to do directly.
+"""Human slash commands: actions that a person asks the harness for directly.
 
-`ph/seams/` is for a seam or a provider of one. A command is neither — it
-publishes no service and registers no provider, it *consumes* several — and the
-shape's existing siblings (`ph_stabilize.compact_command`, `ph_rlm.harness`'s
-`/refine`) already live outside `seams/` in their own packages. This is where
-ph-core's own commands go, so `/workspaces` and P4-09's `/revert` share a home
-rather than each making the same choice differently.
+`ph/seams/` is for a seam or a provider of a seam. A command is neither. It
+publishes no service and registers no provider. It *consumes* several services.
+The existing commands of the same shape (`ph_stabilize.compact_command`, and
+`/refine` in `ph_rlm.harness`) already live outside `seams/` in their own
+packages. The commands of `ph-core` go here: `/autonomous`, `/revert` (P4-09),
+`/sandbox` and `/workspaces`. They share one package, so that each does not make
+the same choice differently.
 
 @module ph.commands
 """

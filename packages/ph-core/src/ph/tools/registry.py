@@ -1,19 +1,23 @@
-"""`ctx.tools` — the registry, the visibility rules, and the pipeline.
+"""`ctx.tools`: the registry, the visibility rules, and the pipeline.
 
-Three separable things live here because they share one traversal:
+Three separate things are in this module because they share one traversal:
 
-* **registration** — global or per-agent, with scoped shadowing by name (B7);
-* **visibility** — restrictions intersect over *global* names only, so a
-  restriction can never silence a tool an agent registered for itself;
-* **the pipeline** — `tools/pre-execute` → approval on `ask` → monotonic guards
-  → `tools/execute` (around) → `tools/body` → body → `tools/post-execute` → normalize →
-  `finalize_content` → `tools/result` (B1-B5).
+* **Registration.** A tool is registered globally or for one agent. A scoped
+  registration shadows a global one by name (B7).
+* **Visibility.** Restrictions intersect. A restriction filters only the tools
+  that are registered outside the scope that wrote it: the global tools and
+  the tools of an ancestor scope (P6-27). So a restriction can never hide a
+  tool that an agent registered for itself.
+* **The pipeline.** `tools/pre-execute` → approval on `ask` → monotonic guards
+  → `tools/execute` (around) → `tools/body` → body → `tools/post-execute` →
+  normalize → `finalize_content` → `tools/result` (B1-B5).
 
-**Guards run after approval**, following dsh. A guard is deny-only and runs last,
-so it is the final word even over a human's explicit approval — that is what
-"monotonic" buys, and it is why policy that must not be reorderable stays a guard
-rather than a listener. (The pH plans' summary tables list the two the other way
-round; that is a transcription slip, not a second design.)
+**Guards run after approval**, as in dsh. A guard can only deny, and it runs
+last. So a guard has the final word, even over the explicit approval of a
+human. That is the benefit of "monotonic". It is also the reason why a policy
+that must not be reorderable stays a guard and does not become a listener. (The
+summary tables of the pH plans list the two in the opposite order. That is a
+transcription error and not a second design.)
 
 @module ph.tools.registry
 """
@@ -118,31 +122,33 @@ EFFECT_MAY_HAVE_HAPPENED = (
 """What a keyed call's result says when it ran after an unknown outcome."""
 
 RUN_CODE = "run_code"
-"""The reserved Code Mode transport name.
+"""The reserved name of the Code Mode transport.
 
-Reserved in *every* mode and unregisterable, unshadowable and unrestrictable:
-if a deployment could occupy the name, a model told to call `run_code` would
-reach something else (P1-04). Only `register_transport` may claim it."""
+The name is reserved in *every* mode. It cannot be registered, shadowed or
+restricted. If a deployment could occupy the name, a model that was told to
+call `run_code` would reach something else (P1-04). Only `register_transport`
+may claim it."""
 
 PresentationMode = Literal["native", "code", "both"]
 
 ToolGuard = Callable[[ToolExecution], str | None]
-"""A monotonic guard: a reason denies, `None` abstains.
+"""A monotonic guard: a reason denies, and `None` abstains.
 
-There is no allow result *by construction*, which is what makes listener order
-unable to turn a denial back into permission (B2)."""
+There is no allow result *by construction*. For that reason, the order of the
+listeners cannot turn a denial back into a permission (B2)."""
 
 CodeNamespaceFactory = Callable[[Any], "MaybeAwaitable[CodeBindingNamespace]"]
-"""Builds one binding namespace for one question — a live run, or the SDK block.
+"""Builds one binding namespace for one caller: a live run, or the SDK block.
 
-The argument is a `CodeBindingsRequest` (`ph.tools.code_mode`), typed `Any` here
-because the registry must not import the module that consumes it.
+The argument is a `CodeBindingsRequest` (`ph.tools.code_mode`). It is typed
+`Any` here because the registry must not import the module that consumes it.
 
-**And not a `TYPE_CHECKING` forward reference either**, which is the obvious fix
-and breaks a gate: this alias is a runtime value, so `get_type_hints(_Layer)` —
-which `test_registration_ownership` calls on every declared dataclass — raises
-`NameError` on a name that only exists for the checker, and the walk swallows it
-and drops `code_namespaces` from the surface it is auditing."""
+**A `TYPE_CHECKING` forward reference is not an option either.** It is the
+obvious fix, and it breaks a gate. This alias is a runtime value, and
+`test_registration_ownership` calls `get_type_hints(_Layer)` on every declared
+dataclass. That call raises `NameError` on a name that exists only for the type
+checker. The walk suppresses the error and drops `code_namespaces` from the
+surface that it audits."""
 
 
 events.declare(
@@ -181,15 +187,15 @@ events.declare(
 )
 
 
-# One reason per non-grant, distinct on purpose: a model must be able to tell a
-# human's "no" from a missing channel, because only one is worth re-planning
-# around and the other is a misconfiguration to report.
 ToolRestriction = NameFilter
-"""A per-scope filter over global tools. Restrictions intersect.
+"""A per-scope filter over the tools that the scope inherits. Restrictions
+intersect.
 
-The rule itself is `ph.seams._restriction.NameFilter`, shared with `ctx.skills`,
-which asks the same question of a different table. The name stays because it is
-what every call site and every profile-facing docstring says.
+The inherited tools are the global tools and the tools of an ancestor scope
+(P6-27). The rule itself is `ph.seams._restriction.NameFilter`. `ctx.skills`
+shares it and asks the same question of a different table. The name
+`ToolRestriction` stays because every call site and every profile-facing
+docstring uses it.
 """
 
 
@@ -199,28 +205,29 @@ class _Layer:
 
     tools: dict[str, ToolDefinition] = field(default_factory=dict)
     by: dict[str, Running] = field(default_factory=dict)
-    """Who registered each tool, and which scope it landed on (P6-29).
+    """Who registered each tool, and which scope the registration landed on (P6-29).
 
-    Kept beside `tools` rather than on `ToolDefinition`, which is frozen row data
-    a plugin author builds and hands over — a `Context` on it would make the
-    value a registration record and let the same definition be registered twice
-    with one of them lying. Written and popped only by `_claim`, and only *after*
-    the mutation it describes has been accepted: a parallel dict is the one shape
-    the five sibling registries rejected in favor of a `_Registered(value, by)`
-    record, and this is the hazard they were avoiding. It survives here because
-    `_claim`'s `mutate`/`undo` closures are built before the pair is known, so
-    folding the pair into `tools` would mean threading it through all six call
-    sites to serve one."""
+    The pairs are kept beside `tools` and not on `ToolDefinition`. A definition
+    is frozen row data that a plugin author builds and hands over. A `Context`
+    on it would make the value a registration record, and the same definition
+    could then be registered twice with one of the two records wrong. Only
+    `_claim` writes and pops this dict, and only *after* the mutation that the
+    entry describes has been accepted. A parallel dict is the one shape that the
+    six sibling registries rejected in favor of a `_Registered(value, by)`
+    record, and this is the hazard that they avoided. The dict stays here
+    because the `mutate` and `undo` closures that `_claim` takes are built
+    before the pair is known. To fold the pair into `tools` would mean passing
+    it through all six call sites for the benefit of one."""
     restrictions: list[ToolRestriction] = field(default_factory=list)
     guards: list[ToolGuard] = field(default_factory=list)
     mode: PresentationMode | None = None
-    """The presentation this scope declared for itself.
+    """The presentation that this scope declared for itself.
 
-    One cell, not a list: two answers to "which form does the model see" is a
-    contradiction rather than something to merge."""
+    This is one cell and not a list. Two answers to "which form does the model
+    see" are a contradiction, and not something to merge."""
     transport: TransportPresentation | None = None
-    """How this scope names and describes the transport. One cell for the same
-    reason `mode` is: the model is offered exactly one callable."""
+    """How this scope names and describes the transport. It is one cell for the
+    same reason as `mode`: the model is offered exactly one callable."""
     code_namespaces: dict[str, CodeNamespaceFactory] = field(default_factory=dict)
     """Binding namespaces this scope contributes to Code Mode runs (P3-10)."""
 
@@ -243,55 +250,64 @@ class _View:
     by: dict[str, Running]
     """Who registered each visible tool, resolved by the same shadowing walk.
 
-    Beside `visible` rather than derived later because one traversal decides
-    both: the layer that *won* a name is the layer whose registration owns it,
-    and asking again afterwards would be a second walk free to disagree with the
-    first the moment shadowing changed."""
+    It is stored beside `visible` and not derived later, because one traversal
+    decides both. The layer that *won* a name is the layer whose registration
+    owns it. A second walk afterwards could disagree with the first as soon as
+    the shadowing changed."""
     mode: PresentationMode
     schemas: tuple[ToolSchema, ...]
-    """The model-facing schemas — under Code Mode only the transport's, where the
-    model is offered one callable and reaches the rest through the SDK (P1-04)."""
+    """The schemas that the model sees. Under Code Mode this is only the schema
+    of the transport. There the model is offered one callable and reaches the
+    rest through the SDK (P1-04)."""
     transport_name: str
-    """What this scope's model calls the transport.
+    """The name by which the model of this scope calls the transport.
 
-    Four checks compare against this rather than against `RUN_CODE` — the C6
-    refusal, the route-back text, the `tools` namespace that must not bind the
-    transport to itself, and the code-only rule in the prompt. Reading it from the
-    view keeps them in agreement by construction."""
+    Four checks compare against this name and not against `RUN_CODE`:
+
+    * the C6 refusal
+    * the route-back text
+    * the `tools` namespace, which must not bind the transport to itself
+    * the code-only rule in the prompt
+
+    All four read the name from the view, so they agree by construction."""
     code_namespaces: dict[str, CodeNamespaceFactory]
-    """The contributed binding namespaces this scope's programs may reach,
-    shadowed by name like tools. Resolved with the view so the run and the SDK
-    block read one answer."""
+    """The contributed binding namespaces that the programs of this scope may
+    reach. A nearer scope shadows by name, as with tools. They are resolved with
+    the view so that the run and the SDK block read one answer."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Effect:
-    """A keyed call's open intent, from before its wrappers to after its body."""
+    """The open intent of a keyed call, from before its wrappers to after its body."""
 
     journal: IntentJournal
     session: Session
     claim: Claim
     unsure_of: str | None = None
-    """The call id of the earlier attempt nobody saw finish, when this retries one."""
+    """The call id of the earlier attempt that nobody saw finish, when this call
+    retries one."""
 
     def unknown(self) -> None:
-        """Settled `outcome-unknown`: the effect may have happened, so a repeat is
-        `reconcile`'s to decide, or runs with the note, as after a crash."""
+        """Settle the intent as `outcome-unknown`. The effect may have happened.
+        So `reconcile` decides a repeat, or the repeat runs with the note, as
+        after a crash."""
         self.journal.abandon(self.session, self.claim, "outcome-unknown")
 
 
 def _effect_settle(
     key: str, call_id: str, *, is_error: bool, content: Sequence[ContentBlock]
 ) -> JsonObject:
-    """A `tool/effect-settled` payload, built by `TOOL_EFFECT`'s own `effect_settle` —
-    the builder repair's closer calls too — from the result's blocks."""
+    """A `tool/effect-settled` payload, built from the blocks of the result. The
+    builder is `effect_settle`, the builder of the `TOOL_EFFECT` kind, which the
+    closer of repair also calls."""
     return effect_settle(
         key, call_id, is_error=is_error, content=[block.to_wire() for block in content]
     )
 
 
 def _repeated(prior: Prior, settled: SessionEvent) -> ToolExecutionResult:
-    """The result the first call with this effect returned, handed back instead."""
+    """The result that the first call with this effect returned, given back to the
+    repeat."""
     meta: JsonObject = {"repeated": True, "repeatOf": as_str(prior.opened.data.get("callId"))}
     return ToolExecutionResult(
         is_error=as_bool(settled.data.get("isError")),
@@ -304,11 +320,11 @@ def _repeated(prior: Prior, settled: SessionEvent) -> ToolExecutionResult:
 class PreparedCall:
     """One call between pipeline stages.
 
-    `result is None` means the body has not run and `dispatch()` is next.
-    Otherwise `needs_post` says whether `tools/post-execute` still applies: a
-    denial is a result policy may still shape, while a pipeline *failure* bypasses
-    it — a listener that raised must not get to reshape the error its own raise
-    produced.
+    `result is None` means that the body has not run and `dispatch()` is next.
+    Otherwise `needs_post` says whether `tools/post-execute` still applies. A
+    denial is a result that policy may still shape. A pipeline *failure*
+    bypasses the stage: a listener that raised must not reshape the error that
+    its own raise produced.
     """
 
     run: ToolRunContext
@@ -317,12 +333,12 @@ class PreparedCall:
 
 
 class Config(WireModel):
-    """Row config for `ph.tools`.
+    """The row config for `ph.tools`.
 
-    A `WireModel` like every other JSON boundary: a row is authored as YAML in
-    camelCase and read as snake_case in Python, under the one alias rule (Q2).
-    `extra="forbid"` turns a mistyped key into a startup error rather than a
-    silently ignored setting.
+    The config is a `WireModel`, like every other JSON boundary. A row is
+    written as YAML in camelCase and read as snake_case in Python, under the one
+    alias rule (Q2). `extra="forbid"` turns a mistyped key into a startup error,
+    so the setting is not silently ignored.
     """
 
     mode: PresentationMode = "native"
@@ -331,19 +347,20 @@ class Config(WireModel):
 def _refuse_decision(decision: Never, *, hook: str, expected: str) -> NoReturn:
     """A `waterfall` hook resolved to something outside its decision union.
 
-    `Never` gives `assert_never`'s build-time check: a variant added without an
-    arm fails the type check. The raise is a `TypeError` rather than
-    `assert_never`'s `AssertionError` because at run time this is not an
-    unreachable branch — `waterfall` calls listeners a plugin registered, so the
-    value is wrong rather than impossible, which is the house convention
-    (`ph.cordis.context` raises the same for an effect that returns no disposer).
+    `Never` gives the build-time check of `assert_never`: a variant that is
+    added without an arm fails the type check. The raise is a `TypeError` and
+    not the `AssertionError` of `assert_never`. At run time this is not an
+    unreachable branch. `waterfall` calls listeners that a plugin registered,
+    so the value is wrong and not impossible. A `TypeError` is the project
+    convention for that case (`ph.cordis.context` raises the same for an effect
+    that returns no disposer).
     """
     raise TypeError(f"{hook} must resolve to {expected}")
 
 
 def _projection_key(execution: ToolExecution) -> tuple[str, str]:
-    """Whose call this is, and its id: an agent's id is its session's, and a call with
-    neither is the deployment's own."""
+    """Whose call this is, and the id of the call. The id of an agent is the id
+    of its session, and a call with neither belongs to the deployment."""
     if execution.agent is not None:
         return execution.agent.id, execution.call_id
     return (execution.session.id if execution.session is not None else ""), execution.call_id
@@ -356,20 +373,23 @@ class ToolRuntime:
     ctx: Context
     default_mode: PresentationMode = "native"
     _layers: ScopedTable[_Layer] = field(default_factory=lambda: ScopedTable(_Layer, _Layer.empty))
-    """Each scope's contribution (`ScopedTable`): made on its first registration,
-    dropped with its last."""
+    """The contribution of each scope (`ScopedTable`). It is made on the first
+    registration of the scope and dropped with the last."""
     _generation: int = 0
-    """Bumped on every mutation. The view cache is valid for one generation."""
+    """Incremented on every mutation. The view cache is valid for one generation."""
     _views: dict[tuple[Context | None, ...], tuple[int, _View]] = field(default_factory=dict)
     _projecting: dict[tuple[str, str], ToolRunContext] = field(default_factory=dict)
-    """The runs currently inside `tools/post-execute`, by whose call and its id
-    (`_projection_key`) — what `projected` renders against.
+    """The runs that are inside `tools/post-execute` now. `projected` renders
+    against them. The key says whose call it is and gives the id of the call
+    (`_projection_key`).
 
-    Keyed by call because a policy row asking for a projection is answering
-    about *its* call, and several can be in the waterfall at once. **And by whose**
-    (T2): an id minted for a call its provider did not name is the same for two
-    agents at the same turn, step and index, and by id alone the second call's
-    entry replaced the first's and its `finally` took it down under the first."""
+    The key includes the call because a policy row that asks for a projection
+    asks about *its* call, and several calls can be in the waterfall at the
+    same time. **It also includes whose call it is** (T2). An id that is minted
+    for a call that its provider did not name is the same for two agents at the
+    same turn, step and index. Keyed by id alone, the entry of the second call
+    replaced the entry of the first, and the `finally` of the second call then
+    removed it while the first call still needed it."""
 
     # ---------------------------------------------------------- registration --
 
@@ -387,47 +407,54 @@ class ToolRuntime:
         *,
         record: str = "",
     ) -> Disposer:
-        """Mutate a layer and hand back the disposer that undoes it.
+        """Mutate a layer and return the disposer that undoes the mutation.
 
-        **Two questions, from one `scope`.** `owner.isolation` chooses *which layer* a
-        registration lands in — tool visibility, B7's subject — while lifetime chooses
-        *when it goes away*. Both come from the one `Running` pair asked for here, rather
-        than being passed in, so a caller cannot pair them wrongly.
+        **One `scope` answers two questions.** `layer.isolation` chooses *which
+        layer* a registration lands in. That is tool visibility, the subject of
+        B7. The lifetime chooses *when the registration goes away*. Both answers
+        come from the one `Running` pair that is requested here. They are not
+        passed in, so a caller cannot pair them wrongly.
 
-        `isolation` is what keeps the two answers apart even though both read the running
-        binding (P6-26). An activation scope is not isolated, so a row's tool still lands
-        on the global layer; an agent's scope *is* its own isolation, so a tool registered
-        from a body running for that agent lands on that agent's layer — the case that let
-        a body inside a contained child install a tool the whole deployment could see.
+        `isolation` keeps the two answers apart, although both read the running
+        binding (P6-26). An activation scope is not isolated, so the tool of a
+        row still lands on the global layer. The scope of an agent *is* its own
+        isolation. So a tool that is registered from a body that runs for that
+        agent lands on the layer of that agent. Before this rule, a body inside
+        a contained child could install a tool that the whole deployment could
+        see.
 
-        **The lifetime is the *intersection* of the two, not a choice between them**
-        (P6-29): the two scopes are unrelated branches and either can end first. Owning it
-        by the row alone strands the agent's `_Layer` under a disposed key; owning it by
-        the agent alone lets a registration outlive the row whose code made it, which is
-        I2 verbatim. So the release goes on both scopes and the first to fire wins —
-        `ScopedTable.claim`, the table the skill registry's restrictions and the
-        sandbox's path limits are kept in too.
+        **The lifetime is the *intersection* of the two, and not a choice
+        between them** (P6-29). The two scopes are unrelated branches, and
+        either can end first. If the row alone owns the registration, the
+        `_Layer` of the agent stays under a disposed key. If the agent alone
+        owns it, the registration can outlive the row whose code made it, which
+        is I2 verbatim. So the release goes on both scopes, and the first one to
+        fire wins. `ScopedTable.claim` does this. It is the same table shape
+        that holds the restrictions of the skill registry and the path limits of
+        the sandbox.
         """
         by = self.ctx.running_for(scope)
 
         def apply(layer: _Layer) -> None:
             mutate(layer)
             if record:
-                # Only a registration this registry will later *invoke* needs the
-                # pair kept — a tool, not a guard or a restriction, which are called
-                # as policy rather than as the row's body. Here rather than in
-                # `_register` so it is written where the pair is derived: computing
-                # it twice would ask `owner_for` twice and warn twice for a disposed
-                # activation, which is the one branch that is meant to be audible.
-                # Named `record` after `claim_slot`'s parameter, which does the same
-                # job for the at-most-one shape — one idiom, one word.
+                # The pair is kept only for a registration that this registry
+                # will later *invoke*. That is a tool. A guard or a restriction
+                # is called as policy and not as the body of the row. The pair
+                # is written here and not in `_register`, so that it is written
+                # where it is derived. To compute it twice would ask `owner_for`
+                # twice and warn twice for a disposed activation, and that is
+                # the one branch that is meant to be noticed. The parameter is
+                # named `record` after the name that `claim_slot` uses for the
+                # same job in the at-most-one shape: one idiom, one word.
                 #
-                # **After `mutate`, not before.** `_register`'s `add` refuses a
-                # duplicate name by raising, and writing the pair first meant a
-                # *rejected* registration overwrote the surviving one's — so the
-                # tool that stayed ran as the row whose registration had just been
-                # refused. Invisible until the next `_changed()` rebuilt the view
-                # from the corrupted cell, which is the worst kind of visible.
+                # **After `mutate`, not before.** The `add` of `_register`
+                # refuses a duplicate name by raising. When the pair was written
+                # first, a *rejected* registration overwrote the pair of the
+                # surviving one. The tool that stayed then ran as the row whose
+                # registration had just been refused. The error was invisible
+                # until the next `_changed()` rebuilt the view from the
+                # corrupted cell.
                 layer.by[record] = by
 
         def revert(layer: _Layer) -> None:
@@ -440,27 +467,29 @@ class ToolRuntime:
         return released
 
     def register(self, definition: ToolDefinition, *, scope: Context | None = None) -> Disposer:
-        """Register a tool globally, or on an agent's scope to shadow by name."""
+        """Register a tool globally, or on the scope of an agent to shadow by name."""
         if definition.name == RUN_CODE:
             raise ValueError(
                 f'"{RUN_CODE}" is the reserved Code Mode transport and cannot be registered'
             )
-        # A chain walk over the layer cells, not `view()`: registration
-        # invalidates the view cache one line later, so building one here made
-        # every mount O(N^2) in throwaway schema construction.
+        # This is a chain walk over the layer cells and not `view()`.
+        # Registration invalidates the view cache one line later, so a view
+        # built here made every mount O(N^2) in schema construction that was
+        # thrown away.
         #
-        # `scope or self.ctx` survives here and in `present_transport`, stated
-        # per §5 rule 6 — and the honest reason is not that converting the read
-        # would make one `None` mean two things. It already does: this line
-        # resolves the *mount*, while `_register` two lines down resolves
-        # `layer_for(scope)`, which since P6-26 is the running body's layer. So
-        # the reserved-name check and the registration it guards can disagree,
-        # and the check takes the wider view — a tool body registering under
-        # `running(...)` can occupy the transport name C6 says is unshadowable.
-        # Latent (every `ctx.tools.register` in the tree is a row's `apply`), and
-        # the fix is not to convert this half: both halves are asking
-        # `layer_for`'s question, so the *pair* converts together or neither
-        # does. P6-12's mechanism owns that, and P6-32 defers to it.
+        # `scope or self.ctx` stays here and in `present_transport`, and §5
+        # rule 6 requires the reason to be stated. The reason is not that
+        # converting the read would make one `None` mean two things. It already
+        # does. This line resolves the *mount*. `_register`, a few lines down,
+        # resolves `layer_for(scope)`, which since P6-26 is the layer of the
+        # running body. So the reserved-name check and the registration that it
+        # guards can disagree, and the check takes the wider view. A tool body
+        # that registers under `running(...)` can occupy the transport name that
+        # C6 says cannot be shadowed. The problem is latent, because every
+        # `ctx.tools.register` in the tree is the `apply` of a row. The fix is
+        # not to convert this half. Both halves ask the question of `layer_for`,
+        # so the *pair* converts together or neither does. The mechanism of
+        # P6-12 owns that, and P6-32 defers to it.
         if definition.name == self._presented_name(scope or self.ctx):
             raise ValueError(
                 f'"{definition.name}" is how this profile presents the Code Mode transport '
@@ -473,9 +502,10 @@ class ToolRuntime:
     ) -> Disposer:
         """Claim the reserved transport name. The one caller is the Code Mode row.
 
-        Same registration path as every other tool — shadowing rules, the
-        `tools/change` emit, layer cleanup — minus the reservation check that
-        exists to keep everyone *else* off the name.
+        The registration path is the same as for every other tool: the shadowing
+        rules, the `tools/change` emit, the layer cleanup. Only the reservation
+        check is skipped, because that check exists to keep every *other* caller
+        off the name.
         """
         if definition.name != RUN_CODE:
             raise ValueError(f'register_transport is for "{RUN_CODE}", not "{definition.name}"')
@@ -504,16 +534,17 @@ class ToolRuntime:
         )
 
     def registrants(self) -> dict[str, str]:
-        """Each deployment-wide tool by name, and the profile row that registered it
-        (`Context.row_id`) — for a caller that has to say which tools a row gives (an
-        assigned profile's narrowing, S7b). A tool no row registered is absent."""
+        """Each deployment-wide tool by name, with the profile row that registered
+        it (`Context.row_id`). It is for a caller that must say which tools a row
+        gives (the narrowing of an assigned profile, S7b). A tool that no row
+        registered is absent."""
         layer = self._layers.get(None)
         if layer is None:
             return {}
         return {name: by.owner.row_id for name, by in layer.by.items() if by.owner.row_id}
 
     def restrict(self, restriction: ToolRestriction, *, scope: Context | None = None) -> Disposer:
-        """Mask global tools for one scope. Restrictions intersect."""
+        """Mask the tools that one scope inherits. Restrictions intersect."""
         return self._claim(
             scope,
             lambda layer: layer.restrictions.append(restriction),
@@ -531,11 +562,12 @@ class ToolRuntime:
         )
 
     def present_as(self, mode: PresentationMode, *, scope: Context | None = None) -> Disposer:
-        """Declare the presentation for one agent, shadowing the deployment default.
+        """Declare the presentation for one agent. It shadows the deployment default.
 
-        One per scope, as one transport is (`present_transport`): a second overwrote
-        the first, and either release cleared the field whatever it then held, so
-        what survived depended on the order the two were let go.
+        A scope may hold one, as it may hold one transport (`present_transport`).
+        Before this rule, a second declaration overwrote the first, and either
+        release cleared the field whatever it then held. So what survived
+        depended on the order in which the two were released.
         """
 
         def claim(layer: _Layer) -> None:
@@ -553,11 +585,12 @@ class ToolRuntime:
     ) -> Disposer:
         """Name and describe the transport for one scope (P3-09).
 
-        Refused when the name is already a visible tool: the whole point of the
-        reservation is that a model told to call this name reaches the transport,
-        and a silent shadow either way would defeat it. The mirror check lives in
-        `register`, so the two orders fail the same way — and `register`'s
-        comment is where `scope or self.ctx` surviving in both is argued.
+        The call is refused when the name is already a visible tool. The purpose
+        of the reservation is that a model that is told to call this name
+        reaches the transport, and a silent shadow in either direction would
+        defeat that. The mirror check is in `register`, so the two orders fail
+        in the same way. The comment in `register` explains why
+        `scope or self.ctx` stays in both.
         """
         target = scope or self.ctx
         occupant = self.view(target).visible.get(presentation.name)
@@ -570,9 +603,10 @@ class ToolRuntime:
 
         def add(layer: _Layer) -> None:
             if layer.transport is not None:
-                # A real claim, unlike a silent overwrite: with two presentations
-                # on one cell, the first disposal would clear what the second
-                # still wants, and the survivor would depend on disposal order.
+                # This is a real claim and not a silent overwrite. With two
+                # presentations on one cell, the first disposal would clear what
+                # the second still needs, and the survivor would depend on the
+                # disposal order.
                 raise ValueError(
                     "this scope already presents the Code Mode transport as "
                     f'"{layer.transport.name}"'
@@ -590,17 +624,19 @@ class ToolRuntime:
     ) -> Disposer:
         """Claim one Code Mode binding namespace for this scope (P3-10).
 
-        The factory answers one question, asked twice with the same request: by
-        the run (with a live bridge) and by the SDK prompt section (with none) —
-        so the block cannot describe a namespace a program could not reach. A
-        keyed claim rather than a listener, so two rows wanting one name fail
-        *here*, at mount, instead of on every cell of a booted deployment; a
-        scoped claim shadows a global one by name, like a tool's.
+        The factory answers one question, and it is asked twice with the same
+        request: by the run (with a live bridge) and by the SDK prompt section
+        (with none). So the block cannot describe a namespace that a program
+        could not reach. This is a keyed claim and not a listener. So two rows
+        that want one name fail *here*, at mount, and not on every cell of a
+        booted deployment. A scoped claim shadows a global one by name, as a
+        scoped tool does.
 
-        A namespace that re-presents a registered tool says so on the *binding*
-        (`CodeBinding.presents`), not here: the binding list is then the only
-        statement of the fact, so it cannot drift from a second list, and a
-        namespace cannot suppress a tool it does not actually offer.
+        A namespace that presents a registered tool again says so on the
+        *binding* (`CodeBinding.presents`), and not here. The binding list is
+        then the only statement of the fact, so it cannot drift from a second
+        list. A namespace also cannot suppress a tool that it does not actually
+        offer.
         """
         validate_binding_name(name)
         if name == "tools":
@@ -637,14 +673,15 @@ class ToolRuntime:
     def stale_views(self) -> list[str]:
         """Cached views that no longer equal what a rebuild would produce (I6, P6-01).
 
-        Here rather than in the invariant row that declares it, because the cache
-        is this class's own secret: a check written against `_views` from outside
-        would be quietly disabled by a rename, and an invariant that can stop
-        being checked without anybody noticing is worse than no invariant at all.
+        The check is here and not in the invariant row that declares it, because
+        the cache is private to this class. A rename would silently disable a
+        check that was written against `_views` from outside. An invariant that
+        can stop being checked without anybody noticing is worse than no
+        invariant.
 
-        Every cached entry is at the current generation — `_changed` clears the
-        table when it bumps the counter — so every one of them is an answer `view`
-        would serve, and every one is compared.
+        Every cached entry is at the current generation, because `_changed`
+        clears the table when it increments the counter. So every entry is an
+        answer that `view` would serve, and every entry is compared.
         """
         found: list[str] = []
         for chain, (_, cached) in self._views.items():
@@ -662,31 +699,34 @@ class ToolRuntime:
         return found
 
     def view(self, scope: Boundary) -> _View:
-        """Resolve what one boundary sees, most-specific-first.
+        """Resolve what one boundary sees, most specific first.
 
-        Memoized per isolation chain until the next registry change: the view is read
-        several times per tool call and per prompt assembly, and changes only when a row
-        registers or disposes something.
+        The view is memoized per isolation chain until the next registry change.
+        It is read several times per tool call and per prompt assembly, and it
+        changes only when a row registers or disposes something.
 
-        **Stated, with no default** (P6-32). This resolved `scope or self.ctx`, and
-        `self.ctx` is the mount — whose isolation is `None`, the *global* layer — so an
-        unstated boundary was not "no tools", it was every tool the deployment holds.
-        `DEPLOYMENT` now says the wide thing deliberately, so a caller that says nothing
-        fails rather than being handed the widest answer.
+        **The boundary is stated, and there is no default** (P6-32). This method
+        at first resolved `scope or self.ctx`. `self.ctx` is the mount, whose
+        isolation is `None`, the *global* layer. So an unstated boundary did not
+        mean "no tools". It meant every tool that the deployment holds.
+        `DEPLOYMENT` now states the wide answer deliberately. A caller that
+        states nothing fails and does not get the widest answer.
         """
         target = boundary_of(scope, self.ctx)
         cache_key = tuple(target.isolation_chain())
         cached = self._views.get(cache_key)
         if cached is not None and cached[0] == self._generation:
             return cached[1]
-        # On the miss, before the table grows: a disposed agent's `Context` is
-        # retained by its own key until something invalidates, which a deployment
-        # that has stopped registering never does (I2).
+        # This runs on the miss, before the table grows. The `Context` of a
+        # disposed agent is retained by its own key until something invalidates
+        # the cache, and a deployment that has stopped registering never does
+        # that (I2).
         drop_dead_chains(self._views)
-        # From the **cache key**, not the context it was first built for: the key is
-        # `target.isolation_chain()`, and its layers are all `_build_view` wants of
-        # the target — which makes the view a pure function of the key, and so
-        # something `stale_views` can check.
+        # The view is built from the **cache key**, and not from the context
+        # that it was first built for. The key is `target.isolation_chain()`,
+        # and the layers of the key are all that `_build_view` needs of the
+        # target. That makes the view a pure function of the key, so
+        # `stale_views` can check it.
         view = self._build_view(self._layers.along(cache_key))
         self._views[cache_key] = (self._generation, view)
         return view
@@ -695,48 +735,52 @@ class ToolRuntime:
         visible: dict[str, ToolDefinition] = {}
         by: dict[str, Running] = {}
         mode = next((layer.mode for layer in layers if layer.mode is not None), None)
-        # Carried rather than re-sliced. `layers[:index]` allocated a list and a
-        # generator *per tool name per layer* to say "the strictly nearer
-        # scopes"; accumulating them says the same thing once, and says it in the
-        # shape the rule is stated in.
+        # The nearer layers are carried and not sliced again. `layers[:index]`
+        # allocated a list and a generator *per tool name per layer* to say
+        # "the strictly nearer scopes". An accumulated list says the same thing
+        # one time, in the form in which the rule is stated.
         nearer: list[_Layer] = []
         for layer in layers:
             for name, definition in layer.tools.items():
                 if name in visible:
-                    # A nearer scope already answered this name; scoped
-                    # registrations shadow globals rather than merging.
+                    # A nearer scope already answered this name. Scoped
+                    # registrations shadow globals and do not merge with them.
                     continue
                 if name != RUN_CODE and not all(outer.admits(name) for outer in nearer):
-                    # **The transport is never restricted** (`RUN_CODE`): a grant
-                    # lists the names its parent sees, where the transport goes by
-                    # the name a profile presents it as, and filtering it here
-                    # under its registered one left every child in Code Mode with
-                    # nothing to call. What a cell may *do* is restricted where it
-                    # counts — at each binding it awaits.
+                    # **The transport is never restricted** (`RUN_CODE`). A
+                    # grant lists the names that its parent sees, and there the
+                    # transport has the name that a profile presents it as.
+                    # Filtering it here under its registered name left every
+                    # child in Code Mode with nothing to call. What a cell may
+                    # *do* is restricted where it matters: at each binding that
+                    # it awaits.
                     #
-                    # **A restriction reaches everything *outside* the scope that
-                    # wrote it, and nothing inside** (P6-27). `nearer` excludes
-                    # this layer, so a layer is never filtered by its own
-                    # restriction — an agent's own registration cannot be masked
-                    # out from under it — while an ancestor's is, which is what
-                    # "a child holds a subset of its parent" means.
+                    # **A restriction reaches everything *outside* the scope
+                    # that wrote it, and nothing inside** (P6-27). `nearer`
+                    # excludes this layer, so a layer is never filtered by its
+                    # own restriction, and the registration of an agent cannot
+                    # be masked away from that agent. The registration of an
+                    # ancestor is filtered. That is the meaning of "a child
+                    # holds a subset of its parent".
                     #
-                    # This read `key is None and not all(...)`, filtering
-                    # **global** names only: the same answer for a flat tree,
-                    # where a chain is [self, global] and there is no ancestor to
-                    # inherit from, and the wrong one once agents nest — a child
-                    # inherited its parent's scoped tools and could not be
-                    # narrowed out of them, so a grant could widen a child but
-                    # never bound it.
+                    # This check at first read `key is None and not all(...)`,
+                    # which filtered **global** names only. That gives the same
+                    # answer for a flat tree, where a chain is [self, global]
+                    # and there is no ancestor to inherit from. It gives the
+                    # wrong answer when agents nest. A child inherited the
+                    # scoped tools of its parent and could not be narrowed out
+                    # of them, so a grant could widen a child but never limit
+                    # it.
                     #
-                    # **"Inside" means this layer, not this subtree.** A tool
-                    # registered on a *descendant's* scope is not reachable by an
-                    # ancestor's filter either, so a grandchild can hold what its
-                    # granting parent cannot see. Deliberate, and the reason a
-                    # spawn may only ever `restrict`: see `Grant.apply`, which
-                    # states that registering on a child is a way to hand it
-                    # something its parent lacks, and is therefore not an
-                    # instrument containment may use.
+                    # **"Inside" means this layer, not this subtree.** The
+                    # filter of an ancestor also does not reach a tool that is
+                    # registered on the scope of a *descendant*. So a
+                    # grandchild can hold what its granting parent cannot see.
+                    # This is deliberate, and it is the reason why a spawn may
+                    # only ever `restrict`. See `Grant.apply`, which states
+                    # that registering on a child is a way to give the child
+                    # something that its parent lacks, and is therefore not an
+                    # instrument that containment may use.
                     continue
                 visible[name] = definition
                 registered = layer.by.get(name)
@@ -751,18 +795,19 @@ class ToolRuntime:
         transport = visible.get(RUN_CODE)
         if presentation is not None and transport is not None:
             if presentation.name != RUN_CODE and presentation.name in visible:
-                # The claim-time checks in `register` and `present_transport` are
-                # scope-local snapshots; a scoped presentation plus a later
-                # parent-scope registration slips past both. This is the one
-                # place that resolves every view, so the contradiction fails
-                # loudly here instead of silently clobbering either side.
+                # The claim-time checks in `register` and `present_transport`
+                # are snapshots of one scope. A scoped presentation followed by
+                # a later registration on a parent scope passes both. This is
+                # the one place that resolves every view, so the contradiction
+                # fails loudly here and does not silently overwrite either side.
                 raise ValueError(
                     f'the Code Mode transport is presented as "{presentation.name}", but a '
                     "tool of that name is also visible in this scope; the transport name "
                     "must be unshadowable (C6)"
                 )
-            # Renamed in place, so `visible` never holds the transport twice and
-            # nothing downstream has to know which name it was registered under.
+            # The transport is renamed in place. So `visible` never holds it
+            # twice, and nothing downstream needs to know the name under which
+            # it was registered.
             del visible[RUN_CODE]
             visible[presentation.name] = presentation.rename(transport)
             transport_name = presentation.name
@@ -772,12 +817,13 @@ class ToolRuntime:
                 if name not in code_namespaces:
                     code_namespaces[name] = factory
         if resolved_mode == "code":
-            # One callable: the transport, under the name this scope presents it as.
-            # Everything else is reached through the SDK the prompt lists, so its
-            # schemas stay out — but the transport's must be offered, or a real
-            # provider is sent a request with no tool to call and the model can run
-            # nothing. The fake adapter never asked for a schema, which is how this
-            # went unseen.
+            # One callable: the transport, under the name that this scope
+            # presents it as. Everything else is reached through the SDK that
+            # the prompt lists, so the other schemas stay out. The schema of the
+            # transport must be offered. Otherwise a real provider gets a
+            # request with no tool to call, and the model can run nothing. The
+            # fake adapter never asked for a schema, which is why this went
+            # unnoticed.
             offered = visible.get(transport_name)
             schemas: tuple[ToolSchema, ...] = () if offered is None else (offered.schema(),)
         else:
@@ -802,19 +848,23 @@ class ToolRuntime:
     ) -> bool:
         """Whether restoring the workspace takes back everything this call to `name` does.
 
-        The tool's own `effects_confined_to_workspace`, read through this scope's
-        view: a shadowed registration is a different tool, and an unscoped lookup
-        ran in the *unsafe* direction — a row shadowing `write` resolved to the
-        global builtin's `True`. An unknown tool is not covered. Asked of **this
-        call** (S4) — its arguments and the agent making it — since a write whose
-        path leaves the tree is not one a restore takes back. A call that changes
-        nothing (`effect_free`) is covered: there is nothing to take back.
+        The answer is the `effects_confined_to_workspace` of the tool itself,
+        read through the view of this scope. A shadowed registration is a
+        different tool, and an unscoped lookup erred in the *unsafe* direction:
+        a row that shadowed `write` resolved to the `True` of the global
+        builtin. An unknown tool is not covered. The question is asked of
+        **this call** (S4), with its arguments and the agent that makes it,
+        because a restore does not take back a write whose path leaves the
+        tree. A call that changes nothing (`effect_free`) is covered, because
+        there is nothing to take back.
 
-        Asked once per nested call, by `prepare` (`ToolExecution.restore_covered`), for
-        its two readers, which must not drift apart: `/revert`, listing what a restore
-        did not undo from each dispatch's record, and the checkpoint policy's barrier
-        before a nested Code Mode dispatch, which exists so a crash cannot empty that
-        list.
+        `prepare` asks one time per nested call (`ToolExecution.restore_covered`),
+        for two readers that must not drift apart:
+
+        * `/revert`, which lists what a restore did not undo, from the record of
+          each dispatch.
+        * The barrier of the checkpoint policy before a nested Code Mode
+          dispatch. The barrier exists so that a crash cannot empty that list.
         """
         definition = self.get(name, scope=scope)
         return definition is not None and (
@@ -822,8 +872,8 @@ class ToolRuntime:
         )
 
     def effect_free(self, name: str, *, scope: Boundary) -> bool:
-        """Whether a call to `name` changes nothing, read through this scope's view (S4).
-        An unknown tool is not."""
+        """Whether a call to `name` changes nothing, read through the view of this
+        scope (S4). An unknown tool is not effect-free."""
         definition = self.get(name, scope=scope)
         return definition is not None and definition.effect_free
 
@@ -831,21 +881,22 @@ class ToolRuntime:
         return sorted(self.view(scope).visible)
 
     def path_tools(self, *, scope: Boundary) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """The visible reader and searchers, by what they declare (G8/P4-02).
+        """The visible reader and searcher tools, by what they declare (G8/P4-02).
 
-        **Here rather than at the row that wanted it**, because the question is
-        about the registry: which visible tools declare `reads_paths` and
-        `searches_paths`. A policy row matching names could not know — a
-        deployment renames its tools and an MCP server adds its own, which is
-        the argument `ToolDefinition.self_limits` makes one file over.
+        **The method is here and not at the row that needed it**, because the
+        question is about the registry: which visible tools declare
+        `reads_paths` and `searches_paths`. A policy row that matched names
+        could not know. A deployment renames its tools and an MCP server adds
+        its own. `ToolDefinition.self_limits` in `definition.py` makes the same
+        argument.
 
-        **Both sets whole, and no tiebreak.** An earlier cut returned the first
-        reader, which pushed a *wording* decision — which of several names to
-        put in a sentence — into the tool table, and showed as an asymmetric
-        return. Picking one is the caller's, and the next question it asks
-        ("name two", "prefer the one that paginates") then costs it nothing
-        here. Sorted, so a deployment with two readers is deterministic rather
-        than dependent on registration order.
+        **Both sets are returned whole, with no tiebreak.** An earlier version
+        returned the first reader. That put a *wording* decision (which of
+        several names to put in a sentence) into the tool table, and it showed
+        as an asymmetric return. The caller picks one. The next question that
+        the caller asks ("name two", "prefer the one that paginates") then
+        needs no change here. The names are sorted, so a deployment with two
+        readers is deterministic and does not depend on registration order.
         """
         visible = self.view(scope).visible
         reads = tuple(sorted(name for name, one in visible.items() if one.reads_paths))
@@ -853,10 +904,11 @@ class ToolRuntime:
         return (reads, searches)
 
     def schemas(self, *, scope: Boundary) -> list[ToolSchema]:
-        """The model-facing schemas for one scope.
+        """The schemas that the model sees for one scope.
 
-        Whitelists name/description/parameters, so no internal field — a
-        timeout budget, a concurrency classifier — can leak into a request.
+        Each schema is a whitelist of name, description and parameters. So no
+        internal field, such as a timeout budget or a concurrency classifier,
+        can leak into a request.
         """
         return list(self.view(scope).schemas)
 
@@ -870,16 +922,19 @@ class ToolRuntime:
         return None
 
     def execution_mode(self, call: ToolExecutionInput) -> ExecutionMode:
-        """The live overlap classification, re-read before every start.
+        """The live overlap classification, read again before every start.
 
-        **The last definition-owned body, bound like the other four** (P6-29): a
-        classifier that registers something unwinds with the row that wrote it instead of
-        landing wherever the scheduler happened to be called from.
+        **The classifier is a definition-owned body, and it is bound like the
+        others** (P6-29). A classifier that registers something unwinds with the
+        row that wrote it. The registration does not land wherever the scheduler
+        was called from.
 
-        The layer bound around the call is `boundary_of(call.scope, ...)`, and for
-        `DEPLOYMENT` that is the mount. The equivalence is load-bearing: only globally
-        registered tools are visible under `DEPLOYMENT`, and a global registration's own
-        layer *is* the mount's, so binding the mount here binds the pair's recorded layer.
+        The layer that is bound around the call is `boundary_of(call.scope, ...)`,
+        and for `DEPLOYMENT` that is the mount. The code depends on this
+        equivalence. Only globally registered tools are visible under
+        `DEPLOYMENT`, and the layer of a global registration *is* the layer of
+        the mount. So binding the mount here binds the recorded layer of the
+        pair.
         """
         view = self.view(call.scope)
         definition = view.visible.get(call.name)
@@ -912,11 +967,11 @@ class ToolRuntime:
             name=call.name,
             arguments=arguments,
             token=object(),
-            # The one narrowing point onto the pipeline's *persistent record*:
-            # `ToolExecution.scope` is non-optional, so every stage downstream
-            # reads a `Context` (P6-32). `execution_mode` narrows the same field
-            # once more, transiently, because the scheduler classifies calls
-            # that have no execution yet.
+            # This is the one narrowing point onto the *persistent record* of
+            # the pipeline. `ToolExecution.scope` is non-optional, so every
+            # stage downstream reads a `Context` (P6-32). `execution_mode`
+            # narrows the same field one more time, transiently, because the
+            # scheduler classifies calls that have no execution yet.
             scope=boundary_of(call.scope, self.ctx),
             session=call.session,
             agent=call.agent,
@@ -925,18 +980,19 @@ class ToolRuntime:
         )
 
     def create_execution(self, call: ToolExecutionInput) -> ToolRunContext:
-        """Accept a call: resolve the tool, snapshot arguments, mint the token.
+        """Accept a call: resolve the tool, snapshot the arguments, mint the token.
 
-        `UNKNOWN_TOOL` is decided here — *before* any policy listener runs — so a
-        name the prompt never offered cannot be observed, logged as policy, or
-        allowed by a permissive row (C6).
+        `UNKNOWN_TOOL` is decided here, *before* any policy listener runs. So a
+        name that the prompt never offered cannot be observed, logged as policy,
+        or allowed by a permissive row (C6).
         """
         view = self.view(call.scope)
         definition = view.visible.get(call.name)
         if definition is None:
             if call.name == RUN_CODE and view.transport_name != RUN_CODE:
-                # "Not enabled" would be false — it is enabled, under the name
-                # this profile presents; say which, so the model can correct.
+                # "Not enabled" would be false. The transport is enabled, under
+                # the name that this profile presents. The message says which
+                # name, so that the model can correct the call.
                 raise ToolNotFoundError(
                     call.name,
                     f'the Code Mode transport is presented as "{view.transport_name}" here',
@@ -950,28 +1006,30 @@ class ToolRuntime:
                 f"call it from inside {view.transport_name} as `await tools.{call.name}(...)`",
             )
         execution = self._execution(call, freeze_json_value(call.arguments, frozen_input=True))
-        # **Who the tool's own code runs as, resolved here and carried** (P6-29).
-        # The two halves come from different places on purpose: the *owner* is
-        # what registration recorded, so a registration made from a tool body
-        # unwinds with the row that wrote the tool (I2); the *layer* is the live
-        # execution's scope at each stage, so what it registers is visible to the
-        # agent it ran for and to nobody else (B7).
+        # **Who the code of the tool runs as is resolved here and carried**
+        # (P6-29). The two halves come from different places on purpose. The
+        # *owner* is what registration recorded, so a registration that a tool
+        # body makes unwinds with the row that wrote the tool (I2). The *layer*
+        # is the scope of the live execution at each stage, so what the body
+        # registers is visible to the agent that it ran for and to nobody else
+        # (B7).
         #
-        # From the same `view` that produced `definition`, so one traversal fills
-        # `visible` and `by` together and the pair cannot be absent while the
-        # definition is present. Asking again per stage would be wrong: a tool
-        # that unregisters itself during its own `execute` is gone from the
-        # rebuilt view by `finish`.
+        # The pair comes from the same `view` that produced `definition`. One
+        # traversal fills `visible` and `by` together, so the pair cannot be
+        # absent while the definition is present. To ask again per stage would
+        # be wrong: a tool that unregisters itself during its own `execute` is
+        # gone from the rebuilt view by `finish`.
         by = view.by.get(call.name) or Running(execution.scope, execution.scope)
         return ToolRunContext(execution=execution, definition=definition, by=by)
 
     def _render(self, run: ToolRunContext, value: object) -> tuple[ContentBlock, ...]:
-        """The tool's renderer, bound as the row that registered the tool (P6-26).
+        """The renderer of the tool, bound as the row that registered the tool (P6-26).
 
-        One spelling, because two would be two answers to "who is running": the
-        renderer is row code reached through a second waterfall, so left
-        ambient it runs bound to whichever `tools/post-execute` wrapper resolved
-        last — a stranger's row, chosen by the mounted profile.
+        There is one way to call it, because two would be two answers to "who is
+        running". The renderer is row code that is reached through a second
+        waterfall. Without a binding of its own, it runs bound to whichever
+        `tools/post-execute` wrapper resolved last. That is the row of a
+        stranger, chosen by the mounted profile.
         """
         with running(run.by, run.execution.scope):
             return run.definition.render(
@@ -979,32 +1037,34 @@ class ToolRuntime:
             )
 
     def projected(self, execution: ToolExecution, value: object) -> tuple[ContentBlock, ...] | None:
-        """What `value` would render to for this call, or `None` if nothing can say.
+        """What `value` would render to for this call, or `None` if nothing can answer.
 
-        **For a policy row that has to measure a value before the registry
-        renders it** (D10). `tools/post-execute` runs *before* the render, so a
-        row replacing the value cannot see the content its replacement will
-        become — `tool-result-offload` returned early for exactly that reason and
-        so never offloaded a structured result however large. The row now asks
-        here instead.
+        **This is for a policy row that must measure a value before the registry
+        renders it** (D10). `tools/post-execute` runs *before* the render. So a
+        row that replaces the value cannot see the content that its replacement
+        will become. `tool-result-offload` returned early for exactly that
+        reason, and so it never offloaded a structured result, however large.
+        The row now asks here.
 
-        **Answered from the live run, not from the table.** The first cut looked
-        the tool up again — `view(scope)`, `visible`, `by` — which is the one
-        thing `ToolRunContext.by` says not to do: resolved once in
-        `create_execution` from the very view that produced `definition`, it
-        cannot disagree with it, and a tool that unregisters itself during its
-        own `execute` is gone from the rebuilt view by the time this is asked.
-        That cut answered `None` for such a tool — offload silently stopping
-        guarding — or rendered under a synthesized `Running(scope, scope)`,
-        which is the unbound-row-code regression `test_registration_ownership`
-        exists to catch, reintroduced by the method whose docstring cites it.
+        **The answer comes from the live run, and not from the table.** The
+        first version looked the tool up again (`view(scope)`, `visible`, `by`).
+        `ToolRunContext.by` says not to do that. The pair is resolved one time
+        in `create_execution`, from the same view that produced `definition`,
+        so it cannot disagree with the definition. A tool that unregisters
+        itself during its own `execute` is gone from the rebuilt view by the
+        time this method is asked. For such a tool, that version answered
+        `None`, and offload silently stopped guarding. Or it rendered under a
+        synthesized `Running(scope, scope)`. That is the unbound-row-code
+        regression that `test_registration_ownership` exists to catch, and the
+        method whose docstring cites the test reintroduced it.
 
-        `None` means there is no run of this call in `tools/post-execute` — the
-        honest answer for a caller deciding whether something is too big, where
-        guessing at a projection would be worse than declining to measure one.
+        `None` means that no run of this call is in `tools/post-execute`. That
+        is the correct answer for a caller that decides whether something is
+        too big. For that caller, a guess at a projection would be worse than
+        no measurement.
 
-        It is not a second render in the ordinary case — a caller that measures
-        this way supplies the content back, and `_post_execute` then renders
+        In the ordinary case this is not a second render. A caller that measures
+        in this way supplies the content back, and `_post_execute` then renders
         nothing.
         """
         run = self._projecting.get(_projection_key(execution))
@@ -1013,18 +1073,23 @@ class ToolRuntime:
     def projected_content(
         self, execution: ToolExecution, decision: Accept, result: ToolExecutionResult
     ) -> Sequence[ContentBlock] | None:
-        """The content an `Accept` in `tools/post-execute` will put in front of the model.
+        """The content that an `Accept` in `tools/post-execute` will show the model.
 
-        Three cases, and the middle one is D10. A decision that replaced the *content*
-        states it outright; one that replaced neither leaves the body's own. One that
-        replaced the **value** states neither — `_post_execute` re-renders from the
-        value after the waterfall — so the content that will be sent does not exist
-        yet, and is asked of `projected`. `None` is that method's: no live run to
-        render against, where guessing would be worse than declining.
+        There are three cases, and the middle one is D10:
 
-        For a row that measures or extends what the model will read — offload sizing
-        a result, ph-clm appending its receipt. It stays an approximation of the last
-        word, as `projected` is: `finish` runs a definition's `finalize_content` after.
+        * A decision that replaced the *content* states the content directly.
+        * A decision that replaced the **value** states neither. `_post_execute`
+          renders again from the value after the waterfall, so the content that
+          will be sent does not exist yet. It is requested from `projected`. A
+          `None` result comes from that method: there is no live run to render
+          against, and a guess would be worse than no answer.
+        * A decision that replaced neither leaves the content of the body.
+
+        This is for a row that measures or extends what the model will read:
+        offload, which measures the size of a result, and ph-clm, which appends
+        its receipt. Like `projected`, it stays an approximation of the final
+        content, because `finish` runs the `finalize_content` of a definition
+        afterwards.
         """
         if decision.content is not None:
             return decision.content
@@ -1038,29 +1103,35 @@ class ToolRuntime:
         *,
         write_ahead: Callable[[PreparedCall], None] | None = None,
     ) -> PreparedCall:
-        """Ordered pre-policy — pre-execute, approval, guards — then the record.
+        """Ordered pre-policy (pre-execute, approval, guards), then the record.
 
-        *Started* in model order by the batch scheduler, but a parallel group's
-        prepares overlap: each slot awaits its own gate, and one parked on a
-        human does not hold the others. What stays in model order is what the
-        model sees — `commit_ready` appends results in slot order whatever order
-        they settled in.
+        The batch scheduler *starts* the prepares in model order, but the
+        prepares of a parallel group overlap. Each slot awaits its own gate, and
+        a slot that is parked on a human does not hold the others. What the
+        model sees stays in model order: `commit_ready` appends results in slot
+        order, whatever order they settled in.
 
-        `write_ahead` runs once the gate has decided and before anything does —
-        **the** place a durable record of the act belongs (B4, P7-15). Not
-        earlier: a call parked on a human approval has done nothing yet, and a
-        record written there says an act was attempted when it was only asked
-        about. Not later: the body's effect has escaped by then, and a crash
-        inside it would leave no evidence the action was tried. Here, the record
-        is true whichever way the run ends, and it is written for a denial too so
-        the call/result pair every reader relies on stays a pair. On `prepare`
-        rather than `execute` because "the gate decided" is this method's fact,
-        and a caller that drives the stages itself needs the same hook.
+        `write_ahead` runs after the gate has decided and before anything acts.
+        This is **the** place where a durable record of the act belongs (B4,
+        P7-15):
+
+        * Not earlier. A call that is parked on a human approval has done
+          nothing yet. A record written there says that an act was attempted
+          when it was only asked about.
+        * Not later. By then the effect of the body has escaped, and a crash
+          inside the body would leave no evidence that the action was tried.
+
+        Here, the record is true whichever way the run ends. It is also written
+        for a denial, so that the call/result pair that every reader relies on
+        stays a pair. The hook is on `prepare` and not on `execute` because "the
+        gate decided" is a fact of this method, and a caller that drives the
+        stages itself needs the same hook.
         """
         prepared = await self._gate(call)
         execution = prepared.run.execution
         if execution.parent is not None:
-            # Of the call as it will run, once (`ToolExecution.restore_covered`).
+            # Asked one time, of the call as it will run
+            # (`ToolExecution.restore_covered`).
             execution.restore_covered = self.restore_covers(
                 execution.name, execution.arguments, scope=execution.scope, agent=execution.agent
             )
@@ -1085,9 +1156,10 @@ class ToolRuntime:
             return PreparedCall(run=run, result=aborted_result(started=False))
 
         try:
-            # `PreToolDecision`, not `Allow`: the chain is the four-way union
-            # and a listener returns any of them. `waterfall` reads its type
-            # from here, so the default's own type would narrow every caller.
+            # The type is `PreToolDecision` and not `Allow`. The chain is the
+            # four-way union, and a listener returns any member of it.
+            # `waterfall` reads its type from here, so the type of the default
+            # alone would narrow every caller.
             async def inner(_exec: ToolExecution) -> PreToolDecision:
                 return Allow()
 
@@ -1097,10 +1169,11 @@ class ToolRuntime:
             if isinstance(gate, Ask):
                 gate = await self._service_ask(execution, gate)
             if isinstance(gate, Respond):
-                # Answered in the tool's own voice. A *successful* result,
-                # because the model asked a question and got one — a denial it
-                # would have had to interpret is the wrong shape for "here is the
-                # answer, no need to run it".
+                # The answer is returned as the result of the tool itself. It
+                # is a *successful* result, because the model asked a question
+                # and got an answer. A denial that the model would have to
+                # interpret is the wrong shape for "here is the answer, no need
+                # to run it".
                 return PreparedCall(
                     run=run,
                     result=ToolExecutionResult(
@@ -1112,23 +1185,24 @@ class ToolRuntime:
                 # A fifth decision must not reach `gate.reason` below and silently deny.
                 _refuse_decision(gate, hook="tools/pre-execute", expected="an Allow or Deny")
             if isinstance(gate, Allow) and gate.has_arguments:
-                # The substitution lands here, in the one place that owns the
-                # execution — after every `tools/pre-execute` listener has seen
-                # the call the model actually made.
+                # The substitution is applied here, in the one place that owns
+                # the execution, after every `tools/pre-execute` listener has
+                # seen the call that the model actually made.
                 execution.arguments = freeze_json_value(gate.arguments, frozen_input=True)
                 execution.substituted = True
             if is_canceled(execution.signal):
                 return PreparedCall(run=run, result=aborted_result(started=False))
-            # Guards run last and only on an allow: a denial already decided,
+            # Guards run last and only on an allow. A denial is already decided,
             # and asking a guard to confirm it would invite a re-permit.
             reason = self.guard_reason(execution) if isinstance(gate, Allow) else gate.reason
             if reason is not None:
                 # **A refusal is not always policy refusing** (D7). A spent
-                # budget ends the call the same way and means something else to
-                # every consumer, so the row says which it is rather than having
-                # this read it off the decision type. A guard's reason takes
-                # neither flag: `guard_reason` only answers for an `Allow`, and
-                # a monotonic guard is a plain denial that does not conclude.
+                # budget ends the call in the same way and means something else
+                # to every consumer. So the row says which it is, and this code
+                # does not infer it from the decision type. The reason of a
+                # guard takes neither flag. `guard_reason` only answers for an
+                # `Allow`, and a monotonic guard is a plain denial that does not
+                # conclude the turn.
                 if isinstance(gate, Deny):
                     settle = budget_result if gate.failure_kind == "failed" else denied_result
                     return PreparedCall(
@@ -1143,15 +1217,15 @@ class ToolRuntime:
     async def _service_ask(self, execution: ToolExecution, ask: Ask) -> Allow | Deny | Respond:
         """Resolve an `ask` through the approval seam. Fail closed (B3).
 
-        The seam is consumed opportunistically: a deployment that mounts no
-        approval service, and an agent-less call with nowhere to route the
-        prompt, both deny.
+        The seam is used only if it is present. A deployment that mounts no
+        approval service denies, and so does a call with no agent, which has
+        nowhere to route the prompt.
 
-        The two answers that carry data are translated into the pipeline's own
-        vocabulary on the way back — `Edited` into an `Allow` that substitutes,
-        `Responded` into a `Respond` — so `prepare()`'s switch stays closed over
-        the pipeline's own decisions and neither capability is reachable only
-        through approval.
+        The two answers that carry data are translated into the decisions of
+        the pipeline on the way back: `Edited` into an `Allow` that substitutes,
+        and `Responded` into a `Respond`. So the switch in `_gate` stays closed
+        over the decisions of the pipeline, and neither capability is reachable
+        only through approval.
         """
         approval = self.ctx.get(APPROVAL)
         name = execution.name
@@ -1176,23 +1250,24 @@ class ToolRuntime:
         if outcome == "allowed-once":
             return Allow()
         if isinstance(outcome, Edited):
-            # The human corrected the call rather than refusing it; see
-            # `Allow.arguments` for where each version of it is recorded.
+            # The human corrected the call and did not refuse it. See
+            # `Allow.arguments` for where each version of the call is recorded.
             return Allow(arguments=outcome.arguments, has_arguments=True)
         if isinstance(outcome, Responded):
             return Respond(message=outcome.message)
         return Deny(reason=denial_reason(outcome, f'tool "{name}"'))
 
     async def dispatch(self, run: ToolRunContext) -> PreparedCall:
-        """The around-dispatch stage: the effect's record, `tools/execute` wrappers,
-        then the body.
+        """The around-dispatch stage: the record of the effect, the `tools/execute`
+        wrappers, then the body.
 
-        **A call that names its effect is answered from the log when it can be**
-        (P10-12). The record opens here, before the wrappers, so the checkpoint
-        policy's barrier carries it to disk before the body runs; the settle holds
-        what the call returned, so the same effect asked for again — under the new
-        call id a re-issued call always has — gets that result back, marked
-        `repeated`, rather than a second effect.
+        **A call that names its effect is answered from the log when that is
+        possible** (P10-12). The record opens here, before the wrappers, so the
+        barrier of the checkpoint policy carries it to disk before the body
+        runs. The settle holds what the call returned. So when the same effect
+        is requested again, under the new call id that a re-issued call always
+        has, the call gets that result back, marked `repeated`, and no second
+        effect happens.
         """
         effect = await self._open_effect(run)
         if isinstance(effect, ToolExecutionResult):
@@ -1200,9 +1275,10 @@ class ToolRuntime:
         try:
             prepared = await self._dispatch(run)
         except BaseException:
-            # Canceled with the body entered: the effect may have happened. Left
-            # open, the intent would read as still running in this process and
-            # refuse every repeat until a restart.
+            # The call was canceled after the body was entered, so the effect
+            # may have happened. If the intent were left open, it would read as
+            # still running in this process and refuse every repeat until a
+            # restart.
             if effect is not None:
                 effect.unknown()
             raise
@@ -1220,26 +1296,27 @@ class ToolRuntime:
         data = {"key": f"{run.name}:{key}", "tool": run.name, "callId": run.call_id}
         opened = await journal.open_once(session, TOOL_EFFECT, data)
         if isinstance(opened, Claim):
-            # New — or reopened, because the prior failed or never started.
+            # New, or reopened because the prior attempt failed or never started.
             return _Effect(journal=journal, session=session, claim=opened)
         earlier = as_str(opened.opened.data.get("callId"))
         if opened.running_here:
-            # **Still running, here.** Opening a second intent underneath it would
-            # unseat the first call's settle, and running the effect again is the
-            # repeat the key exists to prevent (T0).
+            # **Still running, here.** A second intent opened under the first
+            # would displace the settle of the first call, and running the
+            # effect again is the repeat that the key exists to prevent (T0).
             return error_result(
                 EFFECT_IN_FLIGHT.format(call_id=earlier or "?"),
                 {"name": "ToolEffectInFlight", "code": TOOL_EFFECT_IN_FLIGHT},
             )
         if opened.outcome == "done" and opened.settled is not None:
             return _repeated(opened, opened.settled)
-        # Nobody saw the first attempt finish — settled `unknown`, or orphaned by a
-        # process whose resume had no kind for it — so the tool is asked whether it
-        # happened (P10-13) before a new attempt is decided for it.
+        # Nobody saw the first attempt finish. It was settled `unknown`, or a
+        # process whose resume had no kind for it left it orphaned. So the tool
+        # is asked whether the effect happened (P10-13) before a new attempt is
+        # decided for it.
         again = journal.record(session, TOOL_EFFECT, data)
-        # A cancel while the tool is asked leaves the first attempt as unknown as it
-        # was; left open instead, this one read as running here and refused every
-        # repeat.
+        # A cancel while the tool is asked leaves the first attempt as unknown
+        # as it was. When this intent was left open instead, it read as running
+        # here and refused every repeat.
         async with journal.settling_on_failure(session, again):
             said = await self._answer(
                 run.definition,
@@ -1267,18 +1344,21 @@ class ToolRuntime:
     async def reconciled(
         self, record: SessionEvent, session: Session, *, scope: Boundary
     ) -> tuple[ContentBlock, ...] | NotDone | None:
-        """Ask the tool a call record names whether that call happened.
+        """Ask the tool that a call record names whether that call happened.
 
-        For `resume_session` (P10-13), which has no run: the same answer the pipeline
-        gets for a repeat of an unknown effect, looked up in `scope`'s view and bound
-        as the row that registered the tool. The record is read here — its tool's name
-        and its arguments, parsed as the batch parses them — so the caller hands over
-        the record it holds and needs nothing of this package but the types (T4).
-        `None` is the tool's `Unknown`.
+        This is for `resume_session` (P10-13), which has no run. It is the same
+        answer that the pipeline gets for a repeat of an unknown effect. The
+        tool is looked up in the view of `scope` and bound as the row that
+        registered it. The record is read here: the name of its tool, and its
+        arguments, parsed as the batch parses them. So the caller passes the
+        record that it holds and needs nothing of this package but the types
+        (T4). `None` is the `Unknown` of the tool.
 
-        Either record a call leaves: a `tool/call`, whose arguments are the model's
-        string, or a Code Mode dispatch's `tool/code-dispatch-start` (L6b), whose
-        arguments are the object the program passed.
+        The record is either of the two that a call leaves:
+
+        * a `tool/call`, whose arguments are the string from the model
+        * the `tool/code-dispatch-start` of a Code Mode dispatch (L6b), whose
+          arguments are the object that the program passed
         """
         name = as_str(record.data.get("name"))
         view = self.view(scope)
@@ -1300,9 +1380,10 @@ class ToolRuntime:
         record: SessionEvent,
         session: Session,
     ) -> tuple[ContentBlock, ...] | NotDone | None:
-        """What the tool says about a call: `Done` rendered as the call's result,
-        `NotDone`, or `None` for `Unknown` — which a tool with no `reconcile`, and one
-        that raises, answers too. Bound as the registering row (P6-26), render included."""
+        """What the tool says about a call: `Done`, rendered as the result of the
+        call, `NotDone`, or `None` for `Unknown`. A tool with no `reconcile` and a
+        tool that raises also answer `None`. The check is bound as the
+        registering row (P6-26), and so is the render."""
         check = definition.reconcile
         if check is None:
             return None
@@ -1339,8 +1420,9 @@ class ToolRuntime:
         result = prepared.result
         assert result is not None
         if run._cut_off:
-            # Entered and not finished: settled `failed` as its result says, a repeat
-            # ran it again with nothing asked.
+            # The body was entered and did not finish. If the effect were settled
+            # `failed`, as its result says, a repeat would run it again and ask
+            # nothing.
             effect.unknown()
             return prepared
         effect.journal.settle(
@@ -1364,25 +1446,26 @@ class ToolRuntime:
 
             async def body(dispatch_exec: ToolExecution) -> ToolExecutionResult:
                 # A wrapper may have replaced the signal for its delegated
-                # lifetime; the body sees whatever reached it.
+                # lifetime. The body sees whatever reached it.
                 run.execution = dispatch_exec
                 await self.ctx.serial("tools/body", dispatch_exec, scope=dispatch_exec.scope)
-                # Never start a canceled body. Checked last, after every wrapper
-                # and the barrier: a slow one is where a cancellation lands.
+                # Never start a canceled body. The check is last, after every
+                # wrapper and the barrier, because a cancellation lands while a
+                # slow one of them runs.
                 if is_canceled(dispatch_exec.signal):
                     return aborted_result(started=False)
-                # **The definition's code runs as the agent it was invoked
-                # for** (P6-26), all three callbacks and not only `execute` —
-                # `render` and `project_meta` are the same row's code reached
-                # through the same registry, and a rule that covered one of the
-                # three is one the next reader has to reconstruct.
-                # Nothing bound it before: `owner_for` fell through to the seam,
-                # so a registration made here outlived the run, and `layer_for`
-                # fell through to the *global* layer, so a body inside a
-                # contained child installed a tool the whole deployment could
-                # see — the last way to escape the ceiling P6-27 made
-                # structural. The execution already carries the right scope; it
-                # was simply never made current.
+                # **The code of the definition runs as the agent that it was
+                # invoked for** (P6-26). This holds for all three callbacks and
+                # not only `execute`. `render` and `project_meta` are code of
+                # the same row, reached through the same registry. A rule that
+                # covered one of the three is a rule that the next reader must
+                # reconstruct. Before this, nothing bound the code. `owner_for`
+                # fell through to the seam, so a registration made here
+                # outlived the run. `layer_for` fell through to the *global*
+                # layer, so a body inside a contained child installed a tool
+                # that the whole deployment could see. That was the last way to
+                # escape the ceiling that P6-27 made structural. The execution
+                # already carried the right scope, and nothing made it current.
                 with running(run.by, dispatch_exec.scope):
                     try:
                         value = await definition.execute(dispatch_exec.arguments, run)
@@ -1432,11 +1515,11 @@ class ToolRuntime:
         async def inner(_exec: ToolExecution, _result: ToolExecutionResult) -> PostToolDecision:
             return Accept()
 
-        # Published for `projected` only for as long as the waterfall runs: a
-        # row may ask what a value it is proposing would render to, and the
-        # answer has to come from this run's binding rather than a fresh
-        # lookup. Popped in a `finally` so a row that raises cannot leave the
-        # call behind to be answered about later.
+        # The run is published for `projected` only while the waterfall runs.
+        # A row may ask what a value that it proposes would render to, and the
+        # answer must come from the binding of this run and not from a fresh
+        # lookup. The entry is popped in a `finally`, so a row that raises
+        # cannot leave the call behind to be answered about later.
         key = _projection_key(execution)
         self._projecting[key] = run
         try:
@@ -1444,14 +1527,15 @@ class ToolRuntime:
                 "tools/post-execute", execution, result, inner=inner, scope=execution.scope
             )
         finally:
-            # Only this run's (Holdings rule 4): another with the same key would be
-            # a different call, and this one's ending is not its ending.
+            # Remove only the entry of this run (Holdings rule 4). Another run
+            # with the same key would be a different call, and the end of this
+            # run is not the end of that one.
             if self._projecting.get(key) is run:
                 del self._projecting[key]
         if isinstance(decision, Block):
-            # A block exposes only the context its own decision supplied:
-            # context the body deferred belonged to an outcome that no longer
-            # stands.
+            # A block exposes only the context that its own decision supplied.
+            # The context that the body deferred belonged to an outcome that no
+            # longer stands.
             return ToolExecutionResult(
                 is_error=True,
                 content=tuple(decision.feedback),
@@ -1466,30 +1550,32 @@ class ToolRuntime:
         if decision.has_value:
             changes["value"] = decision.value
         if decision.content is not None:
-            # **Content and a replaced value together, deliberately** (D10).
-            # This used to raise, on the reading that content is derived from
-            # the value so two sources would disagree. They are two *consumers*:
-            # see `Accept`, which owns the rule.
+            # **Content and a replaced value together are allowed,
+            # deliberately** (D10). This at first raised, on the reading that
+            # content is derived from the value and so two sources would
+            # disagree. They are two *consumers*. See `Accept`, which owns the
+            # rule.
             changes["content"] = tuple(decision.content)
         elif decision.has_value:
-            # Silence still means "render it", which is what a row that means
-            # value and content to agree says.
+            # No content still means "render it". A row that means value and
+            # content to agree says exactly that.
             changes["content"] = self._render(run, decision.value)
         return replace(result, **changes)
 
     def finish(self, run: ToolRunContext, result: ToolExecutionResult) -> ToolExecutionResult:
         """Definition-owned content finalization, then `tools/result`.
 
-        Runs for *every* normalized outcome, pipeline failures included — which
-        is the point: a tool whose content needs a last-mile transform must not
-        have to trust that policy let its result through.
+        This runs for *every* normalized outcome, pipeline failures included,
+        and that is the purpose. A tool whose content needs a final transform
+        must not have to trust that policy let its result through.
         """
         finalize = run.definition.finalize_content
         if finalize is not None:
             try:
-                # The last definition-owned body, and the one that runs for
-                # failures too — so it is the likeliest of the five to register
-                # a follow-up, and the least acceptable one to leave ambient.
+                # This is the last definition-owned body of the pipeline, and
+                # it also runs for failures. So it is the likeliest of these
+                # bodies to register a follow-up, and the least acceptable one
+                # to leave unbound.
                 with running(run.by, run.scope):
                     replacement = finalize(run.execution, result)
             except Exception:
@@ -1509,19 +1595,21 @@ def _discard(items: list[Any], target: object) -> None:
 def _failure(error: object, *, started: bool = False) -> ToolExecutionResult:
     """Normalize any raised value into a structured `is_error` result (B5).
 
-    A tool that raises must not be able to take the loop down with it, and the
-    model needs the failure in the same shape as every other result. The
-    failure's `kind` comes from the error class that knows it.
+    A tool that raises must not be able to stop the loop, and the model needs
+    the failure in the same shape as every other result. The `kind` of the
+    failure comes from the error class that knows it.
     """
     if isinstance(error, Canceled):
         return aborted_result(started=started)
-    # The error's own answer, not a mapping this function keeps: a boolean here
-    # collapsed three kinds into two and silently reported an abort as a failure.
+    # The kind is the answer of the error itself, and not a mapping that this
+    # function keeps. A boolean here collapsed three kinds into two and
+    # silently reported an abort as a failure.
     kind: FailureKind = error.failure_kind if isinstance(error, HarnessError) else "failed"
     settled = error_result(error_message(error), error_info(error), kind=kind)
-    # **And whether it ended the turn** (C13), off the same class and for the
-    # same reason: a raise that concludes a turn is a fact only the raiser has,
-    # and a result built from it that drops the fact leaves the loop running.
+    # **Whether the failure ended the turn also comes from the error** (C13),
+    # from the same class and for the same reason. Only the raiser knows that
+    # a raise concludes a turn. A result that is built from the raise and
+    # drops that fact leaves the loop running.
     if isinstance(error, HarnessError) and error.concludes_turn:
         return replace(settled, concludes_turn=True)
     return settled
@@ -1546,52 +1634,57 @@ _UNRESOLVED = ToolDefinition(
     output=ToolOutput(schema={}, render=lambda _a, _v: ()),
     execute=_unresolved,
 )
-"""The definition a run carries when `create_execution` itself failed.
+"""The definition that a run carries when `create_execution` itself failed.
 
-A run always has a definition, so `finish` never has to ask whether one exists;
-this one renders nothing and is never dispatched."""
+A run always has a definition, so `finish` never needs to ask whether one
+exists. This one renders nothing and is never dispatched."""
 
 
 def register_when_composed(ctx: Context, build: Callable[[], ToolDefinition | None]) -> None:
-    """Register a tool once the profile is whole, if `build` says there is one.
+    """Register a tool when the profile is whole, if `build` returns one.
 
-    For the tool whose *existence* depends on something another row supplies: a
-    `skill` tool needs an installed skill, a `task` tool needs a subagent provider.
+    This is for a tool whose *existence* depends on something that another row
+    supplies. A `skill` tool needs an installed skill, and a `task` tool needs a
+    subagent provider.
 
-    **A tool that cannot work must not be registered**, rather than registered and
-    refused: its schema and description are in the prompt of every request, so a tool
-    the deployment cannot perform spends the context window teaching a capability
-    that is not there — and the model spends a turn discovering that.
+    **A tool that cannot work must not be registered.** It must not be
+    registered and then refused. Its schema and description are in the prompt
+    of every request. So a tool that the deployment cannot perform spends the
+    context window on a capability that is not there, and the model spends a
+    turn to discover that.
 
-    **`profile/mounted`, not `ctx.inject`.** `inject` waits on a *service key*, and
-    neither condition is one: "the skills registry is non-empty" and "some subagent
-    provider is registered" are facts about a service's contents. `profile/mounted`
-    is the one moment the profile is known to be whole.
+    **The trigger is `profile/mounted`, not `ctx.inject`.** `inject` waits on a
+    *service key*, and neither condition is one. "The skills registry is
+    non-empty" and "some subagent provider is registered" are facts about the
+    contents of a service. `profile/mounted` is the one moment at which the
+    profile is known to be whole.
 
-    `build` returning `None` means "not in this deployment". A name already
-    registered is left alone, so a second dispatch is a no-op rather than a
-    duplicate-name `ValueError` — which, on this event, would abort the process.
+    `build` returns `None` to mean "not in this deployment". A name that is
+    already registered is left alone. So a second dispatch does nothing and does
+    not raise a duplicate-name `ValueError`, which on this event would abort
+    the process.
     """
 
     def once() -> None:
         definition = build()
-        # `DEPLOYMENT` is the mount's chain — the view `scope=None` always
-        # read, named (P6-32). It is NOT a union over agents: a tool registered
-        # on one agent's scope is invisible here, verified, so this checks
-        # "already claimed at the deployment layer" and nothing more. That is
-        # the check this always made; a true is-it-taken-*anywhere* audit is a
-        # per-layer question no single boundary answers.
+        # `DEPLOYMENT` is the chain of the mount. It names the view that
+        # `scope=None` always read (P6-32). It is NOT a union over agents. A
+        # tool that is registered on the scope of one agent is invisible here
+        # (verified). So this checks "already claimed at the deployment layer"
+        # and nothing more. That is the check that this code always made. A
+        # true audit of "is it taken *anywhere*" is a question per layer, which
+        # no single boundary answers.
         if (
             definition is not None
             and ctx.require(TOOLS).get(definition.name, scope=DEPLOYMENT) is None
         ):
-            # No `scope=`. It carried a `scope=ctx` until P6-25, and that was
-            # the tell: a listener firing after `apply` had returned saw no
-            # activation, so the registration would have landed on the tool
-            # registry and outlived this row — and the only thing stopping it
-            # was that somebody remembered. Dispatch now runs a listener as an
-            # effect of the scope that registered it, so the ordinary call is
-            # the correct one here as everywhere else.
+            # No `scope=`. The call carried `scope=ctx` until P6-25, and that
+            # was the sign of the problem. A listener that fired after `apply`
+            # had returned saw no activation. So the registration would have
+            # landed on the tool registry and outlived this row, and the only
+            # protection was that somebody remembered the argument. Dispatch
+            # now runs a listener as an effect of the scope that registered it,
+            # so the ordinary call is correct here as it is everywhere else.
             ctx.require(TOOLS).register(definition)
 
     ctx.on("profile/mounted", once)

@@ -69,7 +69,7 @@ contribute_fold_cache(ctx, id="goal-fold-cache", subject="goal table", stale=ser
 ```
 
 `stale` is the owning service's delegate to `SessionFoldCache.stale`, which lives
-with the cache for `ToolRegistry.stale_views`' reason. The helper reads
+with the cache for `ToolRuntime.stale_views`' reason. The helper reads
 `ctx.sessions` at **poll** time, so the store may mount after the row.
 
 Declaring is only about drift. What bounds a cache is the cache itself: its

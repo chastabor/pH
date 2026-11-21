@@ -1,24 +1,27 @@
-"""`tool-ask-user` — the model asks the person a question (P7-09).
+"""`tool-ask-user`: the model asks the user a question (P7-09).
 
-`ctx.user_questions` shipped with a definition, a front end and a modal, and no
-caller: `grep '\\.ask('` across `packages/*/src` found nothing. This is the
-producer, so the seam has all three parts and the whole path is exercised rather
-than intended.
+`ctx.user_questions` shipped with a definition, a front end and a modal, but
+with no caller: `grep '\\.ask('` across `packages/*/src` found nothing. This tool
+is the producer. The seam therefore has all three parts, and the whole path is
+exercised and not only intended.
 
-**Shipped disabled, and armed by the profile that has a screen.** The row is
-`disabled: true` in `ph-base` and enabled by `tui.yaml` — the `tool-todo` idiom.
-An unattended posture therefore never sees the tool at all: no schema in the
-prompt, no turn spent calling it, nothing in the log. Paying nothing for a
-capability the deployment cannot perform is the same rule `subagent-task`
-follows when it registers nothing without a provider.
+**The row ships disabled, and the profile that has a screen enables it.** The
+row is `disabled: true` in `ph-base`, and `tui.yaml` enables it. This is the
+`tool-todo` idiom. An unattended posture therefore never sees the tool: there is
+no schema in the prompt, no turn is spent on a call, and nothing is in the log.
+A deployment pays nothing for a capability that it cannot perform.
+`subagent-task` follows the same rule when it registers nothing without a
+provider.
 
-**Not gated by approval.** Asking permission to ask is one more interruption for
-the same person, and the ask has to happen anyway for the model to be directed.
+**Approval does not gate the tool.** A request for permission to ask is one more
+interruption for the same user. The question must also be asked anyway, so that
+the model gets its direction.
 
-**Nobody attending is a result, not an error.** The tool answers with a sentence
-the model can act on, the way an unreadable attachment degrades to a pointer, so
-an interactive profile run with every front end detached — `/autonomous`, a
-sandboxed run, a daemon whose UIs have closed — degrades instead of hanging.
+**An absent user is a result, not an error.** The tool answers with a sentence
+that the model can act on, in the way that an unreadable attachment degrades to
+a pointer. An interactive profile that runs with every front end detached
+therefore degrades and does not hang. Examples are `/autonomous`, a sandboxed
+run, and a daemon whose UIs have closed.
 
 @module ph.tools.builtin.ask_user
 """
@@ -57,9 +60,9 @@ UNATTENDED = (
 )
 """What the model reads when there is no one to ask.
 
-Phrased as an instruction rather than as an error because it arrives as a
-successful result: "no answer" is this seam's defined failure mode, and a model
-told only that something failed retries it."""
+The text is an instruction and not an error, because it arrives as a successful
+result. "No answer" is the defined failure mode of this seam, and a model that
+is told only that something failed tries it again."""
 
 
 class AskUserArgs(ToolModel):
@@ -78,8 +81,8 @@ class AskUserArgs(ToolModel):
 class AskUserValue(ToolModel):
     answer: str | None = None
     outcome: AskResolution = "answered"
-    """How the ask ended, as the seam that ran it says — see `AskResolution`,
-    which is where the closed set and the guess it replaced are argued (K7)."""
+    """How the ask ended, as reported by the seam that ran it. See `AskResolution`,
+    which explains the closed set and the guess that it replaced (K7)."""
 
 
 DECLINED = (
@@ -89,11 +92,11 @@ DECLINED = (
 )
 """What the model reads when a person was asked and declined (K7).
 
-Distinct from `UNATTENDED` because the two call for different behavior and only
-one of them was ever said. "Nobody is attending" invites the model to carry on
-alone, which is right when there is no one there and wrong when somebody has
-just dismissed the prompt — that is a person declining to direct it, and asking
-again is the one thing it must not do.
+This text is distinct from `UNATTENDED` because the two cases call for different
+behavior, and only one of them had a sentence before. "Nobody is attending"
+invites the model to continue alone. That is right when no one is there. It is
+wrong when somebody has just dismissed the prompt. That person declined to
+direct the model, and the one thing that the model must not do is ask again.
 """
 
 CANCELED = (
@@ -102,10 +105,10 @@ CANCELED = (
 )
 """What the model reads when the ask was abandoned before delivery.
 
-The one ending that is not about the person's attention at all. Telling the
-model to carry on would be telling it to work through a cancellation, and
-telling it somebody declined — which is what the old attendance guess said here
-— invents a person who was never asked.
+This is the one ending that is not about the attention of the user. To tell the
+model to continue would tell it to work through a cancellation. To tell it that
+somebody declined would invent a person who was never asked. The old attendance
+guess said exactly that here.
 """
 
 FAILED = (
@@ -115,9 +118,9 @@ FAILED = (
 )
 """What the model reads when an answerer raised.
 
-Named rather than folded into `UNATTENDED`, because "there is nobody there" and
-"something here is broken" are different facts and only the second is worth a
-person seeing in the transcript."""
+This case has its own name and is not folded into `UNATTENDED`. "There is nobody
+there" and "something here is broken" are different facts, and only the second
+is worth showing to a person in the transcript."""
 
 _SENTENCES: dict[AskResolution, str] = {
     "unattended": UNATTENDED,
@@ -125,24 +128,26 @@ _SENTENCES: dict[AskResolution, str] = {
     "canceled": CANCELED,
     "failed": FAILED,
 }
-"""One sentence per way of not getting an answer.
+"""One sentence for each way of not getting an answer.
 
-A dict rather than a chain of conditionals, so adding a resolution is adding a
-row. Nothing here makes it *exhaustive* — a dict literal is not checked against
-the `Literal`, and the `.get` below falls back rather than raising — so
-`test_every_way_a_question_can_end_reads_as_itself` walks `get_args` and is what
-actually catches a resolution that arrived without a sentence."""
+This is a dict and not a chain of conditionals, so that a new resolution is a
+new row. Nothing here makes the dict *exhaustive*. A dict literal is not checked
+against the `Literal`, and the `.get` below falls back and does not raise. So
+`test_every_way_a_question_can_end_reads_as_itself` walks `get_args`, and that
+test is what catches a resolution that arrives without a sentence."""
 
 
 def _rendered(value: Any) -> str:  # noqa: ANN401
-    """The four endings `ask` used to fold into `None`, told apart again."""
+    """The text of the result. `ask` used to fold four endings into `None`, and
+    this function tells them apart again."""
     resolution: AskResolution = value["outcome"]
     if resolution == "answered":
         return as_str(value["answer"])
-    # `.get`, for the reason `ph.wire.literal_lookup` exists: a `Literal`
-    # constrains writers and dies at the payload boundary, so a reader holding
-    # what is really a `str` has to have an answer for one it does not know.
-    # `denial_reason` makes the same fallback on the approval side.
+    # `.get` is used for the reason that `ph.wire.literal_lookup` exists. A
+    # `Literal` constrains writers and is lost at the payload boundary. A reader
+    # therefore holds what is really a `str`, and must have an answer for a value
+    # that it does not know. `denial_reason` makes the same fallback on the
+    # approval side.
     return _SENTENCES.get(resolution, UNATTENDED)
 
 
@@ -158,9 +163,9 @@ async def apply(ctx: Context, config: None) -> None:
                 options=args.options,
                 header=args.header,
                 multi_select=args.multi_select,
-                # The call id, so the log's `askId` is the one string that
-                # already joins `tool/call`, `tool/result` and the two
-                # `question/*` records of this one exchange.
+                # The call id is used so that `askId` in the log is the one
+                # string that already joins `tool/call`, `tool/result` and the
+                # two `question/*` records of this one exchange.
                 ask_id=run.call_id,
             ),
             session=run.session,
@@ -178,8 +183,8 @@ async def apply(ctx: Context, config: None) -> None:
                 render=lambda args, value: text_content(_rendered(value)),
             ),
             execute=ask_user,
-            # It changes nothing and asks nobody's permission to run; what it
-            # costs is a person's attention, which no gate can give back.
+            # The tool changes nothing and needs no permission to run. Its cost
+            # is the attention of a person, which no gate can give back.
             is_irreversible=False,
             present_call=lambda args: ToolCallView(
                 title=as_str(args.get("header"), "Question"),

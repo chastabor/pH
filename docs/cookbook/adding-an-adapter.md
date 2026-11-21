@@ -103,18 +103,35 @@ there for file APIs.
 
 ```python
 def resolve_model(self, provider: str, model: str) -> ResolvedModel:
-    return resolved(self.config, structured_output=False)
+    return resolved(
+        self.config,
+        structured_output=False,
+        credential=self.config.api_key_env,
+        sampling=frozenset(SAMPLING_WIRE),
+        max_decision_tokens=None,
+        uploads=referenced_mimes(self.ctx, self.config.uploads),
+    )
 ```
 
-`resolved(route, structured_output=)` projects the six route facts —
-`context_window`, `default_max_tokens`, `accepts`, `max_attachment_bytes`,
-`max_image_edge`, `usable_image_edge` — onto `ResolvedModel`. Your config
-satisfies the `MediaRoute` Protocol by having those names; if it does not, mypy
-says so at the call rather than the route silently reporting defaults.
+`resolved(route, ...)` projects the six route facts (`context_window`,
+`default_max_tokens`, `accepts`, `max_attachment_bytes`, `max_image_edge`,
+`usable_image_edge`) onto `ResolvedModel`. Your config satisfies the
+`MediaRoute` Protocol by having those names. If it does not, mypy says so at the
+call, and the route does not silently report defaults.
 
-`structured_output` is passed rather than read from config because it is a claim
-about the *wire*, not a setting: say `True` only if the server actually enforces
-the schema.
+The five keyword arguments are required, so an adapter cannot forget one:
+
+- `structured_output` is a claim about the *wire*, not a setting. Say `True`
+  only if the server enforces the schema.
+- `credential` is the name of the environment variable that the adapter
+  resolves, or `None` for a route that needs none.
+- `sampling` is the set of sampling settings that the API takes.
+- `max_decision_tokens` is `None` for an adapter that does not decide.
+- `uploads` is the set of MIME types that the adapter sends by reference
+  through a file API. Pass `frozenset()` if the provider has none. A type in
+  this set is not held to `max_attachment_bytes` by `media-degrade`, so the
+  adapter must pass that limit to `load_media(..., inline_limit=)`. A file with
+  no uploaded handle then goes inline only if it fits.
 
 `accepts` and the limits belong in **row config**, not module constants. One
 `openai-compatible` row serves a hosted gateway, Groq, Together and a local

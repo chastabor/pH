@@ -1,24 +1,25 @@
-"""`subagent-task` — delegate a piece of work and wait for the answer.
+"""`subagent-task`: delegate a piece of work and wait for the answer.
 
-The other spelling of delegation already exists: `rlm_run` admits a child and
-hands back a handle, and the child replies later by agent message. That shape
-needs an inbox, a roster and a model that knows to keep working and check back
-— all of which Code Mode has and a plain tool-calling deployment does not. So
-this row is the **blocking** one: one call, one answer, no protocol for the
-model to learn.
+The other form of delegation already exists. `rlm_run` admits a child and
+returns a handle, and the child replies later by agent message. That form needs
+an inbox, a roster, and a model that knows to keep working and check back. Code
+Mode has all of these, and a plain tool-calling deployment does not. So this row
+is the **blocking** form: one call, one answer, and no protocol for the model to
+learn.
 
-Both are worth having, and the difference is not a preference. A parent that
-fans out eight children wants `rlm_run`, because waiting on the first would
-serialize the other seven. A parent that needs one sub-answer to continue wants
-this, because a handle it cannot await is a handle it will forget to collect.
+Both forms are worth having, and the difference is not a preference. A parent
+that fans out eight children needs `rlm_run`, because a wait for the first child
+would serialize the other seven. A parent that needs one sub-answer to continue
+needs this tool, because it will forget to collect a handle that it cannot
+await.
 
-**It registers only when a provider is actually mounted**, at `profile/mounted`
-rather than at this row's own `apply`. Two reasons, and the second is the one
-that matters: a tool advertised in every prompt and refused on every call spends
-the context window teaching the model a capability the deployment does not have
-— and reading the provider at `apply` would have made this row's position in the
-profile decide whether it works, which is the ordering trap `base.yaml` promises
-its rows do not have.
+**The tool registers only when a provider is mounted.** It registers at
+`profile/mounted` and not in the `apply` of this row, for two reasons. The
+second reason matters more. First, a tool that is advertised in every prompt and
+refused on every call uses the context window to teach the model a capability
+that the deployment does not have. Second, if the row read the provider at
+`apply`, the position of this row in the profile would decide whether the row
+works. `base.yaml` promises that its rows do not have that ordering trap.
 
 @module ph.tools.builtin.subagent_task
 """
@@ -32,7 +33,7 @@ from pydantic import Field
 
 from ...cancel import Canceled, raced
 from ...characters import head
-from ...cordis import Context, maybe_await, plugin
+from ...cordis import Context, maybe_await, plugin, releasing
 from ...json import JsonObject, as_str, dumps
 from ...keys import SUBAGENTS, TOOLS
 from ...llm.types import ContentBlock
@@ -145,36 +146,45 @@ class TaskValue(ToolModel):
     status: SubagentStatus
     answer: str = ""
     value: dict[str, Any] | None = None
-    """The child's result in the shape asked for (`output`), checked."""
+    """The result of the child in the shape that was asked for (`output`),
+    checked."""
     granted_access: Access = "read"
     note: str | None = None
-    """What the model should know beside the answer: for a child that outlived its
-    wait, where it is (`STILL_WORKING`); and how it was admitted (`admission_notes`),
-    why `granted_access` is narrower than asked and why it runs without the model its
-    skill asked for, rendered from the seam's codes so the prose the model reads and
-    the codes the log keeps cannot disagree."""
+    """What the model should know in addition to the answer. For a child that
+    outlived its wait, the note says where the child is (`STILL_WORKING`). The
+    note also says how the child was admitted (`admission_notes`): why
+    `granted_access` is narrower than the request, and why the child runs without
+    the model that its skill asked for. The text is rendered from the codes of
+    the seam, so the prose that the model reads and the codes that the log keeps
+    cannot disagree."""
 
 
 class Config(WireModel):
     """Row config."""
 
     provider: str = ""
-    """Which `ctx.subagents` provider runs the child.
+    """The `ctx.subagents` provider that runs the child.
 
-    Empty means "the one that is mounted", which is the ordinary case and saves
-    every profile from naming it. A deployment that mounts two must choose: the
-    row stands down and says so rather than picking one, because "run a child
-    agent" having two answers is exactly why the seam names providers at all.
+    An empty value means "the provider that is mounted". That is the ordinary
+    case, and it saves every profile from naming the provider. A deployment that
+    mounts two providers must choose. Without a choice, the row stands down and
+    says so, and does not pick one. "Run a child agent" with two answers is the
+    reason that the seam names providers.
     """
 
+
+WAIT_CANCELED = "the `task` call that waited for this child was canceled"
+"""The reason on the `canceled` record and the tombstone of a child whose wait
+was canceled (`_collected`)."""
 
 STILL_WORKING = (
     "This child was still working when the harness stopped, so the wait for it ended "
     "here. It is started again with its parent and reports back by message when it "
     "finishes; do not delegate the same task again."
 )
-"""What a `task` call says about a child that outlived its wait (S1, S2): suspended by a
-harness that is stopping, or found in the roster on resume, still live."""
+"""What a `task` call says about a child that outlived its wait (S1, S2). Either
+a harness that was stopping suspended the child, or the resume found the child
+in the roster, still live."""
 
 
 def _task_value(
@@ -183,8 +193,9 @@ def _task_value(
     answer: str = "",
     value: JsonObject | None = None,
 ) -> dict[str, Any]:
-    """The call's value for the child `run` names, however the call learned of it — its
-    own wait, or the roster on resume. One builder, so the two cannot disagree."""
+    """The value of the call for the child that `run` names. The call learned of
+    the child from its own wait, or from the roster on resume. One builder
+    serves both, so the two cannot disagree."""
     notes = [] if status == "done" else [STILL_WORKING]
     notes.extend(admission_notes(run))
     return TaskValue(
@@ -201,7 +212,8 @@ def _task_value(
 
 def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN401
     if value.get("status") != "done":
-        # A child that outlived its wait has no answer yet; the note says where it is.
+        # A child that outlived its wait has no answer yet. The note says where
+        # the child is.
         return text_content(as_str(value.get("note")))
     returned = value.get("value")
     parts = [
@@ -216,23 +228,25 @@ def _render(_args: JsonObject, value: Any) -> list[ContentBlock]:  # noqa: ANN40
 
 @plugin("subagent-task", affects="environment", config=Config, inject=[TOOLS, SUBAGENTS])
 async def apply(ctx: Context, config: Config) -> None:
-    """Register the blocking delegation tool, once a provider exists to run it."""
+    """Register the blocking delegation tool when a provider exists to run it."""
 
     async def delegate(provider: str, args: TaskArgs, run: ToolRunContext) -> dict[str, Any]:
         if run.agent is None:
-            # A spawn is made *by* somebody: the provider reads the parent's
-            # session to log the admission and its options to build the child.
+            # A spawn is made *by* somebody. The provider reads the session of
+            # the parent to log the admission, and the options of the parent to
+            # build the child.
             raise ValueError(f"the {TOOL!r} tool has to be called by an agent")
-        # **Not caught and re-raised** (D15): `SubagentSpawnError` is a
-        # `HarnessError`, so the code, the `failure_kind` and whether the turn
-        # should end reach `registry._failure` instead of being flattened here.
+        # **The error is not caught and raised again** (D15).
+        # `SubagentSpawnError` is a `HarnessError`, so the code, the
+        # `failure_kind`, and whether the turn should end all reach
+        # `registry._failure`. A catch here would flatten them.
         handle = await ctx.require(SUBAGENTS).start(
             provider,
             SubagentRequest(
                 prompt=args.prompt,
                 parent=run.agent,
-                # The boundary the ceiling is computed in, stated rather than
-                # derived from the routing target (P6-31, P6-24).
+                # The boundary that the ceiling is computed in. It is stated
+                # here and not derived from the routing target (P6-31, P6-24).
                 scope=run.scope,
                 name=args.name,
                 access=args.access,
@@ -250,31 +264,35 @@ async def apply(ctx: Context, config: Config) -> None:
                 f"the {provider!r} subagent provider cannot be waited on; "
                 "this deployment needs the handle-and-collect tools instead"
             )
-        outcome = await _collected(handle, run)
-        # `queued` is a child suspended by a harness that is stopping (S1): coming
-        # back, not failed — and a parent told it failed delegates it again.
+        outcome = await _collected(handle, run, run.agent.session)
+        # `queued` is a child that a stopping harness suspended (S1). The child
+        # will come back, and it has not failed. A parent that is told that the
+        # child failed delegates the task again.
         if outcome.status not in ("done", "queued"):
-            # A failure, not a value with a sad field: a child that was canceled
-            # or fell over did not answer the question, and a parent reading
-            # `answer: ""` as an answer is the misreading this prevents.
+            # This is a failure, and not a value with an error field. A child
+            # that was canceled or that crashed did not answer the question. A
+            # parent that reads `answer: ""` as an answer is the misreading that
+            # this raise prevents.
             raise ValueError(
                 f"subagent {ended_text(f'{handle.name} ({handle.session_id})', outcome)}"
             )
         return _task_value(handle, outcome.status, outcome.answer, outcome.value)
 
     async def reconciled(_args: Any, call: SessionEvent, session: Session) -> Reconciled:  # noqa: ANN401
-        """Did a `task` call a crash cut short start a child? The children's own logs
-        say (S2).
+        """Did a `task` call that a crash cut short start a child? The logs of
+        the children say (S2).
 
-        Asked while the parent resumes, before any child is open, so the children are
-        read off the store (`load_children`): each admission names the call that
-        asked for it. No admission under this call's id is a call that started
-        nothing — the admission reaches the child's disk before the child runs — so
-        it is `NotDone`, and asking again is what the call wanted. A child still live
-        is `Done` as the wait's honest ending: it was delegated, the resume puts it
-        back to work, and its answer comes by message. One that has ended, however, is
-        `Unknown`: the answer the cut-short wait would have returned reached nobody,
-        and a child that ended cannot be asked for it again.
+        The question is asked while the parent resumes, before any child is
+        open. So the children are read from the store (`load_children`): each
+        admission names the call that asked for it. When no admission carries
+        the id of this call, the call started nothing, because the admission
+        reaches the disk of the child before the child runs. The answer is then
+        `NotDone`, and asking again is what the call wanted. A child that is
+        still live is `Done`, which is the correct ending of the wait: the child
+        was delegated, the resume puts it back to work, and its answer comes by
+        message. A child that has ended is `Unknown`. The answer that the
+        cut-short wait would have returned reached nobody, and a child that
+        ended cannot be asked for it again.
         """
         children = await ctx.require(SUBAGENTS).load_children(session.id, session.header.family)
         child = admitted_by(children, call)
@@ -285,40 +303,59 @@ async def apply(ctx: Context, config: Config) -> None:
         status: SubagentStatus = "queued" if child.status == "queued" else "running"
         return Done(_task_value(child.run(), status))
 
-    async def _collected(handle: SubagentRun, run: ToolRunContext) -> SubagentResult:
-        """Wait for the child, releasing it if this call is canceled (C7).
+    async def _collected(
+        handle: SubagentRun, run: ToolRunContext, parent: Session | None
+    ) -> SubagentResult:
+        """Wait for the child, and revoke it if this call is canceled (C7).
 
-        `delegate` observed nothing, so a parent interrupted mid-delegation went
-        on waiting for a child nobody had told to stop — and the child went on
-        spending model calls against the same budget, for a turn whose result
-        was already discarded.
+        `delegate` used to observe nothing. A parent that was interrupted during
+        a delegation went on waiting for a child that nobody had told to stop.
+        The child went on spending model calls against the same budget, for a
+        turn whose result was already discarded.
 
-        `dispose` is the release the seam already provides for it ("releases the
-        child early"), so the cancel reaches the child through the path a
-        disposed parent would have used rather than through a second mechanism.
+        **The cancel is a revocation** (`SubagentService.delete`). The provider
+        stops the child, and the log of the child gets `canceled` and a
+        tombstone. `SubagentRun.dispose` alone is not enough. It stops the child
+        and writes nothing, because the seam uses it for a child that the seam
+        has already ended. The log of a child that was only disposed still read
+        `running`, and the next start of the harness put that child back to work
+        for a wait that nobody held.
+
+        `dispose` still follows the revocation. A provider that cannot revoke
+        (`RevokingProvider`) gets only the tombstone from the seam, and
+        `dispose` is what stops its child. For a child that the provider revoked
+        it does nothing. A parent with no session (a stub agent) has no roster
+        to revoke from, and its child is only disposed.
         """
         awaiter = handle.result
         assert awaiter is not None  # the caller checked; this narrows it
         collected = await raced(run.signal, awaiter)
         if collected is not None:
             return collected
-        # Cancelled. Released first, then reported — a parent that raises while
-        # its child is still running is the state this exists to prevent.
-        await maybe_await(handle.dispose() if handle.dispose is not None else None)
-        # **`Canceled`, not `ValueError`** (N3). `registry._failure` already maps
-        # this class to `aborted_result`; a `ValueError` took the other branch
-        # and told the model the `task` tool had *failed*, so a person's own
-        # interrupt read as the harness breaking — and a model that reads
-        # breakage retries.
+        # Canceled. The child is revoked first and the cancel is reported after.
+        # A parent that raises while its child is still running is the state
+        # that this function exists to prevent. The shield is for a cancel that
+        # reaches this task as well as the token: the ending of the child must
+        # still be written (`releasing`).
+        with releasing():
+            if parent is not None:
+                await ctx.require(SUBAGENTS).delete(parent, handle.id, reason=WAIT_CANCELED)
+            if handle.dispose is not None:
+                await maybe_await(handle.dispose())
+        # **`Canceled`, not `ValueError`** (N3). `registry._failure` already
+        # maps this class to `aborted_result`. A `ValueError` took the other
+        # branch and told the model that the `task` tool had *failed*. The
+        # interrupt of the user then read as a fault of the harness, and a model
+        # that reads a fault tries again.
         raise Canceled(f"the wait for subagent {handle.name} was canceled")
 
     def build_tool() -> ToolDefinition | None:
         """The tool, bound to the provider that will run it.
 
-        Resolved here rather than per call, so the deployment's answer to "which
-        provider" is taken once, at the moment the profile is whole — and the
-        refusal a caller reads names the provider the tool was actually built
-        for rather than whatever is registered when it happens to fail.
+        The provider is resolved here and not for each call. The deployment
+        answers "which provider" one time, at the moment the profile is whole.
+        The refusal that a caller reads therefore names the provider that the
+        tool was built for, and not whatever is registered when a call fails.
         """
         provider = ctx.require(SUBAGENTS).resolve(config.provider or None)
         if provider is None:
@@ -330,8 +367,9 @@ async def apply(ctx: Context, config: Config) -> None:
             output=ToolOutput(schema=TaskValue, render=_render),
             execute=partial(delegate, provider),
             reconcile=reconciled,
-            # The fan-out §4.8 opens with: several children at once is the point
-            # of delegating, and each one has its own workspace.
+            # This is the fan-out that §4.8 opens with. Several children at one
+            # time is the purpose of delegation, and each child has its own
+            # workspace.
             is_concurrency_safe=True,
             present_call=lambda args: ToolCallView(
                 card="generic",

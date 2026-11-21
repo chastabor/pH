@@ -1,9 +1,11 @@
-"""A `SKILL.md` on disk, written the same way in both packages.
+"""A `SKILL.md` on disk, written the same way in every package.
 
-The format is `ph.seams.skills`', and two packages test against it: the seam's
-own reader in ph-core, and `rlm-skills-python`'s package half in ph-rlm. The
-builder was written out in the second one first; this is it where both can
-reach it, before a third copy decides frontmatter looks slightly different.
+The format belongs to `ph.seams.skills`. Two packages test against it: ph-core
+tests the reader of the seam itself, and ph-rlm tests the package half of
+`rlm-skills-python`. The ph-stabilize suite and the repository-level live
+suites also write skills with this builder. The builder was first written out
+in ph-rlm. It is here so that every package can reach it, before another copy
+decides that frontmatter looks slightly different.
 
 @module ph.testing.skills
 """
@@ -24,8 +26,10 @@ KIND_OUTPUT: dict[str, Any] = {
     "required": ["kind"],
     "additionalProperties": False,
 }
-"""A sorting skill's `output`: which kind of report its child read. The one shape the
-typed-result tests in both packages return, so they cannot drift apart."""
+"""The `output` of a sorting skill: which kind of report its child read. The
+typed-result tests in ph-core and ph-rlm, and the live suite in
+`tests/test_local_typed_results.py`, all return this one shape, so they cannot
+drift apart."""
 
 
 def write_skill(
@@ -37,12 +41,15 @@ def write_skill(
     body: str = "Instructions here.",
     extra: str = "",
 ) -> Path:
-    """One skill directory, returning it. `front_name` writes a disagreeing name.
+    """Write one skill directory and return it.
 
-    `extra` is frontmatter appended after `description` — the optional half
-    (`version`, `argument-hint`, `allowed-tools`). Here rather than in the test
-    that wanted it first, for the reason this module's own docstring gives: a
-    third writer is where "frontmatter looks slightly different" starts.
+    `front_name` writes a frontmatter name that disagrees with the directory
+    name.
+
+    `extra` is frontmatter that is appended after `description`: the optional
+    fields (`version`, `argument-hint`, `allowed-tools`). It is here and not in
+    the test that wanted it first, for the reason that the module docstring
+    gives: with one more writer, frontmatter starts to look slightly different.
     """
     directory = root / name
     directory.mkdir(parents=True, exist_ok=True)
@@ -69,14 +76,19 @@ def skill(
     output: dict[str, Any] | None = None,
     accepts: Sequence[str] = (),
 ) -> Skill:
-    """One registered skill, with no file behind it; `model` is the key it asks a child
-    it directs to run on, `effort` the reasoning effort it asks that child to run at,
-    `output` the shape of the value that child returns, and `accepts` the media it hands
-    that child.
+    """One registered skill, with no file behind it.
 
-    For the tests that care about the *registry* — visibility, narrowing, the
-    catalog — rather than about the format on disk. Written out in three modules
-    before it moved here, which is the same road `write_skill` took.
+    Four arguments describe the child that the skill directs:
+
+    - `model`: the key of the model that the skill asks the child to run on.
+    - `effort`: the reasoning effort that the skill asks the child to run at.
+    - `output`: the shape of the value that the child returns.
+    - `accepts`: the media that the skill hands to the child.
+
+    This builder is for the tests that are about the *registry* (visibility,
+    narrowing, the catalog) and not about the format on disk. It was written
+    out in three modules before it moved here, as `write_skill` also moved
+    here from a test.
     """
     return Skill(
         name=name,

@@ -1,10 +1,10 @@
-"""`tools-prompt` — the bridge that puts tool schemas in the request.
+"""`tools-prompt`: the bridge that puts the tool schemas in the request.
 
-A separate row from `ph.tools` on purpose: the registry does not depend on there
-being a system prompt, and a headless caller assembling its own request can use
-the registry without one. The bridge is what joins them, and it passes the
-**target scope** through, so what the model is offered is a per-agent answer
-(B7): a restriction or a scoped registration changes it.
+This row is separate from `ph.tools` on purpose. The registry does not depend on
+a system prompt, and a headless caller that assembles its own request can use
+the registry without one. The bridge joins the two. It passes the **target
+scope** through, so what the model is offered is a per-agent answer (B7): a
+restriction or a scoped registration changes it.
 
 @module ph.tools.prompt
 """

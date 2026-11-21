@@ -3,8 +3,10 @@
 This module is the sibling of `_http.py`. `ph.llm.media` answers the *policy*
 question above every adapter, and this module holds what is left. When a request
 reaches an adapter, any `MediaBlock` still on it is one that the route said it
-accepts. Nothing is left to decide. The adapter only fetches bytes and builds a
-wire shape, and the shape belongs to the adapter.
+accepts. One decision is left, for a file of a type that the route uploads: it
+goes by reference, or inline when the upload gave no file and it fits under the
+inline limit, or as a pointer (`load_media`). Apart from that, the adapter only
+fetches bytes and builds a wire shape, and the shape belongs to the adapter.
 
 The module also holds the *upload* half of that work. It was added when a second
 wire got an upload API (P7-03). The docstring of `_http` gives the argument: the
@@ -34,7 +36,13 @@ from ph.llm.types import FILE_EXPIRED, AttachmentRef, Message, attachment_of
 from ph.seams.attachments import AttachmentStore
 from ph.seams.uploads import UploadRegistry
 
-__all__ = ["forget_named_handle", "load_handles", "load_media", "media_pointer"]
+__all__ = [
+    "forget_named_handle",
+    "load_handles",
+    "load_media",
+    "media_pointer",
+    "referenced_mimes",
+]
 
 log = logging.getLogger("ph_app.adapters.media")
 
@@ -83,12 +91,27 @@ def forget_named_handle(
 def media_pointer(attachment: AttachmentRef) -> dict[str, str]:
     """The text block that stands in for media that could not be loaded.
 
-    This is reached only on a race. `media-degrade` already checked that the blob
-    was there, so a call here means that the blob went away between that check
-    and this read. The wording comes from `ph.llm.media`, so the model reads one
-    sentence for one situation, whichever path led to it.
+    There are two ways to reach it. One is a race: `media-degrade` already
+    checked that the blob was there, and the blob went away between that check
+    and this read. The other is a file of an uploaded type that has no handle
+    and is too large to go inline (`load_media`). The wording comes from
+    `ph.llm.media`, so the model reads one sentence for one situation, whichever
+    path led to it.
     """
     return {"type": "text", "text": media_pointer_text(attachment)}
+
+
+def referenced_mimes(ctx: Context, mimes: Collection[str]) -> frozenset[str]:
+    """The MIME types that an adapter will send by reference: `mimes`, or nothing
+    when no upload service is mounted.
+
+    An adapter reports this set as `ResolvedModel.uploads`, and `media-degrade`
+    then leaves a large file of such a type to the adapter. The set must
+    therefore be what `load_handles` will try, and not what the config lists. A
+    route whose deployment mounts no `ctx.uploads` uploads nothing, and its
+    large files must still degrade before the request.
+    """
+    return frozenset(mimes) if ctx.get(UPLOADS) is not None else frozenset()
 
 
 async def load_handles(
@@ -147,12 +170,22 @@ async def load_media(
     messages: Sequence[Message],
     *,
     skip: Collection[str] = (),
+    inline_limit: int | None,
 ) -> dict[str, str]:
-    """Base64 for every attachment still on the request, keyed by id.
+    """Base64 for every attachment that goes inline, keyed by id.
 
-    An id that is absent from the map means that the read failed after
-    `media-degrade` had approved it. That is a race and not a policy outcome. The
-    caller renders a pointer in both cases, so one branch covers both.
+    An id that is absent from the map is rendered as a pointer by the caller.
+    There are two ways to be absent. The read failed after `media-degrade` had
+    approved the block, which is a race and not a policy outcome. Or the file
+    is over `inline_limit` and has no uploaded handle.
+
+    **`inline_limit` is the `max_attachment_bytes` of the route.** `media-degrade`
+    does not hold a type that the route uploads to that ceiling, because the
+    file goes by reference. When the upload gives no handle (the file API
+    failed, or the file is not ready yet), the fallback is inline, and a file
+    over the ceiling cannot go inline: the provider refuses the whole request.
+    So that file is left out, and the model reads the pointer. A later step
+    tries the upload again.
 
     The read goes through `AttachmentStore.load_b64`, which encodes one time for
     each process. A media block stays in derived history for the life of the
@@ -173,6 +206,15 @@ async def load_media(
             if attachment is None or attachment.attachment_id in loaded:
                 continue
             if attachment.attachment_id in skip:
+                continue
+            if inline_limit is not None and attachment.bytes > inline_limit:
+                log.warning(
+                    "ph_app.adapters: %s has no uploaded file and its %d bytes are over "
+                    "the %d-byte inline limit; sending a pointer",
+                    attachment.name or attachment.attachment_id,
+                    attachment.bytes,
+                    inline_limit,
+                )
                 continue
             try:
                 loaded[attachment.attachment_id] = await store.load_b64(attachment)

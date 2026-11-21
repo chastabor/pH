@@ -1,16 +1,16 @@
-"""A `ctx.workspace` tier for tests that need one without needing `git`.
+"""A `ctx.workspace` tier for tests that need one and do not need `git`.
 
 Three test modules in two packages had written this fake, and the copies had
-already drifted three ways — one returned `base`, one returned a per-agent
-directory, one recorded what it was asked, one picked `kind` from `access`. Each
-absorbed the provider protocol behind a `**_`, which is what makes the drift
-invisible: a parameter added to `WorkspaceProvider` breaks all three and none of
-them fail.
+already drifted: one returned `base`, one returned a per-agent
+directory, one recorded what it was asked, and one picked `kind` from `access`.
+Each copy absorbed the provider protocol behind a `**_`. That makes the drift
+invisible: a parameter added to `WorkspaceProvider` breaks all three copies,
+and none of them fails.
 
-What it is *not* is a substitute for `test_workspace_git.py`, which drives real
-`git worktree` against a real repository. The question this answers is which
-`base` and which `access` reach a tier, and what the resolved `kind` makes of
-everything downstream — none of which needs a checkout to pin.
+This module is *not* a substitute for `test_workspace_git.py`, which drives
+real `git worktree` against a real repository. It answers which `base` and
+which `access` reach a tier, and what the resolved `kind` does to everything
+downstream. A test of those questions needs no checkout.
 
 @module ph.testing.stub_workspace
 """
@@ -31,10 +31,10 @@ __all__ = ["StubCheckpointingProvider", "StubWorkspaceProvider", "acquire_for_ro
 
 @dataclass(slots=True)
 class StubWorkspaceProvider:
-    """A tier that answers the way `worktree` does, on any directory.
+    """A tier that answers as `worktree` does, on any directory.
 
-    `root=None` hands back `base` itself, for a test about *which* base reached
-    the tier rather than about isolation.
+    `root=None` returns `base` itself, for a test about *which* base reached
+    the tier and not about isolation.
     """
 
     root: Path | None = None
@@ -43,17 +43,17 @@ class StubWorkspaceProvider:
     kinds: tuple[WorkspaceKind, WorkspaceKind] = ("worktree", "worktree-ephemeral")
     """What this tier answers for `write` and for `read`, in that order.
 
-    A pair rather than a hardcoded resolution, so a test can drive the seam with
-    a kind whose *provider* is not installed on the host — `("overlay",
-    "overlay-ephemeral")` exercises retention, disposal and `/revert`'s decline
-    for the overlay tier on a machine with no AgentFS, which is the CI shape
-    P6-21's own gate names. The default is the git tier's answer, so every
-    existing caller reads the same.
+    It is a pair and not a hardcoded resolution. So a test can drive the seam
+    with a kind whose *provider* is not installed on the host. For example,
+    `("overlay", "overlay-ephemeral")` exercises retention, disposal and the
+    decline of `/revert` for the overlay tier on a machine with no AgentFS.
+    That is the CI shape that the gate of P6-21 names. The default is the
+    answer of the git tier, so every existing caller reads the same.
     """
     bases: list[Path] = field(default_factory=list)
-    """Every `base` this tier was asked about, in order — the assertion a spawn
-    test makes, since branching from the *parent's* root is what puts a fan-out
-    on sibling branches."""
+    """Every `base` that this tier was asked about, in order. A spawn test
+    asserts on it, because branching from the root of the *parent* is what puts
+    a fan-out on sibling branches."""
 
     async def acquire(
         self,
@@ -66,15 +66,16 @@ class StubWorkspaceProvider:
     ) -> Workspace:
         self.bases.append(base)
         tree = base if self.root is None else self.root / agent_id
-        # The real tiers' rule: a tree already at this agent's path is its own.
+        # The rule of the real tiers: a tree that is already at the path of this
+        # agent belongs to this agent.
         reused = self.root is not None and tree.is_dir()
         tree.mkdir(parents=True, exist_ok=True)
         return Workspace(
             root=tree,
             scratch=scratch,
             reused=reused,
-            # The tier's answer — not the request — is what everything
-            # downstream reads, which is the whole point of resolving here.
+            # Everything downstream reads the answer of the tier, not the
+            # request. That is the purpose of resolving here.
             kind=self.kinds[1] if access == "read" else self.kinds[0],
             repo_writable=True,
             ref=f"ph/{session_id}/{agent_id}",
@@ -84,19 +85,19 @@ class StubWorkspaceProvider:
 
 @dataclass(slots=True)
 class StubCheckpointingProvider(StubWorkspaceProvider):
-    """The same tier, plus restore points — a `CheckpointingProvider` for tests.
+    """The same tier, plus restore points: a `CheckpointingProvider` for tests.
 
-    **A separate class rather than a flag, because `isinstance` is the question.**
-    The capability is a runtime-checkable Protocol, so what makes a tier able to
-    checkpoint is having the methods; a `checkpoints: bool = False` on the one class
-    would be invisible to the seam's own gate, and a test that set it would prove
-    nothing.
+    **It is a separate class and not a flag, because `isinstance` is the
+    question.** The capability is a runtime-checkable Protocol, so a tier can
+    checkpoint when it has the methods. A `checkpoints: bool = False` on the
+    one class would be invisible to the gate of the seam itself, and a test
+    that set it would prove nothing.
 
-    The snapshots are in memory and the whole point is the *seam*: which workspaces
-    are offered a restore point, that `/revert` lists rather than refuses, that the
-    token recorded is the token restored. What a real capture costs, and whether it
-    disturbs an agent's index, is `test_workspace_checkpoint.py`'s question against
-    real git.
+    The snapshots are in memory, and the purpose is the *seam*: which
+    workspaces are offered a restore point, that `/revert` lists and does not
+    refuse, and that the token recorded is the token restored. What a real
+    capture costs, and whether it disturbs the index of an agent, is the
+    question of `test_workspace_checkpoint.py` against real git.
     """
 
     saved: dict[str, dict[str, bytes]] = field(default_factory=dict)
@@ -131,18 +132,18 @@ class StubCheckpointingProvider(StubWorkspaceProvider):
 
 
 async def acquire_for_role(ctx: Context, base: Path, *, child: bool = False) -> Workspace:
-    """One agent's workspace, acquired the way a real spawn asks for it.
+    """The workspace of one agent, acquired the way a real spawn asks for it.
 
     **A child is a session stamped `origin: "subagent"`, and nothing else.**
-    That is the encoding `WorkspaceSeam.acquire` derives the rung from — P4-11
-    deleted the `tier=` threading precisely so a caller could not forget — so a
-    test that hand-rolled the session would be re-deriving the one fact under
-    test. It was written out in two modules in this directory before it moved
-    here, which is the same road `git_repo` and this file's own provider took.
+    `WorkspaceSeam.acquire` derives the rung from that encoding. P4-11 deleted
+    the threading of `tier=` so that a caller cannot forget it. So a test that
+    built the session by hand would derive again the one fact under test. This
+    helper was written out in two test modules of ph-core before it moved here,
+    as `git_repo` and the provider in this file also moved here.
 
-    The provider is registered on first use and only then: two answers to "what
-    makes a workspace" is a contradiction, and what differs per role is whether
-    the caller asks for one.
+    The provider is registered on first use and only then. Two answers to "what
+    makes a workspace" would be a contradiction, and what differs per role is
+    whether the caller asks for one.
     """
     workspace_seam = ctx.require(WORKSPACE)
     if workspace_seam.provider is None:

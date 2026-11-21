@@ -1,10 +1,17 @@
 """Builders for tests and fixtures.
 
-Two families. **Payloads**: the three surface types have a shape every test
-needs and none should retype — a user message, an assistant message inside its
-`assistant/message` payload, a tool result inside its `tool/result` payload.
-**Tool scaffolding**: a string-output tool, a bare registry, an agent stub, and
-the fake-provider options. Each was being re-declared per test module.
+The module began with two families:
+
+- **Payloads.** The three surface types have a shape that every test needs and
+  that no test should type again: a user message, an assistant message inside
+  its `assistant/message` payload, and a tool result inside its `tool/result`
+  payload.
+- **Tool scaffolding.** A string-output tool, a bare registry, an agent stub,
+  and the fake-provider options. Each test module declared these again.
+
+The module now also holds bounded waits (`settled`), builders for hand-written
+and stored logs (`log_event`, `write_stored_log`, `StoredLogs`), and helpers
+that narrow a type for a test (`as_kind`, `not_none`).
 
 @module ph.testing.builders
 """
@@ -101,29 +108,61 @@ from ..tools.definition import (
 from ..tools.registry import ToolRuntime
 
 __all__ = [
+    "EMOJI_FAMILY",
     "FAKE_OPTIONS",
+    "SCAFFOLDING",
     "FarSide",
+    "StoppingAgent",
     "StoredLogs",
     "StubAgent",
+    "admitted_child",
+    "as_kind",
     "assistant_payload",
+    "block_text",
+    "boundary_for",
     "code_mode_stub",
+    "delivered_ids",
     "disk_fills_midway",
     "external_tool",
+    "full_disk_batch",
+    "hold_session",
     "isolated_intent_kinds",
+    "isolated_log_types",
     "live_settles",
+    "llama_refusal",
+    "log_event",
+    "log_interrupted_call",
     "logged_events",
     "models_overlay",
     "new_agent",
+    "not_none",
+    "noted",
+    "noting",
+    "open_fds",
     "parked_gate",
     "plugin_payload",
     "raising",
+    "reconciled_call",
     "reference_fork",
+    "result_text",
+    "resume_stored",
+    "revision_record",
     "run_tool",
+    "searches_into",
+    "session_of",
+    "settle_background",
+    "settled",
     "simple_tool",
+    "skill_service",
+    "splice_line",
+    "store_root",
+    "stored_events",
     "stored_log",
     "stored_types",
+    "streamed",
     "tool_result_payload",
     "tool_runtime",
+    "unwritten",
     "user_payload",
     "workspace_acquired",
     "workspace_acquiring",
@@ -142,22 +181,24 @@ FAKE_OPTIONS = AgentOptions(provider="fake", model="fake-1")
 
 
 def models_overlay(**routes: Mapping[str, object]) -> dict[str, Any]:
-    """An overlay `models` row listing `routes` by key, its default `main`, which runs on
-    `FAKE_OPTIONS`' route unless `routes` lists another under it. A row as `mount` takes
-    one."""
+    """An overlay `models` row that lists `routes` by key. Its default is `main`,
+    which runs on the route of `FAKE_OPTIONS` unless `routes` lists another
+    route under that key. The row has the form that `mount` takes."""
     listed = {"main": {"provider": "fake", "model": "fake-1"}, **routes}
     return {"id": "models", "config": {"default": "main", "models": listed}}
 
 
 @contextmanager
 def _failing_after(seconds: float, what: str) -> Iterator[None]:
-    """`anyio.fail_after`, failing the test with what was being waited for.
+    """`anyio.fail_after`, which fails the test with what was being waited for.
 
-    `fail_after` alone raises a bare `TimeoutError` naming neither the wait nor the
-    reason, and a wedged wait is exactly the failure that arrives with no other
-    evidence. Every bounded wait here goes through this, so none can drop the name.
+    `fail_after` alone raises a bare `TimeoutError` that names neither the wait
+    nor the reason. A stuck wait is exactly the failure that arrives with no
+    other evidence. Every bounded wait here goes through this function, so none
+    can drop the name.
     """
-    # `ph.testing` is shipped, and its helpers import where pytest is not installed.
+    # `ph.testing` is shipped, and its helpers are imported where pytest is not
+    # installed.
     import pytest  # noqa: PLC0415
 
     try:
@@ -168,13 +209,14 @@ def _failing_after(seconds: float, what: str) -> Iterator[None]:
 
 
 async def settled(check: Callable[[], object], what: str, *, seconds: float = 5.0) -> None:
-    """Poll until `check()` is true, or fail saying what was waited for.
+    """Poll until `check()` is true, or fail and say what was waited for.
 
-    **The one copy of this loop**, which suites had written out under several
-    names: a copy that gets missed fails as a *hang*, the least legible failure a
-    suite has. `ph.testing` is the declared home for scaffolding no shipped module
-    imports, and this is scaffolding. `seconds` is for a suite whose waits are
-    longer, as a daemon's are.
+    **This is the one copy of this loop.** Suites had written it out under
+    several names, and a copy that is missed fails as a *hang*, the least
+    legible failure that a suite has. `ph.testing` is the declared home for
+    scaffolding that no shipped module imports, and this is scaffolding.
+    `seconds` is for a suite whose waits are longer, as the waits of a daemon
+    are.
     """
     with _failing_after(seconds, what):
         while not check():
@@ -182,13 +224,14 @@ async def settled(check: Callable[[], object], what: str, *, seconds: float = 5.
 
 
 async def settle_background(ctx: Context) -> None:
-    """Wait out the work a test left running: every detached task, then every job.
+    """Wait for the work that a test left running: every detached task, then every job.
 
-    `ctx.drain()` did this until jobs left its pool, and it was never quite a wait:
-    shielded, so a test's own deadline could not reach it, and bounded, so work still
-    running after `DRAIN_SECONDS` was left without a word for the assertions behind
-    it to trip on. Looped, because each can start the other: a child's drive ends by
-    waking listeners, and a listener can start a job.
+    `ctx.drain()` did this until jobs left its pool, and it was never quite a
+    wait. It is shielded, so the deadline of a test could not reach it. It is
+    bounded, so work that still ran after `DRAIN_SECONDS` was left with no
+    message, and the assertions after it failed on that work. This function
+    loops, because each kind of work can start the other: the drive of a child
+    ends by waking listeners, and a listener can start a job.
     """
     jobs = ctx.get(JOBS)
     with _failing_after(10, "background jobs and detached tasks to end"):
@@ -206,11 +249,12 @@ def simple_tool(
     safe: bool | Callable[[Any], bool] = False,
     **kwargs: Any,  # noqa: ANN401
 ) -> ToolDefinition:
-    """A tool taking a free-form object and returning a string.
+    """A tool that takes a free-form object and returns a string.
 
-    The shape every pipeline and batch test wants: no schema to satisfy, a
-    string the assertions can read back. `execute` defaults to returning `name`;
-    `safe` is the concurrency classification, a bool or a classifier.
+    This is the shape that every pipeline and batch test wants: no schema to
+    satisfy, and a string that the assertions can read back. `execute` defaults
+    to a function that returns `name`. `safe` is the concurrency
+    classification: a bool or a classifier.
     """
     return define_tool(
         name,
@@ -227,22 +271,26 @@ def simple_tool(
 
 @dataclass(slots=True)
 class FarSide:
-    """What an external tool's effect reached, in order — the counter a test reads."""
+    """What the effect of an external tool reached, in order. A test reads it as a counter."""
 
     deliveries: list[str] = field(default_factory=list)
     ids: set[str] = field(default_factory=set)
-    """The ids it has seen — what a tool that can ask its far side would ask."""
+    """The ids that it has seen. A tool that can ask its far side would ask for these."""
 
 
 def external_tool(
     name: str = "send", *, keyed: bool = True, fails: bool = False, reconciles: bool = False
 ) -> tuple[ToolDefinition, FarSide]:
-    """A tool whose effect is outside the harness — a message delivered — and its far side.
+    """A tool whose effect is outside the harness (a delivered message), and its far side.
 
-    Called with `{"id": ..., "message": ...}`; `keyed` declares `id` as the call's
-    effect key (`ToolDefinition.idempotency_key`), `fails` makes the delivery land
-    and the call report an error — the ambiguous case a retry has to handle — and
-    `reconciles` lets the tool answer `reconcile` by asking the far side about the id.
+    The tool is called with `{"id": ..., "message": ...}`.
+
+    - `keyed` declares `id` as the effect key of the call
+      (`ToolDefinition.idempotency_key`).
+    - `fails` makes the delivery land and the call report an error. This is the
+      ambiguous case that a retry must handle.
+    - `reconciles` lets the tool answer `reconcile` by asking the far side about
+      the id.
     """
     far = FarSide()
 
@@ -270,12 +318,13 @@ def external_tool(
 
 
 SCAFFOLDING: LogWriter = scaffolding_writer()
-"""The writer tests build logs with: every type this build reads (T6).
+"""The writer that tests build logs with. It writes every type that this build reads (T6).
 
-A test is no writer of record — it writes a crashed turn, an ask nobody answered, a
-log a newer build left — so it holds the one writer that may write any known type,
-and a test kind carries it (`IntentKind(..., writer=SCAFFOLDING)`). Minted here,
-since `scaffolding_writer` refuses anywhere outside `ph.testing`."""
+A test is not a writer of record. It writes a crashed turn, an ask that nobody
+answered, or a log that a newer build left. So it holds the one writer that may
+write any known type, and a test kind carries that writer
+(`IntentKind(..., writer=SCAFFOLDING)`). The writer is minted here, because
+`scaffolding_writer` refuses a caller outside `ph.testing`."""
 
 
 def log_event(
@@ -284,14 +333,14 @@ def log_event(
     data: Mapping[str, JsonValue],
     surface: SurfaceIntent | None = None,
 ) -> SessionEvent:
-    """Write one event into a hand-built log, through `SCAFFOLDING` — what a test
-    calls where it used to call `session.append` (T6)."""
+    """Write one event into a hand-built log, through `SCAFFOLDING`. A test calls
+    this where it used to call `session.append` (T6)."""
     return SCAFFOLDING.append(log, event_type, data, surface)
 
 
 async def streamed(chunks: Iterable[StreamChunk]) -> AsyncIterator[StreamChunk]:
-    """Scripted chunks (`text_chunks`, `tool_call_chunks`) as the stream a provider
-    sends, for an `llm/stream` listener that answers a request itself."""
+    """Scripted chunks (`text_chunks`, `tool_call_chunks`) as the stream that a
+    provider sends, for an `llm/stream` listener that answers a request itself."""
     for chunk in chunks:
         yield chunk
 
@@ -299,9 +348,9 @@ async def streamed(chunks: Iterable[StreamChunk]) -> AsyncIterator[StreamChunk]:
 def revision_record(
     event_type: str, data: Mapping[str, JsonValue] | None = None, size: RevisionSize | None = None
 ) -> RevisionRecord:
-    """A producer's record, for a test that revises the surface through the door
-    (`ph.session.revise`): written by `SCAFFOLDING`, so `event_type` may be any type
-    this build reads, one the test declared included."""
+    """The record of a producer, for a test that revises the surface through
+    `ph.session.revise`. `SCAFFOLDING` writes it, so `event_type` may be any
+    type that this build reads, including one that the test declared."""
     return RevisionRecord(SCAFFOLDING, event_type, data or {}, size)
 
 
@@ -313,13 +362,14 @@ def admitted_child(
     *,
     admitted: bool = True,
 ) -> Session:
-    """A sub-agent's own log, published in `ctx`'s store under `parent` and admitted —
-    named and filed as `open_child_log` opens one (Phase 11).
+    """The own log of a sub-agent, published in the store of `ctx` under `parent`
+    and admitted. It is named and filed as `open_child_log` opens one (Phase 11).
 
-    `admission` adds to the record, in the log's spelling (`goalId`, `prompt`); the
-    run id, a name and an owner are there already. `admitted=False` leaves a log with
-    no admission, which is not a child. Written through `log_event`, so a test says
-    what the child's log holds rather than running a provider to get there.
+    `admission` adds to the record, in the spelling of the log (`goalId`,
+    `prompt`). The run id, a name and an owner are already there.
+    `admitted=False` leaves a log with no admission, which is not a child. The
+    record is written through `log_event`, so a test says what the log of the
+    child holds and does not run a provider to get there.
     """
     child = ctx.require(SESSIONS).create(
         child_session_id(parent.id, run_id),
@@ -339,17 +389,19 @@ def admitted_child(
 
 @contextmanager
 def isolated_intent_kinds(*, core: bool) -> Iterator[None]:
-    """Declare intent kinds into a table of this block's own, so a test's do not leak.
+    """Declare intent kinds into a table of this block only, so the kinds of a test do not leak.
 
-    `core` starts the table with ph-core's own kinds — `ph.session.kinds.KINDS`, and
-    only those — for a test of repair that must still see them settled; without it
-    the table starts empty, for a test of `declare_intent` itself. Either way it is
-    what a process that declared nothing else would hold, whatever this interpreter
-    has imported: a package's kinds (`ph_app.kinds`) are left out, so the block
-    sees repair refuse a log that holds them (T4).
+    With `core`, the table starts with the kinds of ph-core itself
+    (`ph.session.kinds.KINDS`, and only those). That is for a test of repair
+    that must still see them settled. Without `core`, the table starts empty,
+    for a test of `declare_intent` itself. In both cases the table is what a
+    process that declared nothing else would hold, whatever this interpreter
+    has imported. The kinds of a package (`ph_app.kinds`) are left out, so the
+    block sees repair refuse a log that holds them (T4).
 
-    Not enforced: a package leaf *first* imported inside the block declares its kind
-    into the throwaway table, and the real one never sees it.
+    One case is not enforced. A package leaf that is *first* imported inside
+    the block declares its kind into the temporary table, and the real table
+    never sees it.
     """
     real = intents._KINDS
     intents._KINDS = {kind.opened: kind for kind in core_kinds.KINDS} if core else {}
@@ -361,9 +413,10 @@ def isolated_intent_kinds(*, core: bool) -> Iterator[None]:
 
 @contextmanager
 def isolated_log_types() -> Iterator[None]:
-    """Declare log types into a table of this block's own, starting from what the
-    process has declared so far, so a test's declarations do not outlive it — and a
-    front end's completeness check, in a suite run beside this one, never meets them.
+    """Declare log types into a table of this block only, which starts from what
+    the process has declared so far. The declarations of a test then do not
+    outlive it. The completeness check of a front end, in a suite that runs
+    beside this one, never meets them.
     """
     real = known_event_types._DECLARED
     known_event_types._DECLARED = dict(real)
@@ -374,19 +427,21 @@ def isolated_log_types() -> Iterator[None]:
 
 
 def boundary_for(scope: Boundary | None, agent: AgentHandle | None) -> Boundary:
-    """What a test meant, when it did not say (P6-32).
+    """What a test meant when it did not say (P6-32).
 
-    The agent's own scope, which is what a test almost always means; `DEPLOYMENT`
-    for no agent at all, because a call with no agent is not narrowed by
-    anything. Stated here rather than defaulted in the seam, which is the whole
-    of that row: the helper knows what its caller meant, the registry does not.
+    With an agent, the answer is the scope of the agent itself, which is what a
+    test almost always means. With no agent, the answer is `DEPLOYMENT`,
+    because nothing narrows a call with no agent. The default is stated here
+    and not in the seam, and that is the whole of P6-32: the helper knows what
+    its caller meant, and the registry does not.
 
-    **A stub with no `ctx` no longer reaches here to be refused.** That case was
-    a `TypeError` raised on an `isinstance` behind a `getattr`; `AgentHandle`
-    declares `ctx: Context`, so a stub missing it fails the Protocol at
-    `_STUB_IS_A_HANDLE` below rather than at a call site. What the refusal
-    protected still holds and is now the type's job: a test that means the wide
-    view spells `DEPLOYMENT`, because the answer that widens is the one you type.
+    **A stub with no `ctx` no longer reaches this function to be refused.**
+    That case was a `TypeError` raised on an `isinstance` behind a `getattr`.
+    `AgentHandle` declares `ctx: Context`, so a stub without it now fails the
+    Protocol at `_STUB_IS_A_HANDLE` below and not at a call site. What the
+    refusal protected still holds, and the type now enforces it: a test that
+    means the wide view writes `DEPLOYMENT`, because the answer that widens is
+    the one that must be typed.
     """
     if scope is not None:
         return scope
@@ -396,16 +451,16 @@ def boundary_for(scope: Boundary | None, agent: AgentHandle | None) -> Boundary:
 
 
 def parked_gate(ctx: Context, *, only: str | None = None) -> tuple[anyio.Event, anyio.Event]:
-    """A `tools/pre-execute` gate that stops and waits to be let go.
+    """A `tools/pre-execute` gate that stops and waits to be released.
 
-    Returns `(reached, release)`: the listener sets the first when a call arrives
-    at the gate and awaits the second before letting it through. `only` names
-    the one tool it parks; anything else passes untouched, which is what a test
-    of one call among several wants.
+    Returns `(reached, release)`. The listener sets `reached` when a call
+    arrives at the gate, and awaits `release` before it lets the call through.
+    `only` names the one tool that the gate parks. Every other tool passes
+    untouched, which is what a test of one call among several wants.
 
-    For the tests that observe the log *mid-flight* — what has been written while
-    a call is still parked on its gate (P7-15). Written out in three test modules
-    before this.
+    This is for the tests that observe the log *mid-flight*: what has been
+    written while a call is still parked on its gate (P7-15). Three test
+    modules had written it out before this.
     """
     reached, release = anyio.Event(), anyio.Event()
 
@@ -432,22 +487,25 @@ async def run_tool(
 ) -> ToolExecutionResult:
     """Execute one tool the way the loop does, for a test that is not the loop.
 
-    The `ToolExecutionInput(...)` incantation — `scope=agent.ctx`, `session=`,
-    `agent=` — was written out at nine call sites across six files, which is
-    nine places for a test to accidentally pass a different scope than the one
-    whose policy it meant to exercise.
+    The `ToolExecutionInput(...)` call (`scope=agent.ctx`, `session=`,
+    `agent=`) was written out at nine call sites across six files. That gave a
+    test nine places to pass, by accident, a different scope from the one whose
+    policy it meant to exercise.
 
-    `scope=` is spellable **separately** from `agent=` because they are two
-    values, and P6-24 is about the case where they differ — a Code Mode
-    sub-dispatch, a subagent whose driver holds a child ctx. Without it this
-    helper could not construct the divergence it exists to let a test assert.
+    `scope=` can be given **separately** from `agent=` because they are two
+    values, and P6-24 is about the case where they differ: a Code Mode
+    sub-dispatch, or a subagent whose driver holds a child ctx. Without it,
+    this helper could not construct the divergence that it exists to let a
+    test assert.
 
-    Its `None` is the *helper's* "you did not say", resolved by `boundary_for`
-    below, and not the seam's — that one P6-32 deleted, because a seam given no
-    boundary used to answer with the widest one it had.
+    The `None` of `scope` is the "you did not say" of the *helper*, which
+    `boundary_for` above resolves. It is not the `None` of the seam. P6-32
+    deleted that one, because a seam that was given no boundary answered with
+    the widest one it had.
 
-    `parent` makes it a dispatch inside a Code Mode cell, which a row reading back or
-    measuring the cell's own call must leave alone.
+    `parent` makes the call a dispatch inside a Code Mode cell. A row that
+    reads back or measures the own call of the cell must leave such a dispatch
+    alone.
     """
     return await ctx.require(TOOLS).execute(
         ToolExecutionInput(
@@ -463,21 +521,23 @@ async def run_tool(
 
 
 def disk_fills_midway(fd: int, payload: bytes) -> None:
-    """A `write_all` for a disk that fills mid-payload: half the bytes land, then
-    `ENOSPC` — the half-written file every atomic or taken-back write must survive."""
+    """A `write_all` for a disk that fills in the middle of a payload: half the
+    bytes land, then `ENOSPC`. Every atomic write, and every write that is taken
+    back, must survive the half-written file that this leaves."""
     os.write(fd, payload[: len(payload) // 2])
     raise OSError(errno.ENOSPC, "No space left on device")
 
 
 def full_disk_batch(items: Iterable[object], **_kwargs: object) -> list[OSError]:
-    """A `write_atomic_all` for a disk that is full: every file refused with `ENOSPC`,
-    each in its place, as the door answers a write it could not make. For the spill
-    store's fail-open gates, patched where `ph.seams.spill` holds the door."""
+    """A `write_atomic_all` for a disk that is full. Every file is refused with
+    `ENOSPC`, each in its place, as `write_atomic_all` answers a write that it
+    could not make. It is for the fail-open gates of the spill store, patched in
+    where `ph.seams.spill` holds `write_atomic_all`."""
     return [OSError(errno.ENOSPC, "No space left on device") for _ in items]
 
 
 def raising(error: BaseException) -> Callable[..., NoReturn]:
-    """A body that raises `error` — readable where a generator trick was not."""
+    """A body that raises `error`. It is readable where a generator trick was not."""
 
     def body(*_args: object, **_kwargs: object) -> NoReturn:
         raise error
@@ -486,8 +546,9 @@ def raising(error: BaseException) -> Callable[..., NoReturn]:
 
 
 def searches_into(bucket: list[str]) -> Callable[[Path, str, str], Path | None]:
-    """`locate_under`, noting each id the store is searched for into `bucket` — patched
-    where a backend holds it (`ph.persistence.jsonl`), for a test that counts searches."""
+    """`locate_under`, which also notes into `bucket` each id that the store is
+    searched for. It is patched in where a backend holds `locate_under`
+    (`ph.persistence.jsonl`), for a test that counts searches."""
 
     def search(root: Path, name: str, suffix: str) -> Path | None:
         return noted(bucket, name, locate_under(root, name, suffix))
@@ -498,10 +559,10 @@ def searches_into(bucket: list[str]) -> Callable[[Path, str, str], Path | None]:
 def skill_service() -> tuple[Context, SkillService]:
     """A root context with a bare skill registry provided as `skills`.
 
-    `tool_runtime`'s shape for the sibling registry, and here for its stated
-    reason: the three-line constructor was written out per test module, and a
-    seam whose construction drifts is one where two suites disagree about what a
-    default looks like.
+    This is the shape of `tool_runtime` for the sibling registry, and it is here
+    for the same reason. Each test module had written out the three-line
+    constructor. When the construction of a seam drifts, two suites disagree
+    about what a default looks like.
     """
     root = Context()
     service = SkillService(ctx=root)
@@ -520,16 +581,16 @@ def tool_runtime() -> tuple[Context, ToolRuntime]:
 class StoppingAgent:
     """An agent, as far as `agent/turn-stopping` is concerned.
 
-    For driving that boundary's listeners through `ctx.serial` rather than
-    through a whole turn: the loop has no step cap of its own, so a fake
-    provider a listener keeps steering would be steered forever — which is what
-    `skill-steps`' nudge budget and the subagent seam's one reminder exist to
-    bound, and what neither can be tested by.
+    It drives the listeners of that boundary through `ctx.serial` and not
+    through a whole turn. The loop has no step cap of its own, so a fake
+    provider that a listener keeps steering would be steered forever. The nudge
+    budget of `skill-steps` and the one reminder of the subagent seam exist to
+    bound that, and an endless turn can test neither.
 
-    `steer` **appends what the driver would append**, and that is load-bearing
-    rather than decorative: both listeners count their own past steers by
-    folding those very messages out of the log, so a stub that only collected
-    them in a list would leave the stand-down and the once-only rule untested.
+    `steer` **appends what the driver would append**, and the tests depend on
+    that. Both listeners count their own past steers by folding those same
+    messages out of the log. A stub that only collected them in a list would
+    leave the stand-down and the one-time rule untested.
     """
 
     def __init__(self, session: Session) -> None:
@@ -543,14 +604,14 @@ class StoppingAgent:
 
 EMOJI_FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
 """One character of five code points: a man, a woman and a girl joined by ZWJs.
-What a test of a cut that must fall between characters cuts — four of its five
-inner code-point cuts land inside it."""
+A test of a cut that must fall between characters cuts this string: all four of
+its inner code-point cuts land inside it."""
 
 
 def llama_refusal(sent: int, reads: int) -> str:
-    """What a llama.cpp says when an input — an embedding's or a decision's — is
-    longer than its batch: both numbers, as `ph.llm.adapter.too_long_facts`
-    reads them."""
+    """What llama.cpp says when an input (of an embedding or of a decision) is
+    longer than its batch. The text holds both numbers, in the form that
+    `ph.llm.adapter.too_long_facts` reads."""
     return (
         f"input ({sent} tokens) is too large to process. increase the "
         f"physical batch size (current batch size: {reads})"
@@ -558,11 +619,11 @@ def llama_refusal(sent: int, reads: int) -> str:
 
 
 class StubAgent:
-    """The minimum an approval prompt or a tool call needs of an agent.
+    """The minimum that an approval prompt or a tool call needs of an agent.
 
-    Exactly `AgentHandle`, and held to it below: a stub that drifts from the
-    surface the seams read would let every test that uses it pass against a
-    shape no real agent has.
+    It is exactly `AgentHandle`, and the check below holds it to that. A stub
+    that drifts from the surface that the seams read would let every test that
+    uses it pass against a shape that no real agent has.
     """
 
     def __init__(
@@ -602,13 +663,13 @@ def plugin_payload(
     form: ContextForm | None = None,
     summary: str | None = None,
 ) -> dict[str, Any]:
-    """A `user/message` payload for text a *plugin* injected, not a person.
+    """A `user/message` payload for text that a *plugin* injected, not a person.
 
-    The second shape a `user/message` takes, and the one a hand-built fixture
-    keeps getting wrong: injected context, an offload preview and a compaction
-    summary all ride the user role, and what distinguishes them is `source`.
-    A test that reached for `user_payload` for one of those was asserting
-    against a message no producer writes.
+    This is the second shape of a `user/message`, and the one that a hand-built
+    fixture keeps getting wrong. Injected context, an offload preview and a
+    compaction summary all use the user role, and `source` distinguishes them.
+    A test that used `user_payload` for one of those asserted against a message
+    that no producer writes.
     """
     return {
         "id": message_id,
@@ -628,11 +689,12 @@ def assistant_payload(
     content: list[dict[str, Any]] | None = None,
     usage: TokenUsage | None = None,
 ) -> dict[str, Any]:
-    """An `assistant/message` payload; empty `text` gives an empty-content message.
+    """An `assistant/message` payload. An empty `text` gives a message with empty content.
 
-    `content` supplies the blocks outright — a message carrying tool calls — and
-    `usage` the provider's count of the request it answered, so a test does not
-    reach into this dict's shape to set either.
+    `content` supplies the blocks outright, for a message that carries tool
+    calls. `usage` supplies the count that the provider gave for the request
+    that it answered. So a test does not reach into the shape of this dict to
+    set either.
     """
     if content is None:
         content = [{"type": "text", "text": text}] if text else []
@@ -660,11 +722,11 @@ def tool_result_payload(
     step: int = 1,
     is_error: bool = False,
 ) -> dict[str, Any]:
-    """A `tool/result` payload carrying one text block.
+    """A `tool/result` payload that carries one text block.
 
-    `is_error` is a keyword for the same reason `assistant_payload` takes
-    `content`: so a test states the outcome it wants rather than reaching into
-    this dict's shape to overwrite it afterwards.
+    `is_error` is a keyword for the same reason that `assistant_payload` takes
+    `content`: a test states the outcome that it wants, and does not reach into
+    the shape of this dict to overwrite it afterwards.
     """
     return {
         "turn": turn,
@@ -688,13 +750,13 @@ def tool_result_payload(
 def workspace_seam(scratch_root: Path) -> WorkspaceSeam:
     """A bare `ctx.workspace` on its own root context, with no tier registered.
 
-    `tool_runtime()` above is the same shape for the same reason: two test
-    modules had written this four-line constructor byte-identically, across
-    twenty call sites, and a seam whose construction drifts is one where two
+    `tool_runtime()` above has the same shape for the same reason. Two test
+    modules had written this four-line constructor byte for byte the same,
+    across twenty call sites. When the construction of a seam drifts, two
     suites disagree about what a default workspace is.
 
-    No provider, deliberately — a test that wants a tier registers one, and
-    `SharedWorkspaceProvider` is what the seam falls back to either way.
+    There is deliberately no provider. A test that wants a tier registers one,
+    and the seam falls back to `SharedWorkspaceProvider` either way.
     """
     return WorkspaceSeam(ctx=Context(), shared=SharedWorkspaceProvider(), scratch_root=scratch_root)
 
@@ -714,27 +776,27 @@ def workspace_acquiring(
 
 
 def workspace_retained(agent_id: str, reason: str) -> tuple[str, dict[str, Any]]:
-    """A tree marked as evidence; an empty `reason` withdraws the mark."""
+    """A tree marked as evidence. An empty `reason` withdraws the mark."""
     return (RETAINED, {"agentId": agent_id, "retained": reason})
 
 
 def workspace_disposed(agent_id: str, **extra: object) -> tuple[str, dict[str, Any]]:
-    """The closing half — `kept=`, `retained=`, `reconciled=` as the test needs."""
+    """The closing half, with `kept=`, `retained=` and `reconciled=` as the test needs."""
     return (DISPOSED, {"agentId": agent_id, **extra})
 
 
 def workspace_log(*events: tuple[str, dict[str, Any]], session_id: str = "s") -> Session:
-    """A session built from hand-written events, for testing a fold.
+    """A session built from hand-written events, for a test of a fold.
 
-    **Here rather than in each test module**, and it took two modules writing
-    these four builders before the reason showed: `test_workspace_reconcile` and
-    `test_workspace_retention` fold the *same* events through the *same*
-    function, so a fixture that drifts between them is how two suites come to
-    disagree about the payload shape one producer writes.
+    **It is here and not in each test module.** The reason showed only after
+    two modules had written these four builders. `test_workspace_reconcile`
+    and `test_workspace_retention` fold the *same* events through the *same*
+    function. A fixture that drifts between them makes two suites disagree
+    about the payload shape that one producer writes.
 
-    Through `ACQUIRED`/`DISPOSED`/`RETAINED` rather than the literals, for the
-    reason those constants already give for themselves: "a literal spelled at
-    five sites is five chances not to", and a test file is a site.
+    The builders use `ACQUIRED`, `ACQUIRING`, `DISPOSED` and `RETAINED` and not
+    the literals. Those constants exist so that the fold and the producers
+    agree on the names exactly, and a test file must agree with them too.
     """
     session = Session(session_id)
     for kind, data in events:
@@ -745,22 +807,24 @@ def workspace_log(*events: tuple[str, dict[str, Any]], session_id: str = "s") ->
 def reference_fork(
     child: str, parent: str, *, boundary: int, kind: SessionKind = "fork", family: str | None = None
 ) -> tuple[SessionHeader, list[SessionEvent]]:
-    """A child that stores **only its own events**, beginning at `boundary`.
+    """A child that stores **only its own events**, which begin at `boundary`.
 
-    Hand-built because `fork` still copies: the reader lands before anything
-    writes a reference, which is the whole point of that sequencing — the walk
-    has to be exercised before `fork` depends on it, not after.
+    It was built by hand while `fork` still copied the prefix. The reader
+    landed before anything wrote a reference, so that the walk was exercised
+    before `fork` depended on it and not after. `fork` now stores a reference
+    itself, and this builder gives a test a stored reference with no live
+    source session.
 
-    Here rather than in either suite because both need it and they were building
-    it differently: the core one through a store, the view one by writing the
-    wire format out longhand (`"seedLength"`, `"version": 0`, the header
-    envelope). A test that spells the format itself keeps passing when the format
-    changes, which makes it evidence for nothing. Returning the header and the
-    events lets each caller persist them its own way while the *shape* of a
-    reference-fork has one definition.
+    It is here and not in either suite because both need it, and they built it
+    differently. The core suite built it through a store. The view suite wrote
+    out the wire format by hand (`"seedLength"`, `"version": 0`, the header
+    envelope). A test that writes the format itself keeps passing when the
+    format changes, so it is evidence for nothing. The function returns the
+    header and the events, so each caller persists them in its own way while
+    the *shape* of a reference-fork has one definition.
 
-    The first event sits at `boundary`, which both marks the file as owing a
-    prefix and says how long that prefix is.
+    The first event is at `boundary`. That marks the file as one that depends
+    on a prefix, and it says how long the prefix is.
     """
     header = SessionHeader(
         id=child,
@@ -768,13 +832,14 @@ def reference_fork(
         parent_session=parent,
         seed_length=boundary,
         kind=kind,
-        # A child inherits its parent's lineage, and this helper is only handed
-        # the parent's *id*, so it cannot derive one. The default is therefore
-        # right only for a root created with **no cwd**, whose family is its own
-        # id; since format 1 a root worked in a directory is `<cwd-tag>-<id>` and
-        # a caller forking one has to say so. Getting it wrong files the child in
-        # a directory of its own, which is what `test_a_listing_row_says_the_same
-        # _thing_from_either_backend` asserts against.
+        # A child inherits the lineage of its parent. This helper is given only
+        # the *id* of the parent, so it cannot derive the lineage. The default is
+        # therefore right only for a root created with **no cwd**, whose family
+        # is its own id. Since format 1, a root that works in a directory is
+        # `<cwd-tag>-<id>`, and a caller that forks one must say so. A wrong
+        # family files the child in a directory of its own, which
+        # `test_a_listing_row_says_the_same_thing_from_either_backend` asserts
+        # against.
         family=family or parent,
     )
     own = [
@@ -798,28 +863,28 @@ def write_reference_fork(
     kind: SessionKind = "fork",
     family: str | None = None,
 ) -> Path:
-    """`reference_fork` written under `root` in the format `read_session` reads.
+    """`reference_fork` written under `root` in the format that `read_session` reads.
 
-    Through `to_wire` and the real header line type rather than a dict spelled
-    out longhand: a test that writes the wire format itself keeps passing after
-    the format changes, which makes it evidence for nothing.
+    It goes through `to_wire` and the real header line type, and not through a
+    dict written out by hand. A test that writes the wire format itself keeps
+    passing after the format changes, so it is evidence for nothing.
 
-    Takes the **root**, not a path. The first version took a path to serve a
-    caller that stores a log under a name that is not its id — no such caller
-    exists, and three of the five sites were spelling `f"{child}.jsonl"` at the
-    call instead, which is the same "the test states the format itself" failure
-    one layer out. `session_path` is the one naming rule.
+    It takes the **root**, not a path. The first version took a path, to serve
+    a caller that stores a log under a name that is not its id. No such caller
+    exists. Three of the five sites wrote `f"{child}.jsonl"` at the call, which
+    is the same failure one layer out: the test states the format itself.
+    `session_path` is the one naming rule.
     """
     header, own = reference_fork(child, parent, boundary=boundary, kind=kind, family=family)
     return write_stored_log(root, header, own)
 
 
 def write_stored_log(root: Path, header: SessionHeader, events: Sequence[SessionEvent]) -> Path:
-    """A log as the JSONL store leaves it under `root`: `header`'s line, then `events`.
+    """A log as the JSONL store leaves it under `root`: the line of `header`, then `events`.
 
-    `write_reference_fork`'s reason, one level down: the header line type, the
-    encoders and the path are the store's own, so a test states only what the log
-    holds.
+    This has the reason of `write_reference_fork`, one level down. The header
+    line type, the encoders and the path belong to the store, so a test states
+    only what the log holds.
     """
     path = session_path(root, header.id, header.family)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -838,38 +903,41 @@ def write_stored_log(root: Path, header: SessionHeader, events: Sequence[Session
 
 @contextmanager
 def hold_session(root: Path, session_id: str) -> Iterator[Path]:
-    """Hold one session's lease the way another process would; yields the log path.
+    """Hold the lease of one session as another process would. Yields the log path.
 
-    Through the lease's own door (`leased`) rather than a hand-spelled lock file,
-    for `stored_log`'s reason one layer over: two suites each wrote
-    `FileLock(f"{log}.lock")`, which
-    was where the lease lived until it stopped being derived from the log at all.
-    A test that spells the layout locks the wrong file the moment the layout
-    moves, and then tests nothing while still passing.
+    It goes through `leased`, the function of the lease itself, and not through
+    a lock file written by hand. The reason is that of `stored_log`, one layer
+    over. Two suites each wrote `FileLock(f"{log}.lock")`, which was where the
+    lease lived until it stopped being derived from the log at all. A test that
+    writes the layout locks the wrong file as soon as the layout moves, and
+    then tests nothing while it still passes.
     """
     with leased(root, session_id):
         yield stored_log(root, session_id)
 
 
 def stored_log(root: Path, session_id: str, *, family: str | None = None) -> Path:
-    """Where a session's log is, whatever layout the store wrote it in.
+    """The path of the log of a session, in whatever layout the store wrote it.
 
-    A test that spells `root / f"{session_id}.jsonl"` pins the layout, and the
-    family directories moved it — twenty-two of them broke at once, which is the
-    argument for this existing rather than for a second round of hand-editing.
+    A test that writes `root / f"{session_id}.jsonl"` depends on the layout,
+    and the family directories moved it. Twenty-two such tests broke at once.
+    That is the argument for this function and against a second round of
+    hand-editing.
 
-    Falls back to the path the log *would* take, so a test can assert a file is
-    absent before the first flush and poll for it afterwards. `family` defaults
-    to the session's own id, which is right for a root; a fork or a segment
-    inherits its parent's and should say so.
+    It falls back to the path that the log *would* take. So a test can assert
+    that a file is absent before the first flush, and poll for it afterwards.
+    `family` defaults to the id of the session itself, which is right for a
+    root. A fork or a segment inherits the family of its parent and should say
+    so.
     """
     return locate_session(root, session_id) or session_path(root, session_id, family or session_id)
 
 
 def splice_line(path: Path, line: bytes = b"{not a record\n", *, at: int = 2) -> bytes:
-    """Put `line` into a stored log at index `at` — the header is 0 — and return what
-    the file holds now: damage no crash makes, since a crash only cuts a log's end, and
-    the kind a reader must refuse and `phern doctor sessions` must find (P13-09)."""
+    """Put `line` into a stored log at index `at` (the header is 0) and return
+    what the file now holds. No crash makes this damage, because a crash only
+    cuts the end of a log. It is the kind of damage that a reader must refuse
+    and that `phern doctor sessions` must find (P13-09)."""
     lines = path.read_bytes().splitlines(keepends=True)
     lines.insert(at, line)
     damaged = b"".join(lines)
@@ -878,37 +946,38 @@ def splice_line(path: Path, line: bytes = b"{not a record\n", *, at: int = 2) ->
 
 
 def as_kind[B](block: object, kind: type[B]) -> B:
-    """This value, narrowed to `kind` — the assertion a test was already making.
+    """This value, narrowed to `kind`: the assertion that a test was already making.
 
-    A `ContentBlock` is a five-way union, so `blocks[0].name` is an error on four
-    of them: a test that indexes a message's content and reads a field is
-    *claiming* which kind it got, and until the test trees came under mypy
-    (issue 32) nothing checked the claim. 103 such reads existed, and the check
-    they wanted is one `isinstance`.
+    A `ContentBlock` is a five-way union, so `blocks[0].name` is an error on
+    four of them. A test that indexes the content of a message and reads a
+    field *claims* which kind it got. Until the test trees came under mypy
+    (issue 32), nothing checked the claim. There were 103 such reads, and the
+    check that they wanted is one `isinstance`.
 
-    Named for the `as_int`/`as_obj`/`as_seq` family, which does the same job for
-    a payload field: state the shape you are reading and fail on the spot if it
-    is not that. `assert` rather than a raise because the caller is a test and
-    the failure is a wrong expectation, not a refusal to handle.
+    The name follows the `as_int`/`as_obj`/`as_seq` family, which does the same
+    job for a payload field: state the shape that you read, and fail at once if
+    it is not that shape. It uses `assert` and not a raise because the caller
+    is a test, and the failure is a wrong expectation and not a refusal to
+    handle.
 
-    Not block-specific despite where it started: `Message.source` is a four-way
-    union read the same way, and one helper is better than a second copy under
-    another name.
+    It is not specific to blocks, although it started there. `Message.source`
+    is a four-way union that is read the same way, and one helper is better
+    than a second copy under another name.
     """
     assert isinstance(block, kind), f"expected a {kind.__name__}, got {type(block).__name__}"
     return block
 
 
 def block_text(block: object) -> str:
-    """The text of a block that carries text — `TextBlock` or `ReasoningBlock`.
+    """The text of a block that carries text: a `TextBlock` or a `ReasoningBlock`.
 
-    Both spell it `text`, and 75 of the reads `as_kind` exists for wanted only
-    the string. Naming both kinds here keeps the call site from having to decide
-    which of the two it is holding when it does not care.
+    Both name it `text`, and 75 of the reads that `as_kind` exists for wanted
+    only the string. Both kinds are named here, so a call site that does not
+    care which of the two it holds does not have to decide.
 
-    Not `text_of`: that one joins a *sequence* and silently skips anything that
-    is not a `TextBlock`, so a test asserting on reasoning text would get `""`
-    and pass for the wrong reason.
+    This is not `text_of`. That function joins a *sequence* and silently skips
+    anything that is not a `TextBlock`. A test that asserted on reasoning text
+    would get `""` and pass for the wrong reason.
     """
     assert isinstance(block, TextBlock | ReasoningBlock), (
         f"expected a block carrying text, got {type(block).__name__}"
@@ -920,23 +989,24 @@ _AGENT_IDS = itertools.count()
 
 
 def new_agent(ctx: Context, prefix: str = "agent") -> AgentDriver:
-    """A fresh agent on the fake adapter, on a session id nothing else has taken.
+    """A fresh agent on the fake adapter, on a session id that nothing else has taken.
 
-    Counted rather than fixed: a test that needs two agents — an index call and a
-    query call — would otherwise collide on the session id, which fails as
-    `SESSION_ALREADY_EXISTS` several frames from the cause."""
+    The id is counted and not fixed. A test that needs two agents (an index
+    call and a query call) would otherwise collide on the session id. That
+    fails as `SESSION_ALREADY_EXISTS`, several frames from the cause."""
     session = ctx.require(SESSIONS).create(f"{prefix}-{next(_AGENT_IDS)}")
     return ctx.require(AGENTS).create(session, FAKE_OPTIONS)
 
 
 def session_of(agent: AgentHandle) -> Session:
-    """The agent's session, which a test that has an agent always has.
+    """The session of the agent, which a test that has an agent always has.
 
-    `AgentHandle.session` is `Session | None` because a handle exists before the
-    session is attached, and every read of it in production narrows first. A
-    test that has just created an agent through `ctx.require(AGENTS).create(...)`
-    knows better, and said so by reading `agent.session.events` — a claim
-    nothing checked until the test trees came under mypy (issue 32).
+    `AgentHandle.session` is `Session | None` because a handle exists before
+    the session is attached, and every production read of it narrows first. A
+    test that has just created an agent through
+    `ctx.require(AGENTS).create(...)` knows that the session is there. It said
+    so by reading `agent.session.events`, and nothing checked that claim until
+    the test trees came under mypy (issue 32).
     """
     session = agent.session
     assert session is not None, "this agent has no session"
@@ -944,21 +1014,21 @@ def session_of(agent: AgentHandle) -> Session:
 
 
 def open_fds() -> set[str]:
-    """This process's open descriptors, by number. `/dev/fd` lists them on Linux and
-    macOS alike, so a test of something that holds one (a timer, a watch) can say
-    it gave it back."""
+    """The open descriptors of this process, by number. `/dev/fd` lists them on
+    both Linux and macOS. So a test of something that holds a descriptor (a
+    timer, a watch) can say that it gave the descriptor back."""
     return set(os.listdir("/dev/fd"))
 
 
 def noted[I, T](bucket: list[I], item: I, answer: T) -> T:
-    """Record that a listener ran, then answer with a value already in hand.
+    """Record that a listener ran, then answer with a value that is already in hand.
 
-    Twelve listeners in the test trees were written `bucket.append(x) or answer`
-    — a statement smuggled into a lambda, relying on `append` returning `None`.
-    That reads the value of a call that has none, which mypy refuses once the
-    trees are checked (issue 32), and `(append(x), answer)[1]` does not help:
-    the value is still *used*, just as a tuple element. A function is the only
-    place a statement can go.
+    Twelve listeners in the test trees were written as
+    `bucket.append(x) or answer`: a statement hidden in a lambda, which relies
+    on `append` returning `None`. That reads the value of a call that has none,
+    and mypy refuses it now that the trees are checked (issue 32).
+    `(append(x), answer)[1]` does not help, because the value is still *used*,
+    as a tuple element. A statement can go only in a function.
     """
     bucket.append(item)
     return answer
@@ -967,24 +1037,28 @@ def noted[I, T](bucket: list[I], item: I, answer: T) -> T:
 def noting[I, T](bucket: list[I], item: I, answer: Callable[[], T]) -> T:
     """Record that a listener ran, **then** produce the answer.
 
-    `noted`'s sibling for the case where the answer is a call — `next_()` in a
-    middleware chain. The callable matters: passing `next_()` as a value would
-    run the rest of the chain *before* this listener recorded itself, and these
-    tests assert the order (`["pre", "body", "post"]`).
+    This is the sibling of `noted` for the case where the answer is a call,
+    such as `next_()` in a middleware chain. The callable matters. To pass
+    `next_()` as a value would run the rest of the chain *before* this listener
+    recorded itself, and these tests assert the order
+    (`["pre", "body", "post"]`).
     """
     bucket.append(item)
     return answer()
 
 
 class StoredLogs:
-    """A `SessionArchive` in memory: whole logs, one optionally unreadable, and every
-    read's `family` recorded — the fold's half of "an id plus a family is a path",
-    which nothing else would notice going missing.
+    """A `SessionArchive` in memory. It holds whole logs, of which one can be
+    unreadable, and it records the `family` of every read. That record is the
+    fold's half of "an id plus a family is a path", and nothing else would
+    notice if it went missing.
 
-    One stand-in for the folds over stored sessions (the attachments and workspace
-    collectors), so a change to the archive's surface is made once here rather than
-    in a copy per test module. Rows are built as both backends build them
-    (`stored_row`), and `read_own` keeps only the `types` asked for, as they do.
+    It is the one stand-in for the folds over stored sessions (the attachments
+    collector, the workspace collector, and the rebuild of the live-roots
+    index). A change to the surface of the archive is then made one time here,
+    and not in a copy per test module. Rows are built as both backends build
+    them (`stored_row`), and `read_own` keeps only the `types` that were asked
+    for, as the backends do.
     """
 
     def __init__(self, *sessions: Session, broken: str = "", truncate: bool = False) -> None:
@@ -994,7 +1068,7 @@ class StoredLogs:
         self.truncate = truncate
         """Answer every listing as though it filled its `limit`."""
         self.asked: dict[str, str | None] = {}
-        """What `family` each read of each session was given, the latest winning."""
+        """The `family` that each read of each session was given. The latest read wins."""
         self.whole: list[str] = []
         """The sessions read whole (`read`), in order."""
         self.limits: list[int | None] = []
@@ -1059,20 +1133,21 @@ class StoredLogs:
 
 
 def stored_events(ctx: Context, session_id: str) -> list[SessionEvent]:
-    """The events a session's store holds right now, read through the Protocol, and
-    none when it holds no such session.
+    """The events that the store of a session holds right now, read through the
+    Protocol. The list is empty when the store holds no such session.
 
-    What a durability test asks — not what is in memory, but what a resume would
-    be handed. Seven tests spelled the read out before `stored_types` did, and two
-    more its tolerant form before this.
+    A durability test asks this: not what is in memory, but what a resume would
+    be given. Seven tests wrote out the read before `stored_types` did, and two
+    more wrote its tolerant form before this function.
     """
     stored = read_if_stored(ctx.require(SESSION_PERSISTENCE), session_id)
     return [] if stored is None else stored[1]
 
 
 async def resume_stored(ctx: Context, session_id: str) -> Session:
-    """`resume_session` over the log `ctx`'s store holds: `open_session` without its
-    claim or its start, for a test of the resume itself."""
+    """`resume_session` over the log that the store of `ctx` holds. This is
+    `open_session` without its claim or its start, for a test of the resume
+    itself."""
     return await resume_session(ctx, session_id, *ctx.require(SESSION_PERSISTENCE).read(session_id))
 
 
@@ -1082,8 +1157,9 @@ def stored_types(ctx: Context, session_id: str) -> list[str]:
 
 
 def delivered_ids(log: Session) -> list[str]:
-    """The id of each message delivered into `log`'s inbox, in order and repeats
-    kept, as its `agent/inbox/spliced` records say: how a test counts a notice."""
+    """The id of each message delivered into the inbox of `log`, in order and
+    with repeats kept, as its `agent/inbox/spliced` records say. A test counts a
+    notice this way."""
     return [
         as_str(as_obj(message).get("id"))
         for event in log.events
@@ -1093,8 +1169,9 @@ def delivered_ids(log: Session) -> list[str]:
 
 
 def live_settles(session: Session, event_type: str) -> list[SessionEvent]:
-    """The `event_type` records a live settle wrote — not the ones repair, or a claim
-    whose body raised, closed with an `unsettled` marker."""
+    """The `event_type` records that a live settle wrote. This leaves out the
+    records that repair, or a claim whose body raised, closed with an
+    `unsettled` marker."""
     return [
         event
         for event in session.events
@@ -1112,10 +1189,11 @@ def log_interrupted_call(
 ) -> None:
     """A turn that recorded a tool call as started and died before its result.
 
-    What a crash mid-call leaves: the assistant's request and its `tool/call`, with
-    nothing after them. `dispatches` are the Code Mode dispatches the call had
-    started, each `(tool, arguments)`, under the sub-call ids a cell gives them
-    (`{call}:code:{n}`) and never settled.
+    This is what a crash in the middle of a call leaves: the request of the
+    assistant and its `tool/call`, with nothing after them. `dispatches` are
+    the Code Mode dispatches that the call had started, each as
+    `(tool, arguments)`. They get the sub-call ids that a cell gives them
+    (`{call}:code:{n}`), and they are never settled.
     """
     log_event(session, "turn/start", {"turn": 1})
     log_event(session, "step/start", {"turn": 1, "step": 1})
@@ -1153,11 +1231,11 @@ async def reconciled_call(
     *,
     call_id: str = "call-1",
 ) -> tuple[ContentBlock, ...] | NotDone | None:
-    """What tool `name` says, as a resume would ask it, about one call a crash left open.
+    """What tool `name` says about one call that a crash left open, asked as a resume asks.
 
-    The `tool/call` record `log_interrupted_call` writes, handed to
-    `ToolRuntime.reconciled` as `resume_session` hands it: the rendered result for
-    `Done`, `NotDone`, or `None` for `Unknown`.
+    The `tool/call` record that `log_interrupted_call` writes is passed to
+    `ToolRuntime.reconciled` as `resume_session` passes it. The answer is the
+    rendered result for `Done`, `NotDone`, or `None` for `Unknown`.
     """
     record = SessionEvent(
         type="tool/call",
@@ -1171,11 +1249,10 @@ async def reconciled_call(
 def result_text(session: Session, call_id: str) -> str:
     """What the model reads back from one call.
 
-    Through `derive_event_message` — THE projection — rather than by indexing
-    `event.data["message"]["content"][0]`, for the reason `limits._result_facts`
-    gives: a second route to that shape is one that keeps passing after the
-    shape moves, and a test that reads the log by hand stops testing what the
-    model sees.
+    It goes through `derive_event_message`, THE projection, and not through an
+    index into `event.data["message"]["content"][0]`. A second route to that
+    shape keeps passing after the shape moves, and a test that reads the log by
+    hand stops testing what the model sees.
     """
     for event in session.events:
         if event.type != "tool/result":
@@ -1190,7 +1267,8 @@ def result_text(session: Session, call_id: str) -> str:
 def code_mode_stub() -> dict[str, Any]:
     """The patch that mounts Code Mode over the stub runtime, for a test to pass to `mount`.
 
-    A fresh document per call, since a mount may keep what it is handed.
+    Each call returns a fresh document, because a mount may keep what it is
+    given.
     """
     return {
         "insert": [
@@ -1203,16 +1281,16 @@ def code_mode_stub() -> dict[str, Any]:
 def store_root(ctx: Context) -> Path:
     """Where the mounted session store keeps its logs, for a test that needs it.
 
-    **Narrowed rather than promised.** `SessionPersistence` says nothing about
-    where a backend writes — its module is titled "what a backend owes, without
-    saying where it writes" — so `root` is a field of the two path-backed
-    implementations and not of the Protocol. Seven tests read
+    **Narrowed, not promised.** `SessionPersistence` says nothing about where a
+    backend writes. The title of its module is "what a backend must provide,
+    with no statement of where it writes". So `root` is a field of the two
+    path-backed implementations and not of the Protocol. Seven tests read
     `ctx.require(SESSION_PERSISTENCE).root` anyway, which compiled only because
     the test trees were outside mypy (issue 32).
 
-    Widening the Protocol to suit them would contradict a stated decision, so
-    the narrowing happens here and the assertion names what the test is
-    assuming: a store that has a path on disk at all.
+    To widen the Protocol for them would contradict a stated decision. So the
+    narrowing happens here, and the assertion names what the test assumes: a
+    store that has a path on disk at all.
     """
     store = ctx.require(SESSION_PERSISTENCE)
     assert isinstance(store, JsonlSessionStore | TursoSessionStore), (
@@ -1224,28 +1302,28 @@ def store_root(ctx: Context) -> Path:
 def not_none[T](value: T | None, what: str = "") -> T:
     """This value, which a test that reached this line knows is there.
 
-    A seam's `get(...)` answers `X | None` because absence is normal in
+    The `get(...)` of a seam answers `X | None` because absence is normal in
     production, and every caller there narrows. A test that has just registered
-    the thing it is asking for knows better — and said so by reading the
-    attribute, which compiled only while the test trees were outside mypy
+    the thing that it asks for knows that it is there. It said so by reading
+    the attribute, which compiled only while the test trees were outside mypy
     (issue 32).
 
-    Prefer a plain `assert x is not None` where the value is used more than
-    once: the local it binds narrows for the rest of the function, and reads
-    better than repeating this call. This is for the single-use case, where
-    binding a name costs a line and buys nothing.
+    Prefer a plain `assert x is not None` where the value is used more than one
+    time. The local that it binds narrows for the rest of the function, and
+    reads better than a repeat of this call. This function is for the
+    single-use case, where a bound name costs a line and gives no benefit.
     """
     assert value is not None, what or "expected a value, got None"
     return value
 
 
 def write_host_config(text: str, *, home: Path | None = None) -> Path:
-    """Write `$PH_HOME/daemon.yaml` as a person would before a start, and answer its path.
+    """Write `$PH_HOME/daemon.yaml` as a user would before a start, and return its path.
 
-    `load_host_config` is read once per process (`ph.host`), so a test that writes
-    the file after something resolved the roots is a process that has not
-    restarted — forgetting the earlier read here *is* the restart. `home` defaults
-    to the `$PH_HOME` this test runs under.
+    `load_host_config` is read one time per process (`ph.host`). So a test that
+    writes the file after something resolved the roots is a process that has
+    not restarted. This function forgets the earlier read, and that *is* the
+    restart. `home` defaults to the `$PH_HOME` that this test runs under.
     """
     root = home if home is not None else resolve_roots().home
     path = host_config_path(root)
@@ -1255,7 +1333,7 @@ def write_host_config(text: str, *, home: Path | None = None) -> Path:
 
 
 def write_profile(name: str, text: str) -> Path:
-    """Write the person's named profile `name` under this test's `$PH_HOME`, and answer its path."""
+    """Write the user's named profile `name` under the `$PH_HOME` of this test. Returns the path."""
     path = resolve_roots().profile_overlay(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -1263,16 +1341,17 @@ def write_profile(name: str, text: str) -> Path:
 
 
 def logged_events(session_id: str) -> list[SessionEvent]:
-    """The events a session's log holds on disk under this test's `$PH_HOME`.
+    """The events that the log of a session holds on disk under the `$PH_HOME` of this test.
 
-    What a durability assertion reads when no `Context` is at hand — a command run
-    through `CliRunner` — where `stored_events` reads through a mounted store.
+    A durability assertion reads this when no `Context` is at hand, such as
+    after a command run through `CliRunner`. `stored_events` reads through a
+    mounted store.
     """
     _header, events = read_session(stored_log(resolve_roots().sessions_dir(), session_id))
     return events
 
 
 async def unwritten(*_args: object) -> bool:
-    """`session_written` for a log that cannot be written: patch it in where a door
-    must then refuse, or change nothing."""
+    """`session_written` for a log that cannot be written. Patch it in where a
+    caller of `session_written` must then refuse, or change nothing."""
     return False

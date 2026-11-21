@@ -1,4 +1,4 @@
-"""`ph.llm` — the provider-neutral vocabulary, the stream assembler, the seam."""
+"""`ph.llm`: the provider-neutral vocabulary, the stream assembler, and the seam."""
 
 from __future__ import annotations
 

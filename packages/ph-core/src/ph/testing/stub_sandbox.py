@@ -1,13 +1,13 @@
-"""A `ctx.sandbox` backend for testing, enforcing whatever a test says it does.
+"""A `ctx.sandbox` backend for tests, which reports the enforcement that a test gives it.
 
-Two spellings of this existed within one changeset — a local class here and a
-bare `object()` registered as a provider one package over, which stopped
-satisfying `SandboxProvider` the moment that protocol grew `enforcement` and
-kept passing only because the reader it met happened not to ask. That is the
-state `stub_workspace` was written about, arriving again.
+Two versions of this existed within one changeset: a local class in this
+package, and a bare `object()` registered as a provider in another package. The
+bare object stopped satisfying `SandboxProvider` when that protocol gained
+`enforcement`. It kept passing only because the reader that it met did not ask.
+`stub_workspace` was written about the same state.
 
-It confines nothing: every test that has wanted one so far is asking what the
-*deployment* enforces, not what a command becomes.
+The backend confines nothing. Every test that has wanted one so far asks what
+the *deployment* enforces, and not what a command becomes.
 
 @module ph.testing.stub_sandbox
 """
@@ -25,10 +25,10 @@ __all__ = ["StubSandboxProvider"]
 class StubSandboxProvider:
     """A backend that reports `enforcement` and wraps nothing.
 
-    Not a `DenialReader`: it confines nothing, so there are no refusals of its own
-    to recognize. A test that wants the reading half drives the backend whose
-    kernel's words it means to read — `Bubblewrap` or `Seatbelt`, each of which
-    owns its own signature table.
+    It is not a `DenialReader`. It confines nothing, so it has no refusals of
+    its own to recognize. A test that wants the reading half drives the backend
+    whose kernel messages it means to read: `Bubblewrap` or `Seatbelt`. Each of
+    them owns its own signature table.
     """
 
     enforcement: Enforcement = "full"

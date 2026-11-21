@@ -1,4 +1,4 @@
-"""`ph.system_prompt` — prompt assembly (sections, contexts, tools, variables)."""
+"""`ph.system_prompt`: prompt assembly (sections, contexts, tools, variables)."""
 
 from __future__ import annotations
 

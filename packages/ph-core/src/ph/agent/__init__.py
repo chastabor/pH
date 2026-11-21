@@ -1,4 +1,4 @@
-"""`ph.agent` — the agent handle, its inbox, and the registry."""
+"""`ph.agent`: the agent handle, its inbox, and the registry."""
 
 from __future__ import annotations
 

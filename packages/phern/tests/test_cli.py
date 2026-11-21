@@ -573,7 +573,8 @@ def test_the_catalog_says_what_the_profile_sets_not_only_what_the_code_defaults(
     # sentinel with the first: `row.config` is `None` for both.
     mounted = _config("--row", "limits", "--profile", "rlm-stable")
     assert "row not mounted" not in mounted.output
-    assert "turn_limit=None" in mounted.output, "the code's answer stays visible"
+    # The default of a config model prints as the mapping that a profile writes.
+    assert "'turnLimit': None" in mounted.output, "the code's answer stays visible"
 
     configured = _config(
         "--row",

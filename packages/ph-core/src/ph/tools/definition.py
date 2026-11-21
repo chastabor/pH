@@ -1,18 +1,20 @@
-"""What a tool *is*, and what one call produces.
+"""What a tool is, and what one call produces.
 
-The load-bearing decision here is that `output` is **mandatory** (P1-01). A tool
-returns a canonical JSON *value*; its declared `render` projects that value into
-the content the model sees. Two consequences follow, and both are why dsh made
-it mandatory:
+The main decision in this module is that `output` is **mandatory** (P1-01). A
+tool returns a canonical JSON *value*. The declared `render` of the tool
+projects that value into the content that the model sees. Two consequences
+follow, and both are reasons why dsh made `output` mandatory:
 
-* the durable record is the value's projection, so a UI and a replay render the
-  same card from the log alone — nothing depends on the live object;
-* a tool cannot quietly hand the model prose that its own schema does not
-  describe, because content is derived from a validated value.
+* The durable record is the projection of the value. A UI and a replay
+  therefore render the same card from the log alone, and nothing depends on the
+  live object.
+* A tool cannot silently give the model prose that the schema of the tool does
+  not describe, because the content is derived from a validated value.
 
-`ToolRunContext` is the body's view: the accepted execution, the definition that
-will render its value, and the two things a body may do to the turn beyond
-returning — defer a context message, and conclude the turn.
+`ToolRunContext` is the view that the body has of its own call. It holds the
+accepted execution and the definition that will render the value. It also
+offers the two things that a body may do to the turn other than return: defer a
+context message, and conclude the turn.
 
 @module ph.tools.definition
 """
@@ -22,7 +24,6 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
-from dataclasses import replace as dataclasses_replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict
@@ -110,31 +111,35 @@ def text_content(text: str) -> list[ContentBlock]:
 
 @dataclass(frozen=True, slots=True)
 class ToolOutput:
-    """A tool's canonical output declaration.
+    """The canonical output declaration of a tool.
 
-    `render` is a pure projection from arguments and value to content.
-    `presentation_meta` is the tool's private durable payload, computed only for
-    top-level calls (a nested Code Mode dispatch has no card of its own).
+    `render` is a pure projection from the arguments and the value to content.
+    `presentation_meta` is the private durable payload of the tool. It is
+    computed only for top-level calls, because a nested Code Mode dispatch has
+    no card of its own.
 
-    **The arguments are not the model the body received.** The registry calls
-    `render` with `execution.arguments`, so a renderer reads `args.get("path")`
-    where the body two lines above it read `args.path`. Typing them as the
-    *model* would check only the three renderers that read `args` at all;
-    `JsonObject` is what they are, and `ToolDefinition.render` narrows to it once
-    so the annotation is true at runtime and not only on paper.
+    **The arguments are not the model that the body received.** The registry
+    calls `render` with `execution.arguments`. So a renderer reads
+    `args.get("path")` where the body, two lines above it, read `args.path`. If
+    the arguments were typed as the *model*, the type would check only the few
+    renderers that read `args` at all. `JsonObject` is what the arguments are.
+    `ToolDefinition.render` narrows to `JsonObject` one time, so the annotation
+    is true at run time and not only in the source.
 
-    **The value stays `Any`, and that is not laziness.** `ToolDefinition.render`
-    validates it against `output.schema` and raises `ToolOutputError` before this
-    callback is reached. That guarantees a schema's *required* fields — not a
-    `{"type": "object"}` output, and not a defaulted field, which is why a
-    renderer reaching for either uses `.get`. Typing it `JsonValue` was measured:
-    125 lines across nine files would narrow every read, `as_int(data["offset"])
-    + 1` for arithmetic a declared `int` already promised. Worse, it would not
-    even be enforced — parameters are contravariant, so a named renderer
-    declaring `value: Any` satisfies the slot and only inline lambdas would be
-    made to narrow, which is the same field read two ways depending on how its
-    renderer was spelled. It becomes the output *model* when the kernel codec can
-    carry one (plan P8-02, issues 1 and 2).
+    **The value stays `Any` on purpose.** `ToolDefinition.render` validates the
+    value against `output.schema` and raises `ToolOutputError` before it reaches
+    this callback. That validation guarantees the *required* fields of a schema.
+    It guarantees nothing for a `{"type": "object"}` output, and nothing for a
+    field that has a default, so a renderer that reads either of those uses
+    `.get`. Typing the value as `JsonValue` was measured. Every read would need
+    a narrowing, which is 125 lines across nine files: for example
+    `as_int(data["offset"]) + 1`, for arithmetic that a declared `int` already
+    promised. The type would also not be enforced. Parameters are contravariant,
+    so a named renderer that declares `value: Any` satisfies the slot, and only
+    inline lambdas would have to narrow. The same field would then be read in
+    two ways, depending on how its renderer was written. The value becomes the
+    output *model* when the kernel codec can carry one (plan P8-02, issues 1 and
+    2).
     """
 
     schema: SchemaDeclaration
@@ -144,11 +149,11 @@ class ToolOutput:
 
 @dataclass(frozen=True, slots=True)
 class ToolFailure:
-    """Canonical failure detail.
+    """The canonical detail of a failure.
 
-    `kind` is `FailureKind` — see `ph.tools.errors`, which declares it, because
-    it is what an error says about itself. `info` is the routable identity for
-    the subset of failures that have one.
+    `kind` is a `FailureKind`. `ph.tools.errors` declares that type, because it
+    is what an error says about itself. `info` is the routable identity, for the
+    failures that have one.
     """
 
     message: str
@@ -167,11 +172,11 @@ class ToolResult:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
-    """One call's execution-local outcome.
+    """The outcome of one call, local to the execution.
 
-    `value` is deliberately absent from the durable event: the log carries the
-    projection the model saw, and a consumer that needs the structured value
-    asks the tool to render it again rather than trusting a second copy.
+    The durable event deliberately has no `value`. The log carries the
+    projection that the model saw. A consumer that needs the structured value
+    asks the tool to render it again, and does not trust a second copy.
     """
 
     is_error: bool
@@ -195,7 +200,8 @@ def error_result(
 
 
 def denied_result(reason: str, *, concludes_turn: bool = False) -> ToolExecutionResult:
-    """Policy said no. Routable as a denial, so Code Mode can end the run (C3)."""
+    """Policy refused the call. The result is routable as a denial, so Code Mode
+    can end the run (C3)."""
     return replace(
         error_result(reason, {"name": "ToolDenied", "code": TOOL_DENIED}, kind="denied"),
         concludes_turn=concludes_turn,
@@ -203,14 +209,14 @@ def denied_result(reason: str, *, concludes_turn: bool = False) -> ToolExecution
 
 
 def budget_result(reason: str, *, concludes_turn: bool) -> ToolExecutionResult:
-    """A configured ceiling stopped the call, and by default the turn with it (D7).
+    """A configured ceiling stopped the call, and in the usual case the turn too (D7).
 
-    The sibling of `denied_result`, and apart from it for the reason
-    `TOOL_BUDGET_SPENT` gives: nothing judged this call, so `kind` is `failed`.
-    `concludes_turn` is stated rather than defaulted, because the two facts are
-    independent and the caller knows both: a budget that does not refill within
-    the turn should end it, but a per-call ceiling that the next call could pass
-    should not, and a default would make the commoner one silent.
+    This function is the counterpart of `denied_result`. It is separate for the
+    reason that `TOOL_BUDGET_SPENT` gives: nothing judged this call, so `kind`
+    is `failed`. `concludes_turn` has no default. The two facts are independent,
+    and the caller knows both. A budget that does not refill within the turn
+    should end the turn. A per-call ceiling that the next call could pass should
+    not. A default would make the more common case silent.
     """
     return replace(
         error_result(reason, {"name": "ToolBudgetSpent", "code": TOOL_BUDGET_SPENT}, kind="failed"),
@@ -219,11 +225,11 @@ def budget_result(reason: str, *, concludes_turn: bool) -> ToolExecutionResult:
 
 
 def aborted_result(*, started: bool) -> ToolExecutionResult:
-    """Cancellation, before or after the body ran.
+    """A cancellation, before or after the body ran.
 
-    The distinction is the whole reason there are two codes: a call aborted
-    before dispatch had no effect and is safe to retry; one aborted after may
-    have completed.
+    The two codes exist for this difference. A call that was aborted before
+    dispatch had no effect and is safe to retry. A call that was aborted after
+    dispatch may have completed.
     """
     if started:
         return error_result(
@@ -237,13 +243,14 @@ def aborted_result(*, started: bool) -> ToolExecutionResult:
 
 
 def concluded_result() -> ToolExecutionResult:
-    """A call the turn ended before reaching (C13).
+    """A call that the turn ended before the call ran (C13).
 
-    The batch stops dispatching once a result concludes the turn, and every call
-    the model asked for still owes a `tool/result`: a `tool_use` block with
-    nothing answering it is what the next request is rejected for. `aborted` in
-    kind, so it reads as "no effect, safe to retry" like the cancellation it
-    resembles, under its own code so it is not mistaken for one.
+    The batch stops dispatching when a result concludes the turn. Every call
+    that the model asked for still owes a `tool/result`, because the next
+    request is rejected when a `tool_use` block has no answer. The kind is
+    `aborted`, so the result reads as "no effect, safe to retry", like the
+    cancellation that it resembles. It has its own code, so that it is not
+    mistaken for a cancellation.
     """
     return error_result(
         "the turn ended before this call ran",
@@ -261,42 +268,43 @@ class ExecutionMode:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionInput:
-    """A caller's description of one call, before the registry accepts it.
+    """The description that a caller gives of one call, before the registry accepts it.
 
-    `scope` selects which guards, restrictions and presentation apply — the
-    per-agent policy boundary — and `session` is where the call is recorded.
-    Both are stated by the caller (the loop knows its agent's shape; the
-    registry must not guess it). `session` defaults to no log; `scope` has no
-    default at all since P6-32 — see the field below.
+    `scope` selects which guards, restrictions and presentation apply. It is the
+    per-agent policy boundary. `session` is where the call is recorded. The
+    caller states both: the loop knows the shape of its agent, and the registry
+    must not guess it. `session` defaults to no log. `scope` has had no default
+    since P6-32. See the field below.
     """
 
     call_id: str
     name: str
     arguments: JsonValue
     scope: Boundary
-    """The per-agent policy boundary — **required since P6-32**.
+    """The per-agent policy boundary. **Required since P6-32.**
 
-    The field this docstring already described correctly and could not enforce:
-    *"stated by the caller (the loop knows its agent's shape; the registry must
-    not guess it)"*. It defaulted to `None`, which `_execution` resolved as
-    `call.scope or self.ctx` — the mount, whose isolation is the *global* layer —
-    so a caller that stated nothing did not get "no tools", it got every tool the
-    deployment holds, and the registry guessed after all.
+    The class docstring already said that the caller states this field and that
+    the registry must not guess it. The code could not enforce that. The field
+    defaulted to `None`, and `_execution` resolved `None` as
+    `call.scope or self.ctx`. That is the mount, whose isolation is the *global*
+    layer. So a caller that stated nothing did not get "no tools". It got every
+    tool that the deployment holds, and the registry guessed after all.
 
-    `DEPLOYMENT` is how a caller means that on purpose. With both spellings
-    available the default comes off, and the sentence above becomes true rather
-    than aspirational."""
+    A caller that means the wide answer on purpose passes `DEPLOYMENT`. Because
+    both forms are available, the default was removed, and the statement in the
+    class docstring is now enforced."""
     session: Session | None = None
     agent: AgentHandle | None = None
     """The agent to route an approval prompt to, when there is one."""
     root_call_id: str | None = None
-    """The model-requested call owning this execution tree; defaults to `call_id`."""
+    """The call that the model requested and that owns this execution tree. The
+    default is `call_id`."""
     parent: object | None = None
-    """The enclosing transport's opaque token, for a Code Mode sub-dispatch.
+    """The opaque token of the enclosing transport, for a Code Mode sub-dispatch.
 
-    Its presence is also what distinguishes a sub-dispatch from a model-direct
-    call: under `mode: code` only a call WITH a parent may name a native tool
-    (C6)."""
+    The presence of a parent also distinguishes a sub-dispatch from a call that
+    the model made directly. Under `mode: code`, only a call WITH a parent may
+    name a native tool (C6)."""
     cancel: CancelToken | None = None
 
 
@@ -309,33 +317,44 @@ class Done:
 
 @dataclass(frozen=True, slots=True)
 class NotDone:
-    """The call did not happen — its effect is not there — so running it again is safe."""
+    """The call did not happen and its effect is not there, so running it again
+    is safe."""
 
 
 @dataclass(frozen=True, slots=True)
 class Unknown:
-    """The tool cannot tell. The honest answer whenever the check would be a guess."""
+    """The tool cannot tell. This is the correct answer whenever the check would
+    be a guess."""
 
 
 Reconciled: TypeAlias = Done | NotDone | Unknown
-"""What a tool says about a call a crash left unresolved (`ToolDefinition.reconcile`)."""
+"""What a tool says about a call that a crash left unresolved
+(`ToolDefinition.reconcile`)."""
 
 WorkspaceConfinement: TypeAlias = Callable[[JsonValue, AgentHandle | None], bool]
-"""Whether one call's every effect is a file in the agent's workspace, given the call's
-arguments (plain JSON, as they will run or as the log recorded them) and the agent
-making it — the per-call form of `ToolDefinition.effects_confined_to_workspace`."""
+"""Whether every effect of one call is a file in the workspace of the agent.
+
+The function takes the arguments of the call and the agent that makes the call.
+The arguments are plain JSON, as they will run or as the log recorded them. This
+is the per-call form of `ToolDefinition.effects_confined_to_workspace`."""
 
 
 def call_id_of(record: SessionEvent) -> str:
-    """The call a record `ToolDefinition.reconcile` is handed names: a `tool/call`'s
-    `callId`, or a Code Mode dispatch's `subCallId` — the id the call's own body saw
-    as `ToolRunContext.call_id`. Empty when the record names neither."""
+    """The id of the call that a record names, for a record that is passed to
+    `ToolDefinition.reconcile`.
+
+    The id is the `callId` of a `tool/call`, or the `subCallId` of a Code Mode
+    dispatch. It is the id that the body of the call saw as
+    `ToolRunContext.call_id`. The result is empty when the record names
+    neither."""
     return as_str(record.data.get("subCallId")) or as_str(record.data.get("callId"))
 
 
 def recorded_arguments(record: SessionEvent) -> JsonValue:
-    """A call record's arguments, as the call ran with them: a `tool/call`'s are the
-    model's text, parsed as the batch parses it, and a Code Mode dispatch's the object
+    """The arguments of a call record, as the call ran with them.
+
+    The arguments of a `tool/call` are the text from the model, parsed as the
+    batch parses it. The arguments of a Code Mode dispatch are the object that
     its program passed."""
     raw = record.data.get("arguments")
     return parse_arguments(raw) if isinstance(raw, str) else thaw_json(raw)
@@ -345,8 +364,8 @@ def recorded_arguments(record: SessionEvent) -> JsonValue:
 class ToolExecution:
     """One accepted call inside the pipeline.
 
-    Arguments have crossed a lossless-JSON boundary and are frozen. The `token`
-    is registry-assigned and is shared with nested calls only as their opaque
+    The arguments have crossed a lossless-JSON boundary and are frozen. The
+    registry assigns the `token`. Nested calls share it only as their opaque
     `parent`.
     """
 
@@ -360,51 +379,54 @@ class ToolExecution:
     agent: AgentHandle | None = None
     parent: object | None = None
     signal: CancelToken | None = None
-    """The live cancellation view. A `tools/execute` wrapper may replace it for
-    its delegated lifetime — with a child token, so it can narrow but never
-    widen — but cannot remove it."""
+    """The live view of the cancellation. A `tools/execute` wrapper may replace
+    it for its delegated lifetime, but only with a child token, so the wrapper
+    can narrow the cancellation and never widen it. A wrapper cannot remove
+    it."""
     substituted: bool = False
-    """Whether `arguments` is what approval put there rather than what the model
-    sent (`Edited`, P4-05). On the execution because it qualifies the field one
-    line above it, and every stage that holds an execution can ask. The
-    write-ahead record reads it to log what will run — see `Allow.arguments`."""
+    """Whether `arguments` holds what approval put there and not what the model
+    sent (`Edited`, P4-05). The flag is on the execution because it qualifies
+    `arguments`, and every stage that holds an execution can read it. The
+    write-ahead record reads it to log what will run. See `Allow.arguments`."""
     restore_covered: bool = False
-    """Whether a workspace restore takes back everything this call does
-    (`ToolRuntime.restore_covers`), for a call nested in a Code Mode run. Asked once,
-    by `ToolRuntime.prepare` once the gate has decided (S4): the dispatch's record
-    carries it for `/revert`, and the checkpoint policy's barrier skips on it. Two
-    asks could disagree, since the answer follows links a sibling dispatch may
-    move between them. `False` for any other call: nothing reads it there."""
+    """Whether a workspace restore takes back everything that this call does
+    (`ToolRuntime.restore_covers`), for a call nested in a Code Mode run.
+    `ToolRuntime.prepare` asks one time, after the gate has decided (S4). The
+    record of the dispatch carries the answer for `/revert`, and the barrier of
+    the checkpoint policy skips on it. Two asks could disagree, because the
+    answer follows links that a sibling dispatch may move between them. The
+    value is `False` for any other call, where nothing reads it."""
 
 
 @dataclass(slots=True)
 class ToolRunContext:
-    """The body's view of its own execution."""
+    """The view that the body has of its own execution."""
 
     execution: ToolExecution
     definition: ToolDefinition
-    """The tool that will render this call's value. Carried on the run so the
-    pipeline never has to look it up again — or lose it on a path that ends
-    early."""
+    """The tool that will render the value of this call. The run carries it, so
+    the pipeline never has to look it up again, and cannot lose it on a path
+    that ends early."""
     by: Running
     """Who registered that tool, and where (P6-29).
 
-    Resolved once in `create_execution`, from the very view that produced
-    `definition` — so it cannot disagree with it, and cannot be absent while the
-    definition is present. Looking it up again per stage would be wrong: a tool that
-    unregisters itself during its own `execute` is gone from the rebuilt view by
-    `finish`, and `finalize_content` would then run under a fallback rather than as the
-    row that wrote it.
+    `create_execution` resolves it one time, from the same view that produced
+    `definition`. So it cannot disagree with `definition`, and it cannot be
+    absent while the definition is present. A new lookup at each stage would be
+    wrong. A tool that unregisters itself during its own `execute` is gone from
+    the rebuilt view by the time of `finish`. `finalize_content` would then run
+    under a fallback, and not as the row that wrote it.
     """
     _deferred: list[Message] = field(default_factory=list)
     _concluded: bool = False
     _presented: tuple[object, tuple[ContentBlock, ...]] | None = None
     """A value, and the content the body says it renders as (`present`)."""
     _cut_off: bool = False
-    """Whether the body was entered and left by a cancellation rather than by returning
-    or raising: its budget ran out, or a cancel reached it. Its effect may have
-    happened, so a keyed call is settled unknown (`ToolRuntime._settle_effect`).
-    Set by the registry's own body call, the one place that knows it was entered."""
+    """Whether the body was entered and then left by a cancellation, and not by
+    a return or a raise: its budget ran out, or a cancel reached it. The effect
+    of the call may have happened, so a keyed call is settled as unknown
+    (`ToolRuntime._settle_effect`). The registry sets the flag where it calls
+    the body, which is the one place that knows that the body was entered."""
 
     @property
     def call_id(self) -> str:
@@ -440,23 +462,25 @@ class ToolRunContext:
 
     @property
     def idempotency_key(self) -> str:
-        """A key for **this tool's own retries** against a far side that takes one.
+        """A key for **the retries that this tool makes itself** against a far
+        side that takes one.
 
-        An HTTP `Idempotency-Key`, an SMTP `Message-ID`: stable for this call and
-        unique to it — `{session}/{call_id}`, and for a Code Mode dispatch
-        `{session}/{call_id}:code:{n}`, already deterministic. That is all it is
-        for. It does **not** survive the model re-issuing a call, which mints a new
-        call id; recognizing that repeat is `ToolDefinition.idempotency_key`'s job.
+        Examples are an HTTP `Idempotency-Key` and an SMTP `Message-ID`. The key
+        is stable for this call and unique to it: `{session}/{call_id}`. For a
+        Code Mode dispatch it is `{session}/{call_id}:code:{n}`, which is already
+        deterministic. The key has no other purpose. It does **not** survive a
+        call that the model issues again, because that call gets a new call id.
+        Recognizing that repeat is the job of `ToolDefinition.idempotency_key`.
         """
         session = self.execution.session
         return self.call_id if session is None else f"{session.id}/{self.call_id}"
 
     def defer_context(self, context: Message) -> None:
-        """Attach a context message to this call's own result.
+        """Attach a context message to the result of this call.
 
-        The loop appends it only *after* the `tool/result`, so call/result
-        adjacency survives — a context spliced between them would break the
-        pairing every provider relies on.
+        The loop appends the message only *after* the `tool/result`, so the call
+        and the result stay adjacent. A context that was inserted between them
+        would break the pairing that every provider relies on.
         """
         self._deferred.append(context)
 
@@ -465,31 +489,34 @@ class ToolRunContext:
         self._concluded = True
 
     def present(self, value: object, content: Sequence[ContentBlock]) -> None:
-        """Say what `value` — the one this body is about to return — renders as.
+        """State what `value` renders as. `value` is the one that this body is
+        about to return.
 
-        **For a tool whose rendering was made where it ran**: a UTCP command that
-        printed its own `text` beside its value, a remote tool that answered in
-        prose. That text is a pure projection of the arguments and the value, made
-        by the tool's own `render` in another process, and this process cannot make
-        it again: the information is not in the value.
+        **This is for a tool whose rendering was made where the tool ran**: a
+        UTCP command that printed its own `text` beside its value, or a remote
+        tool that answered in prose. That text is a pure projection of the
+        arguments and the value. The `render` of the tool made it in another
+        process. This process cannot make it again, because the information is
+        not in the value.
 
-        The registry takes it wherever it would have rendered *this* value — the
-        dispatch, a post-execute row's `projected` measurement, the re-render after
-        a row passes the value through — so every policy row sees and edits the
-        same content the model will. A row that **replaces** the value gets the
-        definition's own rendering of the replacement, because the text no longer
-        describes it: the match is by identity, not equality. The value is still
-        validated against the declared output either way.
+        The registry uses the content wherever it would have rendered *this*
+        value: at the dispatch, for the `projected` measurement of a
+        post-execute row, and for the new render after a row passes the value
+        through. Every policy row therefore sees and edits the same content that
+        the model will see. A row that **replaces** the value gets the rendering
+        that the definition makes of the replacement, because the text no longer
+        describes the value. The match is by identity, not by equality. In both
+        cases the value is still validated against the declared output.
         """
         self._presented = (value, tuple(content))
 
     def presented_for(self, value: object) -> tuple[ContentBlock, ...] | None:
-        """The content `present` gave for this very value, or `None`."""
+        """The content that `present` gave for this exact value, or `None`."""
         presented = self._presented
         return presented[1] if presented is not None and presented[0] is value else None
 
     def raise_if_canceled(self) -> None:
-        """Bail out of a long body when the call was canceled."""
+        """Stop a long body when the call was canceled."""
         if self.execution.signal is not None:
             self.execution.signal.raise_if_canceled()
 
@@ -497,23 +524,25 @@ class ToolRunContext:
 @dataclass(frozen=True, slots=True)
 class Allow:
     arguments: JsonValue = None
-    """Run it with these arguments instead of the ones the model sent.
+    """Run the call with these arguments and not with the ones that the model sent.
 
-    `None` — the ordinary case — leaves the call untouched. A substitution lands
-    here, applied by `prepare()`, because the execution belongs to the pipeline:
-    a listener reaching into `execution.arguments` itself would be writing the
-    one field the run's owner has already handed to every listener before it.
+    `None` is the ordinary case and leaves the call unchanged. A substitution
+    arrives here and `prepare()` applies it, because the execution belongs to
+    the pipeline. A listener that wrote `execution.arguments` itself would write
+    the one field that the owner of the run has already passed to every listener
+    before it.
 
-    **Three records, three authors, and none of them rewritten.** The assistant
-    message holds what the model asked for; `approval/decided` carries the
-    human's substitution; `tool/call`, written after the gate (P7-15), records
-    what actually ran. A reader sees the request, the correction, and the act,
-    each attributed to whoever made it — where one record overwritten in place
-    would have put the human's arguments in the model's mouth.
+    **Three records, three authors, and none of them is rewritten.** The
+    assistant message holds what the model asked for. `approval/decided` carries
+    the substitution that the human made. `tool/call`, which is written after
+    the gate (P7-15), records what ran. A reader sees the request, the
+    correction, and the act, each attributed to its author. One record that was
+    overwritten in place would have attributed the arguments of the human to the
+    model.
     """
     has_arguments: bool = False
-    """Whether `arguments` is a substitution. Separate from `None`, because
-    `None` is a value a tool may legitimately be called with."""
+    """Whether `arguments` is a substitution. This is separate from `None`,
+    because `None` is a value that a tool may legitimately be called with."""
     kind: Literal["allow"] = "allow"
 
 
@@ -523,41 +552,43 @@ class Deny:
     concludes_turn: bool = False
     """Whether this refusal also ends the turn.
 
-    The same flag a *successful* result carries (`ToolRunContext.conclude_turn`),
-    reached from the other side: `commit_ready` reads `concludes_turn` on every
-    committed result, a denial from `prepare()` included, so a policy row that
-    must stop the conversation says so here rather than inventing a second way
-    to end a turn. The batch already in flight still settles — what ends is what
-    comes after it."""
+    This is the flag that a *successful* result carries
+    (`ToolRunContext.conclude_turn`), set from the other side. `commit_ready`
+    reads `concludes_turn` on every committed result, and that includes a denial
+    from `prepare()`. So a policy row that must stop the conversation says so
+    here, and does not need a second way to end a turn. The batch that is
+    already in flight still settles. What ends is what comes after it."""
     failure_kind: Literal["denied", "failed"] = "denied"
-    """What the model reads this as: policy refusing, or something spent (D7).
+    """How the model reads this: as a policy refusal, or as a spent budget (D7).
 
-    Separate from `concludes_turn`, which decides what the *loop* does, because
-    the two questions have different answers: a budget ceiling ends the turn and
-    is not policy refusing anything, and the `end` posture below refuses and
-    ends. `fs.FsDenied` and `fs.FileTooLarge` split on this same line, under the
-    same field name, and `code_mode.CodeRunFailure` splits `denied` from
-    `budget` — this is the field that lets a policy row say which one it means
-    instead of having the pipeline guess from the decision type.
+    This is separate from `concludes_turn`, which decides what the *loop* does,
+    because the two questions have different answers. A budget ceiling ends the
+    turn and is not a policy refusal. The `end` exit of `ph_stabilize.limits`
+    refuses and ends the turn. `fs.FsDenied` and `fs.FileTooLarge` differ in the
+    same way, under the same field name, and `code_mode.CodeRunFailure`
+    separates `denied` from `budget`. With this field a policy row says which
+    one it means, and the pipeline does not guess from the type of the decision.
 
-    Not the discriminator `kind` above, which names the decision rather than its
-    reading, and which the pipeline's `match` is closed over."""
+    This is not the discriminator `kind` below. `kind` names the decision and
+    not how the model reads it, and the pipeline handles a closed set of
+    decisions."""
     kind: Literal["deny"] = "deny"
 
 
 @dataclass(frozen=True, slots=True)
 class Respond:
-    """Do not run it; hand the model this result instead.
+    """Do not run the call. Give the model this result instead.
 
-    A *successful* result, because whoever answered answered the question the
-    call was asking — a denial the model would have to interpret is the wrong
+    The result is *successful*, because the answerer answered the question that
+    the call asked. A denial that the model would have to interpret is the wrong
     shape for "you don't need to run that, here is the answer".
 
-    A member of the pipeline's own vocabulary rather than something only the
-    approval seam can reach, for the reason `Deny.concludes_turn` is one: a cache
-    row, a replay row, or a "disabled here, do this instead" row all want to
-    short-circuit a call with an answer, and a capability wired to a single
-    consumer is one the next consumer has to reinvent.
+    This is a member of the vocabulary of the pipeline, and not something that
+    only the approval seam can reach. The reason is the same as for
+    `Deny.concludes_turn`. A cache row, a replay row, or a "disabled here, do
+    this instead" row each want to answer a call without running it. A
+    capability that is wired to one consumer is a capability that the next
+    consumer must build again.
     """
 
     message: str
@@ -570,17 +601,17 @@ class Ask:
     allowed_decisions: tuple[ApprovalDecisionName, ...] = ()
     """Which of `approve | edit | reject | respond` a front end should offer.
 
-    **The approval seam's own vocabulary**, under `TYPE_CHECKING` so the tools
-    pipeline still imports nothing from the seam that consumes an `Ask` — the
-    dependency runs the other way, and the name costs nothing to borrow. It was
-    `tuple[str, ...]` until `ctx.require(APPROVAL)` gave the call a type: a
-    policy row could name a fifth decision and find out at the first ask (plan
-    P8-05, issue 18).
+    **This is the vocabulary of the approval seam.** The name is imported under
+    `TYPE_CHECKING`, so this module imports nothing from the approval seam at
+    run time, and borrowing the name costs nothing. The field was
+    `tuple[str, ...]` until `ctx.require(APPROVAL)` gave the call a type. Before
+    that, a policy row could name a fifth decision and learn of the mistake only
+    at the first ask (plan P8-05, issue 18).
 
-    Empty means all of them. Carried from the row that asked to the answerer
-    that prompts, because *what may be decided* is a policy question and a front
-    end that guessed would offer `edit` for a tool whose arguments must not be
-    hand-written."""
+    An empty tuple means all of them. The value is carried from the row that
+    asked to the answerer that prompts, because *what may be decided* is a
+    policy question. A front end that guessed would offer `edit` for a tool
+    whose arguments must not be written by hand."""
     kind: Literal["ask"] = "ask"
 
 
@@ -589,30 +620,31 @@ PreToolDecision: TypeAlias = "Allow | Deny | Ask | Respond"
 
 @dataclass(frozen=True, slots=True)
 class Accept:
-    """Keep the call successful, optionally replacing either projection.
+    """Keep the call successful, and optionally replace either projection.
 
     **Two projections, two consumers** (D10). `value` is what the program
-    receives under Code Mode — `bridge.call` hands it back and a cell subscripts
-    it — and `content` is what reaches the model's transcript. Ordinarily the
-    second is rendered from the first, which is why a row replacing the value
-    leaves `content` alone and lets the registry re-render.
+    receives under Code Mode: `bridge.call` returns it, and a cell subscripts
+    it. `content` is what reaches the transcript of the model. Ordinarily the
+    content is rendered from the value. That is why a row that replaces the
+    value leaves `content` unset and lets the registry render again.
 
-    Supplying *both* is the explicit statement that they differ, and it is
-    offload's case: a result too large for the context is spilled to a file and
-    the model gets a pointer, while the program keeps the whole object in its
-    variable. That combination used to raise, on the reading that content is
-    derived from the value and two sources would disagree — true of a row that
-    means them to agree, and exactly backwards for the one row whose job is to
-    make them differ.
+    A row that supplies *both* states explicitly that they differ. Offload is
+    that case: a result that is too large for the context is spilled to a file.
+    The model gets a pointer, and the program keeps the whole object in its
+    variable. That combination used to raise, on the reasoning that content is
+    derived from the value and two sources would disagree. That reasoning is
+    true of a row that means them to agree. It is exactly wrong for the one row
+    whose job is to make them differ.
     """
 
     content: Sequence[ContentBlock] | None = None
-    """What the model sees. `None` leaves it to the registry: the body's own
-    content, or the render of a replaced `value`."""
+    """What the model sees. `None` leaves the choice to the registry: the
+    content of the body itself, or the render of a replaced `value`."""
     value: Any = None
     has_value: bool = False
-    """Whether `value` is a replacement. Separate from `value is not None`,
-    because `None` is a value a tool may legitimately return."""
+    """Whether `value` is a replacement. This is separate from
+    `value is not None`, because `None` is a value that a tool may legitimately
+    return."""
     additional_contexts: tuple[Message, ...] = ()
     kind: Literal["accept"] = "accept"
 
@@ -638,160 +670,184 @@ class ToolDefinition:
     parameters: dict[str, Any]
     """JSON Schema for the arguments, exactly as the model receives it."""
     output: ToolOutput
-    """The argument model `define_tool` checked is not recoverable from here: a
-    definition lives in a registry beside every other tool, so the type is erased
-    at the table and the checking happens at the constructor, where the body and
-    its declared `parameters` meet. The same shape as `PluginSpec.apply`."""
     execute: Callable[[Any, ToolRunContext], Awaitable[Any]]
-    """Always awaited. `define_tool` wraps every body in an `async def` that runs
-    it through `maybe_await`, so by the time one reaches this field the sync-or-
-    async question is already settled — and `registry.py`'s `await` on it is a
-    checked await rather than one that passes because `Any` awaits."""
+    """The argument model that `define_tool` checked cannot be recovered from
+    here. A definition lives in a registry beside every other tool, so the type
+    is erased at the table. The check happens at the constructor, where the body
+    and its declared `parameters` meet. `PluginSpec.apply` has the same shape.
+
+    Always awaited. `define_tool` wraps every body in an `async def` that
+    runs it through `maybe_await`. So the question of sync or async is settled
+    before a body reaches this field. The `await` on it in `registry.py` is
+    therefore a checked await, and not one that passes because `Any` awaits."""
     finalize_content: (
         Callable[[ToolExecution, ToolExecutionResult], Sequence[ContentBlock] | None] | None
     ) = None
-    """Synchronous last-mile content transform, invoked exactly once for every
-    normalized outcome — pipeline failures that bypass `tools/post-execute`
-    included. Must be total and must not raise."""
+    """A synchronous final transform of the content. It is called exactly one
+    time for every normalized outcome, including the pipeline failures that
+    bypass `tools/post-execute`. It must be total and must not raise."""
     timeout_ms: int | None = None
-    """Cooperative budget, enforced by the `tools-timeout` row's `tools/execute`
-    wrapper. Never sent to the model: `schemas()` whitelists
-    name/description/parameters only."""
+    """A cooperative budget. The `tools/execute` wrapper of the `tools-timeout`
+    row enforces it. It is never sent to the model: `schemas()` passes only the
+    name, the description and the parameters."""
     self_limits: bool = False
     """The tool bounds its own output and offers the model a way to page.
 
-    Declared by the tool rather than matched by name in a policy row, because
-    `read`, `grep` and their kin are *registered plugins* — a deployment renames
-    them, an MCP server adds its own, and a name list in another package cannot
-    know. Read by `ph-stabilize`'s offload row (G2), which leaves a self-limiting
-    result inline: a model that hit this tool's own cap already knows how to ask
-    for the next page, so spending a spill file to tell it again teaches nothing.
+    The tool declares this, and a policy row does not match it by name. `read`,
+    `grep` and similar tools are *registered plugins*: a deployment renames
+    them, and an MCP server adds its own. A list of names in another package
+    cannot know them. The offload row of `ph-stabilize` reads the flag (G2) and
+    leaves a self-limiting result inline. A model that reached the cap of this
+    tool already knows how to ask for the next page, so a spill file that tells
+    it again teaches nothing.
     """
     reads_paths: bool = False
-    """Given an absolute path, this tool returns the file's contents, and it can
-    page through a large one.
+    """Given an absolute path, this tool returns the contents of the file, and
+    it can page through a large file.
 
-    Declared rather than matched by name, for `self_limits`' reason one field up:
-    a deployment renames its tools and an MCP server adds its own, so a name list
-    in another package cannot know. Read by `ph-stabilize`'s offload row, whose
-    replacement text has to tell the model *how* to reach a spilled result —
-    upstream's wording says `read_file`, which is not a tool pH has, and pH was
-    appending a paragraph to correct it rather than naming the tool that exists.
+    The tool declares this, and nothing matches it by name, for the same reason
+    as `self_limits` one field up. A deployment renames its tools and an MCP
+    server adds its own, so a list of names in another package cannot know
+    them. The offload row of `ph-stabilize` reads the flag. The replacement text
+    of that row must tell the model *how* to reach a spilled result. The
+    upstream wording says `read_file`, which is not a tool that pH has. pH used
+    to append a paragraph that corrected the name, and it now names the tool
+    that exists.
     """
     searches_paths: bool = False
-    """Given a path, this tool searches inside it rather than returning it whole.
+    """Given a path, this tool searches inside it and does not return it whole.
 
-    The other half of what the offload replacement needs to say: a spilled result
-    is an ordinary file, and searching one is usually better than paging through
-    it — but only a tool that takes a path as its root can do that.
+    This is the other half of what the offload replacement text must say. A
+    spilled result is an ordinary file, and a search of a file is usually better
+    than paging through it. But only a tool that takes a path as its root can
+    search it.
     """
     arguments_disposable: bool = False
-    """The model does not need to re-read this call's arguments.
+    """The model does not need to read the arguments of this call again.
 
-    Set by a tool whose arguments are a *payload it already delivered* — a file
-    body handed to `write`, the replacement text handed to `edit` — rather than
-    an instruction the model refers back to. Retained history may then elide them
-    under context pressure (`compaction-summarize`'s truncation pass, G4).
+    A tool sets this when its arguments are a *payload that it already
+    delivered*, and not an instruction that the model refers back to. Examples
+    are a file body passed to `write` and the replacement text passed to `edit`.
+    Retained history may then elide the arguments under context pressure (the
+    truncation pass of `compaction-summarize`, G4).
 
-    Declared here rather than matched by name in a policy row, for the reason
-    `self_limits` is: these are *registered plugins*, so a deployment renames
-    them and an MCP server adds its own, and a name list in another package
-    cannot know. The distinction is real and narrow — a long `run_code` cell is
-    exactly the argument a model re-reads, so it stays.
+    The tool declares this, and a policy row does not match it by name, for the
+    same reason as `self_limits`. These are *registered plugins*, so a
+    deployment renames them and an MCP server adds its own, and a list of names
+    in another package cannot know them. The distinction is real and narrow. A
+    long `run_code` cell is exactly the kind of argument that a model reads
+    again, so it stays.
     """
     effects_confined_to_workspace: bool | WorkspaceConfinement = False
-    """Every effect of this call is a file inside the agent's workspace (E7, N3).
+    """Every effect of this call is a file inside the workspace of the agent (E7, N3).
 
-    Named for what the *tool* knows rather than for what a consumer does with it:
-    `/revert` derives "a workspace restore undoes this" from it, but that is the
-    row's inference.
+    The field is named for what the *tool* knows, and not for what a consumer
+    does with it. `/revert` derives "a workspace restore undoes this" from it,
+    but that is an inference that the `/revert` row makes.
 
-    True for a tool whose entire effect is a file inside the workspace. False, the
-    default, for anything that can reach past the tree — a shell command that
-    published a package, a spawn, a message. **Git restores the tree, not the
-    world.** A tool with no effect at all says `effect_free` instead.
+    The value is true for a tool whose entire effect is a file inside the
+    workspace. It is false, the default, for anything that can reach outside the
+    tree: a shell command that published a package, a spawn, a message. **Git
+    restores the tree, not the world.** A tool with no effect at all declares
+    `effect_free` instead.
 
-    **Per call, where a tool can say** (S4). `ctx.fs.resolve` passes an absolute path
-    through untouched, and a link or an allowance can lead out of the tree, so a flat
-    `True` on `write`/`edit` reported a write outside the workspace as covered — and
-    the checkpoint policy skipped the barrier a crash needed. A `WorkspaceConfinement`
-    is asked with the call's arguments and the agent making it; `confined` is the one
-    reader, and a predicate that raises answers not confined.
+    **Per call, where a tool can say** (S4). `ctx.fs.resolve` passes an absolute
+    path through unchanged, and a link or an allowance can lead out of the tree.
+    A flat `True` on `write` and `edit` therefore reported a write outside the
+    workspace as covered, and the checkpoint policy skipped the barrier that a
+    crash needed. A `WorkspaceConfinement` is called with the arguments of the
+    call and the agent that makes the call. `confined` is the only reader. A
+    predicate that raises counts as not confined.
 
-    Declared here rather than matched by name in the command: these are *registered
-    plugins*, so a deployment renames them and an MCP server adds its own. The
-    default is the safe direction — a tool that says nothing is reported as *not*
-    undone.
+    The tool declares this, and the command does not match it by name. These are
+    *registered plugins*, so a deployment renames them and an MCP server adds
+    its own. The default is the safe direction: a tool that declares nothing is
+    reported as *not* undone.
     """
     effect_free: bool = False
-    """This call changes nothing — no file, no process, no message (S4).
+    """This call changes nothing: no file, no process, no message (S4).
 
-    So there is nothing a crash mid-call could leave half done, and nothing a restore
-    would have to take back: the checkpoint policy lets a nested dispatch of it skip
-    its barrier whether or not the run took a restore point, and `/revert` never
-    lists it. Apart from `effects_confined_to_workspace`, whose effects are real and
-    covered only by a restore that exists — a `read` must not pay a barrier on a
-    profile whose workspace takes no restore points, where every `write` has to.
+    So a crash in the middle of the call can leave nothing half done, and a
+    restore has nothing to take back. The checkpoint policy lets a nested
+    dispatch of the call skip its barrier, whether or not the run took a restore
+    point, and `/revert` never lists the call. This differs from
+    `effects_confined_to_workspace`, whose effects are real and are covered only
+    by a restore that exists. A `read` must not pay for a barrier on a profile
+    whose workspace takes no restore points, where every `write` must pay.
     """
     is_concurrency_safe: Callable[[Any], bool] | None = None
-    """Only `True` opts a call into a parallel group. Omission, a raise, and any
-    non-`True` return are all exclusive — the safe default, since a tool that
-    has not thought about overlap must not be assumed to tolerate it."""
+    """Only `True` puts a call in a parallel group. An omitted predicate, a
+    raise, and any return that is not `True` all mean exclusive. That is the
+    safe default: a tool that has not considered overlap must not be assumed to
+    tolerate it."""
     is_irreversible: Callable[[Any], bool] | None = None
-    """This call may do something the harness cannot take back (P6-16).
+    """This call may do something that the harness cannot take back (P6-16).
 
-    A **per-call predicate over the arguments**, not a flag, because the tool that
-    most needs it cannot answer in general: one `run_code` cell may read a file or
-    drop a table, and `bash` is a different command every time. Same shape as
-    `is_concurrency_safe`, for the same reason — the producer is the only party
-    that knows.
+    This is a **per-call predicate over the arguments** and not a flag, because
+    the tool that most needs it cannot answer in general. One `run_code` cell
+    may read a file or drop a table, and `bash` is a different command every
+    time. It has the same shape as `is_concurrency_safe` for the same reason:
+    the producer is the only party that knows.
 
-    Roughly the complement of `effects_confined_to_workspace`, but a separate field
-    rather than derived from it: a call may reach past the tree without being hard
-    to take back — a URL read, a query — and over-asking is how a gate teaches its
-    user to stop reading it. Whether a person is actually asked is `hitl`'s call.
+    It is roughly the complement of `effects_confined_to_workspace`, but it is a
+    separate field and is not derived from it. A call may reach outside the tree
+    and still be easy to take back, such as a URL read or a query. A gate that
+    asks too often teaches its user to stop reading it. `hitl` decides whether a
+    person is actually asked.
     """
     idempotency_key: Callable[[Any], str | None] | None = None
-    """What this call's **effect** is, as a key: the same key, the same effect (P10-12).
+    """What the **effect** of this call is, as a key: the same key means the same
+    effect (P10-12).
 
-    DESIGN I2: outside state has to be idempotent, because a session may repeat an
-    action. After `TOOL_OUTCOME_UNKNOWN` the model re-issues the call under a **new**
-    call id, so nothing keyed on the call can recognize the repeat — only the effect
-    can, and only the producer knows what its effect is: a message id, an order
-    number, a path and a digest. Called with the arguments that will run — plain
-    JSON, after any approval substitution. `None` from the function means this call
-    has no key; a function that raises is treated the same, and logged.
+    DESIGN I2: outside state has to be idempotent, because a session may repeat
+    an action. After `TOOL_OUTCOME_UNKNOWN` the model issues the call again
+    under a **new** call id, so nothing that is keyed on the call can recognize
+    the repeat. Only the effect can, and only the producer knows what its effect
+    is: a message id, an order number, a path and a digest. The function is
+    called with the arguments that will run, as plain JSON, after any approval
+    substitution. A return of `None` means that this call has no key. A function
+    that raises is treated in the same way, and the raise is logged.
 
-    A keyed call is recorded as a `TOOL_EFFECT` intent. The same key settled before
-    is answered from the log, marked `repeated`, instead of running; one whose first
-    attempt failed runs again; one whose outcome is unknown runs again with a note
-    that the earlier call may have happened (or is asked of `reconcile`, P10-13).
+    A keyed call is recorded as a `TOOL_EFFECT` intent. A call whose key settled
+    before is answered from the log and marked `repeated`, and does not run. A
+    call whose first attempt failed runs again. A call whose outcome is unknown
+    runs again with a note that the earlier call may have happened, or
+    `reconcile` is asked about it (P10-13).
 
-    **No shipped tool declares one**, and that is deliberate: none has an external
-    effect whose repeat is worth suppressing — `bash` is a different command every
-    time — and suppressing a legitimate repeat is the failure this could cause.
+    **No shipped tool declares one**, and that is deliberate. None has an
+    external effect whose repeat is worth suppressing (`bash` is a different
+    command every time), and suppressing a legitimate repeat is the failure that
+    this field could cause.
     """
     reconcile: Callable[[Any, SessionEvent, Session], Awaitable[Reconciled]] | None = None
-    """Did this call happen? Asked on resume, of a call a crash left unresolved (P10-13).
+    """Did this call happen? Asked on resume, about a call that a crash left
+    unresolved (P10-13).
 
-    Repair's `TOOL_OUTCOME_UNKNOWN` text asks the *model* to decide from the tool's
-    semantics whether to retry, because nothing asked the tool — which knows. Given the
-    call's arguments (plain JSON, as recorded), its `tool/call` record, and the session
-    being resumed, answer `Done(value)` when the effect is there — the value is
-    rendered as the call's result — `NotDone()` when it is not and running again is
-    safe, and `Unknown()` whenever the check would be a guess. A raise is `Unknown`.
+    The `TOOL_OUTCOME_UNKNOWN` text of repair asks the *model* to decide, from
+    the semantics of the tool, whether to retry. It asks the model because
+    nothing asked the tool, and the tool knows. The function is given the
+    arguments of the call (plain JSON, as recorded), its `tool/call` record, and
+    the session that is being resumed. It answers `Done(value)` when the effect
+    is there, and the value is rendered as the result of the call. It answers
+    `NotDone()` when the effect is not there and running the call again is safe.
+    It answers `Unknown()` whenever the check would be a guess. A raise counts
+    as `Unknown`.
 
-    Asked in two places: on resume, of a `tool/call` a crash left unresolved or of a
-    Code Mode dispatch left open, which is handed its `tool/code-dispatch-start`
-    record and whose arguments are then the object the program passed (L6b); and in
-    the pipeline, of a repeat of an effect whose first attempt nobody saw finish
-    (`idempotency_key`) — there it is handed the `tool/effect` record instead.
+    The function is asked in two places. The first is on resume, about a
+    `tool/call` that a crash left unresolved, or about a Code Mode dispatch that
+    was left open. For the dispatch it is given the `tool/code-dispatch-start`
+    record, and the arguments are then the object that the program passed (L6b).
+    The second is in the pipeline, about a repeat of an effect whose first
+    attempt nobody saw finish (`idempotency_key`). There it is given the
+    `tool/effect` record instead.
 
-    Both are asked through `ToolRuntime`, bound as the row that registered the tool.
+    Both are asked through `ToolRuntime`, bound as the row that registered the
+    tool.
 
-    **Not enforced: an agent-scoped tool is never asked on resume.** Resume looks
-    tools up at `DEPLOYMENT` scope, before any agent exists, so a tool registered on
-    an agent's own scope is invisible there and keeps today's text.
+    **Not enforced: an agent-scoped tool is never asked on resume.** Resume
+    looks tools up at `DEPLOYMENT` scope, before any agent exists. A tool that
+    is registered on the scope of an agent is therefore not visible there, and
+    its call keeps the `TOOL_OUTCOME_UNKNOWN` text.
     """
     present_call: Callable[[JsonObject], ToolCallView | None] | None = None
     present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None
@@ -807,22 +863,23 @@ class ToolDefinition:
         *,
         presented: Sequence[ContentBlock] | None = None,
     ) -> tuple[ContentBlock, ...]:
-        """Project a validated value into model-facing content.
+        """Project a validated value into the content that the model sees.
 
-        `args` arrives as whatever `parse_arguments` made of the model's JSON —
-        the raw *string* when it was malformed — so `as_obj` is what makes a
-        renderer's `JsonObject` true rather than hopeful. It guards a door no
-        shipped tool reaches today, because every renderer that reads `args`
-        belongs to a pydantic-declared tool whose call fails validation first;
-        the same narrowing in `presentation.render_call_view` is the one with a
-        live case behind it.
+        `args` arrives as whatever `parse_arguments` made of the JSON from the
+        model, which is the raw *string* when the JSON was malformed. `as_obj`
+        therefore makes the `JsonObject` of a renderer true in every case. It
+        guards a path that no shipped tool reaches today: every renderer that
+        reads `args` belongs to a pydantic-declared tool, and a malformed call
+        to such a tool fails validation first. The same narrowing in
+        `presentation.render_call_view` is the one that has a live case.
         """
         violations = validate_json_schema_value(self.output.schema, value)
         if violations:
             raise ToolOutputError(self.name, violations)
         if presented is not None:
-            # Rendered where the tool ran (`ToolRunContext.present`); the value
-            # above is still held to the declared output.
+            # The content was rendered where the tool ran
+            # (`ToolRunContext.present`). The value above is still held to the
+            # declared output.
             return tuple(presented)
         try:
             rendered = self.output.render(as_obj(args), value)
@@ -857,17 +914,18 @@ class ToolDefinition:
 
 @dataclass(frozen=True, slots=True)
 class TransportPresentation:
-    """The parts of the Code Mode transport a *profile* is allowed to restate.
+    """The parts of the Code Mode transport that a *profile* may restate.
 
-    The transport's name is reserved so nothing can occupy it and misdirect a
-    model told to call it (P1-04, C6) — but a profile still needs to present it
-    under its own name and description. The RLM profile calls it `python`, and
-    describes pH's own interpreter in its own words.
+    The name of the transport is reserved, so that nothing can occupy it and
+    misdirect a model that was told to call it (P1-04, C6). But a profile still
+    needs to present the transport under its own name and description. The RLM
+    profile calls it `python`, and describes the interpreter of pH in its own
+    words.
 
     Only the presentation is restated. `parameters` and `execute` are absent by
-    design: the argument schema and the governed body are what make the transport
-    the transport, and a profile that could replace them would have replaced
-    Code Mode rather than renamed it.
+    design. The argument schema and the governed body are what make the
+    transport the transport. A profile that could replace them would have
+    replaced Code Mode and not renamed it.
     """
 
     name: str
@@ -878,7 +936,7 @@ class TransportPresentation:
 
     def rename(self, transport: ToolDefinition) -> ToolDefinition:
         """The transport as this profile presents it."""
-        return dataclasses_replace(
+        return replace(
             transport,
             name=self.name,
             description=self.description,
@@ -912,24 +970,25 @@ def define_tool[A: BaseModel](
     present_call: Callable[[JsonObject], ToolCallView | None] | None = None,
     present_result: Callable[[JsonObject, ToolResult], ToolResultView | None] | None = None,
 ) -> ToolDefinition:
-    """Build a `ToolDefinition`, validating arguments before the body sees them.
+    """Build a `ToolDefinition` that validates the arguments before the body sees them.
 
-    When `parameters` is a pydantic model the body receives a **validated model
-    instance**, so a tool never hand-checks its own input; a raw schema dict
-    passes the parsed value through and the tool owns validation.
+    When `parameters` is a pydantic model, the body receives a **validated model
+    instance**, so a tool never checks its own input by hand. A raw schema dict
+    passes the parsed value through, and the tool owns the validation.
 
-    **Generic in `A`, and that is the whole of the checking.** `A` is inferred
-    from `parameters` when it is a model, so a body annotated with a different
-    model than the one declared beside it is an error here, at the declaration,
-    rather than a validation failure at the first call. Only the body sees it —
-    `ToolOutput` says why the renderers cannot. A raw-schema tool leaves `A` to
-    be inferred from its body, which is `Any`, and is checked exactly as loosely
-    as it was declared.
+    **The function is generic in `A`, and that is all of the checking.** `A` is
+    inferred from `parameters` when it is a model. A body that is annotated with
+    a different model from the one declared beside it is therefore an error
+    here, at the declaration, and not a validation failure at the first call.
+    Only the body sees `A`. `ToolOutput` says why the renderers cannot. A
+    raw-schema tool leaves `A` to be inferred from its body, where it is `Any`.
+    Such a tool is checked exactly as loosely as it was declared.
 
-    The value side is deliberately not parameterized; `ToolOutput` argues that.
-    Which is also why `execute` cannot say "sync or async" the way `CommandBody`
-    does: `MaybeAwaitable[Any]` *is* `Any`, so the `Awaitable[Any] | Any` that
-    stood here was prose wearing a type. `run` awaits through `maybe_await`.
+    The value side is deliberately not parameterized, and `ToolOutput` gives the
+    reasons. That is also why `execute` cannot say "sync or async" in the way
+    that `CommandBody` does. `MaybeAwaitable[Any]` *is* `Any`, so the
+    `Awaitable[Any] | Any` that was here before stated nothing that a type
+    checker could use. `run` awaits through `maybe_await`.
     """
     resolved_output = (
         output
@@ -974,16 +1033,18 @@ def define_tool[A: BaseModel](
 
 
 def _classifier(flag: Callable[[Any], bool] | bool | None) -> Callable[[Any], bool] | None:
-    """`True` → always; a callable → itself; anything else → not declared."""
+    """`True` means always, a callable means itself, and anything else means not
+    declared."""
     if flag is True:
         return lambda _args: True
     return flag if callable(flag) else None
 
 
 def _answers_true(classifier: Callable[..., bool] | None, *args: object) -> bool:
-    """Only `True` counts. Omission, a non-`True` return and a **raise** all mean
-    "not declared": a predicate that throws did not answer, and turning silence
-    into a claim would make one buggy classifier claim on every call."""
+    """Only `True` counts. An omitted classifier, a return that is not `True`
+    and a **raise** all mean "not declared". A predicate that raises did not
+    answer. If silence became a claim, one buggy classifier would make that
+    claim on every call."""
     if classifier is None:
         return False
     try:

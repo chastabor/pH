@@ -1,15 +1,15 @@
 """A real git repository for a test, built the same way in every package.
 
-`git`, `_repo` and the `init` / `user.email` / `user.name` triple were written
-out in two test modules and about to be a third. The setup is exactly the kind
-that grows a line — `commit.gpgsign=false`, a `safe.directory` — in one copy and
-not the other, and the copy that misses it fails only on a contributor's
-machine. `StubWorkspaceProvider` next door carries the same argument for the
-same reason.
+`git`, `_repo` and the three steps `init`, `user.email` and `user.name` were
+written out in two test modules, and a third module was about to copy them.
+This kind of setup gains a line (`commit.gpgsign=false`, a `safe.directory`) in
+one copy and not in the other. The copy that lacks the line then fails only on
+the machine of a contributor. `StubWorkspaceProvider` in
+`ph.testing.stub_workspace` makes the same argument for the same reason.
 
-The `worktree` tier's tests use real git deliberately: what they pin is git's
-behavior — that `-d` declines an unmerged branch, that a removed worktree
-deregisters — not our arithmetic about it.
+The tests of the `worktree` tier use real git deliberately. They test the
+behavior of git and not our arithmetic about it: that `-d` declines an unmerged
+branch, and that a removed worktree deregisters.
 
 @module ph.testing.git
 """
@@ -36,10 +36,11 @@ WORKTREE_ROWS: tuple[dict[str, Any], ...] = (
     {"insert": [{"id": "workspace-revert", "name": "workspace-revert"}]},
     {"insert": [{"id": "workspace-commands", "name": "workspace-commands"}]},
 )
-"""Every row of the `worktree` tier, for a test that wants the whole thing.
+"""Every row of the `worktree` tier, for a test that wants the whole tier.
 
-Layered nowhere by default — which profile pays for a checkout per agent is
-P4-11's decision — so a test that wants the tier says so explicitly."""
+The bundles that the `mount` fixture loads by default do not contain these
+rows, because they cost a checkout per agent. Only the `ph-rlm` bundle layers
+them (P4-11). So a test that wants the tier says so explicitly."""
 
 
 async def worktree_agent(
@@ -47,13 +48,13 @@ async def worktree_agent(
     tmp_path: Path,
     *extra_rows: dict[str, Any],
 ) -> tuple[Context, Session, AgentDriver, Workspace]:
-    """`(ctx, session, agent, workspace)` — one agent holding a real worktree.
+    """Return `(ctx, session, agent, workspace)`: one agent that holds a real worktree.
 
-    The whole tier is mounted, and the repository is built under `tmp_path` and
-    never under `ctx.fs.root`: that is the *process's* directory, which for a
-    test run is this checkout — a `base` taken from it has every test in the
-    suite initializing git repositories inside pH's own tree and sharing one
-    branch namespace. That mistake has been made once already.
+    The whole tier is mounted. The repository is built at `tmp_path / "repo"`,
+    and never in the directory of the *process*, which for a test run is this
+    checkout. With a `base` taken from the checkout, every test in the suite
+    would initialize git repositories inside the pH tree, and all of them would
+    share one branch namespace. That mistake has already been made one time.
     """
     ctx = await mount(*WORKTREE_ROWS, *extra_rows)
     base = await git_repo(ctx, tmp_path / "repo")
@@ -71,10 +72,11 @@ async def worktree_agent(
 
 
 async def git_repo(ctx: Context, path: Path) -> Path:
-    """A repository with one commit — the least a worktree can branch from.
+    """A repository with one commit, which is the least that a worktree can branch from.
 
-    Identity is set on the repository rather than inherited, so a machine with
-    no global git identity runs these tests as well as one that has it.
+    The identity is set on the repository and is not inherited. So a machine
+    with no global git identity runs these tests as well as a machine that has
+    one.
     """
     path.mkdir(parents=True, exist_ok=True)
     for args in (
