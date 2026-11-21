@@ -16,7 +16,8 @@ unload removes the tab."* That is invariant I2 applied to the front end, and
 **One slot, not a hierarchy.** dsh separates `conversation.view`,
 `conversation.composer`, `settings.section` and more. pH's TUI has one extension
 point worth opening today, and *a hierarchy with a single member is a hierarchy
-nobody can check*. A second registrant is what should motivate a second slot.
+nobody can check*. A second kind of extension point is what should motivate a
+second slot.
 
 **A screen is built, not injected.** dsh's `inject` returns a props bag for a
 component the shell renders; `build(session)` returns the front end's own screen
@@ -31,9 +32,15 @@ it.
 
 ```text
 ctx.tui_screens.register(definition, *, scope=None)   -> Disposer
-ctx.tui_screens.list()      ctx.tui_screens.get(key)
-ctx.tui_screens.present_with(...)
+ctx.tui_screens.list()
 ```
+
+A registration emits `screens/change` when it is made and again when it is
+released. The daemon listens for it and publishes the list to every attached
+client, and the TUI builds each screen's slash command and key from that list
+(`ph_app.tui.remote`). The seam once also took an in-process presenter
+(`present_with`), from before the harness moved into the daemon (P5-14); nothing
+attached to it after the move, and it was removed.
 
 A `ScreenDefinition` is `key`, `id`, `label`, `order`, `build`.
 

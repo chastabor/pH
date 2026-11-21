@@ -1,42 +1,51 @@
-"""`ctx.tui_screens` — the front end's registration seam (P4-17).
+"""`ctx.tui_screens`: the registration seam of the front end (P4-17).
 
-A row contributes a *screen* the way it already contributes a tool, a command
-or a prompt section. Ported from dsh's slot service (`packages/client/ui-slots`),
-whose ~35 `ui-*` packages register into named slots with
-`ctx.slots.register({name, id, order, label, inject})` and whose own comment
-names the property worth copying: *"the registration rides the slot service's
-effect wrapper, so plugin unload removes the tab."* That is invariant I2 applied
-to the front end, and `claim_key` already provides it.
+A row contributes a *screen* in the same way that it already contributes a tool,
+a command or a prompt section. The seam is ported from the slot service of dsh
+(`packages/client/ui-slots`). The ~35 `ui-*` packages of dsh register into named
+slots with `ctx.slots.register({name, id, order, label, inject})`. A comment in
+that service names the property that is worth copying: *"the registration rides
+the slot service's effect wrapper, so plugin unload removes the tab."* That is
+invariant I2 applied to the front end, and `claim_key` already provides it.
 
-Three things are deliberately narrower than dsh.
+Three things are deliberately narrower than in dsh.
 
 **One slot, not a hierarchy.** dsh separates `conversation.view`,
-`conversation.composer`, `settings.section` and more. pH's TUI has one extension
-point worth opening today, and a hierarchy with a single member is a hierarchy
-nobody can check. A second registrant is what should motivate a second slot.
+`conversation.composer`, `settings.section` and more. The TUI of pH has one
+extension point that is worth opening today, and a hierarchy with a single
+member is a hierarchy that nobody can check. A second kind of extension point
+is what should motivate a second slot.
 
-**A screen is built, not injected.** dsh's `inject` returns a props bag for a
-component the shell renders; `build(session)` returns the front end's own screen
-object. It is given the *session* rather than the harness so a screen stays a
-projection of a log — which is what lets the same screen open over a live chat
-and over a file (P3-25's property, kept).
+**A screen is built, not injected.** The `inject` of dsh returns a props bag for
+a component that the shell renders. `build(session)` returns the screen object
+of the front end itself. It is given the *session* and not the harness, so a
+screen stays a projection of a log. That lets the same screen open over a live
+chat and over a file (the property of P3-25, kept).
 
 **What `build` returns is `Any` here, on purpose.** ph-core may not import
-Textual (P0-01, enforced by `test_layering.py`), so the type of a screen is the
-front end's to state. The seam lives in core anyway because a *plugin* is what
-registers one, and a plugin depends on ph-core alone.
+Textual (P0-01, enforced by `test_layering.py`), so the front end states the
+type of a screen. The seam is in core anyway, because a *plugin* registers a
+screen, and a plugin depends on ph-core alone.
 
-Registering also has to *do* something, and that is what a presenter is for. A
-front end attaches with `present_with`, and each presentation it makes unwinds
-with the **registration's** scope — so a row's screen, its slash command and its
-key are one lifetime, not three that have to be kept in step by hand.
+A registration *does* something through the event that it emits. The daemon
+listens to `screens/change` and publishes the list to every attached client,
+and the TUI builds the slash command and the key of each screen from that list
+(`ph_app.tui.remote`). A row that unloads releases its registration, the event
+fires again, and the command and the key go with it. So the screen of a row,
+its command and its key are one lifetime, and not three that somebody keeps in
+step by hand.
+
+The seam once also took an in-process *presenter* (`present_with`), from the
+time when the TUI ran in the same process as the harness. The harness moved
+into the daemon (P5-14), the presenter on the front-end side went with the
+move, and this half was removed later because nothing attached to it.
 
 @module ph.seams.tui_screens
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any, TypeAlias
@@ -45,7 +54,7 @@ from ..cordis import Context, Disposer, events, plugin
 from ..keys import TUI_SCREENS
 from ..wire import WireModel, declarable
 from ._names import require_slug
-from ._registry import claim_entry, claim_key
+from ._registry import claim_key
 
 events.declare(
     "screens/change",
@@ -57,38 +66,33 @@ events.declare(
 __all__ = [
     "ScreenDefinition",
     "ScreenFactory",
-    "ScreenPresenter",
     "ScreenSchema",
     "TuiScreenRegistry",
     "apply",
 ]
 
 ID_MAX = 32
-"""How long a screen id may be. The *format* is `_names`', shared with a skill's
-name because an id is the same kind of token: something a person types, here as
-`/<id>`. The bound is not shared — half a skill's, because an id has to fit a
-key hint and a palette row beside its label, where a skill name stands alone in
-a catalog.
+"""How long a screen id may be. The *format* belongs to `_names`. It is shared
+with the name of a skill because an id is the same kind of token: something that
+a person types, here as `/<id>`. The bound is not shared. It is half the bound
+of a skill name, because an id must fit a key hint and a palette row beside its
+label, and a skill name stands alone in a catalog.
 
-Only the bound lives here, and deliberately: a compiled pattern beside it would
-be a second statement of the format that nothing consults, so nothing could hold
-it to the first."""
+Only the bound is here, deliberately. A compiled pattern beside it would be a
+second statement of the format that nothing consults, so nothing could hold it
+equal to the first."""
 
 ScreenFactory: TypeAlias = Callable[[Any], Any]
-"""`build(session) -> screen`. The return is the front end's own object."""
-
-ScreenPresenter: TypeAlias = Callable[["ScreenDefinition"], "Disposer | None"]
-"""What a front end does with a screen — a verb, a key, a palette entry. The
-disposer it returns undoes all of that."""
+"""`build(session) -> screen`. The return value is an object of the front end."""
 
 
 class ScreenSchema(WireModel):
-    """What a palette needs to list a screen — everything but how to draw it.
+    """What a palette needs to list a screen: everything except how to draw it.
 
-    `build` is a callable and stays where the session it draws from is; the
-    declarative body a browser could render is P7-07's work. Until then this is
-    what travels, and it is derived from the definition rather than spelled out
-    at the daemon edge so a field added there arrives here (P7-11).
+    `build` is a callable, and it stays where the session that it draws from is.
+    The declarative body that a browser could render is the work of P7-07. Until
+    then this is what travels. It is derived from the definition and not written
+    out at the daemon edge, so a field that is added there arrives here (P7-11).
     """
 
     id: str
@@ -102,51 +106,21 @@ class ScreenDefinition:
     """One screen a plugin contributes to the front end."""
 
     id: str
-    """Addressable name. Becomes `/<id>` and the binding id a keymap remaps."""
+    """The addressable name. It becomes `/<id>` and the binding id that a keymap remaps."""
     label: str
     """What the palette and the picker call it."""
     build: ScreenFactory
-    """`build(session) -> screen`, called each time the screen is opened, so
-    what it shows is a fold of the log as it stands rather than as it stood."""
+    """`build(session) -> screen`. It is called each time the screen is opened, so
+    the screen shows a fold of the log as it is now, and not as it was."""
     order: int = 100
     """Sort order, as dsh orders slot entries. Lower is earlier."""
     key: str | None = None
     """A default key, when the screen wants one. The binding carries `id` as its
-    binding id, so a user rebinds it like any other."""
+    binding id, so a user rebinds it like any other binding."""
 
     def schema(self) -> ScreenSchema:
         """The wire-facing half. `build` is the one thing that cannot travel."""
         return ScreenSchema.model_validate(declarable(self))
-
-
-@dataclass(frozen=True, slots=True)
-class _Entry:
-    """A registration and the scope that owns it.
-
-    The owner is kept because a presentation made *later* — by a front end that
-    attached after this row mounted — still has to unwind when this row does.
-    """
-
-    screen: ScreenDefinition
-    owner: Context
-
-
-@dataclass(slots=True)
-class _FrontEnd:
-    """One attached presenter and everything it has drawn.
-
-    Keyed by screen id, not appended to: a row that unloads has already had its
-    presentation released through its own scope, and a list would keep the spent
-    release forever — one per registration for the life of the front end.
-    """
-
-    present: ScreenPresenter
-    drawn: dict[str, Disposer] = field(default_factory=dict)
-
-    def undraw(self) -> None:
-        for release in reversed(list(self.drawn.values())):
-            release()
-        self.drawn.clear()
 
 
 @dataclass(slots=True)
@@ -154,125 +128,43 @@ class TuiScreenRegistry:
     """The service published as `ctx.tui_screens`."""
 
     ctx: Context
-    _entries: dict[str, _Entry] = field(default_factory=dict)
-    _front_ends: list[_FrontEnd] = field(default_factory=list)
+    _entries: dict[str, ScreenDefinition] = field(default_factory=dict)
 
     def register(self, screen: ScreenDefinition, *, scope: Context | None = None) -> Disposer:
         """Contribute a screen.
 
-        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
-        a registration made from a row's `apply` — or from a listener that row
-        wrote — already unwinds with the row. Pass it to register on *someone
-        else's* lifetime, which is what it now means and all it now means.
+        The ordinary case needs no `scope=` (P6-12, P6-25). A registration made
+        from the `apply` of a row, or from a listener that the row wrote,
+        already unwinds with the row. Pass `scope=` to register on the lifetime
+        of *someone else*. That is its only meaning now.
+
+        The registration emits `screens/change` when it is made and again when
+        it is released, after the entry has left the table (`claim_key`).
         """
         require_slug(screen.id, maximum=ID_MAX, kind="screen id")
-        owner = self.ctx.owner_for(scope)
-        entry = _Entry(screen=screen, owner=owner)
         changed = partial(self.ctx.emit, "screens/change")
-        release = claim_key(owner, self._entries, screen.id, entry, label="screen", then=changed)
-
-        def undraw_and_release() -> None:
-            self._undraw(screen.id)
-            release()
-
-        try:
-            for front_end in self._front_ends:
-                self._draw(front_end, entry)
-        except BaseException:
-            # A presenter that raised (Holdings rule 2): the registration ends here,
-            # or the id stayed taken with no disposer handed to anyone, and a second
-            # try was refused as a duplicate.
-            undraw_and_release()
-            raise
-        changed()
-        return undraw_and_release
-
-    def present_with(self, present: ScreenPresenter, *, scope: Context | None = None) -> Disposer:
-        """Attach a front end: every screen registered now, and every later one.
-
-        Returns a disposer that both detaches the presenter and undoes what it
-        drew — so a front end that goes away while the rows stay does not leave
-        commands pointing at it.
-        """
-        front_end = _FrontEnd(present=present)
-        released = claim_entry(
-            self.ctx.owner_for(scope), self._front_ends, front_end, label="tui-screens(front-end)"
+        release = claim_key(
+            self.ctx.owner_for(scope),
+            self._entries,
+            screen.id,
+            screen,
+            label="screen",
+            then=changed,
         )
-
-        def detach() -> None:
-            released()
-            front_end.undraw()
-
-        try:
-            for entry in self._ordered():
-                self._draw(front_end, entry)
-        except BaseException:
-            detach()
-            raise
-        return detach
+        changed()
+        return release
 
     def list(self) -> list[ScreenDefinition]:
-        """Every screen, by `order` then `id` — the order a palette shows them."""
-        return [entry.screen for entry in self._ordered()]
-
-    def get(self, screen_id: str) -> ScreenDefinition | None:
-        entry = self._entries.get(screen_id)
-        return None if entry is None else entry.screen
-
-    # ------------------------------------------------------------ internals --
-
-    def _ordered(self) -> Sequence[_Entry]:
-        """Registrations in slot order.
-
-        `Sequence`, not `list`: `list` is a method on this class, so inside the
-        body it no longer names the builtin as far as an annotation is
-        concerned.
-        """
-        return sorted(
-            self._entries.values(), key=lambda entry: (entry.screen.order, entry.screen.id)
-        )
-
-    def _undraw(self, screen_id: str) -> None:
-        """Take one screen off every front end (K8).
-
-        `claim_key`'s disposer removes the *entry* and nothing else, while what
-        each front end drew is owned by `entry.owner` — the row's scope. So
-        releasing one registration left the screen on screen: a row that
-        re-registers, or a command that retires one of several screens, took its
-        entry out of the table and the front end went on showing it until the
-        whole row unloaded. The table and the drawing are two halves of one
-        registration, so one disposer owns both.
-
-        Each `undo` is `add_disposer`'s idempotent release, so the scope running
-        it later is a no-op — which is what lets the two lifetimes overlap
-        without either having to know about the other.
-        """
-        for front_end in self._front_ends:
-            undo = front_end.drawn.pop(screen_id, None)
-            if undo is not None:
-                undo()
-
-    def _draw(self, front_end: _FrontEnd, entry: _Entry) -> None:
-        """Present one screen to one front end, owned by the registration.
-
-        `add_disposer` hands back an idempotent release, which is what lets the
-        same teardown belong to two lifetimes at once: the row unloading runs it
-        through the scope, the front end detaching runs it through `undraw`, and
-        whichever happens second does nothing.
-        """
-        undo = front_end.present(entry.screen)
-        if undo is None:
-            return
-        label = f"screen-view({entry.screen.id})"
-        front_end.drawn[entry.screen.id] = entry.owner.add_disposer(undo, label=label)
+        """Every screen, by `order` then `id`. A palette shows them in this order."""
+        return sorted(self._entries.values(), key=lambda screen: (screen.order, screen.id))
 
 
 @plugin("tui-screens", affects="presentation")
 async def apply(ctx: Context, config: None) -> None:
     """Mount the screen registry.
 
-    In `ph-base` rather than in a front-end profile: the seam is the same rule
-    every other seam follows, and a headless run that mounts a row registering a
-    screen nothing draws needs no special case for it.
+    The row is in `ph-base` and not in a front-end profile. The seam follows the
+    same rule as every other seam. A headless run that mounts a row that
+    registers a screen that nothing draws needs no special case for it.
     """
     ctx.provide(TUI_SCREENS, TuiScreenRegistry(ctx=ctx))

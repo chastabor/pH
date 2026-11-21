@@ -1,24 +1,25 @@
-"""`ctx.token_meter` — the provider's count is the truth; ours is for pressure.
+"""`ctx.token_meter`: the provider's count is the truth, and ours is for pressure.
 
-Two numbers, and conflating them causes real bugs.
+There are two numbers, and confusing them causes real bugs.
 
-* **Provider-reported `usage` is authoritative.** It is what gets billed and
-  what the context window is actually measured against.
-* **An estimate exists only to decide "should we compact *before* asking".**
-  There is no usage number for a request that has not been made yet, so
-  something has to guess, and a guess that is 15% off is fine for a threshold.
+* **The `usage` that the provider reports is authoritative.** It is what is
+  billed, and it is what the context window is actually measured against.
+* **An estimate exists only to decide "should we compact *before* asking".** A
+  request that has not been made yet has no usage number, so something has to
+  guess. A guess that is 15% off is fine for a threshold.
 
-So the baseline switches from estimate to reported usage the moment the first
-response lands (D15), and never drifts back. **From there it follows the surface
-until the next response**: what was appended since is estimated and added, and what
-a replacement took off the surface since — a compaction summary, a model's own
-context edit, an elided argument — is estimated and taken away. So compaction's
-trigger, a context edit's gate and its readouts all read one number that moves when
-the context does, in the provider's units, the system prompt and tool schemas
-included. `tiktoken` is used when installed
-and `len/4` otherwise — the fallback is deliberately crude, because a
-harness that refused to start without an optional tokenizer would be worse than
-one that occasionally compacts a turn early.
+So the baseline switches from the estimate to the reported usage when the first
+response arrives (D15), and it never goes back. **From there it follows the
+surface until the next response.** What was appended since then is estimated
+and added. What a replacement took off the surface since then is estimated and
+subtracted: a compaction summary, a context edit by the model itself, an elided
+argument. So the trigger of compaction, the gate of a context edit and its
+readouts all read one number. That number moves when the context moves. It is
+in the units of the provider, and it includes the system prompt and the tool
+schemas. `tiktoken` is used when it is installed, and `len/4` otherwise. The
+fallback is deliberately crude. A harness that refused to start without an
+optional tokenizer would be worse than a harness that sometimes compacts a turn
+early.
 
 @module ph.seams.token_meter
 """
@@ -70,35 +71,38 @@ CHARS_PER_TOKEN = 4
 """The `len/4` fallback ratio, matching dsh and Deep Agents."""
 
 IMAGE_PIXELS_PER_TOKEN = 750
-"""Anthropic's published approximation for an image: about `width x height / 750`.
+"""The published approximation of Anthropic for an image: about
+`width x height / 750`.
 
-The one figure below that comes from a provider's own documentation rather than
-from judgement. It needs dimensions, which an ingester supplies only when it
-already knew them — decoding an image to find out is the dependency P7-02 keeps
-optional — so the unknown case falls back to a flat number."""
+Of the figures here, it is the only one that comes from the documentation of a
+provider and not from judgment. It needs dimensions, and an ingester supplies
+them only when it already knew them. To decode an image to find them is the
+dependency that P7-02 keeps optional. So the unknown case falls back to a flat
+number."""
 
 IMAGE_TOKENS_UNKNOWN = 1_600
 PDF_TOKENS_PER_PAGE = 2_000
 PDF_TOKENS_UNKNOWN = 4_000
 AUDIO_TOKENS_PER_SECOND = 25
 MEDIA_TOKENS_UNKNOWN = 1_000
-"""Order-of-magnitude costs for media whose exact price this cannot know.
+"""Order-of-magnitude costs for media whose exact price this module cannot know.
 
-Deliberately rough, and defensible here in a way it would not be for billing: this
-estimate exists to answer "should we compact *before* asking", and a guess 15% off
-is fine for a threshold. What is **not** fine is a media block matching none of
-`measure`'s branches and contributing zero — being wrong by a factor is a rounding
-error against being wrong by everything.
+The figures are deliberately rough. That is defensible here in a way that it
+would not be for billing. This estimate exists to answer "should we compact
+*before* asking", and a guess that is 15% off is fine for a threshold. What is
+**not** fine is a media block that matches none of the branches of `measure`
+and contributes zero. To be wrong by a factor is a rounding error beside being
+wrong by everything.
 """
 
 
 def estimate_media_tokens(attachment: AttachmentRef) -> int:
     """What one attachment plausibly costs in a request.
 
-    Uses the facts the ingester recorded when it has them and a flat figure when
-    it does not, per kind. Never zero: a block the model is shown must cost
-    something, or the pressure trigger is measuring a different conversation than
-    the one being sent.
+    For each kind, it uses the facts that the ingester recorded when it has
+    them, and a flat figure when it does not. The result is never zero. A block
+    that the model is shown must cost something, or the pressure trigger
+    measures a different conversation from the one that is sent.
     """
     mime = attachment.mime
     if mime.startswith("image/"):
@@ -118,7 +122,7 @@ class TokenBaseline:
 
     tokens: int
     source: str
-    """`"usage"` once a provider has reported; `"estimate"` before that."""
+    """`"usage"` after a provider has reported, and `"estimate"` before that."""
     context_window: int | None = None
 
     @property
@@ -137,16 +141,18 @@ class TokenMeter:
     _encoder: Any = None
     _encoder_tried: bool = False
     _nodes: SessionTable[dict[int, int]] = field(default_factory=SessionTable)
-    """Each surface node's estimate, by session id and seq (`node_tokens`): a node's
-    event never changes, so neither does its estimate, and a long result is tokenized
-    once — not on every check until the next response, nor again by each reader.
-    Kept only for a session the store holds, and gone with it."""
+    """The estimate of each surface node, by session and seq (`node_tokens`).
+    The event of a node never changes, so its estimate does not change either.
+    A long result is therefore tokenized one time, and not on every check until
+    the next response, nor again by each reader. An estimate is kept only for a
+    session that the store holds, and it goes when the session goes."""
 
     def _encode(self, text: str) -> int:
         if not self._encoder_tried:
             self._encoder_tried = True
             try:
-                # Not a declared dependency: the row checks for it before this runs.
+                # `tiktoken` is not a declared dependency. This import is the
+                # check for it: when the import fails, the meter uses `len/4`.
                 import tiktoken  # type: ignore[import-not-found]  # noqa: PLC0415
 
                 self._encoder = tiktoken.get_encoding("cl100k_base")
@@ -163,21 +169,24 @@ class TokenMeter:
         return self._encode(text) if text else 0
 
     def measure(self, message: Message) -> int:
-        """Estimate one message — the per-node measurement compaction sorts by.
+        """Estimate one message. This is the measurement for each node that
+        compaction sorts by.
 
-        Arms per variant rather than a `getattr` walk over `.text`/`.arguments`/
-        `.content`. The duck-type read the same union by attribute presence, so a
-        block kind nobody had written a probe for cost **zero** tokens — silently,
-        and in the direction that keeps oversized content inside the window, since
-        this number is what compaction sorts and clips by. `assert_never` makes
-        that a build failure instead.
+        There is one arm for each variant, and not a `getattr` walk over
+        `.text`, `.arguments` and `.content`. The duck-typed version read the
+        same union by the presence of an attribute. A kind of block that nobody
+        had written a probe for then cost **zero** tokens. It did so in
+        silence, and in the direction that keeps oversized content inside the
+        window, because this number is what compaction sorts and clips by.
+        `assert_never` makes that a build failure instead.
         """
         total = 0
         for block in message.content:
-            # Arms in frequency order, which for a `match` is the only lever
-            # left: a hit costs ~37 ns plus ~22 ns for each arm it passed, while
-            # a miss costs what the `isinstance` ladder did. An agent transcript
-            # is ~55% text, ~36% tool call/result, and media is rarest.
+            # The arms are in frequency order, which is the only lever left for
+            # a `match`. A hit costs ~37 ns plus ~22 ns for each arm that it
+            # passed, and a miss costs what the `isinstance` ladder did. An
+            # agent transcript is ~55% text and ~36% tool call or result, and
+            # media is rarest.
             match block:
                 case TextBlock():
                     total += self._encode(block.text)
@@ -199,16 +208,17 @@ class TokenMeter:
     def last_usage(self, session: Session) -> TokenUsage | None:
         """The most recent reported usage in this log.
 
-        An incremental fold, not a walk back through `session.events` — which
-        materialized a snapshot of the whole log to read one field, and grew
-        more expensive the longer a conversation ran. `baseline` reads the same
-        fold on every pressure check, so the cost landed exactly where the log was
-        longest.
+        This is an incremental fold, and not a walk back through
+        `session.events`. The walk materialized a snapshot of the whole log to
+        read one field, and it cost more the longer a conversation ran.
+        `baseline` reads the same fold on every pressure check, so the cost
+        fell exactly where the log was longest.
 
-        The parser stays *here*, with the row that understands `TokenUsage`, and
-        `Session` is asked to fold with it. It briefly lived on `Session`
-        itself — a method, a slot and a private parser — which made the log
-        model learn a seam's type so the seam could read it back (I5).
+        The parser stays *here*, with the row that understands `TokenUsage`,
+        and `Session` is asked to fold with it. For a short time the fold was
+        on `Session` itself, as a method, a slot and a private parser. The log
+        model then had to learn the type of a seam so that the seam could read
+        it back (I5).
         """
         found = session.projection("assistant/message", _reported_at)
         return None if found is None else found[1]
@@ -216,58 +226,60 @@ class TokenMeter:
     def reasoning_reading(self, session: Session) -> StatusReading | None:
         """What the route asks the model to spend on thinking, or nothing.
 
-        Off `Session.request_header` — the typed, incrementally folded accessor
-        for the event whose whole payload is the call config. The daemon walked
-        `header.config.reasoningEffort` out of a dict by its camelCase alias
-        before this, so a rename returned `""` forever instead of failing.
+        The value comes from `Session.request_header`. That is the typed
+        accessor, folded incrementally, for the event whose whole payload is
+        the call config. Before this, the daemon walked
+        `header.config.reasoningEffort` out of a dict by its camelCase alias,
+        so a rename returned `""` forever and did not fail.
 
-        **Here rather than on the `llm` row, which owns the fact.** `ph.session`
-        imports `ph.llm.types`, so `ph.llm` cannot import the seam layer at
-        module scope — a `StatusField` contributed from there is an import
-        cycle. This row is the nearest honest home: it already answers "what did
-        this request cost", and effort is the setting that most changes the
-        answer.
+        **The reading is here and not on the `llm` row, which owns the fact.**
+        `ph.session` imports `ph.llm.types`, so `ph.llm` cannot import the seam
+        layer at module scope: a `StatusField` that is contributed from there
+        is an import cycle. This row is the nearest correct place. It already
+        answers "what did this request cost", and effort is the setting that
+        changes that answer most.
 
-        A *reading* rather than a field on every status frame, for the reason
-        the posture beside it is one. The field it replaced cost an entry on two
-        payload models, a resolver in the supervisor, a line in the client's
-        status sink and one in `TuiState`.
+        It is a *reading* and not a field on every status frame, for the same
+        reason as the posture reading beside it. The field that it replaced
+        cost an entry on two payload models, a resolver in the supervisor, a
+        line in the status sink of the client and a line in `TuiState`.
         """
         header = session.request_header()
         effort = header.config.reasoning_effort if header is not None else None
         return StatusReading(text=str(effort)) if effort else None
 
     def cache_reading(self, session: Session) -> StatusReading | None:
-        """What the last request did with the provider's prompt cache (P7-14).
+        """What the last request did with the prompt cache of the provider (P7-14).
 
-        The footer already shows what the conversation *costs*; this is the
-        other half of that number — how much of it the provider did not have to
-        re-ingest. It is worth a field because a cache hit rate that falls is
-        the visible symptom of a moved prefix (A12): a section that changes
-        every turn re-bills the whole conversation, and nothing else on this
-        line would show it happening.
+        The footer already shows what the conversation *costs*. This reading is
+        the other half of that number: how much of it the provider did not have
+        to ingest again. It is worth a field because a falling cache hit rate
+        is the visible symptom of a moved prefix (A12). A section that changes
+        every turn bills the whole conversation again, and nothing else on this
+        line would show that.
 
-        **Silence when the provider says nothing.** A route that reports no
-        cache figures at all — and every route does on the first request of a
-        session — has this return `None`, which the footer renders as nothing
-        rather than as `cache 0%`. `StatusField.read`'s own rule: a line that
-        always carries every field is a line where the one that matters cannot
-        be seen.
+        **Silence when the provider says nothing.** For a route that reports no
+        cache figures at all, this returns `None`, and every route is in that
+        case on the first request of a session. The footer renders `None` as
+        nothing and not as `cache 0%`. This is the rule of `StatusField.read`:
+        a line that always carries every field hides the one field that
+        matters.
 
-        The same `last_usage` the gauge budgets against, which is what keeps the
-        two consistent: both describe the *last request*, and a message rewritten
-        in place is not a new one. This read `session.latest` directly while
-        `last_usage` was a whole-log walk — so it deliberately said nothing
-        after a rewrite rather than repeat a figure — and now that both are the
-        one incremental fold, a footer showing a cache rate beside a context
-        percentage computed from a different message is the inconsistency worth
-        avoiding.
+        The reading uses `last_usage`, the same last reported usage that the
+        gauge budgets against, and that keeps the two consistent. Both describe
+        the *last request*, and a message that is rewritten in place is not a
+        new request. This method used to read `session.latest` directly, while
+        `last_usage` was a walk of the whole log. So it deliberately said
+        nothing after a rewrite, and did not repeat a figure. Both are now the
+        one incremental fold. The inconsistency to avoid is a footer that shows
+        a cache rate beside a context percentage that was computed from a
+        different message.
 
-        **One compact phrase**, as `StatusReading.text` asks, because the field is
-        in the `context` slot and a front end draws it onto the gauge: no
-        separator of its own, and no space between the count and the share it
-        was of the prompt — `28.8k(98%)`, then `+2.0k stored` when the request
-        also paid to store a prefix.
+        **One compact phrase**, as `StatusReading.text` asks, because the field
+        is in the `context` slot and a front end draws it onto the gauge. It
+        has no separator of its own, and no space between the count and the
+        share of the prompt that the count was: `28.8k(98%)`, then
+        `+2.0k stored` when the request also paid to store a prefix.
         """
         usage = self.last_usage(session)
         if usage is None:
@@ -277,20 +289,20 @@ class TokenMeter:
             return None
         parts = []
         if read:
-            # The share of the prompt, not of the request: output tokens are
+            # The share is of the prompt, not of the request. Output tokens are
             # never cacheable, so including them would make a perfect hit rate
             # read as a falling one on a long answer.
             #
-            # Through `total` rather than by re-adding its terms, which is what
-            # that property exists for: a fifth billed term reaches this
-            # percentage instead of silently falling out of it.
+            # It goes through `total` and does not add the terms again, which
+            # is what that property exists for. A fifth billed term then
+            # reaches this percentage and does not silently fall out of it.
             prompt = usage.total - usage.output_tokens
             share = f"({read * 100 // prompt}%)" if prompt else ""
             parts.append(f"{thousands(read)}{share}")
         if written:
-            # What this request paid to store, which is the first-turn shape on
-            # a route that bills cache writes: it is not a hit and must not be
-            # counted as one.
+            # What this request paid to store. This is the shape of a first
+            # turn on a route that bills cache writes. It is not a hit and must
+            # not be counted as one.
             parts.append(f"{thousands(written)} stored")
         return StatusReading(text="cache " + "+".join(parts))
 
@@ -298,17 +310,20 @@ class TokenMeter:
         """What the next request will cost, from usage when there is any.
 
         Reported usage, adjusted by what the surface did since, is closer than
-        either count alone: the provider counted the request it answered exactly —
-        system prompt and tool schemas included — and only the change has to be
-        guessed. **Every surface event after the reply that reported adds a node**,
-        and a replacement takes off the nodes it shadows: one the provider counted
-        is estimated and subtracted, one added since simply never counts. So a tool
-        result appended after the reply is in the number, and a summary, a context
-        edit or a rewrite in place moves it the moment it lands rather than at the
-        next response. `pending` is added on top, as messages not yet logged.
+        either count alone. The provider counted the request that it answered
+        exactly, system prompt and tool schemas included, and only the change
+        has to be guessed. **Every surface event after the reply that reported
+        adds a node**, and a replacement takes off the nodes that it shadows. A
+        shadowed node that the provider counted is estimated and subtracted. A
+        shadowed node that was added since then never counts. So a tool result
+        that was appended after the reply is in the number. A summary, a
+        context edit or a rewrite in place moves the number when it lands, and
+        not at the next response. `pending` is added on top, as messages that
+        are not logged yet.
 
-        Walks only the events since that reply — one step's worth — and estimates
-        each node once (`node_tokens`), as the estimate before any reply does.
+        The method walks only the events since that reply, which is the work of
+        one step. It estimates each node one time (`node_tokens`), as the
+        estimate before any reply does.
         """
         window = None
         context = session.request_context()
@@ -343,13 +358,15 @@ class TokenMeter:
         )
 
     def node_tokens(self, session: Session, seq: int) -> int:
-        """One surface node's estimate, measured the first time anything asks — the
-        baseline, a section map, a context edit pricing what it replaces — and kept
-        for the session's life, since a node's event never changes. `0` for a node
-        that projects to no message."""
-        # Kept only for a session the store still holds: a reader still holding one
-        # that has gone — a status line drawn once more — is answered and files
-        # nothing (`ph.session.tables`).
+        """The estimate of one surface node. It is measured the first time that
+        anything asks: the baseline, a section map, a context edit that prices
+        what it replaces, or compaction. It is kept for the life of the
+        session, because the event of a node never changes. The result is `0`
+        for a node that projects to no message."""
+        # An estimate is kept only for a session that the store still holds. A
+        # reader may still hold a session that has gone, such as a status line
+        # that is drawn one more time. That reader gets its answer and nothing
+        # is filed (`ph.session.tables`).
         known = self._nodes.setdefault(session, dict)
         tokens = known.get(seq)
         if tokens is None:
@@ -360,28 +377,24 @@ class TokenMeter:
 
 
 def _reported_at(event: SessionEvent) -> tuple[int, TokenUsage] | None:
-    """An event's usage and where it was reported, for the fold `baseline` and
-    `last_usage` share: the seq is where the provider's count stops being the
-    whole story."""
+    """The usage of an event and the seq where it was reported, for the fold that
+    `baseline` and `last_usage` share. After that seq, the count of the provider
+    is no longer the whole count."""
     usage = reported_usage(event)
     return None if usage is None else (event.seq, usage)
 
 
-def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None:
-    """One event's usage, or `None` when it carries none.
+def reported_usage(event: SessionEvent) -> TokenUsage | None:
+    """The usage of one event, or `None` when it carries none.
 
-    `key` for the records that carry it under another name —
-    `subagent/usage-attributed`'s `childUsage` — so they are read by the same
-    rule rather than a fifth spelling.
-
-    Public and here rather than private in four places: this was the fourth
-    spelling of "read `TokenUsage` off an event" and the three before it
-    disagreed about missing, `null` and malformed. A payload that will not parse
-    answers `None` — the same as one that carries nothing — because the
-    alternative is a footer that raises on a frame it could have skipped, and
-    `fold_latest` then keeps the last usage that did parse.
+    The function is public and here, and not private in four places. It was the
+    fourth spelling of "read `TokenUsage` off an event", and the three before
+    it disagreed about a missing value, `null` and a malformed value. A payload
+    that does not parse answers `None`, the same as a payload that carries
+    nothing. The alternative is a footer that raises on a frame that it could
+    have skipped. `fold_latest` then keeps the last usage that did parse.
     """
-    usage = event.data.get(key)
+    usage = event.data.get("usage")
     if not usage:
         return None
     try:
@@ -392,40 +405,45 @@ def reported_usage(event: SessionEvent, key: str = "usage") -> TokenUsage | None
 
 
 SPENDING_TYPES = frozenset({"assistant/message", "compaction/summarized", "llm/decided"})
-"""The records in a log that spend tokens: a model's replies, the summarize calls
-that shortened its context, and the questions a row had a decision model answer.
-What a goal's own log charges and what a sub-agent's log says it spent read this
-one set, so a record added to it reaches both."""
+"""The records in a log that spend tokens: the replies of a model, the summarize
+calls that shortened its context, and the questions that a row had a decision
+model answer. What the log of a goal charges and what the log of a sub-agent
+says that it spent both read this one set, so a record that is added to the set
+reaches both."""
 
 
-def event_tokens(event: SessionEvent, key: str = "usage") -> int:
-    """One record's spend as `TokenUsage.total`, or `0` when it carries none that
-    parses — the one definition of "tokens" a budget and a child's account share.
+def event_tokens(event: SessionEvent) -> int:
+    """The spend of one record as `TokenUsage.total`, or `0` when the record
+    carries no usage that parses. This is the one definition of "tokens" that a
+    budget and the account of a child share.
 
-    `total`, not `inputTokens + outputTokens`: a two-term sum left most of a
-    cache-heavy run's input outside the budget, and disagreed with the footer
-    showing the same word.
+    It is `total` and not `inputTokens + outputTokens`. A sum of two terms left
+    most of the input of a cache-heavy run outside the budget, and it disagreed
+    with the footer, which showed the same word.
     """
-    usage = reported_usage(event, key)
+    usage = reported_usage(event)
     return 0 if usage is None else usage.total
 
 
 @plugin("token-meter", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the token meter, and the one reading it can answer for a footer."""
+    """Mount the token meter, and contribute the two readings that it answers
+    for a footer: `reasoning` and `cache`."""
     meter = TokenMeter(ctx=ctx)
     ctx.provide(TOKEN_METER, meter)
-    # `contribute_item` rather than an `inject`, for `diagnostics`' reason: this
-    # row must activate in a profile that mounts no front end at all, and a
-    # dependency on `ctx.tui_status` would make the meter — which compaction
-    # needs — wait on a registry a headless run never mounts.
+    # This uses `contribute_item` and not an `inject`, for the same reason as
+    # `diagnostics`. This row must activate in a profile that mounts no front
+    # end at all. A dependency on `ctx.tui_status` would make the meter, which
+    # compaction needs, wait on a registry that a headless run never mounts.
     for status_field in (
-        # `model`: it qualifies the model name the line opens with — one model
-        # at two efforts is two costs and two answers — so a front end draws it
-        # onto the name (`flash/high`) rather than somewhere down the line.
+        # `model`: the reading qualifies the model name that the line opens
+        # with, because one model at two efforts is two costs and two answers.
+        # So a front end draws it onto the name (`flash/high`), and not
+        # somewhere further down the line.
         StatusField(id="reasoning", read=meter.reasoning_reading, order=5, slot="model"),
-        # `context`: the other half of the gauge's number, drawn onto the gauge
-        # (`context 12%/cache 28.8k(98%)`); `cache_reading` says how it spells.
+        # `context`: the other half of the number of the gauge, drawn onto the
+        # gauge (`context 12%/cache 28.8k(98%)`). `cache_reading` says how it
+        # is spelled.
         StatusField(id="cache", read=meter.cache_reading, order=14, slot="context"),
     ):
         contribute_item(ctx, TUI_STATUS, status_field, label=f"token-meter({status_field.id})")

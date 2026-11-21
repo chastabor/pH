@@ -38,7 +38,6 @@ not undo the rest.
 ctx.credentials.reference(name)      # -> CredentialRef; a name, not a value
 ctx.credentials.resolve(ref)         # -> the secret, at the edge only
 ctx.credentials.has(name)            # is it available, without reading it
-ctx.credentials.require(name)        # resolve or refuse
 ctx.credentials.provide_value(...)   # for a test, or a non-env source
 ```
 

@@ -1,24 +1,30 @@
-"""One small JSON file beside the sessions it indexes: the machinery the schedule index
-and the live-roots index share.
+"""One small JSON file beside the sessions that it indexes. This module holds the
+code that the schedule index and the live-roots index share.
 
-Both are caches over facts the logs still hold (I-6), so both answer five questions
-the same way, and the answers are written once here:
+Both indexes are caches over facts that the logs still hold (I-6). So both
+answer five questions in the same way, and the answers are written one time,
+here:
 
-- **Reading.** A file that is missing, unreadable, corrupt or of another version reads
-  as empty and incomplete: the safe answer on a daemon's boot path. It is also how a
-  format change migrates. An old file is rebuilt from the logs once, never converted.
-- **Completeness.** Only a rebuild marks the file complete (`vouch`). Every other
-  writer keeps the flag it found, so a reader can tell a file a rebuild vouched for
-  from one that writers have only ever added to.
-- **Writing.** Read, change and atomic rename under a file lock, so a reader never
-  sees half a file and two hosts writing at once do not lose each other's entries.
-- **No-op first.** A change that would not move the file is decided before the lock
-  (K10) and again under it, so re-stating what the file says costs a read.
-- **The rebuild merge.** What a rebuild did not read, it keeps, since a log it could
-  not read is no evidence. What moved while it read, it keeps as moved.
+- **Reading.** A file that is missing, unreadable, corrupt or of another version
+  reads as empty and incomplete. That is the safe answer on the boot path of a
+  daemon. A format change migrates in the same way: an old file is rebuilt from
+  the logs one time and is never converted.
+- **Completeness.** Only a rebuild marks the file complete (`vouch`). Every
+  other writer keeps the flag that it found. A reader can therefore tell a file
+  that a rebuild vouched for from a file that writers have only ever added to.
+- **Writing.** A write is a read, a change and an atomic rename under a file
+  lock. A reader therefore never sees half a file, and two hosts that write at
+  the same time do not lose the entries of each other.
+- **No-op first.** Whether a change would move the file is decided before the
+  lock (K10) and again under it. To state again what the file already says
+  therefore costs one read.
+- **The rebuild merge.** A rebuild keeps what it did not read, because a log
+  that it could not read is no evidence. It keeps what moved while it read, as
+  moved.
 
-What differs is each index's own: its file name, its version, its entry and how one
-is spelled on disk, and anything beyond the file, such as the schedule index's claims.
+Each index supplies what differs: its file name, its version, its entry and the
+form of an entry on disk, and anything beyond the file, such as the claims of
+the schedule index.
 
 @module ph.seams._json_index
 """
@@ -40,15 +46,16 @@ __all__ = ["LOCK_TIMEOUT", "JsonIndex"]
 log = logging.getLogger("ph.seams")
 
 LOCK_TIMEOUT = 5.0
-"""How long a write waits for the file lock before giving up (K10).
+"""How long a write waits for the file lock before it gives up (K10).
 
-**Patient, because the wait is a worker thread's.** It was cut to a quarter second
-while the schedule index's `record` ran on the event loop, where every caller reached
-it and the wait was time the daemon served nothing. Both indexes write through a
-writer that moves the write off the loop, and a wait there costs a thread and delays
-only the writes queued behind it, so waiting out another host's write is worth more
-than dropping this one. Giving up is still the answer past it: an index that cannot be
-written costs a late answer, never a wrong one.
+**The wait is patient, because a worker thread does the waiting.** The value was
+cut to a quarter of a second while the `record` of the schedule index ran on the
+event loop. Every caller reached it there, and during the wait the daemon served
+nothing. Both indexes now write through a writer that moves the write off the
+event loop. A wait there costs a thread and delays only the writes that are
+queued behind it. So to wait for the write of another host is worth more than to
+drop this write. Past the timeout, the write still gives up: an index that
+cannot be written costs a late answer and never a wrong one.
 """
 
 
@@ -56,9 +63,10 @@ written costs a late answer, never a wrong one.
 class JsonIndex[E]:
     """One index file under `root`: `{version, complete, sessions: {id: entry}}`.
 
-    A subclass names its file (`NAME`), its format (`VERSION`) and itself in messages
-    (`WHAT`), and says how one entry reads and writes (`_decode`, `_encode`). The
-    reading, locking, rewriting and merging are here.
+    A subclass names its file (`NAME`), its format (`VERSION`) and itself in
+    messages (`WHAT`). It also says how one entry is read and written
+    (`_decode`, `_encode`). The reading, the locking, the rewriting and the
+    merging are here.
     """
 
     root: Path
@@ -71,21 +79,22 @@ class JsonIndex[E]:
         return self.root / self.NAME
 
     def _decode(self, key: str, raw: Mapping[str, Any]) -> E | None:
-        """One entry as the file spells it, or `None` to drop one this build cannot read."""
+        """Read one entry from its form in the file. Return `None` to drop an
+        entry that this build cannot read."""
         raise NotImplementedError
 
     def _encode(self, entry: E) -> dict[str, Any]:
-        """One entry as the file spells it."""
+        """One entry in the form that the file holds."""
         raise NotImplementedError
 
     def read(self) -> dict[str, E]:
-        """Every entry on record. Empty when there is nothing to say.
+        """Every entry on record. The result is empty when there is nothing to say.
 
-        **Every failure reads as empty**, deliberately: a missing file is the ordinary
-        state of a `$PH_HOME` nothing has been recorded in, and a corrupt one is a
-        cache that lost its contents. Both mean "this file cannot tell you", and the
-        answer is an empty one rather than an exception on a daemon's boot path. Both
-        also read as incomplete (`_load`)."""
+        **Every failure reads as empty, on purpose.** A missing file is the
+        ordinary state of a `$PH_HOME` in which nothing has been recorded. A
+        corrupt file is a cache that lost its contents. Both mean "this file
+        cannot tell you", so the answer is an empty one and not an exception on
+        the boot path of a daemon. Both also read as incomplete (`_load`)."""
         return self._load()[0]
 
     def _load(self) -> tuple[dict[str, E], bool]:
@@ -114,15 +123,15 @@ class JsonIndex[E]:
         moves: Callable[[Mapping[str, E]], bool],
         apply: Callable[[dict[str, E]], None],
     ) -> bool:
-        """`apply` a writer's change, unless `moves` says it would not move the file.
-        Whether the file now holds the change.
+        """`apply` the change of a writer, unless `moves` says that it would not
+        move the file. Returns whether the file now holds the change.
 
-        **The no-op is decided before the lock, not inside it** (K10). Both indexes
-        are re-stated far more often than they move, and paying a lock to discover
-        nothing moved was what made a reconcile on every open cost something. Reading
-        first is safe: a read that fails is empty, and a write is an atomic rename, so
-        there is no torn state to see, and a racing writer only means the second ask
-        under the lock finds nothing to do.
+        **The no-op is decided before the lock, and not inside it** (K10). Both
+        indexes are stated again far more often than they move. To take a lock
+        only to find that nothing moved is what gave a reconcile on every open
+        its cost. To read first is safe. A read that fails is empty, and a write
+        is an atomic rename, so there is no torn state to see. A racing writer
+        only means that the second check, under the lock, finds nothing to do.
         """
         if not moves(self._load()[0]):
             return True
@@ -136,14 +145,15 @@ class JsonIndex[E]:
         return self._rewrite(under_lock, vouch=False)
 
     def _merge(self, read: Mapping[str, E | None], *, before: Mapping[str, E], vouch: bool) -> bool:
-        """Write a rebuild's answer: each entry `read` holds, or its removal for `None`.
-        Whether it was written.
+        """Write the answer of a rebuild: each entry that `read` holds, or its
+        removal for `None`. Returns whether it was written.
 
-        **What the rebuild did not read, it keeps**, since a log it could not read or
-        never found is no evidence the entry is gone. **What moved while it read, it
-        keeps as moved**: an entry that differs from `before`, the file as the rebuild
-        began, was written meanwhile by a writer who knew better. `vouch` marks the
-        file complete; a rebuild that read a guessed store does not.
+        **The rebuild keeps what it did not read.** A log that it could not read
+        or never found is no evidence that the entry is gone. **The rebuild
+        keeps what moved while it read, as moved.** `before` is the file as the
+        rebuild began. An entry that differs from `before` was written in the
+        meantime by a writer that knew better. `vouch` marks the file complete.
+        A rebuild that read a guessed store does not vouch.
         """
 
         def apply(found: dict[str, E]) -> bool:
@@ -159,11 +169,12 @@ class JsonIndex[E]:
         return self._rewrite(apply, vouch=vouch)
 
     def _rewrite(self, apply: Callable[[dict[str, E]], bool], *, vouch: bool) -> bool:
-        """Read, `apply`, and write back, under the lock. Whether the file holds the
-        change; `apply` returns `False` when there is nothing to write.
+        """Read, `apply`, and write back, under the lock. Returns whether the file
+        holds the change. `apply` returns `False` when there is nothing to
+        write.
 
-        `vouch` marks the file complete, which only a rebuild may. Otherwise the file
-        keeps the `complete` it had.
+        `vouch` marks the file complete, which only a rebuild may do. Otherwise
+        the file keeps the `complete` that it had.
         """
         try:
             with file_lock(f"{self.path}.lock", timeout=LOCK_TIMEOUT, what=self.WHAT):
@@ -179,8 +190,9 @@ class JsonIndex[E]:
         return True
 
     def _write(self, found: Mapping[str, E], *, complete: bool) -> None:
-        """Serialize and rename, so a reader never sees a half-written index. Keys
-        sorted, so two writers writing the same facts write the same bytes."""
+        """Serialize and rename, so that a reader never sees a half-written index.
+        The keys are sorted, so two writers that write the same facts write the
+        same bytes."""
         document: dict[str, Any] = {
             "version": self.VERSION,
             "complete": complete,

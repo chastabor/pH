@@ -1,26 +1,26 @@
-"""`session-telemetry-otel` — ship the ledger to an OTel collector (P5-09).
+"""`session-telemetry-otel`: ship the ledger to an OTel collector (P5-09).
 
-A **sink**, registered through `SessionTelemetry.add_sink`, which is the whole
-security argument: `add_sink` runs after the `session-telemetry/record` redaction
-waterfall settles, so an exporter physically cannot observe a record the redactors
-dropped or rewrote. A row that listened on the waterfall event *alongside*
-redaction could see the unredacted form by winning a race; this one has no such
-race to win.
+This row is a **sink**, registered through `SessionTelemetry.add_sink`. That is
+the complete security argument. `add_sink` runs after the
+`session-telemetry/record` redaction waterfall settles, so an exporter cannot
+observe a record that the redactors dropped or rewrote. A row that listened on
+the waterfall event *beside* redaction could win a race and see the unredacted
+form. This row has no such race to win.
 
-**Logs, not spans**, which is §8's decision rather than a shortcut: "the session
-log is the trace", and a span hierarchy would be a second, lossier account of what
-the log already holds event by event. Each record becomes one OTel *log record*,
-carrying the channel and severity pH already assigned.
+**Logs, not spans.** That is the decision of §8 and not a shortcut: the session
+log is the trace, and a span hierarchy would be a second, lossier account of
+what the log already holds event by event. Each record becomes one OTel *log
+record*, which carries the channel and the severity that pH already assigned.
 
-**Optional, and honest when absent.** `opentelemetry-sdk` and the OTLP exporter
-distribution are an extra (`ph-core[otel]`), imported inside `apply` so a
-deployment that never exports does not pay them, and a profile that mounts this
-row without them gets a refusal naming what to install rather than an
-`ImportError` from the loader.
+**Optional, and explicit when absent.** `opentelemetry-sdk` and the OTLP
+exporter distribution are an extra (`ph-core[otel]`). They are imported when
+`apply` runs, so a deployment that never exports does not pay for them. A
+profile that mounts this row without them gets a refusal that names what to
+install, and not an `ImportError` from the loader.
 
-**Nothing here half-mounts**: either the row can export or it refuses. Building a
-provider with no exporter would have `phern doctor` report a healthy telemetry sink
-shipping to nowhere.
+**Nothing here half-mounts**: the row can export, or it refuses. A provider
+that was built with no exporter would make `phern doctor` report a healthy
+telemetry sink that ships to nowhere.
 
 @module ph.seams.telemetry_otel
 """
@@ -44,37 +44,39 @@ MISSING = (
 )
 """Why the row refused, and the two ways out.
 
-A refusal rather than a silent no-op: a deployment that mounted an exporter and
-got nothing exported would discover it from the absence of data somewhere else,
-which is the worst place to learn it.
+The row refuses and does not silently do nothing. A deployment that mounted an
+exporter and got nothing exported would learn it from the absence of data
+somewhere else, which is the worst place to learn it.
 """
 
 SEVERITY = {"debug": 5, "info": 9, "warn": 13, "error": 17}
-"""pH's four severities as OTel severity numbers.
+"""The four severities of pH as OTel severity numbers.
 
-The numbers are OTel's own scale (DEBUG=5, INFO=9, WARN=13, ERROR=17) written
-out rather than imported, so this mapping is readable without the SDK in front
-of you — and so the module's only hard dependency stays inside `apply`. The
-cost of writing them out is that a fifth pH severity could map to nothing; the
-test holds these keys against `get_args(Severity)` so that fails loudly rather
-than exporting the new severity as INFO.
+The numbers are the scale of OTel itself (DEBUG=5, INFO=9, WARN=13, ERROR=17).
+They are written out and not imported, so a reader can follow this mapping
+without the SDK, and the only hard dependency of the module stays inside
+`apply`. The cost is that a fifth pH severity could map to nothing. The test
+holds these keys equal to `get_args(Severity)`, so that case fails loudly and
+the new severity is not exported as INFO.
 """
 
 SCALARS = (str, int, float, bool)
-"""What OTel accepts as an attribute value. A tuple at module scope rather than a
-`str | int | float | bool` expression inside `_flat`, which would be evaluated per
-attribute per record.
+"""What OTel accepts as an attribute value. It is a tuple at module scope and
+not a `str | int | float | bool` expression inside `_flat`, which would be
+evaluated for every attribute of every record.
 """
 
 
 class Config(WireModel):
-    """Row config. `endpoint` empty means "whatever the OTEL_* environment says".
+    """Row config for the OTel telemetry sink. An empty `endpoint` means "whatever
+    the OTEL_* environment says".
 
-    Deliberately thin: the OTel SDK already reads `OTEL_EXPORTER_OTLP_ENDPOINT`
-    and friends, and a second place to configure one exporter is a second place
-    for them to disagree. Empty is passed straight through — the exporter's own
-    `endpoint or environ.get(...)` gives exactly the unconfigured behavior, so
-    there is nothing for this row to branch on.
+    The config is deliberately thin. The OTel SDK already reads
+    `OTEL_EXPORTER_OTLP_ENDPOINT` and the related variables, and a second place
+    to configure one exporter is a second place for the two to disagree. An
+    empty value is passed through unchanged. The exporter's own
+    `endpoint or environ.get(...)` then gives exactly the unconfigured behavior,
+    so this row has nothing to branch on.
     """
 
     service_name: str = "ph"
@@ -96,9 +98,9 @@ async def apply(ctx: Context, config: Config) -> None:
         from opentelemetry.sdk._logs import LoggerProvider  # noqa: PLC0415
         from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
 
-        # Inside the guard, because `_pipeline` imports the *other* half of the
-        # extra: a deployment with the SDK but no OTLP exporter refuses here
-        # rather than mounting a sink that ships nowhere.
+        # This call is inside the guard, because `_pipeline` imports the *other*
+        # half of the extra. A deployment with the SDK but no OTLP exporter
+        # refuses here and does not mount a sink that ships nowhere.
         processor = _pipeline(config)
     except ImportError as error:
         raise MountRefusal(MISSING) from error
@@ -106,19 +108,20 @@ async def apply(ctx: Context, config: Config) -> None:
     provider = LoggerProvider(resource=Resource.create({"service.name": config.service_name}))
     provider.add_log_record_processor(processor)
     logger = provider.get_logger("ph.session")
-    # Resolved once at mount rather than `SeverityNumber(...)` per record: enum
-    # lookup by value goes through `Enum.__call__`, for a table of four that
-    # cannot change while the row is mounted.
+    # Resolved one time at mount, and not with `SeverityNumber(...)` for each
+    # record. An enum lookup by value goes through `Enum.__call__`, and this is
+    # a table of four that cannot change while the row is mounted.
     severities = {name: SeverityNumber(value) for name, value in SEVERITY.items()}
 
     def ship(record: SessionTelemetryRecord) -> None:
         """One post-redaction record, as one OTel log record.
 
-        No `try` here: `SessionTelemetry.record` already wraps every sink call,
-        so a guard at this level could not change any outcome — it would only
-        choose which of two log lines prints, while making the seam's own
-        containment unreachable for the one sink that talks to a network. Sink
-        health is the seam's to own, and it is already where it can see it.
+        There is no `try` here. `SessionTelemetry.record` already wraps every
+        sink call, so a guard at this level could not change any outcome. It
+        would only choose which of two log lines prints, and it would make the
+        containment of the seam unreachable for the one sink that talks to a
+        network. The health of a sink belongs to the seam, which is already
+        where it can see it.
         """
         logger.emit(
             timestamp=record.time * 1_000_000,
@@ -128,9 +131,9 @@ async def apply(ctx: Context, config: Config) -> None:
             attributes=_flat({"channel": record.channel, **record.attributes}),
         )
 
-    # Through `add_sink`, never `ctx.on("session-telemetry/record", …)`: the
-    # sink list is fanned out *after* the waterfall settles, so this cannot see
-    # a record the redactors have not finished with. A listener could.
+    # Through `add_sink`, never `ctx.on("session-telemetry/record", …)`. The
+    # sink list is fanned out *after* the waterfall settles, so this sink cannot
+    # see a record that the redactors have not finished with. A listener could.
     ctx.require(SESSION_TELEMETRY).add_sink(ship, scope=ctx)
     ctx.add_disposer(provider.shutdown, label="telemetry.otel")
 
@@ -150,14 +153,14 @@ async def apply(ctx: Context, config: Config) -> None:
 
 
 def _pipeline(config: Config) -> Any:  # noqa: ANN401
-    """The OTLP exporter behind a batching processor — the row's one test seam.
+    """The OTLP exporter behind a batching processor. A test substitutes this one function.
 
     Batching is right in production, where a record per turn must not be a
-    request per turn, and wrong in a test, which has to observe the export
-    before the batch would have flushed. One substitutable hook rather than two
-    (an exporter factory *and* a processor factory) because both existed for
-    this single substitution, and the pair had `apply` importing a class purely
-    to hand it to a one-line helper.
+    request per turn. It is wrong in a test, which must observe the export
+    before the batch would have flushed. There is one substitutable hook and
+    not two (an exporter factory *and* a processor factory), because both
+    existed for this single substitution, and the pair made `apply` import a
+    class only to hand it to a one-line helper.
     """
     # Not a declared dependency: the row checks for it before this runs.
     from opentelemetry.exporter.otlp.proto.http._log_exporter import (  # noqa: PLC0415
@@ -169,13 +172,13 @@ def _pipeline(config: Config) -> Any:  # noqa: ANN401
 
 
 def _flat(attributes: dict[str, Any]) -> dict[str, Any]:
-    """OTel attributes are scalars; anything else goes as its JSON text.
+    """OTel attributes are scalars, so anything else goes as its JSON text.
 
-    Flattened here rather than dropped, because a record's attributes are the
-    part an operator actually queries on — and a nested value silently omitted
-    is a field that looks absent rather than unsupported. The `ph.` prefix is
-    applied here and only here, so the caller hands in `channel` rather than
-    spelling the convention a second time.
+    A nested value is flattened here and not dropped. The attributes of a
+    record are the part that an operator queries on, and a nested value that is
+    silently omitted is a field that looks absent and not unsupported. The
+    `ph.` prefix is applied here and only here, so the caller passes `channel`
+    and does not spell the convention a second time.
     """
     return {
         f"ph.{key}": value if isinstance(value, SCALARS) else dumps(value)

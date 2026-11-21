@@ -1,8 +1,8 @@
-"""`ctx.commands` — human slash commands that spend no model turn.
+"""`ctx.commands`: slash commands of the user that spend no model turn.
 
-A command is not a tool. `/compact`, `/revert`, `/refine` are things the *human*
-asks the harness to do, and routing them through a model turn would be both
-slower and dishonest: the log would show the model deciding something the user
+A command is not a tool. `/compact`, `/revert` and `/refine` are things that
+the *user* asks the harness to do. A route through a model turn would be slower
+and also false: the log would show the model deciding something that the user
 decided. So a command dispatches directly, records `command/run` and
 `command/done`, and never opens a `turn/*`.
 
@@ -62,12 +62,13 @@ events.declare(
 
 
 class CommandSchema(WireModel):
-    """What a front end needs to *offer* a command — everything but its body.
+    """What a front end needs to *offer* a command: everything except its body.
 
-    The declarable half of a `CommandDefinition`, split from the callable the
-    way `ToolSchema` is split from `ToolDefinition` (P7-11). A palette and a
-    completer need these three fields and nothing else; the body runs where the
-    profile is mounted, which over a socket is not where the palette is.
+    This is the declarable half of a `CommandDefinition`. It is split from the
+    callable in the way that `ToolSchema` is split from `ToolDefinition`
+    (P7-11). A palette and a completer need these three fields and nothing
+    else. The body runs where the profile is mounted, and over a socket that is
+    not where the palette is.
     """
 
     name: str
@@ -76,16 +77,20 @@ class CommandSchema(WireModel):
 
 
 CommandBody: TypeAlias = Callable[[str, "CommandContext"], "MaybeAwaitable[str | None]"]
-"""What a slash command *is*: the line the human typed, and what to show them.
+"""What a slash command *is*: the line that the user typed goes in, and what to
+show them comes out.
 
-Sync or async, because a body arrives through a plugin row's entry point and no
-checker between that row and `dispatch` sees it; `maybe_await` is what lets a row
-written either way work rather than fail on an `await`. Every body in this tree
-is `async def`. `None` is a command that did its work and has nothing to say.
+A body may be sync or async, because it arrives through the entry point of a
+plugin row, and no checker between that row and `dispatch` sees it. With
+`maybe_await`, a row written either way works and does not fail on an `await`.
+Most bodies in this tree are `async def`. A few are plain functions, such as
+the usage verb of `install_or_status` and `/refine --show`. `None` is a command
+that did its work and has nothing to say.
 
-A declaration rather than the prose one — `run(argument, ctx) -> str | None`
-written underneath a `Callable[..., Any]` — that stood here before: this alias is
-the only thing standing between a row's signature and the dispatch that calls it.
+This alias is a declaration. Before it, the contract was prose,
+`run(argument, ctx) -> str | None`, written under a `Callable[..., Any]`. The
+alias is the only thing between the signature of a row and the dispatch that
+calls it.
 """
 
 
@@ -96,9 +101,9 @@ class CommandDefinition:
     name: str
     summary: str
     run: CommandBody
-    """The body. Returns the line to show the human, or nothing. A command with verbs
-    is given a `Verbs` table here, which is what lets the registry tell a verb that
-    only asks from one that acts."""
+    """The body. It returns the line to show the user, or nothing. A command with
+    verbs gets a `Verbs` table here. The table is how the registry tells a verb
+    that only asks from a verb that acts."""
     argument_hint: str = ""
 
     def schema(self) -> CommandSchema:
@@ -107,24 +112,25 @@ class CommandDefinition:
 
 
 CommandRecord: TypeAlias = Literal["before", "with-act", "after"]
-"""When a verb's `command/run` reaches disk — the one thing a verb says about its
-record, and one value rather than two flags, since a verb that only asks has no
-barrier to place.
+"""When the `command/run` of a verb reaches disk. This is the one thing that a
+verb says about its record. It is one value and not two flags, because a verb
+that only asks has no barrier to place.
 
-* `before` — `COMMAND_RUN`'s own barrier, ahead of the body (S16). The default, and
-  what anything unsure says.
-* `with-act` — the barrier of the durable intent the body opens before it acts:
-  `/revert <seq>` restores through `WORKSPACE_RESTORE`. Appended before the body and
-  written by that flush (`IntentJournal.open_deferred`) — one fsync where two back to
-  back bought nothing more. Only for a body whose every act is behind such an intent.
-* `after` — a verb that only asks, changing no tree, no setting, no record beyond
-  the command's own pair: no barrier, and recorded once it answers, as one pair, so
-  the question someone asks on a full disk — what state are things in? — is still
-  answered.
+* `before`: the own barrier of `COMMAND_RUN`, ahead of the body (S16). This is
+  the default, and it is what a verb says when unsure.
+* `with-act`: the barrier of the durable intent that the body opens before it
+  acts. `/revert <seq>` restores through `WORKSPACE_RESTORE`. The record is
+  appended before the body and written by that flush
+  (`IntentJournal.open_deferred`). That is one fsync where two in a row gained
+  nothing more. It is only for a body whose every act is behind such an intent.
+* `after`: a verb that only asks. It changes no tree, no setting, and no record
+  except the own pair of the command. It has no barrier, and it is recorded
+  when it answers, as one pair. So the question that someone asks on a full
+  disk, "what state are things in?", is still answered.
 
-A wrong `before` costs an fsync, or a refused listing on a full disk. A wrong `after`
-is an act with no record ahead of it, and a wrong `with-act` one whose record was
-still in memory — each the failure S16 closed."""
+A wrong `before` costs an fsync, or a refused listing on a full disk. A wrong
+`after` is an act with no record ahead of it. A wrong `with-act` is an act whose
+record was still in memory. Each of those two is the failure that S16 closed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,37 +139,40 @@ class CommandVerb:
     written."""
 
     run: CommandBody
-    """Given what follows the verb, stripped — the verb is the table's to read."""
+    """It is given what follows the verb, stripped. The table reads the verb itself."""
     record: CommandRecord = "before"
 
 
 @dataclass(frozen=True, slots=True)
 class Verbs:
-    """A command body that dispatches on its argument's first word — the one parse of
-    a verb, and the one place a verb says when its record is written.
+    """A command body that dispatches on the first word of its argument. It is
+    the one parse of a verb, and the one place where a verb says when its record
+    is written.
 
-    **Per verb, not per command**, because every command with a question to answer
-    also has a verb that acts: `/workspaces list` beside `remove`, bare `/revert`
-    beside `/revert <seq>`. A tool can declare `effect_free` whole; a command cannot.
-    And in one table, because a command that parsed its own verbs and declared the
-    reading ones beside them kept two lists in step by hand — where one wrong entry
-    runs an act with no record ahead of it.
+    **The record is set for each verb, not for each command**, because every
+    command with a question to answer also has a verb that acts:
+    `/workspaces list` beside `remove`, bare `/revert` beside `/revert <seq>`.
+    A tool can declare `effect_free` as a whole, and a command cannot. The
+    verbs are in one table, because a command that parsed its own verbs and
+    declared the reading verbs beside them kept two lists in step by hand. One
+    wrong entry there runs an act with no record ahead of it.
 
     `""` is the bare command. Verbs match without regard to case.
     """
 
     table: Mapping[str, CommandVerb]
     otherwise: CommandVerb | str
-    """For an argument whose first word names no verb: a usage line, answered as it
-    is, or a verb given the whole argument — for `/revert <seq>`, the verb the
-    argument is data for."""
+    """For an argument whose first word names no verb. It is either a usage line,
+    which is answered as it is, or a verb that is given the whole argument. For
+    `/revert <seq>`, that verb is the one that the argument is data for."""
     refused: tuple[type[Exception], ...] = ()
-    """What a verb raises to refuse, answered with its text rather than raised on —
-    each command's own refusal, said once here instead of caught in every verb."""
+    """What a verb raises to refuse. The refusal is answered with its text and is
+    not raised further. Each command states its own refusal one time here, and
+    does not catch it in every verb."""
 
     def lookup(self, argument: str) -> tuple[CommandVerb | str, str]:
-        """The verb `argument` names and what follows it — or, naming none,
-        `otherwise` and the whole argument."""
+        """The verb that `argument` names, and what follows it. When it names no
+        verb, the result is `otherwise` and the whole argument."""
         word, _, rest = argument.partition(" ")
         verb = self.table.get(word.casefold())
         return (self.otherwise, argument) if verb is None else (verb, rest.strip())
@@ -192,17 +201,18 @@ def install_or_status(
     summary: str,
     answer: Callable[[Provisioning, CommandContext], Awaitable[str]],
 ) -> CommandDefinition:
-    """The command a plugin that provisions something offers: `install` acts, and
-    `status` — the bare command too — only asks.
+    """The command that a plugin offers when it provisions something. `install`
+    acts. `status` only asks, and so does the bare command.
 
     `answer` is handed the invocation as well as the verb, because "is this
-    ready" is asked by someone: a plugin whose state is per agent — an index in
-    the agent's scratch — answers for the agent and session that typed it.
+    ready" is asked by someone. A plugin whose state is per agent, such as an
+    index in the scratch directory of the agent, answers for the agent and the
+    session that typed the command.
 
-    One shape for every such plugin, because "is this ready" should be asked the same
-    way of each, and its verbs sorted into asking and acting the same way too. The
-    whole definition, so the hint naming the verbs comes from the table that owns
-    them.
+    Every such plugin has this one shape, because "is this ready" should be
+    asked of each in the same way, and its verbs should be sorted into asking
+    and acting in the same way. The function returns the whole definition, so
+    that the hint that names the verbs comes from the table that owns them.
     """
     status = CommandVerb(lambda _rest, invocation: answer("status", invocation), record="after")
     install = CommandVerb(lambda _rest, invocation: answer("install", invocation))
@@ -229,29 +239,32 @@ class CommandContext:
     ctx: Context
     session: Session | None
     scope: Context
-    """The boundary this dispatch was told to run in (P6-24).
+    """The boundary that this dispatch was told to run in (P6-24).
 
-    `dispatch` resolved it and spent it on the binding, and stopped there — so a
-    body that asked a *scoped* question had only `agent` and re-derived one, one
-    frame below a caller that had just stated it. `ph.commands.revert` is the
-    live case: it reads the tool table to decide what a revert covers, which is a
-    policy read, and its own docstring notes that getting it wrong "ran in the
-    *unsafe* direction". The boundary is stated at the top of the dispatch; there
-    is no reason for the bottom to guess."""
+    `dispatch` used to resolve the boundary, use it for the binding, and stop
+    there. A body that asked a *scoped* question then had only `agent`, and
+    derived a boundary again, one frame below a caller that had just stated
+    it. `ph.commands.revert` was the case. It read the tool table to decide
+    what a revert covers, which is a policy read. It now reads the answer that
+    each dispatch recorded (`restoreCovered`), and no body in this tree reads
+    this field today. The boundary is stated at the top of the dispatch, so the
+    bottom has no reason to guess."""
     agent: AgentHandle | None = None
     line: str = ""
-    """The command as it was typed, `/name` and all — what a record of the command
-    says asked. Here because a verb is handed only what follows it (`Verbs`), and a
-    body that records the line should not rebuild it."""
+    """The command as it was typed, with `/name` included. A record of the
+    command reports this as what was asked. It is here because a verb is handed
+    only what follows it (`Verbs`), and a body that records the line should not
+    rebuild it."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Registered:
     """A command and who registered it (P6-29).
 
-    In the table rather than beside it, so `claim_key`'s identity-checked release
-    takes both away in one step and the two can never be popped out of step —
-    the failure a parallel `dict[str, Running]` would have made silent.
+    The two are in the table and not beside it. The identity-checked release of
+    `claim_key` then takes both away in one step, and they can never be removed
+    out of step. A parallel `dict[str, Running]` would have made that failure
+    silent.
     """
 
     definition: CommandDefinition
@@ -259,12 +272,14 @@ class _Registered:
 
 
 def parse_command_line(line: str) -> tuple[str, str]:
-    """`/name the rest` → `("name", "the rest")`. The one spelling of the split.
+    """`/name the rest` → `("name", "the rest")`. This is the one spelling of the
+    split.
 
-    Exported because a front end that routes a line *before* dispatching it — the
-    TUI over a socket decides which end owns a verb — has to tokenize the same
-    way this registry will, or a leading space and a doubled one read as two
-    different commands on the two ends.
+    It is exported because a front end that routes a line *before* it
+    dispatches the line has to tokenize in the same way as this registry. The
+    TUI over a socket is such a front end: it decides which end owns a verb.
+    Otherwise a leading space and a doubled space read as two different
+    commands on the two ends.
     """
     name, _, argument = line.strip().lstrip("/").partition(" ")
     return name, argument.strip()
@@ -280,10 +295,11 @@ class CommandRegistry:
     def register(self, definition: CommandDefinition, *, scope: Context | None = None) -> Disposer:
         """Register one command. Emits `commands/change` on both edges.
 
-        The announcement is `claim_key`'s `then` rather than a wrapper around the
-        disposer it returns, because a scope unwinding runs what `add_disposer`
-        was given: wrapping means unloading a row takes its verb away and tells
-        nobody, which is the edge a remote palette most needs to hear about.
+        The announcement is the `then` of `claim_key`, and not a wrapper around
+        the disposer that `claim_key` returns. A scope that unwinds runs what
+        `add_disposer` was given. With a wrapper, the unload of a row takes its
+        verb away and tells nobody, and that is the edge that a remote palette
+        most needs to hear about.
         """
         by = self.ctx.running_for(scope)
         changed = partial(self.ctx.emit, "commands/change")
@@ -313,30 +329,32 @@ class CommandRegistry:
         session: Session | None = None,
         agent: AgentHandle | None = None,
     ) -> str | None:
-        """Run one `/name argument` line. Returns the text to show the human.
+        """Run one `/name argument` line. Returns the text to show the user.
 
-        Both halves are recorded even when the body fails: a command that broke
-        is something the user did, and the log is where they will look for it.
+        Both halves are recorded even when the body fails. A command that broke
+        is something that the user did, and the log is where they will look
+        for it.
 
-        **`scope=` is the boundary the body runs for** (P6-24), mirroring
-        `ToolExecutionInput.scope` on the tools side. It had no such channel, so
-        the binding below had to derive one from `agent` — the value documented
-        as the approval-routing target, not the policy boundary — which is the
-        guess this row exists to delete. The two differ for a subagent whose
-        driver holds a child ctx.
+        **`scope=` is the boundary that the body runs for** (P6-24). It mirrors
+        `ToolExecutionInput.scope` on the tools side. Before this parameter
+        existed, the binding below had to derive a boundary from `agent`. That
+        value is documented as the target of approval routing and not as the
+        policy boundary. `scope=` exists to remove that guess. The two differ
+        for a subagent whose driver holds a child ctx.
 
-        **This fallback is not the fail-open one `ctx.fs` had.** There, an
-        unreadable `agent.ctx` fell back to the *mount*, which no agent-scoped
-        registration reaches, so a scoped policy row silently applied to nobody.
-        P6-24 answered that by refusing; P6-32 then deleted the derivation
-        outright, so `ctx.fs` requires a stated `Boundary` and has no fallback at
-        all. `SubagentService._delegating_boundary` is the surviving refuser, for
-        the reason its docstring gives: its handle arrives on a caller-built
-        payload, so the broken case stays reachable. Here the fallback is
-        the *registration's own layer*, which is where a dispatch with no agent
-        lands anyway and is exactly as wide as the command already was. Nothing
-        is widened by failing to read an agent, so nothing is worth refusing a
-        human's slash command over.
+        **This fallback is not the fail-open fallback that `ctx.fs` had.**
+        There, an unreadable `agent.ctx` fell back to the *mount*, which no
+        agent-scoped registration reaches, so a scoped policy row silently
+        applied to nobody. P6-24 answered that with a refusal. P6-32 then
+        deleted the derivation outright, so `ctx.fs` requires a stated
+        `Boundary` and has no fallback at all.
+        `SubagentService._delegating_boundary` is the refuser that remains. Its
+        handle arrives on a payload that the caller builds, so the broken case
+        stays reachable there. Here the fallback is the *own layer of the
+        registration*. A dispatch with no agent lands there anyway, and that
+        layer is exactly as wide as the command already was. A failure to read
+        an agent widens nothing, so nothing justifies the refusal of a slash
+        command of the user.
         """
         name, argument = parse_command_line(line)
         entry = self._commands.get(name)
@@ -347,48 +365,53 @@ class CommandRegistry:
         opening: JsonObject = {"name": name, "argument": argument}
         held: Claim | None = None
         run = definition.run
-        # A body that is not a verb table said nothing about its record, so it gets
-        # the barrier anything unsure gets.
+        # A body that is not a verb table said nothing about its record. It gets
+        # the barrier that anything unsure gets.
         record = run.record(argument) if isinstance(run, Verbs) else "before"
         if session is not None and record == "before":
-            # **On disk before the body runs** (S16) — `COMMAND_RUN`'s barrier. A
-            # command's effects used to come before any durable record of it:
-            # `/revert` rewrote the tree while `command/run` sat in memory, and a
-            # crash mid-body left an unpaired record nothing ever closed. One whose
-            # record cannot be written does not run.
+            # **On disk before the body runs** (S16). This is the barrier of
+            # `COMMAND_RUN`. The effects of a command used to come before any
+            # durable record of it. `/revert` rewrote the tree while
+            # `command/run` was still in memory, and a crash in the body left an
+            # unpaired record that nothing ever closed. A command whose record
+            # cannot be written does not run.
             try:
                 held = await journal.open(session, COMMAND_RUN, opening)
             except IntentNotDurable:
                 return f"refusing: /{name} was not run, because the log could not record it"
         elif session is not None and record == "with-act":
-            # Before the body as well, and on disk before its act — written by the
-            # barrier of the intent the act opens, rather than by a second one here.
+            # This record is also appended before the body, and it is on disk
+            # before the act of the body. The barrier of the intent that the act
+            # opens writes it, and no second barrier is placed here.
             held = journal.open_deferred(session, COMMAND_RUN, opening)
         outcome = "ok"
         detail: str | None = None
         try:
             # **As the row that registered it, for the agent that typed it**
-            # (P6-26, P6-29). The `ctx=self.ctx` handed to the body is the
-            # *registry's* — the same `scope or self.ctx` shape P6-12 named one
-            # table over — so a command that registered anything did it globally
-            # and forever.
+            # (P6-26, P6-29). The `ctx=self.ctx` that is handed to the body is
+            # the context of the *registry*. That is the same
+            # `scope or self.ctx` shape that P6-12 named one table over, so a
+            # command that registered anything did it globally and forever.
             #
-            # The owner is the registering row, exactly as `_invoke` binds a
-            # listener's own scope rather than the emitter's, and for the same
-            # reason: whose code this is does not depend on who triggered it. So
-            # there is no longer a no-agent case to special-case — P6-26 bound
-            # nothing at all there, to avoid restating `owner_for`'s fallback and
-            # deleting its second branch. The recorded pair is a better answer
-            # than either, and it is available unconditionally.
+            # The owner is the registering row, exactly as `_invoke` binds the
+            # own scope of a listener and not the scope of the emitter. The
+            # reason is the same: whose code this is does not depend on who
+            # triggered it. So the case with no agent no longer needs special
+            # treatment. P6-26 bound nothing at all in that case, to avoid
+            # restating the fallback of `owner_for` and deleting its second
+            # branch. The recorded pair is a better answer than either, and it
+            # is available unconditionally.
             #
             # Only the *layer* still comes from the agent, and it reads the
-            # declared `ctx` — the `getattr` probe this used to spell fell back to
-            # the registration's own layer, which for every command is the global one —
-            # narrower than the seam, and stated here because a per-agent command
-            # would make this the line that decides who sees what it registers.
-            # `None` past this line means "no boundary was stated and no agent
-            # to read one from"; the two consumers below spell their own
-            # fallbacks (bind nothing; hand the body the registration's layer).
+            # declared `ctx`. The `getattr` probe that this used to be fell
+            # back to the own layer of the registration, which is the global
+            # layer for every command. The layer of the agent is narrower than
+            # the seam. It is stated here because a per-agent command would
+            # make this the line that decides who sees what the command
+            # registers. `None` past this line means "no boundary was stated,
+            # and there is no agent to read one from". The two consumers below
+            # each state their own fallback: bind nothing, and hand the body
+            # the layer of the registration.
             resolved = scope if scope is not None else (agent.ctx if agent is not None else None)
             with running(entry.by, resolved):
                 result = await maybe_await(
@@ -403,13 +426,14 @@ class CommandRegistry:
                         ),
                     )
                 )
-            # **Checked, not coerced.** A body arrives through a plugin row's
-            # entry point, so `CommandBody` is a claim no checker between that
-            # row and here has seen — and this used to read `result if
-            # isinstance(result, str) else None`, which is the "quietly
-            # substituted a default" `settled_or_none` was written to end. It
-            # also protects the `finally` below: a non-JSON detail would raise
-            # out of `session.append` *there*, masking the body's own exception.
+            # **Checked, not coerced.** A body arrives through the entry point
+            # of a plugin row, so `CommandBody` is a claim that no checker
+            # between that row and here has seen. This line used to read
+            # `result if isinstance(result, str) else None`. That silently
+            # substitutes a default, which is what `settled_or_none` was
+            # written to end. The check also protects the `finally` below: a
+            # detail that is not JSON would raise out of the append of
+            # `command/done` *there*, and mask the own exception of the body.
             detail = settled_or_none(f"/{name}", result, str)
             return detail
         except Exception as error:
@@ -418,14 +442,14 @@ class CommandRegistry:
             raise
         except BaseException as error:
             # **Cancellation is not a failure, and it is not an `Exception`.**
-            # `asyncio.CancelledError` is a `BaseException`, so a `/compact` the
-            # person interrupted — or one whose task group was torn down —
-            # unwound straight past the branch above, and the `finally` recorded
-            # the value `outcome` was initialized with: `ok`, with no detail. The
-            # log then said a command that never finished succeeded, which is the
-            # one question `command/done` exists to answer. The same reasoning
-            # covers `KeyboardInterrupt` and `SystemExit`: what is recorded is
-            # that the body did not complete.
+            # `asyncio.CancelledError` is a `BaseException`. A `/compact` that
+            # the user interrupted, or one whose task group was torn down,
+            # therefore unwound past the branch above, and the `finally`
+            # recorded the value that `outcome` was initialized with: `ok`, with
+            # no detail. The log then said that a command which never finished
+            # had succeeded. That is the one question that `command/done`
+            # exists to answer. The same reasoning covers `KeyboardInterrupt`
+            # and `SystemExit`: the record says that the body did not complete.
             outcome = "canceled"
             detail = str(error) or type(error).__name__
             raise
@@ -439,10 +463,10 @@ class CommandRegistry:
                     ),
                 )
             elif session is not None:
-                # A question (`after`): recorded once it is answered, as one pair and
-                # with no barrier — it changed nothing a record had to precede, and a
-                # disk that cannot take a write is exactly when a person asks what
-                # state things are in.
+                # A question (`after`). It is recorded when it is answered, as
+                # one pair and with no barrier. It changed nothing that a record
+                # had to precede, and a disk that cannot take a write is exactly
+                # when a user asks what state things are in.
                 journal.open_settled(
                     session,
                     COMMAND_RUN,

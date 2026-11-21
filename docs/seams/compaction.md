@@ -45,7 +45,6 @@ instruction to preserve anything.
 ctx.compaction.register(engine)          -> Disposer
 ctx.compaction.require()                 # the engine, or a refusal
 await ctx.compaction.compact_now(...)    # /compact
-await ctx.compaction.compact_if_needed(...)  # the pressure path
 ctx.compaction.trigger_fraction()        # where the engine compacts on its own, or None
 ```
 
@@ -54,10 +53,6 @@ ctx.compaction.trigger_fraction()        # where the engine compacts on its own,
 ```python
 @runtime_checkable
 class CompactionEngine(Protocol):
-    async def compact_if_needed(
-        self, agent: Any, trigger: CompactionTrigger
-    ) -> CompactionResult | None: ...
-
     async def compact_now(
         self, agent: Any, *, instructions: str = ""
     ) -> CompactionResult | None: ...
@@ -77,14 +72,12 @@ without a second copy of the share.
 engine may weight the summary towards it; one that cannot is free to ignore it,
 which is why it has a default rather than being a second method.
 
-Both methods, because the two callers are genuinely different: `/compact` is a
-person saying *do it now*, and the pressure path is a policy row asking *is it
-time* — carrying the `CompactionTrigger` that says which pressure. An engine
-implementing only the second would leave the command with nothing to call.
-
-The loop knows nothing about any of this — compaction attaches to
-`agent/pre-step` and `agent/request-error` like every other stabilization feature
-(D12).
+The seam asks an engine only for `compact_now`, because `/compact` is its one
+caller: a person saying *do it now*. Deciding *is it time* is the engine's own
+business. The engine row attaches to `agent/pre-step`, `agent/request` and
+`agent/request-error` like every other stabilization feature (D12), and its
+records carry the `CompactionTrigger` that says which pressure. The loop knows
+nothing about any of this.
 
 ## Two things an engine must get right
 

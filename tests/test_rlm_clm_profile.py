@@ -33,6 +33,7 @@ from ph_app.profiles import available_profiles, resolve_profile
 from ph_clm import BUNDLE
 from ph_clm.keys import CLM, CLM_MIRROR
 from ph_clm.mirror import parse
+from ph_stabilize.compaction import SummarizeEngine
 
 pytestmark = pytest.mark.anyio
 
@@ -107,11 +108,12 @@ async def test_a_compaction_at_the_request_is_in_the_file_the_model_reads(
     ctx, agent = await _conversed(mount, rows)
     session = agent.session
     engine = ctx.require(COMPACTION).require()
-    original = type(engine).compact_if_needed
+    assert isinstance(engine, SummarizeEngine)
+    original = SummarizeEngine.compact_if_needed
     armed = True
 
     async def compact_if_needed(
-        self: object, handle: AgentHandle, trigger: CompactionTrigger
+        self: SummarizeEngine, handle: AgentHandle, trigger: CompactionTrigger
     ) -> CompactionResult | None:
         nonlocal armed
         if trigger == "window" and armed:
@@ -120,9 +122,9 @@ async def test_a_compaction_at_the_request_is_in_the_file_the_model_reads(
                 session, [_unprotected(ctx, session)], "compacted", call_id=None
             )
             return None
-        return await original(self, handle, trigger)  # type: ignore[arg-type]
+        return await original(self, handle, trigger)
 
-    monkeypatch.setattr(type(engine), "compact_if_needed", compact_if_needed)
+    monkeypatch.setattr(SummarizeEngine, "compact_if_needed", compact_if_needed)
     path = ctx.require(CLM_MIRROR).path(session, agent)
     seen: list[tuple[int, int]] = []
 

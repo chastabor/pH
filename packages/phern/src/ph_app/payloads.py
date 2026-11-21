@@ -1233,7 +1233,7 @@ class OwedListing(WireModel):
 
     sessions: list[OwedRoot] = Field(default_factory=list)
     trusted: bool
-    """Whether the index could vouch for itself when read (`LiveSurvey.trusted`)."""
+    """Whether the index could vouch for itself when read (`LiveSurvey.complete`)."""
     rebuilt: bool
     """Whether this reply rebuilt the index from the logs first."""
 

@@ -35,9 +35,9 @@ reason ph-core can own this seam without knowing what a terminal is.
 
 ## It must stay cheap
 
-A field is read on **every redraw**, which for a running agent is every spinner
-frame. A contributor that stats a tree or spawns a subprocess would take the
-footer down with it.
+A field is read **each time the daemon sends the footer**: on attach, and with
+each status frame of a session. A contributor that stats a tree or spawns a
+subprocess would take the footer down with it.
 
 That is the whole reason [`ctx.diagnostics`](diagnostics.md) is a second seam
 rather than a parameter on this one: a diagnostic answers *"what is this

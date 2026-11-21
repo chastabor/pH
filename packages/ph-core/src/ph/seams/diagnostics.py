@@ -1,32 +1,34 @@
-"""`ctx.diagnostics` — what a row wants `phern doctor` to say about it.
+"""`ctx.diagnostics`: what a row wants `phern doctor` to say about it.
 
-Four rows in three packages arrived at this one by one: the containment tier
-(P4-11), the workspace kind and `repo_writable` per agent (P4-07), a permission
-row's honest reach (P4-06, which said out loud that it was "the fourth row
-wanting to hand `phern doctor` a reading... which is `ctx.tui_status`' problem
-again"), and the worker model. `ph-app` cannot import `ph-stabilize` or
-`ph-rlm`, so without a seam each of them lands as a bespoke `ctx.<name>` the
-consumer has to know by heart — and the consumer is the one command whose entire
-job is to be complete.
+Four rows in three packages came to need this seam, one after another: the
+containment tier (P4-11), the workspace kind and `repo_writable` of each agent
+(P4-07), the reach that a permission row reports for itself (P4-06, which noted
+that it was the fourth row that wanted to hand `phern doctor` a reading, and
+that this was the problem of `ctx.tui_status` again), and the worker model.
+`ph_app` may not import `ph_stabilize` or `ph_rlm`. So without a seam, each
+reading becomes a separate `ctx.<name>` that the consumer must know by heart,
+and the consumer is the one command whose only job is to be complete.
 
-**This is `ctx.tui_status` minus the `Session`.** Same registration shape, same
-`scope=`, same drop-a-raising-contributor rule, same order-then-id sort. The
-difference is what it is read *for*: a footer field answers "where am I now" on
-every spinner frame, so it must be cheap; a diagnostic answers "what is this
-deployment" once, at a person's request, so it may spawn a subprocess or stat a
-tree. Two seams rather than one parameterized seam, because a field that quietly
-became expensive would take the footer down with it.
+**This is `ctx.tui_status` without the `Session`.** It has the same
+registration shape, the same `scope=` and the same sort by order and then by
+id. Both seams contain a contributor that raises: the footer drops the field,
+and this seam prints one row that says that the section failed. The difference
+is what each seam is read *for*. A footer field answers "where am I now" each
+time the footer is sent, so it must be cheap. A diagnostic answers "what is this
+deployment" one time, when a user asks, so it may spawn a subprocess or stat a
+tree. These are two seams and not one seam with a parameter, because a field
+that quietly became expensive would take the footer down with it.
 
-**Rows, not a sentence.** `read()` returns `(label, value)` pairs — the shape
-`PathRoots.describe()` already returns and `doctor` already prints — so a
-contributor that has several things to say (a kind and a `repo_writable` per
-agent) says them as rows rather than by inventing a delimiter the printer has to
-learn.
+**Rows, not a sentence.** `read()` returns `(label, value)` pairs.
+`PathRoots.describe()` already returns that shape, and `doctor` already prints
+it. So a contributor with several things to report (a kind and a
+`repo_writable` for each agent) reports them as rows, and does not invent a
+delimiter that the printer must learn.
 
-**No severity.** §12 Q10 is explicit that `phern doctor` prints the tier's three
-columns "rather than a severity color", because a color invites a reader to
-skip the sentence — and the sentence is the entire point of E1. So there is no
-`level` here, deliberately, where `tui_status` has one.
+**No severity.** §12 Q10 states that `phern doctor` prints the three columns of
+the tier and not a severity color. A color invites a reader to skip the
+sentence, and the sentence is the purpose of E1. So this seam deliberately has
+no `level`, where `tui_status` has one.
 
 @module ph.seams.diagnostics
 """
@@ -56,31 +58,33 @@ log = logging.getLogger("ph.seams.diagnostics")
 ID_MAX = 32
 """How long a section id may be.
 
-Per-seam, as `_names` intends — it parameterizes the bound precisely so each
-registry states its own. 32 is generous for a heading a person reads down the
-page, and matching the two sibling registries costs nothing here."""
+The bound is per seam, as `_names` intends: `_names` takes the bound as a
+parameter so that each registry states its own. 32 is generous for a heading
+that a person reads down the page, and to match the two sibling registries
+costs nothing here."""
 
 ORDER_SELF_ASSESSMENT = 100
-"""Where the deployment's judgement of itself sits — `invariants`' section, last.
-A reading about the deployment orders below it; a section placing itself relative
-to that boundary names the constant rather than a number two files away."""
+"""Where the judgement of the deployment about itself sits: the section of
+`invariants`, which is last. A reading about the deployment takes a lower order.
+A section that places itself relative to that boundary names the constant, and
+not a number two files away."""
 
 
 @dataclass(frozen=True, slots=True)
 class Diagnostic:
-    """A row's contribution to `phern doctor`.
+    """The contribution of a row to `phern doctor`.
 
     `read` returns no rows when there is nothing to report, and the section is
-    omitted rather than printed empty — the same reason `StatusField.read`
-    returns `None`: a report that always shows every section is one where the
-    section that matters cannot be found.
+    then omitted and not printed empty. `StatusField.read` returns `None` for
+    the same reason: in a report that always shows every section, the section
+    that matters cannot be found.
     """
 
     id: str
     read: Callable[[], Sequence[tuple[str, str]]]
     title: str = ""
-    """The heading, defaulting to the id. Spelled separately so a section can be
-    called "Containment" while its id stays a slug."""
+    """The heading. It defaults to the id. It is a separate field so that a
+    section can be called "Containment" while its id stays a slug."""
     order: int = 0
 
 
@@ -102,10 +106,10 @@ class DiagnosticsRegistry:
     def register(self, diagnostic: Diagnostic, *, scope: Context | None = None) -> Disposer:
         """Contribute a section.
 
-        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
-        a registration made from a row's `apply` — or from a listener that row
-        wrote — already unwinds with the row. Pass it to register on *someone
-        else's* lifetime, which is what it now means and all it now means.
+        The ordinary case no longer needs `scope=` (P6-12, P6-25). A
+        registration made from the `apply` of a row, or from a listener that
+        the row wrote, already unwinds with the row. Pass `scope=` to register
+        on the lifetime of *another* owner. That is now its only meaning.
         """
         require_slug(diagnostic.id, maximum=ID_MAX, kind="diagnostic id")
         by = self.ctx.running_for(scope)
@@ -114,12 +118,13 @@ class DiagnosticsRegistry:
         )
 
     def report(self) -> list[tuple[str, list[tuple[str, str]]]]:
-        """Every section that has something to say, in `order` then id order.
+        """Every section that has something to report, by `order` and then by id.
 
-        A contributor that raises is dropped with its traceback rather than
-        taking the report down: `phern doctor` is what a person runs *because*
-        something is wrong, and the one section that fails is the least
-        acceptable moment to lose the other five.
+        A contributor that raises does not stop the report. Its section prints
+        one row that says that the section failed, and the traceback goes to
+        the log. `phern doctor` is what a user runs *because* something is
+        wrong, and the moment when one section fails is the worst moment to
+        lose the other sections.
         """
         report: list[tuple[str, list[tuple[str, str]]]] = []
         ordered = sorted(
@@ -128,9 +133,9 @@ class DiagnosticsRegistry:
         for entry in ordered:
             diagnostic = entry.diagnostic
             try:
-                # As the row that contributed it (P6-29); no target, for the same
-                # reason `tui_status.readings` has none — `phern doctor` describes a
-                # deployment, not an agent.
+                # Run as the row that contributed the section (P6-29). There is
+                # no target, for the same reason that `tui_status.readings` has
+                # none: `phern doctor` describes a deployment, not an agent.
                 with running(entry.by):
                     rows = list(diagnostic.read())
             except Exception:
@@ -144,12 +149,12 @@ class DiagnosticsRegistry:
 
 
 def contribute(ctx: Context, diagnostic: Diagnostic) -> None:
-    """Offer a section from a row's `apply`, whether or not this seam is mounted.
+    """Offer a section from the `apply` of a row, whether or not this seam is mounted.
 
-    `contribute_via` carries the rule and the reason. `ph_rlm`'s kernel-snapshot
-    row made the same call for the same reason — "the compaction seam is a nice
-    to have here, and a deployment that removed the compaction row must not
-    thereby lose kernel snapshots".
+    `contribute_via` carries the rule and the reason. The kernel-snapshot row
+    of `ph_rlm` makes the same choice for the same reason: the compaction seam
+    is a nice-to-have for that row, and a deployment that removed the
+    compaction row must not lose kernel snapshots because of it.
     """
     contribute_item(ctx, DIAGNOSTICS, diagnostic, label=f"diagnostic({diagnostic.id})")
 

@@ -1,9 +1,9 @@
-"""`ctx.permission_presets` — one name for a sandbox mode *and* an approval policy.
+"""`ctx.permission_presets`: one name for a sandbox mode *and* an approval policy.
 
 A user thinks in postures ("read-only", "let it work in here", "I know what I'm
-doing"), not in two independent knobs. A preset maps one name onto both, and
-records the choice as `permission/preset` so the log says which posture a turn
-ran under — which is the question anyone reviewing a session asks first.
+doing"), and not in two independent settings. A preset maps one name onto both.
+It records the choice as `permission/preset`, so the log says which posture a
+turn ran under. That is the first question of anyone who reviews a session.
 
 @module ph.seams.permission_presets
 """
@@ -76,12 +76,12 @@ class PresetSchema(WireModel):
     """One posture as a front end draws it: its name, what it means, and whether
     it is the one in force.
 
-    `CommandSchema`'s shape and its reason — a picker on the other side of a
-    socket cannot reach `PRESETS`, and a client that hardcoded the three from
-    this module would be a second statement of what a deployment offers. The
-    active flag is here rather than beside the list because "which one" is the
-    question a picker is asking, and an answer split across two fields is two
-    things a reader has to line up.
+    It has the shape of `CommandSchema`, for the same reason. A picker on the
+    other side of a socket cannot reach `PRESETS`, and a client that hardcoded
+    the three presets of this module would be a second statement of what a
+    deployment offers. The active flag is here and not beside the list, because
+    "which one" is the question that a picker asks. An answer that is split
+    across two fields is two things that a reader has to line up.
     """
 
     name: str
@@ -90,6 +90,14 @@ class PresetSchema(WireModel):
 
 
 PRESET_NAMES: Mapping[str, PresetName] = {name: name for name in PRESETS}
+"""Every preset name, keyed by its own spelling.
+
+The pick of a user arrives as a `str`, from a picker or from a wire. This
+lookup is the membership test that also *narrows* the value, so the read site
+needs no `cast`. It is like `_WORKSPACE_KINDS` in `ph.seams.workspace`, and
+stricter. It is keyed by `PRESETS` and not by `get_args(PresetName)`. So a name
+that the alias allows but no entry of `PRESETS` implements is narrowed away
+here, and does not raise a `KeyError` downstream."""
 
 _SCHEMAS: Mapping[str, tuple[PresetSchema, ...]] = {
     active: tuple(
@@ -98,24 +106,19 @@ _SCHEMAS: Mapping[str, tuple[PresetSchema, ...]] = {
     )
     for active in PRESETS
 }
-"""Every posture list there is — one per posture that could be active.
+"""Every list of postures that exists: one list for each posture that could be
+active.
 
-Nine immutable models built once, for `_POSTURE_READINGS`' reason two lines
-down: there are three presets, so "which list does a picker get" has exactly
-three answers and none of them needs rebuilding per call."""
+These are nine immutable models that are built one time, for the same reason
+as `_POSTURE_READINGS` below. There are three presets, so "which list does a
+picker get" has exactly three answers, and none of them needs to be built again
+for each call."""
 
 _POSTURE_READINGS: dict[str, StatusReading] = {
     name: StatusReading(text=f"{name} accepted") for name in PRESETS
 }
-"""One reading per preset, built once — there are three, and the field is read
-on every footer refresh."""
-"""Every preset name by its own spelling.
-
-A person's pick arrives as a `str` — off a picker, off a wire — and this is the
-membership test that also *narrows* it, so the read site needs no `cast`. Like
-`ph.seams.workspace`'s `_WORKSPACE_KINDS`, and stricter: keyed off `PRESETS`
-rather than `get_args(PresetName)`, so a name the alias allows but no row
-implements is narrowed away here instead of raising a `KeyError` downstream."""
+"""One reading for each preset, built one time. There are three presets, and
+the field is read on every refresh of the footer."""
 
 
 @dataclass(slots=True)
@@ -131,8 +134,9 @@ class PermissionPresetService:
         self.active = name
         if session is not None:
             sandbox, approval = self.ctx.get(SANDBOX), self.ctx.get(APPROVAL)
-            # **One posture, one batch** (S14): a torn tail that kept the preset
-            # and lost its sandbox mode read as one preset and ran as another.
+            # **One posture, one batch** (S14). A torn tail that kept the preset
+            # and lost its sandbox mode was read as one preset and ran as
+            # another.
             with session.batch() as batch:
                 _LOG.append(batch, "permission/preset", {"preset": name})
                 if sandbox is not None:
@@ -142,34 +146,35 @@ class PermissionPresetService:
         return preset
 
     def schemas(self, session: Session | None = None) -> tuple[PresetSchema, ...]:
-        """Every posture, with the live one marked — what a picker draws.
+        """Every posture, with the live one marked. This is what a picker draws.
 
-        Resolved rather than remembered, which is the whole point: the TUI folded
-        `permission/preset` events to decide what to mark, so a client attaching
-        to a session somebody had already switched marked nothing at all. The
-        seam knows without being told.
+        The answer is resolved and not remembered, and that is the purpose. The
+        TUI used to fold `permission/preset` events to decide what to mark. A
+        client that attached to a session that somebody had already switched
+        then marked nothing at all. The seam knows without being told.
         """
         return _SCHEMAS[self.resolve(session).name]
 
     def posture_reading(self, session: Session) -> StatusReading:
-        """`read-only accepted` — what runs without anybody being asked.
+        """`read-only accepted`: what runs without anybody being asked.
 
-        The verb is load-bearing. All three presets are *named* for the sandbox
-        mode they set, so the bare word reads equally as the posture and as the
-        mode, and the two are different questions: this one is about prompting,
-        the sandbox reading is about what the kernel permits.
+        The verb matters. All three presets are *named* for the sandbox mode
+        that they set, so the bare word reads equally as the posture and as the
+        mode. The two are different questions. This reading is about prompting,
+        and the sandbox reading is about what the kernel permits.
 
-        A bound method over a memo rather than a closure building an f-string,
-        because there are three postures and this is read on every refresh.
+        This is a bound method over a memo, and not a closure that builds an
+        f-string, because there are three postures and this is read on every
+        refresh.
         """
         return _POSTURE_READINGS[self.resolve(session).name]
 
     def resolve(self, session: Session | None = None) -> PermissionPreset:
         if session is not None:
             event = session.latest("permission/preset")
-            # Through the lookup, which is the membership test *and* the
-            # narrowing — the `in PRESETS` / `cast` pair it replaced did the
-            # first and needed the second to say so.
+            # The read goes through the lookup, which is the membership test
+            # *and* the narrowing. The `in PRESETS` test and the `cast` that it
+            # replaced did the first, and needed the second to say so.
             name = PRESET_NAMES.get(as_str(event.data.get("preset"))) if event else None
             if name is not None:
                 return PRESETS[name]

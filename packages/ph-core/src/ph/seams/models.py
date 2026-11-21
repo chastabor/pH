@@ -1,9 +1,10 @@
-"""`ctx.models` — the models a profile lists, and which one a root runs on.
+"""`ctx.models`: the models that a profile lists, and which one a root runs on.
 
-A route is a provider and a model. It used to be two free strings — the daemon's
-`--provider`/`--model` for every root, a child's own request else its parent's —
-so which models a session could reach was nowhere a profile could say. A profile
-now lists them by name (`plans/Session_Profiles_Plan.md`, item 8):
+A route is a provider and a model. It used to be two free strings: the
+`--provider` and `--model` of the daemon for every root, and for a child its
+own request or else the route of its parent. So no profile could say which
+models a session could reach. A profile now lists them by name
+(`plans/Session_Profiles_Plan.md`, item 8):
 
 ```yaml
 - id: models
@@ -21,26 +22,29 @@ now lists them by name (`plans/Session_Profiles_Plan.md`, item 8):
           high: {chat_template_kwargs: {enable_thinking: true}}
 ```
 
-A route's `efforts` say what each reasoning effort sends on its API (`ModelRoute.efforts`);
-an effort they do not define is not sent, with a warning.
+The `efforts` of a route say what each reasoning effort sends on the API of the
+route (`ModelRoute.efforts`). An effort that they do not define is not sent,
+and a warning says so.
 
-A root runs on `default` unless a person chose otherwise, and `ModelList.resolve`
-is the one rule for what a choice means — the command line, `/model` and rpc all
+A root runs on `default` unless a user chose otherwise. `ModelList.resolve` is
+the one rule for what a choice means. The command line, `/model` and rpc all
 ask it, so the three cannot come to disagree:
 
-* nothing: the default;
-* a key: that entry — and a key the profile does not list is refused, naming
-  the ones it does;
-* a whole route (`provider` and `model`): the entry it matches, else the route as
-  given. A person's own choice is not bounded by the list; what the list bounds is
-  what an *agent* may pick when it spawns one (S7b).
+* Nothing: the default.
+* A key: that entry. A key that the profile does not list is refused, and the
+  refusal names the keys that it does list.
+* A whole route (`provider` and `model`): the entry that it matches, or else
+  the route as given. The list does not bound the choice of a user. It bounds
+  what an *agent* may pick when it spawns a child (S7b).
 
-**Environment**, because the model is the first thing an agent's work depends
-on, and a session's audit that could not say which it ran would be no audit.
+The row affects the **environment**, because the model is the first thing that
+the work of an agent depends on. An audit of a session that could not say which
+model the session ran on would be no audit.
 
-The list is the person's, not a catalog pH keeps: `model_choices`' old refusal to
-invent one that goes stale still holds, because nothing here is shipped as the
-truth about a provider — a shipped profile's list is a default a person replaces.
+The list belongs to the user. It is not a catalog that pH keeps. The old
+refusal of `model_choices` to invent a catalog that goes stale still holds,
+because nothing here is shipped as the truth about a provider. The list of a
+shipped profile is a default that a user replaces.
 
 @module ph.seams.models
 """
@@ -93,29 +97,32 @@ __all__ = [
 ]
 
 KEY_MAX = 32
-"""The longest key a profile may name a model by — a word a person types."""
+"""The longest key that a profile may name a model by. A key is a word that a
+user types."""
 
 ModelKind: TypeAlias = Literal["classify", "light"]
-"""A kind of model a shipped skill may ask for by key (A2): named for the job, so a
-skill works on any profile, rather than for a model, which only one profile has."""
+"""A kind of model that a shipped skill may ask for by key (A2). A kind is named
+for the job, so the skill works on any profile. The name of a model would work
+only on the one profile that has that model."""
 
 MODEL_KINDS: Mapping[ModelKind, str] = {
     "classify": "short replies at low effort with steady settings: sorting, tagging, yes or no",
     "light": "cheap general work: a summary, a lookup, a first pass",
 }
-"""Each shared kind, and the job it names (A2).
+"""Each shared kind, and the job that it names (A2).
 
-A profile serves a kind by listing it as a key, on whatever route does that job well
-there. One it does not list falls back to the parent's model with a warning
-(`ModelFallback`), which is the cue to set it up; `phern doctor` lists which kinds the
-profile serves. Shipped profiles do not alias a kind to their default model, since that
-would hide the warning. The media a skill hands its child are not kinds: a skill states
-them with `accepts`, whatever kind it asks for."""
+A profile serves a kind by listing it as a key, on whatever route does that job
+well there. A kind that the profile does not list falls back to the model of
+the parent with a warning (`ModelFallback`). The warning is the cue to set the
+kind up, and `phern doctor` lists which kinds the profile serves. Shipped
+profiles do not alias a kind to their default model, because that would hide
+the warning. The media that a skill hands its child are not kinds: a skill
+states them with `accepts`, whatever kind it asks for."""
 
 
 UnrunnableReason: TypeAlias = Literal["unlisted", "unserved"]
-"""Why a well-formed choice cannot run here: the list does not hold its key, or no
-adapter here serves its route's provider."""
+"""Why a well-formed choice cannot run here: the list does not hold its key, or
+no adapter here serves the provider of its route."""
 
 
 class ModelChoiceError(ValueError):
@@ -123,10 +130,12 @@ class ModelChoiceError(ValueError):
 
 
 class UnrunnableChoice(ModelChoiceError):
-    """A well-formed choice this mount cannot run, with `reason` as a code: the one
-    refusal a caller may degrade around rather than surface. A child whose skill's model
-    cannot run, or any readmitted child whose model cannot, falls back to its parent's
-    (`ph.seams.subagents.ModelFallback`)."""
+    """A well-formed choice that this mount cannot run, with `reason` as a code.
+    It is the one refusal that a caller may degrade around, where it would
+    otherwise pass the refusal on. A child falls back to the model of its
+    parent (`ph.seams.subagents.ModelFallback`) in two cases: the model that
+    its skill names cannot run, or the child is readmitted and its model cannot
+    run."""
 
     def __init__(self, message: str, *, reason: UnrunnableReason) -> None:
         super().__init__(message)
@@ -136,40 +145,46 @@ class UnrunnableChoice(ModelChoiceError):
 class ModelRoute(WireModel):
     """One route: the provider that serves it, the model, and its call settings.
 
-    `sampling` is what a model maker recommends, kept beside the model it was tuned for:
-    `sampling: {temperature: 0.7, topP: 0.8}`. Each setting is sent where the route's
-    API takes it and dropped with a warning where it does not (`ResolvedModel.sampling`);
-    unset is unsent, so the server's own flags decide.
+    `sampling` holds what the maker of a model recommends, kept beside the model
+    that it was tuned for: `sampling: {temperature: 0.7, topP: 0.8}`. Each
+    setting is sent where the API of the route takes it, and is dropped with a
+    warning where the API does not (`ResolvedModel.sampling`). A setting that
+    is unset is not sent, so the flags of the server itself decide.
     """
 
     provider: str = Field(min_length=1)
     model: str = Field(min_length=1)
     reasoning_effort: str | None = None
-    """The effort this route runs at, by a name its `efforts` defines, or `default`
-    (`DEFAULT_EFFORT`); a spawn or a skill may ask a child for another. Unset sends
-    none."""
+    """The effort that this route runs at. It is a name that `efforts` defines,
+    or `default` (`DEFAULT_EFFORT`). A spawn or a skill may ask a child for
+    another effort. When this is unset, no effort is sent."""
     efforts: dict[str, dict[str, Any]] | None = None
-    """What each reasoning effort sends on this model's API, by the effort's name: request
-    body fields the adapter merges into its own (`wire_effort`), an object key by key.
+    """What each reasoning effort sends on the API of this model, by the name of
+    the effort. Each value holds request body fields that the adapter merges
+    into its own body (`wire_effort`), and an object merges key by key.
 
-    **Per model, and stated by the profile**, because the spelling is the model's as much
-    as the wire's: Qwen on llama.cpp turns its thinking off with `chat_template_kwargs`,
-    an OpenAI reasoning model takes `reasoning_effort`, Anthropic a `thinking` budget,
-    Gemini 2.5 `generationConfig.thinkingConfig.thinkingBudget`. No adapter guesses one.
-    An effort asked for that this does not name (the route's own, or one a spawn or a
-    skill asks for) is not sent, with a warning, the request header's record
-    (`EpochHeader.withheld`), a line in `phern doctor` and, for a child, a note to its
-    parent (`EffortUnsent`). `DEFAULT_EFFORT` is not pH's
-    to define, so it is refused here. Absent rather than empty when unset, so a route's
-    wire form is as it was.
+    **The mapping is per model, and the profile states it**, because the
+    spelling belongs to the model as much as to the wire. Qwen on llama.cpp
+    turns its thinking off with `chat_template_kwargs`. An OpenAI reasoning
+    model takes `reasoning_effort`, Anthropic takes a `thinking` budget, and
+    Gemini 2.5 takes `generationConfig.thinkingConfig.thinkingBudget`. No
+    adapter guesses one. An effort that is asked for and that this mapping does
+    not name is not sent. That effort may be the effort of the route itself, or
+    one that a spawn or a skill asks for. Four things report it: a warning, the
+    record in the request header (`EpochHeader.withheld`), a line in
+    `phern doctor` and, for a child, a note to its parent (`EffortUnsent`).
+    `DEFAULT_EFFORT` is the default of the provider and pH does not define it,
+    so it is refused here. The field is absent and not empty when it is unset,
+    so the wire form of a route is as it was.
 
-    `dict[str, Any]` rather than `JsonObject`, which pydantic cannot build (`ph.json`)."""
+    The type is `dict[str, Any]` and not `JsonObject`, which pydantic cannot
+    build (`ph.json`)."""
     sampling: Sampling = Field(default_factory=Sampling, exclude_if=Sampling.is_empty)
     max_tokens: int | None = None
 
     @property
     def label(self) -> str:
-        """`provider/model`, the spelling the picker and the footer use."""
+        """`provider/model`, the spelling that the picker and the footer use."""
         return f"{self.provider}/{self.model}"
 
     @model_validator(mode="after")
@@ -188,24 +203,28 @@ class Config(WireModel):
     """Row config for `models`: the listed routes, by key, and which one is the default."""
 
     default: str = ""
-    """The key a root runs on when nobody chose. Must be listed; empty only when
-    nothing is."""
+    """The key that a root runs on when nobody chose one. It must be a listed
+    key. It is empty only when no model is listed."""
 
     models: dict[str, ModelRoute] = Field(default_factory=dict)
-    """Every route this profile means, under the key a person, a skill or a spawn
-    names it by. Replaced whole by a patch, like any row's config."""
+    """Every route that this profile lists, under the key that a user, a skill
+    or a spawn names it by. A patch replaces the whole mapping, as it does for
+    the config of any row."""
 
     def choosing(self, chosen: ModelEntry) -> Config:
-        """This list with `chosen` as its default — what `/model` makes an override of.
+        """This list with `chosen` as its default. `/model` makes an override of
+        the result.
 
-        A route the list does not hold joins it under a key made from its own name
-        (`route_key`), so the session's list says what it runs on, and choosing the
-        same route again finds the same entry.
+        A route that the list does not hold joins it under a key that is made
+        from the name of the route (`route_key`). So the list of the session
+        says what the session runs on, and choosing the same route again finds
+        the same entry.
         """
         key = chosen.key or route_key(chosen.route)
         if not chosen.key:
-            # A made-up key that a listed model already holds for another route gets a
-            # number, rather than quietly naming that other route.
+            # A listed model may already hold the made-up key for another route.
+            # The key then gets a number, so that it does not name that other
+            # route without notice.
             count = 2
             while key in self.models and self.models[key] != chosen.route:
                 key = f"{route_key(chosen.route)[: KEY_MAX - 3]}-{count}"
@@ -231,9 +250,10 @@ class Config(WireModel):
 class ModelChoice(WireModel):
     """What somebody asked to run on: a listed key, a whole route, or neither.
 
-    Neither is the default. The two are exclusive because they are two different
-    requests — "the one this profile calls `fast`" and "exactly this route" — and
-    a value that carried both would make the resolver pick which was meant.
+    Neither means the default. A key and a route are exclusive because they are
+    two different requests: "the one that this profile calls `fast`" and
+    "exactly this route". A value that carried both would make the resolver
+    pick which one was meant.
     """
 
     key: str = ""
@@ -269,11 +289,11 @@ class ModelChoice(WireModel):
 
     @classmethod
     def from_flags(cls, provider: str | None, model: str | None) -> ModelChoice:
-        """`--provider`/`--model` as a person types them.
+        """`--provider` and `--model` as a user types them.
 
-        `--model` alone names a listed key, which is the short thing to type; the
-        two together are a whole route. `--provider` alone would be a provider
-        with no model, which nothing can run.
+        `--model` alone names a listed key, which is the short thing to type.
+        The two together are a whole route. `--provider` alone would be a
+        provider with no model, which nothing can run.
         """
         if provider is None:
             return cls(key=model or "")
@@ -283,11 +303,12 @@ class ModelChoice(WireModel):
 
     @classmethod
     def parse(cls, text: str) -> ModelChoice:
-        """`/model`'s argument and the picker's value: `key`, or `provider/model`.
+        """The argument of `/model` and the value of the picker: `key`, or
+        `provider/model`.
 
-        A key is a slug and so has no `/`, which is what tells the two apart. The
-        split is at the *first* `/`, because a model name may carry more of them
-        (`org/model` behind an OpenAI-compatible server).
+        A key is a slug and so has no `/`, which is how the two are told apart.
+        The split is at the *first* `/`, because a model name may hold more of
+        them (`org/model` behind an OpenAI-compatible server).
         """
         stripped = text.strip()
         provider, slash, model = stripped.partition("/")
@@ -300,11 +321,13 @@ class ModelChoice(WireModel):
 
 
 class ModelEntry(WireModel):
-    """A route under the key the profile lists it by — `""` for one it does not, until a
-    person chooses it and it joins the session's list under its own name (`route_key`).
+    """A route under the key that the profile lists it by. The key is `""` for a
+    route that the profile does not list, until a user chooses the route and it
+    joins the list of the session under its own name (`route_key`).
 
-    What `/model` offers, what a choice resolves to, and what a daemon starts a root
-    on: one shape for the one fact, so nothing converts between copies of it.
+    It is what `/model` offers, what a choice resolves to, and what a daemon
+    starts a root on. One shape holds the one fact, so nothing converts between
+    copies of it.
     """
 
     key: str
@@ -312,7 +335,8 @@ class ModelEntry(WireModel):
     default: bool = False
 
     def options(self) -> AgentOptions:
-        """The agent settings this entry starts an agent with, its key included."""
+        """The agent settings that this entry starts an agent with, its key
+        included."""
         route = self.route
         return AgentOptions(
             provider=route.provider,
@@ -332,13 +356,14 @@ class ModelList:
 
     @classmethod
     def of(cls, profile: Profile) -> ModelList:
-        """The list a composed profile names, read without mounting it.
+        """The list that a composed profile names, read without mounting it.
 
-        For a check made before anything mounts — `phern daemon` refusing a
-        `--model` its profile does not list, rather than every root failing on
-        it later. An absent or disabled row is the empty list, which is also what
-        a mount without the row provides. Interpolated as a mount interpolates,
-        so `${env:LLAMA_MODEL:-default}` is the model it names here too.
+        It is for a check that is made before anything mounts. `phern daemon`
+        refuses a `--model` that its profile does not list, where every root
+        would otherwise fail on it later. An absent or disabled row is the
+        empty list, which is also what a mount without the row resolves against
+        (`choose`). The config is interpolated as a mount interpolates it, so
+        `${env:LLAMA_MODEL:-default}` names the same model here.
         """
         row = models_row(profile)
         if row is None:
@@ -364,7 +389,8 @@ class ModelList:
         )
 
     def resolve(self, choice: ModelChoice) -> ModelEntry:
-        """What `choice` runs on — the module docstring's three cases, and nothing else."""
+        """What `choice` runs on: the three cases of the module docstring, and
+        nothing else."""
         if choice.key:
             route = self.routes.get(choice.key)
             if route is None:
@@ -388,9 +414,9 @@ class ModelList:
         return self.entry(self.default, self.routes[self.default])
 
     def listed_as(self, provider: str, model: str, *, key: str = "") -> str | None:
-        """The key this list holds the route `provider/model` under: `key` where that is
-        the route it names, else the first that is, else `None` for a route it does not
-        list."""
+        """The key that this list holds the route `provider/model` under. It is
+        `key` where `key` names that route, or else the first key that does. It
+        is `None` for a route that the list does not hold."""
         return next(
             (
                 name
@@ -404,21 +430,24 @@ class ModelList:
     def efforts_for(
         self, provider: str, model: str, *, key: str = ""
     ) -> Mapping[str, EffortFields]:
-        """What each reasoning effort sends on the route `provider/model`, by the entry
-        this list holds it under (`listed_as`, `key` first, since two keys may list one
-        route with different efforts). Nothing for a route it does not list."""
+        """What each reasoning effort sends on the route `provider/model`, by the
+        entry that this list holds the route under (`listed_as`). `key` is tried
+        first, because two keys may list one route with different efforts. The
+        result is empty for a route that the list does not hold."""
         listed = self.listed_as(provider, model, key=key)
         efforts = self.routes[listed].efforts if listed is not None else None
         return efforts or {}
 
 
 def choose(ctx: Context, choice: ModelChoice) -> ModelEntry:
-    """`choice` resolved by this mount's list, on a provider an adapter here serves.
+    """`choice` resolved by the list of this mount, on a provider that an adapter
+    here serves.
 
-    The list's rule is `ModelList.resolve`'s. What is added is the one fact only a
-    mount knows — which providers are registered — so a route nothing can run is
-    refused where it is chosen rather than at its first request. A mount without
-    the row resolves against the empty list: only a whole route runs there.
+    The rule of the list is `ModelList.resolve`. This function adds the one
+    fact that only a mount knows, which is the set of registered providers. So
+    a route that nothing can run is refused where it is chosen, and not at its
+    first request. A mount without the row resolves against the empty list,
+    and only a whole route runs there.
     """
     chosen = (ctx.get(MODELS) or ModelList()).resolve(choice)
     llm = ctx.get(LLM)
@@ -433,26 +462,30 @@ def choose(ctx: Context, choice: ModelChoice) -> ModelEntry:
 
 
 def route_key(route: ModelRoute) -> str:
-    """A key for a route a person chose that no list held: its own name, as a slug."""
+    """A key for a route that a user chose and that no list held: the name of the
+    route, as a slug."""
     return slugify(f"{route.provider}-{route.model}", maximum=KEY_MAX) or "chosen"
 
 
 def models_row(profile: Profile) -> Row | None:
-    """The row that lists `profile`'s models — found by its plugin's name, the way
-    `/sandbox` finds its row, since the id is the profile's to choose."""
+    """The row that lists the models of `profile`. It is found by the name of its
+    plugin, as `/sandbox` finds its row, because the profile chooses the id."""
     return next((row for row in profile.enabled_rows() if row.name == "models"), None)
 
 
 async def move_to(
     ctx: Context, session: Session, chosen: ModelEntry, *, source: OverrideSource, command: str
 ) -> ModelEntry:
-    """Make `chosen` this session's model — an override of the `models` row (S4).
+    """Make `chosen` the model of this session, as an override of the `models`
+    row (S4).
 
-    Through the one door, so the log holds the choice before it is made and a restart
-    runs on it again. Answers the entry under the key the session's list now gives
-    it, which is how an unlisted route comes back with a name. A mount with no
-    `models` row has no list to change: the route is the agent's alone, and is
-    answered as chosen.
+    The change goes through `override` (`ph.session_profile`), the one function
+    that changes the config of a row on a mount. So the log holds the choice
+    before it is made, and a restart runs on it again. The function answers the
+    entry under the key that the list of the session now gives it, which is how
+    an unlisted route comes back with a name. A mount with no `models` row has
+    no list to change. The route then belongs to the agent alone, and the
+    function answers it as chosen.
     """
     mount = ctx.get(MOUNT)
     row = models_row(mount.profile) if mount is not None else None
@@ -468,13 +501,15 @@ async def move_to(
 async def start_on(
     ctx: Context, session: Session, choice: ModelChoice, *, source: OverrideSource, command: str
 ) -> ModelEntry:
-    """The entry a starting agent runs on: this start's `choice`, made the session's
-    where it differs (`move_to`), else the session's own default.
+    """The entry that a starting agent runs on. A start that names a `choice`
+    makes it the model of the session (`move_to`). A start that names none runs
+    on the default of the session itself.
 
-    The one spelling for every host that starts an agent — the daemon's roots,
-    `phern -p` and rpc — so what a start option means cannot differ between them.
+    Every host that starts an agent calls this one function: the roots of the
+    daemon, `phern -p` and rpc. So the meaning of a start option cannot differ
+    between them.
 
-    :raises ModelChoiceError: for a choice nothing here can run.
+    :raises ModelChoiceError: for a choice that nothing here can run.
     """
     if choice.is_default:
         return choose(ctx, choice)
@@ -482,8 +517,9 @@ async def start_on(
 
 
 def narrows(mounted: Config, asked: Config, _reach: ChildReach) -> ChildLimit:
-    """A child's `models` row names the model it runs on, which must be a key its
-    parent's list holds: the child runs on its parent's adapters (S7b)."""
+    """The `models` row of a child names the model that the child runs on. That
+    model must be a key that the list of its parent holds, because the child
+    runs on the adapters of its parent (S7b)."""
     key = asked.default
     if not key:
         return ChildLimit()
@@ -497,10 +533,12 @@ def narrows(mounted: Config, asked: Config, _reach: ChildReach) -> ChildLimit:
 
 
 def dropped_settings(ctx: Context, models: ModelList) -> list[tuple[str, str]]:
-    """`phern doctor`'s rows for each listed route that sets what it cannot send, which
-    every request on it goes without, with a warning: a sampling setting its API does
-    not take (A1, `Sampling.uncarried`), where its adapter has said what it takes, and a
-    reasoning effort its `efforts` do not define (`unmapped_effort`)."""
+    """The rows of `phern doctor` for each listed route that sets what it cannot
+    send. Every request on the route goes without that setting, with a warning.
+    There are two cases. The first is a sampling setting that the API of the
+    route does not take (A1, `Sampling.uncarried`), where its adapter has said
+    what it takes. The second is a reasoning effort that the `efforts` of the
+    route do not define (`unmapped_effort`)."""
     llm = ctx.get(LLM)
     rows: list[tuple[str, str]] = []
     for key, route in models.routes.items():
@@ -522,8 +560,9 @@ def dropped_settings(ctx: Context, models: ModelList) -> list[tuple[str, str]]:
 
 
 def served_kinds(models: ModelList) -> list[tuple[str, str]]:
-    """`phern doctor`'s rows for each shared kind (`MODEL_KINDS`): the route this
-    profile serves it on, or that a skill asking for it runs on its parent's model."""
+    """The rows of `phern doctor` for each shared kind (`MODEL_KINDS`): the route
+    that this profile serves the kind on, or a note that a skill that asks for
+    the kind runs on the model of its parent."""
     routes = models.routes
     return [
         (
@@ -536,8 +575,9 @@ def served_kinds(models: ModelList) -> list[tuple[str, str]]:
 
 @plugin("models", affects="environment", config=Config, narrows=narrows)
 async def apply(ctx: Context, config: Config) -> None:
-    """Provide the profile's model list, and say in `phern doctor` which settings it
-    sets that its routes cannot carry."""
+    """Provide the model list of the profile. In `phern doctor`, report which
+    settings the list sets that its routes cannot carry, and which shared kinds
+    the profile serves."""
     models = ModelList(config)
     ctx.provide(MODELS, models)
     contribute(

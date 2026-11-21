@@ -1,4 +1,4 @@
-"""`ph.seams` — capability seams: Definition, Provider, Consumer in one module each."""
+"""`ph.seams`: capability seams, with Definition, Provider and Consumer in one module each."""
 
 from __future__ import annotations
 

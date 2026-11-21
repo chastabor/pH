@@ -1,23 +1,24 @@
-"""`ctx.code_runtime` — the seam definition only (P1-06, C1).
+"""`ctx.code_runtime`: the definition of the seam only (P1-06, C1).
 
-What ships is the *contract*, and one assertion inside it that is easy to miss and
-expensive to omit:
+This module ships the *contract*. One assertion in the contract is easy to miss
+and expensive to omit:
 
-> a provider declaring `persistence: "namespace"` **must** emit `kernel/snapshot`
-> events, and that is checked when it registers — not the first time someone forks
-> a session and discovers the state was never durable.
+> a provider that declares `persistence: "namespace"` **must** emit
+> `kernel/snapshot` events. The seam checks that when the provider registers,
+> and not the first time that someone forks a session and finds that the state
+> was never durable.
 
-This is D17 enforced by the seam rather than left to convention. dsh withheld a
-persistent Python REPL precisely because "cross-call state would be invisible to
-the log"; pH admits one only from a provider that has promised, at registration,
-to keep it visible. A promise checked at runtime would be discovered by the person
-who lost work.
+This is D17, enforced by the seam and not left to convention. dsh withheld a
+persistent Python REPL because "cross-call state would be invisible to the
+log". pH admits one only from a provider that has promised, at registration, to
+keep that state visible. A promise that was checked at run time would be found
+by the user who lost work.
 
-**Binding names are validated here too.** One `bindings` list has to be valid
-against every backend regardless of `language`, so names must be portable
-identifiers and must clear the reserved sets of every shipped language — a name
-legal in Python and reserved in TypeScript would make a binding set silently
-backend-specific.
+**Binding names are validated here too.** One `bindings` list must be valid
+against every backend, whatever its `language`. So a name must be a portable
+identifier and must avoid the reserved words of every shipped language. A name
+that is legal in Python and reserved in TypeScript would make a set of bindings
+silently specific to one backend.
 
 @module ph.seams.code_runtime
 """
@@ -106,10 +107,11 @@ _TYPESCRIPT_RESERVED = frozenset(
 )
 
 RESERVED_BINDING_NAMES: frozenset[str] = frozenset(keyword.kwlist) | _TYPESCRIPT_RESERVED
-"""Names no binding may take, in any language pH renders an SDK for.
+"""Names that no binding may take, in any language that pH renders an SDK for.
 
-The union rather than the per-language set: one binding list must be valid
-against every backend, so a name reserved anywhere is reserved everywhere."""
+This is the union and not the set of one language. One binding list must be
+valid against every backend, so a name that is reserved anywhere is reserved
+everywhere."""
 
 
 class PersistenceObligationError(RuntimeError):
@@ -117,7 +119,7 @@ class PersistenceObligationError(RuntimeError):
 
 
 def validate_binding_name(name: str) -> None:
-    """Assert a binding name is a portable identifier."""
+    """Assert that a binding name is a portable identifier and is not reserved."""
     if not PORTABLE_NAME.match(name):
         raise ValueError(
             f'binding name "{name}" is not a portable identifier ([A-Za-z_][A-Za-z0-9_]*)'
@@ -128,11 +130,11 @@ def validate_binding_name(name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class CodeBinding:
-    """One governed callable a program may await.
+    """One governed callable that a program may await.
 
-    `dispatch` is `None` when the namespace is being *described* (rendering the
-    SDK prompt) rather than *bound* to a run — the description needs no closure
-    over a live bridge.
+    `dispatch` is `None` when the namespace is being *described* (to render the
+    SDK prompt) and not *bound* to a run. The description needs no closure over
+    a live bridge.
     """
 
     name: str
@@ -141,18 +143,19 @@ class CodeBinding:
     dispatch: Callable[..., Any] | None = None
     """Re-enters the tool pipeline as a sub-call (C1)."""
     counts_as_spawn: bool = False
-    """Declared by the namespace author when a call starts a child agent, so the
-    bridge can hold it to the spawn budget (C4) by property rather than by
-    guessing from the name."""
+    """The author of the namespace declares this when a call starts a child
+    agent. The bridge can then hold the call to the spawn budget (C4) by a
+    property, and does not guess from the name."""
     presents: str | None = None
-    """The governed tool this binding is the namespaced face of.
+    """The governed tool that this binding is the namespaced face of.
 
-    Set when a namespace re-presents a registered tool under its own name
-    (`rlm.run` for `rlm_run`). The tool stays dispatchable and stays addressable
-    by a policy row; it is simply dropped from the `tools` listing, so the SDK
-    offers one route to a capability rather than two — the second of which has no
-    prompt text explaining it. Read off the bindings themselves so the
-    suppression list *is* the binding list and the two cannot drift."""
+    It is set when a namespace presents a registered tool again under its own
+    name (`rlm.run` for `rlm_run`). The tool stays dispatchable, and a policy
+    row can still address it. It is only dropped from the `tools` listing, so
+    the SDK offers one route to a capability and not two. The second route
+    would have no prompt text that explains it. The suppression list is read
+    from the bindings themselves, so it *is* the binding list and the two
+    cannot drift."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,24 +178,26 @@ class CodeRunRequest:
 
     program: str
     agent: str
-    """Whose boundary the run gets: the agent whose workspace, confinement and
-    lifetime a runtime binds it to (S21).
+    """Whose boundary the run gets: the agent to whose workspace, confinement and
+    lifetime a runtime binds the run (S21).
 
-    Required, so nothing runs code as nobody. The H1 probe once did, from a
-    namespace no agent owned, and got no workspace, no confinement and the daemon's
-    own directory for a module the model had named."""
+    The field is required, so nothing runs code as nobody. The H1 probe did
+    that at one time. It ran from a namespace that no agent owned, and it got
+    no workspace, no confinement, and the directory of the daemon itself for a
+    module that the model had named."""
     bindings: tuple[CodeBindingNamespace, ...] = ()
     namespace: str | None = None
-    """`None` keeps dsh's fresh-per-run contract; a key selects a persistent one.
-    A namespace other than the agent's own still runs within the agent's boundary."""
+    """`None` keeps the fresh-per-run contract of dsh. A key selects a persistent
+    namespace. A namespace other than the agent's own still runs within the
+    boundary of the agent."""
     token: CancelToken | None = None
-    """The caller's cancellation view for this run.
+    """The caller's view of cancellation for this run.
 
-    `token` because that is what a held `CancelToken` is called everywhere else:
-    `bridge.token` writes this one and `Kernel.run`'s `token` reads it, so the
-    same word carries it the whole way — and `tasks.cancel_scope` is a real
-    `anyio.CancelScope` in a dozen files here. See `ph.cancel` for why this is a
-    token and not a scope.
+    It is named `token` because a held `CancelToken` has that name everywhere
+    else. `bridge.token` writes this field and the `token` of `Kernel.run`
+    reads it, so the same word carries it the whole way. `tasks.cancel_scope`,
+    in contrast, is a real `anyio.CancelScope` in several files here. See
+    `ph.cancel` for why this is a token and not a scope.
     """
 
 
@@ -205,42 +210,44 @@ class CodeRunResult:
     error: str | None = None
     truncated: bool = False
     dropped: int = 0
-    """Bytes of output the runtime's caps threw away, counted to the end of the
-    run. The marker in `logs` where a stream was cut carries no number, because
-    a stream still running cannot know what will follow; `logs` ends with the
-    total, and this is the same total for a front end. `0` when nothing was
-    dropped — a value too large to return sets `truncated` and drops no output.
-    A run that was killed sends no `done`, so the guest's share of it is not
-    counted."""
+    """The bytes of output that the caps of the runtime threw away, counted to
+    the end of the run. The marker in `logs` where a stream was cut carries no
+    number, because a stream that is still running cannot know what will
+    follow. `logs` ends with the total, and this field is the same total for a
+    front end. It is `0` when nothing was dropped: a value that is too large to
+    return sets `truncated` and drops no output. A run that was killed sends no
+    `done`, so the share of the guest is not counted."""
     reset: bool = False
-    """The runtime died since the last run, so this one got a fresh, empty
-    namespace. The reset notice in `logs` tells the *model*; this flag tells the
-    card — a fact recovered from the notice's prose would be forged by any
-    program whose first output is the marker text."""
+    """The runtime died since the last run, so this run got a fresh, empty
+    namespace. The reset notice in `logs` tells the *model*, and this flag
+    tells the card. A fact that was recovered from the prose of the notice
+    could be forged by any program whose first output is the marker text."""
     displays: tuple[dict[str, Any], ...] = ()
-    """Rich payloads the program emitted — a plot, a table, a diff.
+    """Rich payloads that the program emitted: a plot, a table, a diff.
 
-    Carried on the result rather than folded into `logs` because they are for a
-    front-end and `logs` is for the model: a base64 PNG in the model's text costs
-    a fortune and says nothing."""
+    They are carried on the result and not folded into `logs`, because they
+    are for a front end and `logs` is for the model. A base64 PNG in the text
+    that the model reads is expensive and tells the model nothing."""
 
 
 @runtime_checkable
 class CodeRuntime(Protocol):
     """A code-execution backend.
 
-    `language`, `isolation` and `persistence` are read-only descriptors a
-    consumer branches on; `declares_kernel_snapshots` is the promise the seam
-    checks — declared here rather than probed for, so a typed runtime that
-    forgets it is caught at `register`, not at the first persistent cell.
+    `language`, `isolation` and `persistence` are read-only descriptors that a
+    consumer branches on. `declares_kernel_snapshots` is the promise that the
+    seam checks. It is declared here and not probed for, so a typed runtime
+    that forgets it is caught at `register`, and not at the first persistent
+    cell.
 
-    **Properties, because "read-only descriptor" has to be said in the type
-    too.** Declared as plain attributes they were *settable*, which a checker
-    reads as invariant and instance-level — so the real runtime, whose
-    `language` and `isolation` are `ClassVar`s and whose `persistence` is the
-    narrower `Literal["namespace"]`, did not satisfy the very Protocol it is
-    registered against, and neither did the stub. `ctx.code_runtime` was `Any`,
-    so `register(provider)` was never checked and nobody knew (plan P8-05).
+    **They are properties, because the type must also say "read-only
+    descriptor".** When they were declared as plain attributes they were
+    *settable*, which a checker reads as invariant and instance-level. So the
+    real runtime did not satisfy the Protocol that it is registered against:
+    its `language` and `isolation` are `ClassVar`s, and its `persistence` is
+    the narrower `Literal["namespace"]`. The stub did not satisfy it either.
+    `ctx.code_runtime` was `Any`, so `register(provider)` was never checked and
+    nobody knew (plan P8-05).
     """
 
     @property
@@ -259,26 +266,26 @@ class CodeRuntime(Protocol):
 class CodeRuntimeSeam:
     """The service published as `ctx.code_runtime`.
 
-    Holds at most one provider: two answers to "what runs this program" is a
-    contradiction, and a profile picks its tier (D16).
+    It holds at most one provider. Two answers to "what runs this program"
+    would contradict each other, and a profile picks its tier (D16).
     """
 
     ctx: Context
     provider: CodeRuntime | None = None
     provider_by: Running | None = None
-    """Who registered the runtime (P6-29). See `ph.seams.compaction`."""
+    """Who registered the runtime (P6-29). See `CompactionSeam.engine_by`."""
     _sdk_renderers: dict[str, Callable[[Sequence[CodeBindingNamespace]], str]] = field(
         default_factory=dict
     )
 
     def register(self, provider: CodeRuntime, *, scope: Context | None = None) -> Disposer:
-        """Claim the runtime. Enforces the persistence obligation (D6)."""
+        """Claim the runtime. This enforces the persistence obligation (D17)."""
         persistence = provider.persistence
         if (
             persistence == "namespace"
-            # Still a probe, and deliberately: the Protocol is structural, so an
-            # untyped provider reaches here without the attribute at all, and
-            # `False` is what the error below is written to say about it.
+            # This is still a probe, deliberately. The Protocol is structural,
+            # so an untyped provider reaches here without the attribute, and
+            # `False` is what the error below is written to report about it.
             and getattr(provider, "declares_kernel_snapshots", False) is not True
         ):
             raise PersistenceObligationError(
@@ -305,10 +312,11 @@ class CodeRuntimeSeam:
     ) -> Disposer:
         """Claim the `tools:sdk` prompt renderer for one language (P1-04).
 
-        The seam is the one place a renderer lives, so a provider that registers
-        a richer one and is then disposed leaves an *absence* — a loud failure at
-        prompt assembly — rather than silently reverting to a default whose
-        different text would invalidate the cached prefix (A12).
+        The seam is the one place where a renderer lives. So a provider that
+        registers a richer renderer and is then disposed leaves an *absence*,
+        which is a loud failure at prompt assembly. It does not silently revert
+        to a default, whose different text would invalidate the cached prefix
+        (A12).
         """
         return claim_key(
             self.ctx.owner_for(scope),
@@ -328,13 +336,14 @@ class CodeRuntimeSeam:
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
         provider = self.require()
-        # As the row that registered the runtime (P6-29). The layer is the
-        # registration's, for the reason `CompactionSeam.register` states.
+        # Run as the row that registered the runtime (P6-29). The layer is that
+        # of the registration, for the reason that `CompactionSeam.engine_by`
+        # states.
         with running(self.provider_by):
             return await provider.run(request)
 
 
 @plugin("code-runtime", affects="environment")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the code-runtime seam definition. No provider ships in Phase 1."""
+    """Mount the definition of the code-runtime seam. No provider ships in `ph-base`."""
     ctx.provide(CODE_RUNTIME, CodeRuntimeSeam(ctx=ctx))

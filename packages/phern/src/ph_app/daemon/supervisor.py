@@ -100,7 +100,7 @@ from ph.seams.models import (
 from ph.seams.schedule import (
     CANCELED,
     CREATED,
-    FOLDED,
+    REBUILD_TYPES,
     TICK,
     Schedule,
     ScheduleService,
@@ -1732,15 +1732,12 @@ class Supervisor:
             def drew() -> None:
                 """The screen set changed, so tell the watchers.
 
-                This listens to `screens/change` and not to `present_with` of
-                the seam. `present_with` looks like the right hook and is not.
-                Its undo for each screen is a disposer on the scope of the
-                *registering row*. That disposer is added after the removal by
-                `claim_key`, and therefore unwinds **before** it. A presenter
-                that is told "this screen is going" then reads a table that
-                still contains the screen, and publishes the list unchanged.
-                The `then` of `claim_key` runs after the removal, and that is
-                the only placement that can be correct.
+                The seam emits `screens/change` from the `then` of
+                `claim_key`, which runs after the entry has left the table. So
+                the list that this reads on an unload no longer holds the
+                screen. A hook that ran on the scope of the registering row
+                would unwind before the removal, read the old table, and
+                publish the list unchanged.
 
                 The notice carries the whole list and not the one screen,
                 because `ScreenDefinition.build` cannot travel. A client keeps
@@ -2854,7 +2851,7 @@ class Supervisor:
         try:
             written = await anyio.to_thread.run_sync(
                 lambda: rebuild_index(
-                    index, archive.holding(FOLDED, gate=CREATED), now=now_ms(), vouch=vouched
+                    index, archive.holding(REBUILD_TYPES, gate=CREATED), now=now_ms(), vouch=vouched
                 )
             )
         except Exception:

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..agent.types import AgentHandle
-from ..seams.compaction import CompactionResult, CompactionTrigger
+from ..seams.compaction import CompactionResult
 
 __all__ = ["StubCompactionEngine"]
 
@@ -24,11 +24,6 @@ class StubCompactionEngine:
 
     share: float | None = None
     """`None` is an engine that does not compact on pressure."""
-
-    async def compact_if_needed(
-        self, agent: AgentHandle, trigger: CompactionTrigger
-    ) -> CompactionResult | None:
-        return None
 
     async def compact_now(
         self, agent: AgentHandle, *, instructions: str = ""

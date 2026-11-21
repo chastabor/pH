@@ -1,39 +1,42 @@
-"""`ctx.jobs` — background work with a handle, a cancel and a completion.
+"""`ctx.jobs`: background work with a handle, a cancel and a completion.
 
-Anything long-running that is not a turn: a `/refine` planner pass, a watcher, a
-background build. A job is deliberately *not* a tool call — it outlives the step
-that started it, so it needs its own identity and its own cancellation rather
-than borrowing the turn's.
+A job is long-running work that is not a turn. The producers in this tree are a
+`/refine` planner pass, the drive of a subagent, and a background run of a
+`ph-utcp` tool. A job is deliberately *not* a tool call. It outlives the step
+that started it, so it needs its own identity and its own cancellation, and it
+cannot borrow those of the turn.
 
 **A job is an effect of the scope that owns it (I2).** It outlives the *step*,
-not the agent or the session: a subagent's drive job belongs to the delegation, a
-`/refine` pass to the session that asked, a daemon sweeper to the process. So
-`start` takes a `scope=` like every other registration here, and disposing that
-scope cancels the job and drops its entry. Without an owner the table only ever
-grew, and the bound would have had to be a number somebody picked.
+not the agent or the session. The drive job of a subagent belongs to the
+delegation. A `/refine` pass belongs to the agent that asked. A background run
+belongs to the agent that owns the tree. So `start` takes a `scope=`, as every
+other registration here does, and the dispose of that scope cancels the job and
+drops its entry. Without an owner the table only grew, and its bound would have
+been a number that somebody picked.
 
-Two halves of "this job is over", deliberately distinct:
+"This job is over" has two halves, and they are deliberately distinct:
 
-* **abandoned** — the owning scope went away while the work was still running.
-  Cancel it, then forget it.
-* **released** (`forget`) — the owner knows the work is finished and wants the
-  entry gone. Forget it, cancel nothing. A job whose own body triggers its
-  owner's teardown would otherwise report `canceled` for work that completed.
+* **abandoned**: the owning scope went away while the work still ran. The job
+  is canceled and then forgotten.
+* **released** (`forget`): the owner knows that the work is finished and wants
+  the entry gone. The job is forgotten, and nothing is canceled. Without this
+  half, a job whose own body triggers the teardown of its owner would report
+  `canceled` for work that completed.
 
-Cancellation is cooperative: `Job.cancel()` sets a token, and a body that never
-reads it will run to completion regardless, past a teardown too: `ctx.drain()` does
-not wait for jobs, whose owners stop them in `dispose`. `settled()` is the wait for
-a caller that wants one.
+Cancellation is cooperative. `Job.cancel()` sets a token, and a body that never
+reads the token runs to completion. It also runs past a teardown: `ctx.drain()`
+does not wait for jobs, because their owners stop them in `dispose`. A caller
+that wants to wait calls `settled()`.
 
-**Slots are how a producer bounds its own concurrency** (`slot=`). Work that
-arrives faster than it should run is queued rather than refused: the caller asked
-for all of it, and a refusal answers a question about resources with one about
-intent. The primitive is here rather than in each producer because "wait for a
-free slot" is forty lines of subtle async — a cancel scope around the wait, a
-release on every ending, a table that has to be dropped — and every one of those
-subtleties is discovered once and then re-discovered by the next producer. A
-subagent provider, a background build and a watcher all queue the same way, and a
-second provider inherits it instead of re-deriving it.
+**A producer bounds its own concurrency with a slot** (`slot=`). Work that
+arrives faster than it should run is queued and not refused. The caller asked
+for all of it, and a refusal would treat a question about resources as a
+question about intent. The primitive is here and not in each producer, because
+"wait for a free slot" is forty lines of subtle async: a cancel scope around the
+wait, a release on every ending, and a table that must be dropped. A producer
+that wrote those lines itself would have to find each of those details again.
+Every producer queues the same way, and a second provider inherits the queue
+and does not derive it again.
 
 @module ph.seams.jobs
 
@@ -48,7 +51,6 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 import anyio
-from anyio.abc import TaskGroup
 from pydantic import Field
 
 from ..cancel import CancelToken
@@ -70,42 +72,45 @@ __all__ = [
 log = logging.getLogger("ph.seams.jobs")
 
 JobState: TypeAlias = Literal["queued", "running", "done", "failed", "canceled"]
-"""`queued` is admitted but waiting for a slot — see `JobService.start`'s `slot=`.
+"""`queued` means that the job is admitted and waits for a slot. See the `slot=`
+of `JobService.start`.
 
-A state rather than an absence, because "not started yet" and "not started at
-all" are different things to whoever is reading the table."""
+It is a state and not an absence, because "not started yet" and "not started at
+all" are different things to a reader of the table."""
 
 UNSETTLED: frozenset[str] = frozenset({"queued", "running"})
-"""The states that still owe work — what an owner going away has to stop.
+"""The states that still owe work. These are what a departing owner must stop.
 
-Beside the vocabulary it reads, for `SETTLED_STATUSES`' reason one seam over: a
-consumer that spelled its own copy got it wrong the moment a state was added."""
+The set is defined beside the vocabulary that it reads, for the same reason as
+`SETTLED_STATUSES` in `ph.seams.subagents`: a consumer that wrote its own copy
+had it wrong as soon as a state was added."""
 
 Slot: TypeAlias = tuple[str, int]
-"""`(key, limit)`: which queue this job waits in, and how many of that queue run
-at once. The key is the producer's to choose — a parent session id bounds one
-parent's fan-out.
+"""`(key, limit)`: the queue that this job waits in, and how many jobs of that
+queue run at one time. The producer chooses the key. A parent session id as the
+key bounds the fan-out of one parent.
 
-A deployment-wide bound is *not* spelled here: it is `Config.concurrency`, set by
-whoever runs the harness rather than by the row that happens to start the work."""
+A deployment-wide bound is *not* written here. It is `Config.concurrency`, set
+by whoever runs the harness and not by the row that happens to start the work."""
 
 _Key: TypeAlias = tuple[str, str, str]
-"""A queue's identity: which kind of bound, for which job kind, and whose.
+"""The identity of a queue: which kind of bound, for which job kind, and whose.
 
-Three parts rather than two because the *kind* has to be in there. A producer
-picks its own key and the obvious one is a session id — which two producers can
-reach for at once, silently sharing a queue whose limit is whichever of them
-arrived first. Keyed by kind as well, that cannot happen, and no producer has to
-know the others exist to avoid it."""
+It has three parts and not two, because the *kind* must be in it. A producer
+picks its own key, and the obvious key is a session id. Two producers can pick
+the same session id. They would then silently share a queue whose limit is that
+of whichever producer arrived first. With the kind in the key that cannot
+happen, and no producer has to know that the others exist to avoid it."""
 
 CHILDREN_KIND = "subagent"
-"""The job kind a subagent drive runs under, and the one a deployment usually caps.
+"""The job kind that the drive of a subagent runs under, and the kind that a
+deployment usually caps.
 
-**Named here so a host can spell the cap without importing a bundle**, which is
-the whole of what this constant is for — `phern daemon --max-concurrent-children`
-needs a key, and reaching into `ph-rlm` for it from `ph-app` would be worse than
-one string in the seam that defines what a job kind is. The *number* is not here:
-see `Config.concurrency`."""
+**It is named here so that a host can write the cap without importing a
+bundle.** That is the only purpose of this constant.
+`phern daemon --max-concurrent-children` needs a key. One string in the seam
+that defines what a job kind is, is better than an import of `ph-rlm` into
+`ph_app` for that key. The *number* is not here: see `Config.concurrency`."""
 
 events.declare("job/started", "emit", owner="ph.seams.jobs", doc="A background job began.")
 events.declare("job/settled", "emit", owner="ph.seams.jobs", doc="A background job finished.")
@@ -123,17 +128,17 @@ class Job:
     result: object = None
     error: BaseException | None = None
     release: Releaser | None = None
-    """This job's stop on its owning scope, which cancels it if the scope goes first.
-    Set by `start`, and dropped unrun by `JobService.forget` — not by a caller
-    directly, because dropping the entry and deregistering the stop have to happen
-    together."""
+    """The stop of this job on its owning scope. It cancels the job if the scope
+    goes first. `start` sets it, and `JobService.forget` drops it without running
+    it. A caller does not drop it directly, because the entry and the stop must
+    be removed together."""
 
     waiting: anyio.CancelScope | None = None
-    """The wait for a slot, while there is one. Internal to `JobService`.
+    """The wait for a slot, while there is one. It is internal to `JobService`.
 
-    A body parked on a limiter is not running, so it reads no cancel token —
-    cooperative cancellation cannot reach it. This is what `cancel` cancels
-    instead, and it is why a queued job can be stopped at all."""
+    A body that waits on a limiter is not running, so it reads no cancel token,
+    and cooperative cancellation cannot reach it. `cancel` cancels this scope
+    instead. That is why a queued job can be stopped at all."""
 
     def cancel(self) -> None:
         """Stop this job, whether it is running or still waiting for a slot."""
@@ -147,16 +152,17 @@ class _Queue:
     """One slot queue, and how many jobs still hold a place in it."""
 
     key: _Key
-    """Its own identity, so a job holding one needs no parallel list of keys to
-    give its place back."""
+    """The identity of the queue. A job that holds a place then needs no parallel
+    list of keys to give the place back."""
     limiter: anyio.CapacityLimiter
     held: int = 0
-    """Admitted jobs that have not settled — queued and running alike.
+    """The admitted jobs that have not settled, queued and running alike.
 
-    A refcount rather than a "was that the last one?" scan of the job table: a
-    settled job may legitimately stay in that table (`forget` is the owner's
-    call, not this seam's), so the scan would answer *no* forever and the queue
-    would outlive every producer that ever used it."""
+    It is a reference count and not a scan of the job table for "was that the
+    last one?". A settled job may legitimately stay in that table, because
+    `forget` is the decision of the owner and not of this seam. The scan would
+    then answer *no* forever, and the queue would outlive every producer that
+    ever used it."""
 
 
 @dataclass(slots=True)
@@ -165,35 +171,19 @@ class JobService:
 
     ctx: Context
     caps: Mapping[str, int] = field(default_factory=dict)
-    """Deployment-wide ceilings by job kind — `Config.concurrency`.
+    """The deployment-wide ceilings by job kind (`Config.concurrency`).
 
-    Read here rather than passed at each `start`, because it is a fact about the
-    deployment and not about any one piece of work: a producer that had to quote
-    it would be a producer that could forget to."""
+    They are read here and not passed at each `start`, because a ceiling is a
+    fact about the deployment and not about one piece of work. A producer that
+    had to state it could forget to."""
     _jobs: dict[str, Job] = field(default_factory=dict)
     _queues: dict[_Key, _Queue] = field(default_factory=dict)
-    _scope: TaskGroup | None = None
     _bodies: int = 0
-    """Job bodies spawned and not yet ended, queued ones included: what `settled`
-    waits out. A count rather than the table, which drops an abandoned job while
-    its body may still be on its way out."""
+    """The job bodies that were spawned and have not ended, queued ones included.
+    This is what `settled` waits for. It is a count and not the table, because
+    the table drops an abandoned job while its body may still be ending."""
     _quiet: anyio.Event | None = None
     """Set when `_bodies` reaches zero, for whoever is in `settled` then."""
-
-    def bind(self, task_group: TaskGroup) -> None:
-        """Adopt the task group jobs run in.
-
-        Optional. Without one, a job runs on `ctx.detach` with `leave`, so a
-        teardown stops it through its owner rather than waiting on it: nothing is
-        dropped, since the owner's stop keeps the work (a child is suspended and
-        resumed later, a refinement is considered again), and a one-shot does not
-        spend its drain on work that rarely finishes in it. Unlike running the
-        body inline, it does not make `start()` block until the job finishes. A
-        job that outlives the step that started it is the entire point of the
-        seam, so `start` returning early is the contract rather than an
-        optimization.
-        """
-        self._scope = task_group
 
     @property
     def in_flight(self) -> int:
@@ -203,10 +193,10 @@ class JobService:
     async def settled(self) -> None:
         """Wait until every job body started here has ended.
 
-        For a caller that chooses to wait, which no teardown does: `ctx.drain()`
-        leaves jobs to their owners. Unbounded, because how long a job may take is
-        the caller's to say; a body that never reads its token holds this until
-        it finishes.
+        This is for a caller that chooses to wait. No teardown does:
+        `ctx.drain()` leaves jobs to their owners. The wait has no bound,
+        because the caller decides how long a job may take. A body that never
+        reads its token holds this wait until the body finishes.
         """
         while self._bodies:
             if self._quiet is None:
@@ -214,7 +204,7 @@ class JobService:
             await self._quiet.wait()
 
     def _ended(self) -> None:
-        """One body over; wake whoever is in `settled` once none are left."""
+        """Count one body as ended. Wake whoever is in `settled` when none are left."""
         self._bodies -= 1
         if not self._bodies and self._quiet is not None:
             self._quiet.set()
@@ -231,34 +221,38 @@ class JobService:
         on_queued: Callable[[], None] | None = None,
         on_settled: Callable[[Job], None] | None = None,
     ) -> Job:
-        """Start one background job, owned by `scope` (default: this seam's).
+        """Start one background job, owned by `scope` (default: the scope of this
+        seam).
 
-        `scope` is what bounds the job's lifetime: the delegation, the session,
-        the process. Disposing it abandons the job — canceled if still running,
-        and dropped from the table either way.
+        `scope` bounds the lifetime of the job: the delegation, the session, the
+        process. The dispose of `scope` abandons the job. The job is canceled if
+        it has not settled, and it is dropped from the table in either case.
 
-        **`slot=(key, limit)` queues instead of refusing.** `start` still returns
-        at once and the handle is real — what waits is the *body*, so a producer's
-        admission, its record and its identity are untouched by how busy it is. A
-        job waiting for a slot is `queued`; it takes one in admission order, and
-        frees it on every ending — done, failed or canceled — so one failure
-        cannot wedge the queue behind it. The first caller of a key fixes that
-        key's limit; a later `(key, other)` joins the existing queue rather than
-        resizing it, because two producers disagreeing about a bound is not
-        something this seam can settle for them.
+        **`slot=(key, limit)` queues and does not refuse.** `start` still returns
+        at once and the handle is real. Only the *body* waits, so the admission,
+        the record and the identity of a producer do not depend on how busy it
+        is. A job that waits for a slot is `queued`. It takes a slot in
+        admission order, and frees the slot on every ending (done, failed or
+        canceled), so one failure cannot block the queue behind it. The first
+        caller of a key fixes the limit of that key. A later `(key, other)`
+        joins the existing queue and does not resize it, because this seam
+        cannot settle a disagreement between two producers about a bound.
 
-        `on_queued` fires only when there is actually a wait, so a producer can
-        record *that* rather than infer it. A parameter and not a field on `Job`
-        for a stated reason: a callable on a registry's value is a row body the
-        ownership walk has to classify, and this one is the caller's own, handed
-        back to the caller, rather than a registration.
+        `on_queued` fires only when the job actually waits, so a producer can
+        record *that* and need not infer it. It is a parameter and not a field
+        on `Job` for a stated reason. A callable on the value of a registry is a
+        row body that the ownership walk has to classify. This callable belongs
+        to the caller and is handed back to the caller. It is not a
+        registration.
 
-        **`on_settled` is called however the job ends** (S6): done, failed, canceled
-        while it ran — or canceled before it ran, whether waiting for a slot or before
-        its first step, which never enters `run`. It is where a producer takes down
-        what it put up for the job; inside `run`, an entry outlived every job that
-        never got there. Called before `job/settled` is announced, and not at all if
-        `start` raises, which the caller sees.
+        **`on_settled` is called however the job ends** (S6): done, failed, or
+        canceled while it ran. It is also called for a job that was canceled
+        before it ran, either while it waited for a slot or before its first
+        step. Such a job never enters `run`. A producer uses `on_settled` to
+        take down what it put up for the job. When that cleanup was inside
+        `run`, an entry outlived every job that never got there. `on_settled`
+        is called before `job/settled` is announced. It is not called if `start`
+        raises, because the caller sees that.
         """
         job = Job(id=f"{kind}-{secrets.token_hex(4)}", kind=kind, label=label, token=CancelToken())
         waits = self._waits(kind, slot)
@@ -268,15 +262,17 @@ class JobService:
 
         def enter() -> Disposer:
             def abandon() -> None:
-                # Never a job its owner released: `forget` drops this unrun.
+                # This never runs for a job that its owner released: `forget`
+                # drops this disposer without running it.
                 del self._jobs[job.id]
-                # **`queued` counts as owed, not just `running`.** A job still
-                # waiting for a slot has a parked body and, once it is out of
-                # this table, no owner left to stop it: it would take a slot
-                # nobody wants, run work whose owner is gone, and hold
-                # `settled()` open until it did. This read `== "running"` while
-                # the only states were running-or-settled, and a whole kind
-                # became `queued` the day a deployment cap shipped.
+                # **`queued` counts as owed, and not only `running`.** A job that
+                # still waits for a slot has a waiting body. When the job is out
+                # of this table, no owner is left to stop it. It would take a
+                # slot that nobody wants, run work whose owner is gone, and hold
+                # `settled()` open until it finished. This test read
+                # `== "running"` while the only states were running or settled,
+                # and a whole kind became `queued` on the day that a deployment
+                # cap shipped.
                 if job.state in UNSETTLED:
                     job.cancel()
 
@@ -288,8 +284,9 @@ class JobService:
                 if waits:
                     holds = await self._take(job, waits, on_queued)
                     if not holds:
-                        # Canceled where it waited. It never ran, which is what
-                        # `canceled` says and why the work below is not entered.
+                        # The job was canceled where it waited. It never ran.
+                        # `canceled` says that, and it is why the work below is
+                        # not entered.
                         job.state = "canceled"
                         return
                 if job.token.canceled:
@@ -303,23 +300,25 @@ class JobService:
                 job.error = error
                 log.debug("ph.seams.jobs: job %s failed", job.id, exc_info=True)
             finally:
-                # First, so nothing below can strand the count; nothing below
-                # awaits either, so a waiter in `settled` wakes after all of it.
+                # This comes first, so that nothing below can strand the count.
+                # Nothing below awaits either, so a waiter in `settled` wakes
+                # after all of it.
                 self._ended()
                 if job.state == "running":
                     # **Derived, not caught** (L4). `except Exception` misses a
-                    # `BaseException` — a foreign cancel, a `BaseExceptionGroup`
-                    # from a task group, `KeyboardInterrupt` — so the state
-                    # stayed `"running"` and `job/settled` announced a job that
-                    # was still going as it went away. The `job.token.canceled`
-                    # check above only covers a cancel through the job's *own*
-                    # token.
+                    # `BaseException`: a foreign cancel, a `BaseExceptionGroup`
+                    # from a task group, `KeyboardInterrupt`. The state then
+                    # stayed `"running"`, and `job/settled` announced a job as
+                    # still running while it went away. The `job.token.canceled`
+                    # check above covers only a cancel through the *own* token
+                    # of the job.
                     #
-                    # Settled here rather than by a third `except` for the
-                    # reason `_turn_reason` gives one file over: every ordinary
-                    # exit assigns a state first, so `"running"` arriving here
-                    # cannot be a job that finished, and a branch per exception
-                    # type is a list that the next base exception is not on.
+                    # The state is settled here and not by a third `except`, for
+                    # the reason that `_turn_reason` (`ph.agent_loop.driver`)
+                    # gives. Every ordinary exit assigns a state first, so
+                    # `"running"` here cannot be a job that finished. A branch
+                    # for each exception type is a list that the next base
+                    # exception is not on.
                     job.state = "canceled"
                 if holds:
                     for queue in waits:
@@ -335,39 +334,46 @@ class JobService:
         try:
             job.release = await self.ctx.owner_for(scope).effect(enter, label=f"job({job.id})")
             self.ctx.emit("job/started", job)
-            if self._scope is not None:
-                self._scope.start_soon(body)
-            else:
-                # `leave`: the `effect` above is this job's stop, on its owner, and
-                # cancels its token. A cancel from this seam's own scope would be
-                # a second stop landing ahead of the owner's, and this row
-                # unwinds before the agents that own its jobs. It keeps the job
-                # out of what `drain` waits for, too (`AtDispose`).
-                self.ctx.detach(body(), label=f"job {job.id}", at_dispose="leave")
-            # Counted once it is sure to run, and before it can: neither spawn
-            # runs the body before this line.
+            # Every body runs on `ctx.detach` with `leave`, so `start` returns
+            # before the work does. A job that outlives the step that started it
+            # is the purpose of the seam. A teardown stops the job through its
+            # owner and does not wait for it. Nothing is dropped, because the
+            # stop of the owner keeps the work: a child is suspended and resumed
+            # later, and a refinement is considered again.
+            #
+            # `leave`: the `effect` above is the stop of this job. It is on the
+            # owner of the job, and it cancels the token of the job. A cancel
+            # from the scope of this seam would be a second stop that arrives
+            # before the stop of the owner, and this row unwinds before the
+            # agents that own its jobs. `leave` also keeps the job out of what
+            # `drain` waits for (`AtDispose`).
+            self.ctx.detach(body(), label=f"job {job.id}", at_dispose="leave")
+            # The body is counted when it is sure to run, and before it can run:
+            # neither spawn runs the body before this line.
             self._bodies += 1
         except BaseException:
             # **A job that never reaches its body gives its places back here, or
-            # nothing ever does.** `body`'s `finally` is the only other release,
-            # so a disposed owner or a closed task group between the two used to
-            # strand one refcount per attempt — and a queue whose count never
-            # returns to zero is one this table keeps for the life of the
-            # process, keyed by whatever the producer chose. Usually a session id.
+            # nothing ever does.** The `finally` of `body` is the only other
+            # release. A disposed owner between the two used to strand one
+            # reference count for each attempt. A queue whose
+            # count never returns to zero stays in this table for the life of
+            # the process, under whatever key the producer chose. That key is
+            # usually a session id.
             self._leave(waits)
             self.forget(job.id)
             raise
         return job
 
     def _waits(self, kind: str, slot: Slot | None) -> Sequence[_Queue]:
-        """Every queue this job waits in, **narrowest first**.
+        """Every queue that this job waits in, **narrowest first**.
 
-        The order is the whole of why holding two is safe. A job takes its
-        producer's slot before the deployment's, so it only occupies global
-        capacity once it is genuinely next for its own parent; the other way
-        round, one parent's queued children would sit on every deployment slot
-        while waiting for a bound of their own, starving every other parent. No
-        cycle is possible either, because every job acquires in this same order.
+        The order is the reason why it is safe to hold two places. A job takes
+        the slot of its producer before the slot of the deployment, so it
+        occupies global capacity only when it is next for its own parent. In
+        the other order, the queued children of one parent would hold every
+        deployment slot while they waited for the bound of that parent, and
+        every other parent would starve. No cycle is possible either, because
+        every job acquires in this same order.
         """
         waits: list[_Queue] = []
         if slot is not None:
@@ -375,14 +381,14 @@ class JobService:
         cap = self.caps.get(kind)
         if cap is not None:
             waits.append(self._queue(("kind", kind, ""), cap))
-        # Counted here, where the places are taken, so the increment and the
-        # `_leave` that undoes it cannot be one caller apart.
+        # The places are counted here, where they are taken. The increment and
+        # the `_leave` that undoes it then cannot be one caller apart.
         for queue in waits:
             queue.held += 1
         return waits
 
     def _queue(self, key: _Key, limit: int) -> _Queue:
-        """This key's queue, made on first use."""
+        """The queue of this key, made on first use."""
         queue = self._queues.get(key)
         if queue is None:
             queue = self._queues[key] = _Queue(key=key, limiter=anyio.CapacityLimiter(limit))
@@ -391,21 +397,22 @@ class JobService:
     async def _take(
         self, job: Job, waits: Sequence[_Queue], on_queued: Callable[[], None] | None
     ) -> bool:
-        """Wait for a place in every queue. `False` if canceled while waiting.
+        """Wait for a place in every queue. Returns `False` if the job was canceled
+        while it waited.
 
-        The wait is its own cancel scope, not the body's: a job canceled while
-        queued must stop waiting, while one canceled while *running* is stopped
-        through its token — and a single scope over both would cancel the work
-        mid-flight, which is the opposite of cooperative.
+        The wait has its own cancel scope, which is not the scope of the body. A
+        job canceled while it is queued must stop waiting. A job canceled while
+        it is *running* is stopped through its token. One scope over both would
+        cancel the work in mid-flight, which is the opposite of cooperative.
 
-        A cancel releases whatever prefix it had taken here, so the caller's
-        `finally` has one rule — release everything, or nothing — rather than a
-        list of what happened to be acquired.
+        A cancel releases the places that the job had already taken here. The
+        `finally` of the caller therefore has one rule, release everything or
+        nothing, and needs no list of what was acquired.
         """
         if job.token.canceled:
-            # Canceled before it began to wait: nothing to announce, nothing taken.
-            # `on_queued` here had a producer record a wait for work that would
-            # never run.
+            # The job was canceled before it began to wait. There is nothing to
+            # announce and nothing taken. A call to `on_queued` here made a
+            # producer record a wait for work that would never run.
             return False
         if on_queued is not None and any(queue.limiter.available_tokens < 1 for queue in waits):
             on_queued()
@@ -420,18 +427,19 @@ class JobService:
             holds = not waiting.cancelled_caught
         finally:
             job.waiting = None
-            # Whatever ended the wait — its own cancel, or a stop from outside it,
-            # such as the task group a bound service runs its bodies in going away —
-            # gives back what it had taken. Released on the own cancel alone, an
-            # outside stop kept the narrower queue's place, and a job still waiting
-            # in that queue waited for good.
+            # Whatever ended the wait gives back what the job had taken. The
+            # ending may be the own cancel of the job, or a stop from outside,
+            # such as the cancel of the task that runs the body when the event
+            # loop shuts down. When only the own cancel released, an outside
+            # stop kept the place in the narrower queue, and a job that still
+            # waited in that queue waited forever.
             if not holds:
                 for queue in taken:
                     queue.limiter.release()
         return holds
 
     def _leave(self, waits: Sequence[_Queue]) -> None:
-        """Drop this job's places, and each queue once nobody holds one."""
+        """Drop the places of this job, and each queue when no job holds a place in it."""
         for queue in waits:
             queue.held -= 1
             if queue.held <= 0:
@@ -451,12 +459,13 @@ class JobService:
         return True
 
     def forget(self, job_id: str) -> bool:
-        """Drop a finished job's entry without canceling it.
+        """Drop the entry of a finished job without canceling it.
 
-        For an owner that knows the work is done — a delegation whose child has
-        settled — so the table does not hold one entry per unit of past work for
-        the life of the scope. Drops its stop from the scope too, unrun, so the scope
-        holds no teardown for something already over.
+        This is for an owner that knows that the work is done, such as a
+        delegation whose child has settled. The table then does not hold one
+        entry for each unit of past work for the life of the scope. `forget`
+        also drops the stop of the job from the scope, without running it, so
+        that the scope holds no teardown for work that is already over.
         """
         job = self._jobs.pop(job_id, None)
         if job is None:
@@ -470,19 +479,21 @@ class Config(WireModel):
     """Row config for the local job runner."""
 
     concurrency: dict[str, int] = Field(default_factory=dict)
-    """How many jobs of each kind this deployment runs at once; the rest queue.
+    """How many jobs of each kind this deployment runs at one time. The rest
+    queue.
 
-    A **deployment's** bound, which is why it is here and not an argument every
-    producer passes: it answers "what can this host carry", where a producer's
-    own `slot=` answers "what is one caller's fair share". Both apply, narrowest
-    first. A kind that is absent is uncapped.
+    This is the bound of the **deployment**, which is why it is here and is not
+    an argument that every producer passes. It answers "what can this host
+    carry". The `slot=` of a producer answers "what is the fair share of one
+    caller". Both apply, narrowest first. A kind that is absent has no cap.
 
-    **Empty by default, and the number lives with the producer.** A default here
-    naming `subagent` would be this seam — which treats `kind` as a free string
-    everywhere else — knowing one bundle's vocabulary, and `ph-base` ships no
-    subagent provider for it to bound. The `rlm` bundle, which does ship one,
-    sets its own figure beside the per-parent one, so the two numbers an operator
-    compares sit in one file."""
+    **It is empty by default, and the bundle of the producer sets the number.**
+    A default here that named `subagent` would make this seam know the
+    vocabulary of one bundle, and the seam treats `kind` as a free string
+    everywhere else. `ph-base` also ships no subagent provider for such a
+    default to bound. The `rlm` bundle does ship one. It sets its own figure
+    beside the per-parent figure, so that the two numbers that an operator
+    compares are in one file."""
 
 
 @plugin("jobs-local", affects="deployment", config=Config)

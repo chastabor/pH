@@ -1,31 +1,34 @@
-"""`ctx.attachments` — media the log points at but cannot reconstruct.
+"""`ctx.attachments`: media that the log points at but cannot rebuild.
 
 The log is lossless JSON (A1), so an image never enters it. A `MediaBlock`
-carries an `AttachmentRef` and the bytes live here, named by their own SHA-256.
+carries an `AttachmentRef`, and the bytes are stored here under their own
+SHA-256.
 
-**Why this is not `ctx.spill_store`, which has the same mechanics.** The
-lifecycles differ in the one way that matters. A spilled tool result is a
-*forwarding address*: the log already holds the preview the model saw, and
-losing the file costs a reader the way back to the original. An attachment is
-content the log only **points at** — lose it and the conversation is missing a
-piece nothing can rebuild. Someone will eventually clear a cache directory to
-reclaim space, and that must not be able to delete conversation. So: its own
-seam, its own directory, and no participation in F7's sweep.
+**Why this is not `ctx.spill_store`, which has the same mechanics.** The two
+lifecycles differ in one way, and it is the way that matters. A spilled tool
+result is a *forwarding address*. The log already holds the preview that the
+model saw, so a lost file costs a reader the way back to the original. An
+attachment is content that the log only **points at**. If it is lost, the
+conversation is missing a piece that nothing can rebuild. Someone will
+eventually clear a cache directory to reclaim space, and that must not be able
+to delete conversation. So attachments have their own seam and their own
+directory, and the sweep of F7 does not touch them.
 
-**Addressed globally, with no owner directory.** A digest is a digest: two
-sessions attaching the same photo share one file, and a fork references exactly
-the digests its parent does rather than a directory the parent owns — which is
-what stops deleting a parent session from breaking its children. The cost is
-that collection needs a fold over *every* session, so nothing here collects
-automatically; that is an explicit operation (P7-01's `phern attachments gc`),
-deliberately unlike the spill store's per-owner sweep.
+**A blob is addressed globally and has no owner directory.** A digest names the
+same bytes everywhere. Two sessions that attach the same photo share one file. A
+fork references exactly the digests that its parent references, and not a
+directory that the parent owns. That is why deleting a parent session does not
+break its children. The cost is that collection needs a fold over *every*
+session, so nothing here collects automatically. Collection is an explicit
+operation (`phern attachments gc`, P7-01). This is deliberately unlike the spill
+store, which sweeps each owner.
 
-**Reading a path is the caller's business, not this store's** (I-9). The store
-takes bytes. Who is allowed to turn a path into bytes is a security question with
-two different answers — a person may attach anything they can read, a *model*
-must go through `ctx.fs` so `permissions-fs` and the workspace tier bound it —
-and a store that read paths itself would answer it once, wrongly, for both.
-`save_path` exists for the human door and says so.
+**Reading a path is the business of the caller, not of this store** (I-9). The
+store takes bytes. Who may turn a path into bytes is a security question with
+two different answers. A user may attach anything that they can read. A *model*
+must go through `ctx.fs`, so that `permissions-fs` and the workspace tier bound
+it. A store that read paths itself would answer the question one time, wrongly,
+for both. `save_path` exists for the user, and its docstring says so.
 
 @module ph.seams.attachments
 """
@@ -55,10 +58,11 @@ from ..paths import default_home_path, write_atomic
 from ..wire import WireModel
 
 if TYPE_CHECKING:
-    # Annotation-only, all three — and this seam is a plugin entry point, so an
-    # unguarded import put `ph.persistence` into every process that touches an
-    # attachment. `ph/persistence/__init__.py` imports the JSONL *backend*, so
-    # the fold that exists in order not to import one was importing one.
+    # All three imports are for annotations only. This seam is a plugin entry
+    # point, so an unguarded import put `ph.persistence` into every process
+    # that touches an attachment. `ph/persistence/__init__.py` imports the
+    # JSONL *backend*. So the fold, which exists so that this module imports no
+    # backend, was importing one.
     from ..persistence.protocol import SessionArchive
     from ..session import SessionEvent
     from .uploads import UploadRegistry
@@ -85,7 +89,7 @@ __all__ = [
 log = logging.getLogger("ph.seams.attachments")
 
 OCTET_STREAM = "application/octet-stream"
-"""What a file pH cannot classify is called."""
+"""The MIME type that pH gives a file that it cannot classify."""
 
 EXTENSIONS: dict[str, str] = {
     "image/png": ".png",
@@ -98,12 +102,14 @@ EXTENSIONS: dict[str, str] = {
     "video/mp4": ".mp4",
     "text/plain": ".txt",
 }
-"""MIME → suffix, so a person browsing the directory sees openable files.
+"""A map from MIME type to suffix, so that a person who browses the directory
+sees files that open.
 
-A table rather than `mimetypes.guess_extension`, which answers `.jpe` for JPEG
-and varies by platform — a stored file's name is part of what someone sees when
-they go looking, and it should not depend on which machine wrote it. An unknown
-type simply gets no suffix; the digest is the identity either way.
+This is a table and not `mimetypes.guess_extension`, which answers `.jpe` for
+JPEG and varies by platform. The name of a stored file is part of what someone
+sees when they look in the directory, and it must not depend on which machine
+wrote the file. An unknown type gets no suffix. The digest is the identity in
+both cases.
 """
 
 
@@ -119,42 +125,47 @@ class Config(WireModel):
 
 
 ENCODED_CACHE_BYTES = 32 * 1024 * 1024
-"""How much base64 the store keeps in memory before evicting the oldest.
+"""How much base64 the store keeps in memory before it evicts the oldest entry.
 
-A cap rather than an unbounded dict: base64 is a third larger than the bytes it
-encodes, so a session with a handful of PDFs would otherwise hold tens of
-megabytes of `str` for as long as the process lives.
+The cache has a cap and is not an unbounded dict. Base64 is a third larger than
+the bytes that it encodes. Without a cap, a session with a handful of PDFs
+would hold tens of megabytes of `str` for as long as the process lives.
 """
 
 
 def mime_of(name: str) -> str:
-    """What pH calls a file of this name, going only by the name.
+    """The MIME type that pH gives a file of this name, from the name alone.
 
-    The guess half of the ladder. It decides more than a label: `path_for`
-    derives the stored file's *extension* from the mime, and `IMAGE_MIMES`
-    decides whether a block reaches the model as an image or as a document — so
-    a second copy of it is how the same PNG becomes a document in one front end
-    and an image in another.
+    `mime_for` falls back to this guess. The guess decides more than a label.
+    `path_for` derives the *extension* of the stored file from the MIME type,
+    and `IMAGE_MIMES` decides whether a block reaches the model as an image or
+    as a document. So a second copy of this function is how the same PNG becomes
+    a document in one front end and an image in another.
     """
     return mimetypes.guess_type(name)[0] or OCTET_STREAM
 
 
 def mime_for(declared: str | None, name: str) -> str:
-    """What pH calls a file somebody has already named a type for.
+    """The MIME type that pH gives a file for which somebody has already declared
+    a type.
 
-    **A declared type wins, except when it is the one that says nothing.** A
-    browser sends `Content-Type` with every dropped file and falls back to
-    `application/octet-stream` for any extension *it* does not recognize — so a
-    literal "declared wins" stores a `.png` from such a browser as a document,
-    gives it the wrong extension out of `EXTENSIONS`, and misses `IMAGE_MIMES`.
-    That is exactly the failure `mime_of` exists to prevent, arriving through the
-    one door that has an opinion to override it with.
+    **A declared type wins, except when it is the type that says nothing.** A
+    browser sends `Content-Type` with every dropped file, and it falls back to
+    `application/octet-stream` for any extension that *it* does not recognize.
+    A literal "declared wins" would store a `.png` from such a browser as a
+    document, give it the wrong extension from `EXTENSIONS`, and miss
+    `IMAGE_MIMES`. That is exactly the failure that `mime_of` exists to prevent.
+    It would arrive through the one path that has a declared type to override
+    the guess with.
 
-    Three callers, which is why the combination is a function rather than an
-    `or` at each of them: a person's `--attach` (declared by the caller, guessed
-    from the path), a browser upload (declared by the browser), and
-    `attachment/put`, where a client that sends no `mime` at all still sent a
-    name.
+    There are three callers, which is why the rule is a function and not an
+    `or` at each of them:
+
+    - The `--attach` of a user, through `save_path`. The caller of `save_path`
+      declares the type, or else the type is guessed from the path.
+    - A browser upload, where the browser declares the type.
+    - `attachment/put`, where a client that sends no `mime` at all still sent a
+      name.
     """
     if declared and declared != OCTET_STREAM:
         return declared
@@ -162,12 +173,13 @@ def mime_for(declared: str | None, name: str) -> str:
 
 
 async def read_for_attach(source: Path | str) -> tuple[str, str, bytes]:
-    """`(name, mime, content)` for a file a *person* is attaching.
+    """`(name, mime, content)` for a file that a *user* is attaching.
 
-    The human door (I-9), as one function: reads with the caller's own
-    permissions, no policy check, mime by `mime_of`. Exported because two front
-    ends read a file this way — the in-process one through `save_path`, the
-    socket one before `attachment/put`.
+    This one function is the user's way to attach (I-9). It reads with the
+    permissions of the caller, makes no policy check, and takes the MIME type
+    from `mime_of`. It is exported because two front ends read a file this way:
+    the in-process front end through `save_path`, and the socket front end
+    before `attachment/put`.
     """
     path = Path(source).expanduser()
     content = await anyio.to_thread.run_sync(path.read_bytes)
@@ -184,12 +196,13 @@ class AttachmentStore:
     _encoded_bytes: int = 0
 
     def path_for(self, ref: AttachmentRef) -> Path:
-        """Where a reference resolves — derived, never looked up.
+        """The path that a reference resolves to. It is derived and never looked up.
 
-        The digest *is* the name, so this is a pure function of the ref and needs
-        no directory scan. The suffix comes from the ref's own MIME, which means
-        a ref that reaches here from a stored log resolves to the same path the
-        write produced, on any machine.
+        The digest *is* the name, so the path is a pure function of the
+        reference and needs no directory scan. The suffix comes from the MIME
+        type of the reference itself. So a reference that arrives here from a
+        stored log resolves to the same path that the write produced, on any
+        machine.
         """
         digest = ref.attachment_id.partition(":")[2] or ref.attachment_id
         return self.root / f"{digest}{EXTENSIONS.get(ref.mime, '')}"
@@ -205,23 +218,25 @@ class AttachmentStore:
         duration_ms: int | None = None,
         pages: int | None = None,
     ) -> AttachmentRef:
-        """Store `content` and return the reference a `MediaBlock` carries.
+        """Store `content` and return the reference that a `MediaBlock` carries.
 
-        Idempotent by construction: identical bytes produce one file.
+        The call is idempotent by construction: identical bytes produce one file.
 
         **Pixel dimensions are measured here when the caller did not supply
-        them** (P7-03). Every other measurement argument stays a fact a caller
-        already knows — a page count a PDF reader reported, a duration a
-        container parsed — but an image's size is four integers at a fixed offset
-        in its own header, which `ph.llm.dimensions` reads with no dependency.
-        The argument still wins when given: an ingester that has already decoded
-        the image knows at least as much as its header does.
+        them** (P7-03). Every other measurement argument stays a fact that a
+        caller already knows, such as a page count that a PDF reader reported or
+        a duration that was parsed from a container. The size of an image is
+        different. The header of the image holds it as plain integers, and
+        `ph.llm.dimensions` reads them with no dependency. The argument still
+        wins when it is given. An ingester that has already decoded the image
+        knows at least as much as the header does.
 
-        Not enforced (§5 rule 6): this fills in an attachment as it is *stored*,
-        so a reference already in a log written before P7-03 keeps `width: None`
-        for ever, and neither pixel ceiling can fire for it. Backfilling would
-        mean rewriting stored references, which A1 does not allow, or measuring
-        at read time, which puts a file read on the request path.
+        Not enforced (§5 rule 6): this fills in an attachment when it is
+        *stored*. A reference that is already in a log written before P7-03
+        keeps `width: None` forever, and neither pixel limit can apply to it. A
+        backfill would mean rewriting stored references, which A1 does not
+        allow, or measuring at read time, which puts a file read on the request
+        path.
         """
         if width is None and height is None and mime in IMAGE_MIMES:
             measured = image_dimensions(content)
@@ -242,16 +257,17 @@ class AttachmentStore:
         return ref
 
     async def save_path(self, source: Path | str, *, mime: str | None = None) -> AttachmentRef:
-        """Read a file directly and store it — **the human door only** (I-9).
+        """Read a file directly and store it. **For the user only** (I-9).
 
-        Reads with the harness's own permissions and no policy check, which is
-        correct for a person attaching a file they can already open and wrong for
-        anything the model asked for: a tool that reached this would be an
-        exfiltration primitive, attaching a private key as a "document" for a
-        provider to OCR. A model-initiated attach reads through
-        `ctx.fs.read_bytes` — which is the same `fs/read-intent` gate every other
-        model-driven read passes — and calls `save_bytes` with what comes back.
-        `tool-attach` is that caller, and it is the only one this seam expects.
+        The read uses the permissions of the harness and makes no policy check.
+        That is correct for a user who attaches a file that they can already
+        open. It is wrong for anything that the model asked for. A tool that
+        reached this method would be an exfiltration primitive: it could attach
+        a private key as a "document" for a provider to OCR. An attach that the
+        model starts reads through `ctx.fs.read_bytes`, which is the same
+        `fs/read-intent` gate that every other model-driven read passes. It then
+        calls `save_bytes` with the result. `tool-attach` is that caller, and it
+        is the only one that this seam expects.
         """
         name, _, content = await read_for_attach(source)
         return await self.save_bytes(content=content, mime=mime_for(mime, name), name=name)
@@ -260,17 +276,17 @@ class AttachmentStore:
         return await anyio.to_thread.run_sync(self.path_for(ref).read_bytes)
 
     async def load_b64(self, ref: AttachmentRef) -> str:
-        """The attachment as base64, encoded once per process.
+        """The attachment as base64, encoded one time for each process.
 
-        **The cache cannot go stale, and that is a property of the naming rather
-        than a promise this has to keep.** `attachment_id` is the SHA-256 of the
-        content, so two refs with one id have one body by definition — there is
-        no invalidation to get wrong.
+        **The cache cannot go stale. That follows from the naming, and is not a
+        promise that this method has to keep.** `attachment_id` is the SHA-256
+        of the content, so two references with one id have one body by
+        definition. There is no invalidation to get wrong.
 
-        Worth having because the alternative is paid on *every model step*: a media
-        block stays in derived history for the life of the session, so an attachment
-        added at the first turn would be re-read from disk and re-encoded for every
-        request after it.
+        The cache is worth having because the alternative cost is paid on *every
+        model step*. A media block stays in derived history for the life of the
+        session. So an attachment that was added at the first turn would be read
+        from disk and encoded again for every request after it.
         """
         cached = self._encoded.get(ref.attachment_id)
         if cached is not None:
@@ -287,9 +303,9 @@ class AttachmentStore:
     def exists(self, ref: AttachmentRef) -> bool:
         """Whether the bytes are still there.
 
-        Worth asking before a request is built: a reference whose blob is gone
-        must degrade to a pointer the model can read rather than a wire error it
-        cannot act on.
+        A caller asks this before a request is built. A reference whose blob is
+        gone must degrade to a pointer that the model can read, and not to a
+        wire error that the model cannot act on.
         """
         return self.path_for(ref).is_file()
 
@@ -297,10 +313,10 @@ class AttachmentStore:
 def _write(path: Path, payload: bytes) -> None:
     """Put one blob at its content-addressed name, atomically (K5).
 
-    The name is the sha256 of these bytes, which is what makes both halves
-    right: `skip_if_present`, because a file already at this name already holds
-    them, and the atomic write, because a truncated one would be believed
-    forever for the same reason.
+    The name is the sha256 of these bytes, and that makes both halves correct.
+    `skip_if_present` is correct because a file that is already at this name
+    already holds the bytes. The atomic write is correct because a truncated
+    file would be believed forever, for the same reason.
     """
     write_atomic(path, payload, skip_if_present=True)
 
@@ -314,61 +330,69 @@ async def apply(ctx: Context, config: Config) -> None:
 
 # ------------------------------------------------------------- collection --
 #
-# `phern attachments gc` (P7-01). Here rather than in the command for
-# `stored_survivors`' reason: the fold is the part with rules, the command is a
-# way to ask for it, and a second asker — a diagnostic, a daemon sweep somebody
-# later wants — must not re-derive which blobs are safe to remove.
+# `phern attachments gc` (P7-01). The fold is here and not in the command, for
+# the same reason as `stored_survivors`. The fold is the part that has rules,
+# and the command is one way to ask for it. A second asker, such as a
+# diagnostic or a daemon sweep that somebody wants later, must not derive again
+# which blobs are safe to remove.
 
 DIGEST_TEXT = re.compile(r"sha256:[0-9a-f]{64}")
 """How an attachment id is recognized **in a log, by its shape**.
 
-Deliberately not a list of the keys that carry one. Three producers already spell
-it differently — `attachment/uploaded` writes `attachmentId`, the media notices
-write `attachmentIds` as a list, and a `user/message` carries it nested inside a
-content block's `attachment` — and every one of those was written at a different
-time by a different row. A key list here would be a fourth spelling of the same
-fact, maintained in a module none of them import, and the failure when it fell
-behind is the one failure this command may not have: a blob quietly collected
-because the row that referenced it used a name nobody added here.
+This is deliberately not a list of the keys that carry an id. Three producers
+already spell the key differently:
 
-The value's shape is what all of them share, because `digest_of` produces it. The
-cost of matching too much is that an unrelated string that happens to be a
-SHA-256 digest keeps a blob alive for ever, which is a wasted file; the cost of
-matching too little is a session that will not open again.
+- The upload records (`attachment/uploading` and `attachment/uploaded`) write
+  `attachmentId`.
+- The media notices write `attachmentIds` as a list.
+- A `user/message` carries the id nested inside the `attachment` of a content
+  block.
+
+Each of them was written at a different time by a different row. A key list
+here would be a fourth spelling of the same fact, maintained in a module that
+none of them import. When that list fell behind, the result would be the one
+failure that this command must not have: a blob is quietly collected, because
+the row that referenced it used a name that nobody added here.
+
+All of them share the shape of the value, because `digest_of` produces it.
+Matching too much costs a wasted file: an unrelated string that happens to be a
+SHA-256 digest keeps a blob alive forever. Matching too little costs a session
+that will not open again.
 """
 
 MIN_AGE = 86_400.0
 """How long a blob must have been on disk before it may be collected, in seconds.
 
-**Not a retention policy, and the difference is the whole design of this
-command.** Age never *authorizes* collection here — a blob a stored log
-references is kept however old it is, which is the constraint P7-01 wrote down
-before anything was implemented. What this covers is the window between a blob
-being written and the log that mentions it being written: a person can drop a
-file on the composer and leave it staged for as long as they are composing, and
-during that time the bytes are on disk with no `user/message` referencing them
-anywhere. Collecting it would delete the file out from under the prompt they are
+**This is not a retention policy, and that difference is the design of this
+command.** Age never *authorizes* collection here. A blob that a stored log
+references is kept however old it is. P7-01 wrote that constraint down before
+anything was implemented. This constant covers the window between the write of
+a blob and the write of the log that mentions it. A user can drop a file on the
+composer and leave it staged for as long as they are composing. During that
+time the bytes are on disk, and no `user/message` anywhere references them. To
+collect the blob would delete the file from under the prompt that the user is
 still typing.
 
-A day, because that is the scale of the thing being waited for — a person's
-attention — and because the cost of waiting is one unreferenced file on disk for
+The value is a day. That is the scale of what is waited for, which is the
+attention of a person. The cost of waiting is one unreferenced file on disk for
 one more day.
 """
 
 LISTING_LIMIT = 100_000
 """How many stored sessions the fold will list.
 
-Every other listing in the harness is a *page* — 50 for the picker, 500 for the
-lineage survey — because they answer "show me the recent ones". This one answers
-"is there anyone at all who still needs this blob", and a bounded answer to that
-question is not a smaller answer, it is a wrong one: the session that fell below
-the cut is exactly the old conversation nobody has opened lately, which is the
-one whose media a person would be most upset to lose.
+Every other listing in the harness is a *page*: 50 for the picker, 500 for the
+lineage survey. Those listings answer "show me the recent ones". This listing
+answers "does anyone at all still need this blob". A bounded answer to that
+question is not a smaller answer. It is a wrong answer. The session that fell
+below the cut is exactly the old conversation that nobody has opened lately,
+and that is the conversation whose media a person would be most upset to lose.
 
-So it is set high enough not to be reached in practice **and checked**: a survey
-that hits it reports `truncated`, and a truncated survey collects nothing. A cap
-at all, rather than none, because a store with more logs than this has something
-else wrong with it and walking it silently for an hour is not the better failure.
+So the limit is set high enough that it is not reached in practice, **and it is
+checked**. A survey that reaches the limit reports `truncated`, and a truncated
+survey collects nothing. There is a limit at all because a store with more logs
+than this has something else wrong with it. To walk such a store silently for
+an hour is not the better failure.
 """
 
 
@@ -385,50 +409,55 @@ class Blob:
 
 @dataclass(frozen=True, slots=True)
 class AttachmentSurvey:
-    """What is stored, what still points at it, and what may go.
+    """What is stored, what still points at it, and what may be removed.
 
-    Every count is reported rather than summarized into a verdict, because the
-    person reading it is deciding whether to pass `--remove` and the number that
-    decides it — how much of the store was actually read — is the one a summary
-    would drop.
+    Every count is reported, and none is summarized into a verdict. The user who
+    reads the survey is deciding whether to pass `--remove`. The number that
+    decides it is how much of the store was actually read, and a summary would
+    drop that number.
     """
 
     sessions: int
     """Stored logs whose references were read."""
     collect: tuple[Blob, ...]
-    """Unreferenced, old enough, and safe to remove — if `safe`."""
+    """Unreferenced and old enough. Safe to remove only if `safe` is true."""
     kept: tuple[Blob, ...]
     """Referenced by some stored log. Never collected, at any age."""
     recent: tuple[Blob, ...]
-    """Unreferenced but younger than `MIN_AGE` — a staged file, most likely."""
+    """Unreferenced but younger than the minimum age of the survey (`MIN_AGE` by
+    default). Most likely a staged file."""
     uploads: tuple[Path, ...]
-    """Handle-cache entries for digests nothing references — `ctx.uploads`' answer.
+    """Entries of the handle cache for digests that nothing references.
 
-    Asked of that seam rather than derived here, because the layout is its own:
-    a collector that rebuilt `<provider>/<digest>.json` from the outside would
-    report zero, silently and with nothing failing, the day the scheme changed.
+    `ctx.uploads` gives this answer. The survey does not derive it here, because
+    the layout belongs to that seam. A collector that rebuilt
+    `<provider>/<digest>.json` from the outside would report zero, silently and
+    with nothing failing, on the day that the scheme changed.
 
-    Swept under the same reference set as the blobs but **not for the same
-    reason** — losing an entry costs one upload and losing a blob costs the
-    conversation. That is why these are not aged: an unreferenced digest's cache
-    entry is dead the moment the blob is, and there is no staged-file window to
-    wait out because nothing uploads a file before a session mentions it."""
+    These entries are swept under the same reference set as the blobs, but **not
+    for the same reason**. Losing an entry costs one upload, and losing a blob
+    costs the conversation. That is why these entries are not aged. The cache
+    entry of an unreferenced digest is dead as soon as the blob is. There is no
+    staged-file window to wait out, because nothing uploads a file before a
+    session mentions it."""
     unreadable: tuple[str, ...]
     """Logs that would not read. Their references are unknown, so nothing is safe."""
     truncated: bool
-    """The listing hit `LISTING_LIMIT`, so "nothing references this" is unproven."""
+    """The listing hit its limit (`LISTING_LIMIT` by default) or could not be read,
+    so "nothing references this" is unproven."""
 
     @property
     def safe(self) -> bool:
         """Whether the fold saw enough of the store to remove anything.
 
-        **Fail closed, and the asymmetry is the reason.** A log this build cannot
-        parse may reference any digest in the store, and a listing that was cut
-        short hides whole sessions — in both cases "no session mentions this
-        blob" is a statement the fold is not entitled to make. Being wrong in the
-        cautious direction costs disk; being wrong in the other direction makes a
-        conversation permanently unopenable, because after P7-03 the local blob
-        is the last copy — a provider's is behind a handle that expires.
+        **The check fails closed, because the two errors do not cost the same.**
+        A log that this build cannot parse may reference any digest in the
+        store, and a listing that was cut short hides whole sessions. In both
+        cases the fold cannot state that "no session mentions this blob". An
+        error in the cautious direction costs disk space. An error in the other
+        direction makes a conversation permanently impossible to open. After
+        P7-03 the local blob is the last copy, because the copy of a provider
+        is behind a handle that expires.
         """
         return not self.unreadable and not self.truncated
 
@@ -438,12 +467,13 @@ class AttachmentSurvey:
 
 
 def referenced_digests(events: Iterable[SessionEvent]) -> set[str]:
-    """Every attachment id mentioned anywhere in these events' payloads.
+    """Every attachment id that is mentioned anywhere in the payloads of these events.
 
-    Over the *payloads* rather than over a set of event types, for `DIGEST_TEXT`'s
-    reason and one more: the surface layer means a stored log can carry an event
-    type this build does not know (A3), and an unknown event that referenced a
-    blob would otherwise read as no reference at all.
+    The search is over the *payloads* and not over a set of event types. One
+    reason is the reason that `DIGEST_TEXT` gives. The other is the surface
+    layer: a stored log can carry an event type that this build does not know
+    (A3), and an unknown event that referenced a blob would otherwise read as
+    no reference at all.
     """
     found: set[str] = set()
     for event in events:
@@ -454,10 +484,11 @@ def referenced_digests(events: Iterable[SessionEvent]) -> set[str]:
 def _walk(value: JsonValue, found: set[str]) -> None:
     """Collect digest-shaped strings from a lossless-JSON payload.
 
-    `Mapping` and `Sequence` rather than `dict` and `list`: the log freezes its
-    payloads into `MappingProxyType` and tuples, which are neither — the same trap
-    P4-05 hit reading a frozen argument tree, and here it would have found nothing
-    at all in a stored log while passing every test written against a live one.
+    The checks are against `Mapping` and `Sequence`, not `dict` and `list`. The
+    log freezes its payloads into `MappingProxyType` and tuples, which are
+    neither. P4-05 hit the same trap when it read a frozen argument tree. Here
+    the function would have found nothing at all in a stored log, and it would
+    have passed every test that was written against a live log.
     """
     if isinstance(value, str):
         found.update(DIGEST_TEXT.findall(value))
@@ -470,12 +501,13 @@ def _walk(value: JsonValue, found: set[str]) -> None:
 
 
 def _blobs(root: Path, now: float) -> list[Blob]:
-    """Every file in the store, as the digest it is named for.
+    """Every file in the store, as the digest that it is named for.
 
-    The name *is* the identity — `path_for` derives it and never looks it up — so
-    this is the inverse of that function rather than a scan for metadata. A file
-    whose name is not a digest is not one of ours and is left alone: someone's
-    note in the directory is not this command's to delete.
+    The name *is* the identity: `path_for` derives it and never looks it up. So
+    this function is the inverse of `path_for` and not a scan for metadata. A
+    file whose name is not a digest does not belong to this store and is left
+    alone. A note that someone put in the directory is not for this command to
+    delete.
     """
     if not root.is_dir():
         return []
@@ -505,24 +537,27 @@ def survey_attachments(
     limit: int = LISTING_LIMIT,
     now: float | None = None,
 ) -> AttachmentSurvey:
-    """Fold every stored session for the digests it still points at.
+    """Fold every stored session for the digests that it still points at.
 
-    Named rather than duck-typed, which keeps what the duck-typing was for — no
-    backend reaches this module at runtime, and a test may still hand it a stub —
-    while what the fold asks of each is checked. `SessionArchive` is the read-only
-    half of `SessionPersistence`, so a store satisfies it by being one.
+    The parameters have named types and are not duck-typed. That keeps what the
+    duck typing was for: no backend reaches this module at run time, and a test
+    may still pass a stub. It also means that what the fold asks of each
+    argument is checked. `SessionArchive` is the read-only half of
+    `SessionPersistence`, so a store satisfies it by being a
+    `SessionPersistence`.
 
-    **Unchained reads, one log at a time.** `read_own` rather than `read` is not
-    an optimization, it is the correct primitive for this question twice over: the
-    union of references over every stored log is the same set as the union over
-    every materialized chain, so following parents would re-read an ancestor once
-    per descendant to learn nothing new — and a chained read *fails* when an
-    ancestor is missing, which would turn one damaged log into an unreadable
-    subtree and refuse a collection that is perfectly safe to make.
+    **The reads are unchained, one log at a time.** The fold uses `read_own`
+    and not `read`. That is not an optimization. `read_own` is the correct
+    primitive for this question, for two reasons. First, the union of
+    references over every stored log is the same set as the union over every
+    materialized chain. To follow parents would read an ancestor again for each
+    descendant and learn nothing new. Second, a chained read *fails* when an
+    ancestor is missing. One damaged log would become an unreadable subtree,
+    and the fold would refuse a collection that is safe to make.
 
-    The cost is a listing plus one read per log, which is why nothing calls this
-    on a timer. It is no longer a *search* per log: `StoredSession` carries the
-    family, so each read is a path.
+    The cost is a listing plus one read for each log, which is why nothing
+    calls this function on a timer. It is no longer a *search* for each log:
+    `StoredSession` carries the family, so each read is a path.
     """
     moment = time() if now is None else now
     unreadable: list[str] = []
@@ -531,19 +566,21 @@ def survey_attachments(
         listed = list(persistence.stored(limit=limit))
     except Exception:
         log.warning("ph.seams.attachments: could not list stored sessions", exc_info=True)
-        # An empty listing and `truncated` — the same refusal a cut-short one
-        # gets, because "no sessions" and "could not ask" are indistinguishable
-        # from here and only one of them makes collection safe.
+        # The result is an empty listing with `truncated` set. That is the same
+        # refusal that a listing cut short gets. "No sessions" and "could not
+        # ask" cannot be told apart from here, and only one of them makes
+        # collection safe.
         return AttachmentSurvey(
             sessions=0, collect=(), kept=(), recent=(), uploads=(), unreadable=(), truncated=True
         )
     for entry in listed:
         try:
-            # `family` from the listing row, so a log is a path rather than a
-            # directory search. Without it every non-root session — a fork, a
-            # segment, a subagent's log, which in a busy store is most of them —
-            # re-scanned the store to find itself, and the cost grew with the
-            # size of the store rather than with the number of logs read.
+            # `family` comes from the listing row, so a log is a path and not a
+            # directory search. Without it, every session that is not a root (a
+            # fork, a segment, the log of a subagent) scanned the store again to
+            # find itself. In a busy store those are most of the sessions. The
+            # cost then grew with the size of the store and not with the number
+            # of logs read.
             _header, events = persistence.read_own(entry.session_id, family=entry.family or None)
         except Exception:
             log.warning(
@@ -577,12 +614,13 @@ def collect_attachments(
 ) -> tuple[int, int]:
     """Remove what the survey cleared, and report `(blobs, upload entries)`.
 
-    Refuses everything unless the survey is `safe`, rather than leaving that check
-    to each caller: this is the one function in the harness that deletes
-    conversation, and a guard a caller can forget is not a guard.
+    The function removes nothing unless the survey is `safe`. The check is here
+    and is not left to each caller, because this is the one function in the
+    harness that deletes conversation. A guard that a caller can forget is not
+    a guard.
 
     The cache half goes back through `ctx.uploads`, which pairs the unlink with
-    forgetting the entry — unlinking from here would leave that seam's memo
+    forgetting the entry. An unlink from here would leave the memo of that seam
     answering with a handle whose file this command had just removed.
     """
     if not survey.safe:

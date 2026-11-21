@@ -75,6 +75,7 @@ from ph.seams.schedule import (
     CANCELED,
     CREATED,
     FOLDED,
+    REBUILD_TYPES,
     TICK,
     Schedule,
     ScheduleKind,
@@ -663,6 +664,77 @@ def test_a_rebuild_finds_every_appointment_the_logs_hold(tmp_path: Path) -> None
 
     assert index.read() == {"due": Appointment("due", 9_000_000, made)}
     assert index.survey().trusted
+
+
+def _with_base(session_id: str, *, index: bool) -> Session:
+    """A session whose `profile/base` records its `schedule` row with `index`, and
+    which holds one schedule that is due later."""
+    session = Session(session_id)
+    log_event(
+        session,
+        "profile/base",
+        {
+            "name": "test",
+            "rows": [{"id": "schedule", "name": "schedule", "config": {"index": index}}],
+            "sources": [],
+            "phVersion": "0",
+        },
+    )
+    ScheduleService().create(session, Schedule(id="a", kind="once", spec="9000000", prompt="go"))
+    return session
+
+
+def test_a_rebuild_leaves_out_a_session_whose_profile_turns_the_index_off(
+    tmp_path: Path,
+) -> None:
+    """`index: false` means that a daemon never wakes the session. The setting is in
+    the `profile/base` of the log, so a rebuild reads it there, and an override that
+    turns the index off later counts too.
+
+    Sabotage: drop the `_indexed` check in `rebuild_index`, and both sessions are
+    written to the index and woken.
+    """
+    sessions = tmp_path / "sessions"
+    on = _with_base("on", index=True)
+    off = _with_base("off", index=False)
+    later = _with_base("later", index=True)
+    log_event(
+        later,
+        "profile/override",
+        {
+            "row": "schedule",
+            "entry": {"id": "schedule", "config": {"index": False}},
+            "source": "command",
+            "command": "test",
+        },
+    )
+    for session in (on, off, later):
+        write_stored_log(sessions, session.header, session.events)
+    index = _index(tmp_path)
+    index.record("off", next_at=9_000_000, now=0)
+
+    assert rebuild_index(index, logs_holding(sessions, REBUILD_TYPES, gate=CREATED), now=now_ms())
+
+    assert set(index.read()) == {"on"}
+
+
+def test_a_mount_with_the_index_off_removes_the_entry_of_its_session(tmp_path: Path) -> None:
+    """An entry written while the setting was on must not outlive it, or a daemon
+    keeps waking the session from it. With the index off, the mount writes no
+    appointment and removes the one that it finds.
+
+    Sabotage: return early in `reindex` when the index is off, and the old entry
+    stays.
+    """
+    index = _index(tmp_path)
+    index.record("s1", next_at=1_000, now=0)
+    service = ScheduleService(index=index, indexed=False)
+    session = Session("s1")
+
+    service.create(session, Schedule(id="a", kind="once", spec="9000000", prompt="go"))
+
+    assert index.read() == {}
+    assert [state.schedule.id for state in service.live(session)] == ["a"], "it still schedules"
 
 
 def test_a_rebuild_keeps_what_it_did_not_read_and_what_moved_while_it_read(

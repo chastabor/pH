@@ -63,17 +63,17 @@ ctx.jobs.start(work, *, scope=..., kind=..., label=...,
 ctx.jobs.get(job_id)      ctx.jobs.list(...)
 ctx.jobs.cancel(job_id)   ctx.jobs.forget(job_id)
 await ctx.jobs.settled()  ctx.jobs.in_flight              # wait out every body
-ctx.jobs.bind(...)                                        # attach to a task group
 ```
 
 A `Job` carries `id`, `kind`, `label`, `state`, `token`, `result`, `error` and
 `release`.
 
-`bind` is how the seam gets a task group to run in. **Without one bound, a job
-runs on `Context.detach()`**, with `at_dispose="leave"`: its owner stops it, and
-`drain` does not wait for it. That is what makes `ctx.jobs` usable in a one-shot
-`phern -p` run where there is no supervisor; running the body inline instead would
-block the admission path on the very work it was trying to detach.
+**A job runs on `Context.detach()`**, with `at_dispose="leave"`: its owner stops
+it, and `drain` does not wait for it. That is what makes `ctx.jobs` usable in a
+one-shot `phern -p` run where there is no supervisor; running the body inline
+instead would block the admission path on the very work it was trying to detach.
+(The seam once also took a host's task group through `bind`. No host ever bound
+one, and it was removed.)
 
 ## Slots: more work than should run at once
 

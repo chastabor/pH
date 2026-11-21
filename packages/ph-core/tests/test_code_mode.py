@@ -22,7 +22,7 @@ import pytest
 
 from ph.cordis import DEPLOYMENT, Context
 from ph.json import as_obj, as_seq
-from ph.keys import AGENTS, CODE_RUNTIME_STUB, SESSIONS, SYSTEM_PROMPT, TOOLS
+from ph.keys import AGENTS, CODE_RUNTIME, CODE_RUNTIME_STUB, SESSIONS, SYSTEM_PROMPT, TOOLS
 from ph.llm.types import ToolSchema
 from ph.persistence import interrupted_turn_closers
 from ph.seams.code_runtime import CodeBindingNamespace
@@ -945,3 +945,29 @@ async def test_revert_still_lists_an_orphaned_dispatch_as_not_undone() -> None:
     assert session.latest("tool/code-dispatch") is not None, "repair settled it"
     listed = "\n".join(_not_undone(session, "c1"))
     assert "publish(" in listed
+
+
+async def test_a_program_runs_as_the_row_that_registered_the_runtime(mount: MountProfile) -> None:
+    """P6-29: the runtime is row code that the seam invokes later, so it runs as
+    the row that registered it.
+
+    The transport used to take the provider out of the seam and call it
+    directly. The provider then ran as the row of the transport
+    (`tools-code-mode`), and anything that it registered would have joined the
+    lifetime of the wrong row.
+
+    Sabotage: call `runtime.require().run(...)` in `run_code` and the program
+    runs as `plugin(tools-code-mode)`.
+    """
+    ctx = await _code_ctx(mount)
+    ran_as: list[Context] = []
+
+    async def program(ns: Mapping[str, Any], emit: Callable[[str], None]) -> str:
+        ran_as.append(ctx.owner_for(None))
+        return "done"
+
+    result, _session = await _run(ctx, "who-runs", program)
+
+    assert not result.is_error
+    registered_by = not_none(ctx.require(CODE_RUNTIME).provider_by)
+    assert ran_as == [registered_by.owner]

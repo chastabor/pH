@@ -1,24 +1,23 @@
-"""`ctx.credentials` — references travel, values do not (I-3).
+"""`ctx.credentials`: references travel, values do not (I-3).
 
 The rule: **nothing above the adapter edge ever holds a secret value.** A
-consumer asks for a `CredentialRef`, which is a name; only the adapter about to
-build an HTTP request resolves it, and only into a local variable.
+consumer asks for a `CredentialRef`, which is a name. Only the adapter that is
+about to build an HTTP request resolves it, and only into a local variable.
 
-That is what makes the guarantee checkable rather than aspirational — a planted
-`FOO_API_KEY` must not appear in any event, any fd-3 frame, or any child's
-environment, and the test asserts exactly that over a whole run. A design that
-passed values around would need every future plugin author to be careful; this
-one needs the adapter edge to be.
+That makes the guarantee one that can be checked, and not only intended. A
+planted `FOO_API_KEY` must not appear in any event, any fd-3 frame, or the
+environment of any child, and the test asserts exactly that over a whole run.
+A design that passed values around would need every future plugin author to be
+careful. This design needs only the adapter edge to be careful.
 
 `__repr__` is overridden on the resolved value for the same reason: a secret
-that reaches a log via an exception traceback has still leaked.
+that reaches a log through an exception traceback has still leaked.
 
 @module ph.seams.credentials
 """
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -38,8 +37,6 @@ __all__ = [
     "missing_credential",
     "waiting_for",
 ]
-
-log = logging.getLogger("ph.seams.credentials")
 
 
 class CredentialRef(WireModel):
@@ -86,16 +83,18 @@ class CredentialService:
         self._overrides[name] = value
 
     def provided(self) -> tuple[str, ...]:
-        """The **names** this process was handed, in the order they arrived.
+        """The **names** that this process was handed, in the order in which
+        they arrived.
 
-        Names and never values — this class has one accessor that reveals a
-        secret and it is `resolve`, at the adapter edge.
+        It returns names and never values. This class has one accessor that
+        reveals a secret, and that accessor is `resolve`, at the adapter edge.
 
-        For the picker, which lists what a deployment *names* in its profile: a
-        credential typed into the login screen's free-text entry is named
-        nowhere, so without this it vanished from the list the moment it was
-        stored. The environment is deliberately not enumerated with it — every
-        variable a shell exports is not a list of pH's credentials.
+        It is for the picker, which lists what a deployment *names* in its
+        profile. A credential that is typed into the free-text entry of the
+        login screen is named nowhere. Without this method it vanished from the
+        list at the moment that somebody set it. The environment is
+        deliberately not enumerated with it, because the variables that a shell
+        exports are not a list of the credentials of pH.
         """
         return tuple(self._overrides)
 
@@ -107,29 +106,22 @@ class CredentialService:
         value = self._overrides.get(ref.name) or os.environ.get(ref.name)
         return None if value is None else SecretValue(ref=ref, _value=value)
 
-    def require(self, ref: CredentialRef) -> SecretValue:
-        resolved = self.resolve(ref)
-        if resolved is None:
-            raise KeyError(
-                f'credential "{ref.name}" is not available; set the environment '
-                "variable or provide it through ctx.credentials"
-            )
-        return resolved
-
 
 def missing_credential(ctx: Context, provider: str, model: str) -> str | None:
-    """The credential the route `provider`/`model` names and `ctx` cannot supply.
+    """The credential that the route `provider`/`model` names and that `ctx`
+    cannot supply.
 
-    `None` when the route needs none, when it can be supplied, or when there is no
-    adapter for it to ask — `resolve_model` then names no credential, and a route with
-    no adapter fails for that reason, loudly; calling it a missing key would send a
-    person looking for the wrong thing.
+    The result is `None` when the route needs no credential, when `ctx` can
+    supply it, or when there is no adapter to ask. In the last case
+    `resolve_model` names no credential. A route with no adapter fails for that
+    reason, and loudly. To call it a missing key would send a user to look for
+    the wrong thing.
 
-    **Names only** (I-3): the adapter says which name it resolves at its edge
-    (`ResolvedModel.credential`), and `has` answers whether a value exists without
-    handing one over. With no credential seam mounted, nothing can be supplied, so
-    the name is missing. The question behind the resume check (T5): can this
-    session run here, now?
+    **Names only** (I-3). The adapter says which name it resolves at its edge
+    (`ResolvedModel.credential`), and `has` answers whether a value exists
+    without handing one over. With no credential seam mounted, nothing can be
+    supplied, so the name is missing. This is the question behind the resume
+    check (T5): can this session run here, now?
     """
     llm = ctx.get(LLM)
     if llm is None:
@@ -146,13 +138,14 @@ def missing_credential(ctx: Context, provider: str, model: str) -> str | None:
 async def hold_for_credential(
     ctx: Context, session: Session, holder: str, provider: str, model: str
 ) -> str | None:
-    """Hold `holder` on the credential its route names if `ctx` cannot supply it, or
-    release it if it can — the log made to say which (T5). Returns the name it waits
-    for, or `None`.
+    """Hold `holder` for the credential that its route names when `ctx` cannot
+    supply it, or release `holder` when `ctx` can. The log is made to say which
+    (T5). Returns the name that `holder` waits for, or `None`.
 
-    The one check behind every resume: the daemon's for a root's own route, the
-    subagent seam's for each child it would readmit. Logs nothing: the daemon says
-    what waits, once per root, when the root comes back.
+    This is the one check behind every resume. The daemon makes it for the
+    route of a root itself, and the subagent seam makes it for each child that
+    it would readmit. The function emits no log message: the daemon says what
+    waits, one time for each root, when the root comes back.
     """
     name = missing_credential(ctx, provider, model)
     await _record_wait(ctx, session, holder, name)
@@ -160,16 +153,17 @@ async def hold_for_credential(
 
 
 async def _record_wait(ctx: Context, session: Session, holder: str, name: str | None) -> None:
-    """Make `session`'s log say what `holder` waits for now: `name`, or nothing (T5).
+    """Make the log of `session` say what `holder` waits for now: `name`, or
+    nothing (T5).
 
-    A hold for any other name is settled — its name arrived, or the route stopped
-    naming it — and a hold for `name` is opened unless one is open already, so
-    asking again with nothing changed appends nothing. That is what lets every open
-    of a session ask, a second restart before the key arrives included, without the
-    log growing a record per restart.
+    A hold for any other name is settled, because its name arrived or the route
+    stopped naming it. A hold for `name` is opened unless one is open already,
+    so asking again with nothing changed appends nothing. Every open of a
+    session can therefore ask, including a second restart before the key
+    arrives, and the log does not grow by one record for each restart.
 
-    Through `ctx.intents`, as `CREDENTIAL_WAIT`'s records, never a direct append;
-    names only (I-3).
+    The records go through `ctx.intents`, as records of `CREDENTIAL_WAIT`, and
+    never through a direct append. They hold names only (I-3).
     """
     journal = intents_of(ctx)
     for claim in journal.held(session, CREDENTIAL_WAIT):
@@ -181,11 +175,12 @@ async def _record_wait(ctx: Context, session: Session, holder: str, name: str | 
 
 
 def waiting_for(ctx: Context, session: Session) -> Mapping[str, str]:
-    """Who in `session`'s log waits for which credential: holder → name.
+    """Who in the log of `session` waits for which credential, as holder → name.
 
-    One name per holder, since `_record_wait` settles a holder's other holds before
-    it opens one. Read off the journal's cached index rather than refolded, so the
-    doctor, a root's status and its startup summary cost what the log grew since.
+    There is one name for each holder, because `_record_wait` settles the other
+    holds of a holder before it opens one. The answer is read from the cached
+    index of the journal and is not folded again. So the doctor, the status of
+    a root and its startup summary cost only what the log grew since.
     """
     return dict(
         hold_of(intent.opened) for intent in intents_of(ctx).pending(session, CREDENTIAL_WAIT)

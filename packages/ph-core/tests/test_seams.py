@@ -18,7 +18,6 @@ providers were handed a narrowed copy, so a `system-prompt/assemble` listener an
 
 from __future__ import annotations
 
-import contextlib
 import os
 import sys
 from functools import partial
@@ -29,6 +28,7 @@ from typing import Any, ClassVar, Literal, cast
 import anyio
 import pytest
 
+from ph.cancel import CancelToken
 from ph.cordis import DEPLOYMENT, Context, InactiveScopeError
 from ph.json import JsonValue, as_str
 from ph.seams._names import SLUG_CHARACTERS
@@ -781,7 +781,7 @@ async def test_a_credential_reference_carries_no_value() -> None:
     assert "value" not in ref.to_wire()
 
     service.provide_value("PH_TEST_KEY", "sk-secret")
-    secret = service.require(ref)
+    secret = not_none(service.resolve(ref))
     # Even a resolved secret refuses to print itself: a value that reaches a log
     # through a traceback has still leaked.
     assert "sk-secret" not in repr(secret)
@@ -789,27 +789,22 @@ async def test_a_credential_reference_carries_no_value() -> None:
     assert secret.reveal() == "sk-secret"
 
 
-async def test_a_missing_credential_raises_rather_than_returning_empty() -> None:
+async def test_a_missing_credential_is_none_rather_than_empty() -> None:
     service = CredentialService(ctx=Context())
-    with pytest.raises(KeyError, match="not available"):
-        service.require(service.reference("PH_TEST_ABSENT_KEY"))
+    assert service.resolve(service.reference("PH_TEST_ABSENT_KEY")) is None
 
 
 # ----------------------------------------------------------------- compaction --
 
 
-async def test_an_absent_engine_is_a_no_op_automatically_and_an_error_on_request() -> None:
-    """The seam's one asymmetry, and it is deliberate.
-
-    A profile that layered no compaction row has *chosen* not to compact, so the
-    policy hooks must not raise at it every step. But a person who typed
-    `/compact` asked for something this deployment cannot do, and answering them
-    with silence would read as "there was nothing to compact".
+async def test_an_absent_engine_is_an_error_on_request() -> None:
+    """A profile that layered no compaction row has *chosen* not to compact. But a
+    person who typed `/compact` asked for something this deployment cannot do, and
+    answering them with silence would read as "there was nothing to compact".
     """
     seam = CompactionSeam(ctx=Context())
     session = Session("no-engine")
 
-    assert await seam.compact_if_needed(_agent(session), "pressure") is None
     with pytest.raises(CompactionError) as caught:
         await seam.compact_now(_agent(session))
     assert caught.value.code == "unavailable"
@@ -1351,10 +1346,9 @@ async def test_settled_waits_for_every_body_even_one_whose_owner_has_gone() -> N
 
 
 async def test_start_does_not_wait_for_the_body() -> None:
-    """With no task group bound, a job detaches rather than running inline.
+    """A job detaches rather than running inline.
 
-    The inline fallback was a placeholder — `bind()` never had a caller, so it was
-    the only branch that ever ran — and it made `start()` block for exactly as
+    The inline fallback was a placeholder. It made `start()` block for exactly as
     long as the work, which is what a caller uses a job to avoid.
     """
     root = Context()
@@ -1506,34 +1500,33 @@ async def test_a_job_stopped_from_outside_while_it_waits_gives_its_places_back()
     """A job waiting for its second queue, stopped by a cancel that is not its own,
     gives back the place it already took in the first.
 
-    `_take` released what it had taken only when its own wait scope was canceled; a
-    cancel from outside it — the task group a bound service runs its bodies in going
-    away — kept the narrower queue's token taken, and a job still waiting in that
-    queue waited for good.
+    `_take` released what it had taken only when its own wait scope was canceled. A
+    cancel from outside it, such as the cancel of the task that runs the body when
+    the event loop shuts down, kept the narrower queue's token taken, and a job still
+    waiting in that queue waited for good. The wait is driven here in a task group
+    of the test's own, so the test can make that outside cancel.
 
-    Sabotage: release only on the wait's own cancel again, and the last job never
-    runs.
+    Sabotage: release only on the wait's own cancel again, and the place in the
+    narrower queue stays taken.
     """
-    root = Context()
-    service = JobService(ctx=root, caps={"test": 1})
+    service = JobService(ctx=Context(), caps={"test": 1})
     gate = anyio.Event()
 
     async def hold(_job: Job) -> None:
         await gate.wait()
 
-    async with anyio.create_task_group() as outer:
-        async with anyio.create_task_group() as first:
-            service.bind(first)
-            await service.start(kind="test", label="holds the cap", run=hold)
-            await service.start(kind="test", label="holds k", run=hold, slot=("k", 1))
-            await anyio.sleep(0.05)
-            service.bind(outer)
-            last = await service.start(
-                kind="test", label="after", run=lambda _job: "ran", slot=("k", 1)
-            )
-            await anyio.sleep(0.05)
-            first.cancel_scope.cancel()
-        await settled(lambda: last.state == "done", "the job behind the stopped one to run")
+    await service.start(kind="test", label="holds the cap", run=hold)
+    narrow, cap = service._waits("test", ("k", 1))
+    job = Job(id="waiting", kind="test", label="waits for the cap", token=CancelToken())
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(service._take, job, (narrow, cap), None)
+        await settled(lambda: narrow.limiter.available_tokens == 0, "the narrow place to be taken")
+        group.cancel_scope.cancel()
+
+    assert narrow.limiter.available_tokens == 1, "the outside stop kept the narrow place"
+    gate.set()
+    await service.settled()
 
 
 async def test_a_job_canceled_before_it_waits_is_not_announced_as_queued() -> None:
@@ -1583,18 +1576,12 @@ async def test_a_job_stopped_by_a_base_exception_is_not_still_running() -> None:
     def interrupted(_job: object) -> None:
         raise _Interrupted
 
-    job = None
-    # A task group of this test's own, so the escape is caught here rather than
-    # taking the suite down — the body genuinely re-raises, which is the other
-    # half of the contract: the `finally` records, it does not swallow.
-    with contextlib.suppress(BaseExceptionGroup):
-        async with anyio.create_task_group() as scope:
-            service.bind(scope)
-            # No wait: `async with` does not return until the body task is
-            # done, and the body settles before it re-raises.
-            job = await service.start(kind="test", label="interrupted", run=interrupted)
+    # The body runs detached, and it raises the exception again after it settles:
+    # the `finally` records, it does not swallow. The detached task keeps the
+    # exception and logs it.
+    job = await service.start(kind="test", label="interrupted", run=interrupted)
+    await service.settled()
 
-    assert job is not None
     assert job.state == "canceled", f"a job stopped by a base exception reported {job.state}"
     assert settled_states == ["canceled"], settled_states
 
@@ -1869,34 +1856,6 @@ def _screen(screen_id: str, **overrides: Any) -> ScreenDefinition:  # noqa: ANN4
     )
 
 
-async def test_a_screen_a_presenter_refused_is_not_left_claimed() -> None:
-    """A registration that fails ends what it made (Holdings rule 2).
-
-    The screen was claimed in the table, then drawn on each front end; a presenter
-    that raised left the claim with no disposer handed back, so the id stayed taken
-    until the row unmounted and a second try was refused as a duplicate.
-
-    Sabotage: drop the `except BaseException` from `register`, and the second try is
-    refused.
-    """
-    root = Context()
-    registry = TuiScreenRegistry(ctx=root)
-    calls: list[str] = []
-
-    def present(screen: ScreenDefinition) -> None:
-        calls.append(screen.id)
-        if len(calls) == 1:
-            raise RuntimeError("the front end fell over")
-
-    registry.present_with(present)
-    screen = ScreenDefinition(id="stats", label="Stats", build=lambda _ctx: None)
-    with pytest.raises(RuntimeError, match="fell over"):
-        registry.register(screen)
-    assert registry.get("stats") is None, "a refused screen is still claimed"
-    registry.register(screen)
-    assert registry.get("stats") is screen
-
-
 async def test_screens_list_in_slot_order_then_id() -> None:
     """dsh orders slot entries by `order`; the id breaks ties so the list is
     stable rather than dependent on which row mounted first."""
@@ -1982,84 +1941,28 @@ def test_a_skill_name_and_a_screen_id_are_one_rule_at_two_bounds() -> None:
     assert SLUG_CHARACTERS in screen
 
 
-async def test_a_front_end_presents_screens_registered_before_and_after_it() -> None:
-    """Attachment order must not decide what gets drawn: rows mount before a
-    terminal exists in a resume, and after it when one is loaded late."""
-    root = Context()
-    registry = TuiScreenRegistry(ctx=root)
-    drawn: list[str] = []
-    registry.register(_screen("early"))
+async def test_unloading_a_row_takes_its_screen_off_the_list() -> None:
+    """The property ported from dsh: *"the registration rides the slot service's
+    effect wrapper, so plugin unload removes the tab."*
 
-    registry.present_with(lambda screen: drawn.append(screen.id))
-    registry.register(_screen("late"))
+    A front end learns of the change from `screens/change`, so the event fires
+    again on the unload, and the list that a listener reads then no longer holds
+    the screen.
 
-    assert drawn == ["early", "late"]
-
-
-async def test_unloading_a_row_undoes_what_the_front_end_drew_for_it() -> None:
-    """The gate, and the property ported from dsh: *"the registration rides the
-    slot service's effect wrapper, so plugin unload removes the tab."*"""
-    root = Context()
-    registry = TuiScreenRegistry(ctx=root)
-    undrawn: list[str] = []
-    registry.present_with(lambda screen: lambda: undrawn.append(screen.id))
-
-    row = root.scope("a-row")
-    registry.register(_screen("audit"), scope=row)
-    assert registry.get("audit") is not None
-
-    await row.dispose()
-
-    assert registry.get("audit") is None, "the screen outlived the row that registered it"
-    assert undrawn == ["audit"], "the verb and the key outlived the row that registered them"
-
-
-async def test_releasing_one_registration_takes_its_screen_off_the_front_end() -> None:
-    """K8 — the disposer removed the table entry and left the drawing behind.
-
-    What each front end drew is owned by the *row's* scope, so it came down when
-    the row unloaded and not when the individual registration was released. The
-    two tests around this one cover the lifetimes that worked: the row unloading,
-    and the front end detaching. This is the third — a row retiring one of
-    several screens, or re-registering the same id — where the entry left the
-    table and the screen stayed on screen with nothing pointing at it.
+    Sabotage: drop `then=changed` from `register`, and the unload is never
+    announced.
     """
     root = Context()
     registry = TuiScreenRegistry(ctx=root)
-    undrawn: list[str] = []
-    registry.present_with(lambda screen: lambda: undrawn.append(screen.id))
-
-    row = root.scope("a-row")
-    release = registry.register(_screen("audit"), scope=row)
-    registry.register(_screen("kept"), scope=row)
-
-    release()
-
-    assert registry.get("audit") is None
-    assert undrawn == ["audit"], "the released screen is still drawn"
-    # The row's own teardown still works and does not run the undo twice.
-    await row.dispose()
-    assert undrawn == ["audit", "kept"]
-
-
-async def test_a_detaching_front_end_undoes_its_own_presentations() -> None:
-    """The other lifetime. A terminal can close while the harness runs on, and
-    a command left pointing at a dead app is worse than no command."""
-    root = Context()
-    registry = TuiScreenRegistry(ctx=root)
-    undrawn: list[str] = []
-    detach = registry.present_with(lambda screen: lambda: undrawn.append(screen.id))
+    announced: list[list[str]] = []
+    root.on("screens/change", lambda: announced.append([one.id for one in registry.list()]))
     row = root.scope("a-row")
     registry.register(_screen("audit"), scope=row)
 
-    detach()
-    assert undrawn == ["audit"]
-    assert registry.get("audit") is not None, "detaching a front end must not unregister rows"
-
-    # The same teardown belongs to both lifetimes; whichever runs second does
-    # nothing, which is why `add_disposer` hands back an idempotent release.
     await row.dispose()
-    assert undrawn == ["audit"]
+
+    assert registry.list() == [], "the screen outlived the row that registered it"
+    assert announced == [["audit"], []]
 
 
 def test_settled_statuses_are_drawn_from_the_declared_vocabulary() -> None:

@@ -1,36 +1,46 @@
-"""Which roots a host holds busy, and why — the live-roots index (P13-01).
+"""Which roots a host holds busy, and why: the live-roots index (P13-01).
 
-**A root outlives its process; the thing that would resume it does not.** The log
-keeps everything a restart needs — an open turn, a goal nobody settled, a child still
-working, a prompt nobody claimed — and a fresh daemon mounts none of it, because
-`Supervisor.rehydrate` reads only the schedule index and `NON_GUARANTEES` says so.
-The work survives and is never picked up, which fails in the shape the schedule
-index was built against: **silence**.
+**A root outlives its process, and the thing that would resume it does not.**
+The log keeps everything that a restart needs: an open turn, a goal that nobody
+settled, a child that is still working, a prompt that nobody claimed. A fresh
+daemon mounts none of it on its own. `Supervisor.rehydrate` reads only the
+schedule index, and `NON_GUARANTEES` says that a daemon resumes owed roots only
+when it is asked. Without a record of what is owed, the work survives and
+nothing picks it up. That failure has the form that the schedule index was built
+against: **silence**.
 
-**The shape is the schedule index's, for its reasons.** "Mount every stored session
-at boot" reads hundreds of logs to find the few that matter, mounts a profile, a
-workspace and possibly a kernel for each, and claims every lease on the machine. So
-this is an index: the host knows the moment a root is mounted, a turn starts or
-ends, a goal opens or settles, a child is admitted or ends, a prompt lands in an
-idle inbox, and a root is released — and it records, per root, which of those
-*holds* still stand. A daemon, or the thin client that manages one, reads one small
-file and resumes only what is owed.
+**The index has the form of the schedule index, for the same reasons.** "Mount
+every stored session at boot" reads hundreds of logs to find the few that
+matter. It mounts a profile, a workspace and possibly a kernel for each, and it
+claims every lease on the machine. So this is an index. The host knows the
+moment at which a root is mounted, a turn starts or ends, a goal opens or
+settles, a child is admitted or ends, a prompt lands in an idle inbox, and a
+root is released. It records, for each root, which of those *holds* still stand.
+A daemon reads one small file and resumes only what is owed. The thin client
+that manages a daemon asks the daemon for the same list (`sessions/owed`).
 
-**It is a cache, and the logs stay authoritative (I-6).** Every hold here is derived
-from records a log still holds, so a missing, stale or corrupt index costs a root
-left for the next pass and never a wrong one: `holds_of` is the fold a rebuild runs
-over a stored log, and `rebuild_live_index` writes what every stored root's log
-says. A file that cannot vouch for itself — missing, of another version, or
-rewritten by a writer that found it so — reads as incomplete, and a reader that
-needs certainty rebuilds first (`LiveSurvey.trusted`).
+**The index is a cache, and the logs stay authoritative (I-6).** Every hold here
+is derived from records that a log still holds. A missing, stale or corrupt
+index therefore costs a root that is left for the next pass, and never a wrong
+one. `holds_of` is the fold that a rebuild runs over a stored log, and
+`rebuild_live_index` writes what the log of every stored root says. A file that
+cannot vouch for itself reads as incomplete. That is a file that is missing or
+of another version, or a file that a writer wrote again after it found the file
+so. A reader that needs certainty rebuilds first (`LiveSurvey.complete`).
 
-**What a hold means.** `turn`: the root's agent is mid-turn, or its log ends inside
-one. `inbox`: a prompt is pending that no turn has claimed. `goal`: an `/autonomous`
-goal is open. `children`: a sub-agent of this root is still live in its own log.
-`failed` rides beside the holds: a root whose ladder is spent still owes its work, and
-a resumer must know not to loop on it. `damaged` does too: a log beneath the root that
-will not read, so what it owes is unknown (P13-09). A root with no hold and nothing
-damaged is not in the file (`LiveEntry.listed`).
+**What a hold means.**
+
+- `turn`: the agent of the root is in the middle of a turn, or its log ends
+  inside one.
+- `inbox`: a prompt is pending that no turn has claimed.
+- `goal`: an `/autonomous` goal is open.
+- `children`: a sub-agent of this root is still live in its own log.
+
+Two more facts are recorded beside the holds. `failed`: a root whose ladder is
+spent still owes its work, and a resumer must know not to loop on it. `damaged`:
+a log beneath the root cannot be read, so what that log owes is unknown
+(P13-09). A root with no hold and nothing damaged is not in the file
+(`LiveEntry.listed`).
 
 @module ph.seams.live_index
 """
@@ -75,46 +85,49 @@ __all__ = [
 log = logging.getLogger("ph.seams.live_index")
 
 Hold: TypeAlias = Literal["turn", "goal", "children", "inbox"]
-"""Why a root still owes work. Closed, so a fifth reason is a type error here rather
-than a word a resumer does not know."""
+"""Why a root still owes work. The set is closed, so a fifth reason is a type
+error here, and not a word that a resumer does not know."""
 
 HOLDS: tuple[Hold, ...] = get_args(Hold)
-"""Every hold, in the one order an entry lists them (`ordered_holds`)."""
+"""Every hold, in the one order in which an entry lists them (`ordered_holds`)."""
 
 _HOLD_NAMES: Mapping[str, Hold] = literal_lookup(Hold)
-"""The read side: a hold named in the file that this build does not know is dropped
-on read rather than carried as a string nothing branches on."""
+"""The lookup for the read side. A hold that the file names and that this build
+does not know is dropped on read. It is not carried as a string that nothing
+branches on."""
 
 HOLD_TYPES: frozenset[str] = frozenset(
     {"turn/start", "turn/end", GOAL_SET, GOAL_SETTLED, "agent/inbox/spliced"}
 )
-"""The records a root's holds are folded from — all a rebuild reads of a root's log,
-so it validates five types and not every streamed chunk."""
+"""The records that the holds of a root are folded from. From the log of a root,
+a rebuild reads only these five types and the types of the ladder
+(`Ladder.types`). So it validates those types and not every streamed chunk."""
 
 
 @dataclass(frozen=True, slots=True)
 class Ladder:
-    """A host's retry ladder, as a rebuild reads it: the record types it is folded
-    from, and the fold over a root's own events that says whether it is spent
-    (`LiveEntry.failed`).
+    """The retry ladder of a host, as a rebuild reads it. It holds the record
+    types that the ladder is folded from, and the fold over the own events of a
+    root that says whether the ladder is spent (`LiveEntry.failed`).
 
-    The host's and not this seam's, because the ladder is the host's: which records
-    say a root was retried and gave up is `ph_app.daemon.recovery`'s to declare. A
-    rebuild must be handed one — a rebuild that did not ask would write every root
-    back as not failed, which is one more attempt per restart from a resumer that
-    trusts the file."""
+    The ladder belongs to the host and not to this seam. Which records say that
+    a root was retried and gave up is for `ph_app.daemon.recovery` to declare. A
+    rebuild must be given a ladder. A rebuild that did not ask would write every
+    root back as not failed. A resumer that trusts the file would then make one
+    more attempt at each restart."""
 
     types: frozenset[str]
     spent: Callable[[Sequence[SessionEvent]], bool]
 
 
 INDEX_NAME = "live.json"
-"""One file per `$PH_HOME`, beside `schedules.json`: read whole by whoever resumes,
-written only when a root's holds move."""
+"""One file for each `$PH_HOME`, beside `schedules.json`. Whoever resumes reads
+it whole, and it is written only when the holds of a root move."""
 
 
 def ordered_holds(found: Iterable[Hold]) -> tuple[Hold, ...]:
-    """`found` in `HOLDS` order, so the host and a rebuild that agree write one entry."""
+    """`found` in the order of `HOLDS`. The host and a rebuild that agree
+    therefore write the same entry."""
     held = set(found)
     return tuple(hold for hold in HOLDS if hold in held)
 
@@ -126,29 +139,33 @@ class LiveEntry:
     session_id: str
     holds: tuple[Hold, ...]
     updated: int = field(compare=False)
-    """When this entry was written, epoch ms — so, since holds that have not moved
-    are not written again, when the root has owed what it owes now. **Not compared**:
-    two entries that differ only in when they were said are the same claim, which is
-    what lets a host re-state one without a write."""
+    """When this entry was written, in epoch ms. Holds that have not moved are
+    not written again, so this is also the time since which the root has owed
+    what it owes now. **The field is not compared.** Two entries that differ
+    only in when they were written are the same claim. A host can therefore
+    state an entry again without a write."""
     family: str = ""
-    """Where the log is filed, so a resumer opens it by path rather than by search."""
+    """Where the log is filed, so that a resumer opens it by path and not by
+    search."""
     cwd: str = ""
     profile: str = ""
-    """The named profile the root ran on, or `""` when the host did not say — a
-    rebuild from a log does not."""
+    """The named profile that the root ran on, or `""` when the host did not say.
+    A rebuild from a log does not say."""
     failed: bool = False
-    """The root's ladder was spent and nothing has succeeded since. It still owes
-    its work; a resumer that retried it would be one more attempt per restart."""
+    """The ladder of the root was spent, and nothing has succeeded since. The
+    root still owes its work. A resumer that retried it would make one more
+    attempt at each restart."""
     damaged: tuple[str, ...] = ()
-    """Logs beneath this root that will not read, by session id (P13-09). What they
-    owe is unknown — a child mid-turn in a file nobody can open is counted as not
-    live — so a root is listed for its damage alone, with no holds, and nothing a
-    resume does moves it: `phern doctor sessions --repair` does."""
+    """The logs beneath this root that cannot be read, by session id (P13-09).
+    What they owe is unknown: a child in the middle of a turn, in a file that
+    nobody can open, is counted as not live. So a root is listed for its damage
+    alone, with no holds. Nothing that a resume does changes that entry.
+    `phern doctor sessions --repair` does."""
 
     @property
     def listed(self) -> bool:
-        """Whether this root belongs in the file: it holds work, or a log beneath it
-        will not read. Both writers ask this, so they cannot disagree."""
+        """Whether this root belongs in the file: it holds work, or a log beneath
+        it cannot be read. Both writers ask this, so they cannot disagree."""
         return bool(self.holds or self.damaged)
 
     def to_json(self) -> dict[str, Any]:
@@ -189,11 +206,13 @@ class LiveSurvey:
 
 @dataclass(slots=True)
 class LiveIndex(JsonIndex[LiveEntry]):
-    """The index as a value, so a caller states where it lives and nothing guesses.
+    """The index as a value, so that a caller states where it lives and nothing
+    guesses.
 
-    The file's reading, locking, rewriting and rebuild merge are `JsonIndex`'s, shared
-    with the schedule index, so a missing, corrupt or older file reads as empty and
-    incomplete here exactly as there.
+    `JsonIndex` does the reading, the locking, the rewriting and the rebuild
+    merge of the file, and the schedule index shares it. A missing, corrupt or
+    older file therefore reads as empty and incomplete here exactly as it does
+    there.
     """
 
     NAME: ClassVar[str] = INDEX_NAME
@@ -211,14 +230,10 @@ class LiveIndex(JsonIndex[LiveEntry]):
     def _encode(self, entry: LiveEntry) -> dict[str, Any]:
         return entry.to_json()
 
-    def record(self, session_id: str, entry: LiveEntry | None) -> bool:
-        """Set or clear one root's entry. Blocking — see `LiveIndexWriter`."""
-        return self.record_all({session_id: entry})
-
     def record_all(self, changes: Mapping[str, LiveEntry | None]) -> bool:
-        """Set or clear several roots' entries — `None` clears: one read, and at most
-        one rewrite. Whether the file now holds `changes`. An entry that differs only
-        in `updated` is no change."""
+        """Set or clear the entries of several roots, where `None` clears: one
+        read, and at most one rewrite. Returns whether the file now holds
+        `changes`. An entry that differs only in `updated` is no change."""
 
         def apply(found: dict[str, LiveEntry]) -> None:
             for session_id, entry in changes.items():
@@ -232,8 +247,9 @@ class LiveIndex(JsonIndex[LiveEntry]):
     def replace(
         self, read: Mapping[str, LiveEntry | None], *, since: LiveSurvey, vouch: bool = True
     ) -> bool:
-        """Write a rebuild's answer, by `JsonIndex._merge`'s rule, marking the file
-        complete when `vouch`. Whether it was written."""
+        """Write the answer of a rebuild by the rule of `JsonIndex._merge`, and
+        mark the file complete when `vouch` is set. Returns whether it was
+        written."""
         return self._merge(read, before=since.entries, vouch=vouch)
 
 
@@ -243,47 +259,50 @@ def _moves(found: Mapping[str, LiveEntry], changes: Mapping[str, LiveEntry | Non
 
 
 _UNSEEN = object()
-"""What `_written` answers for a root this writer has never written — equal to no
-entry and to no `None`."""
+"""The default that the lookup in `_written` returns for a root that this writer
+has never written. It equals no entry, and it does not equal `None`."""
 
 
 @dataclass(slots=True)
 class LiveIndexWriter:
-    """`LiveIndex.record` without the wait on the event loop (K10).
+    """`LiveIndex.record_all` without the wait on the event loop (K10).
 
-    Every host-side caller is on the loop at a transition, and `record` is a file
-    lock, a read and an atomic rewrite. So `note` only notes the change, and a writer
-    hands everything noted so far to `record_all` in one worker-thread hop.
+    Every caller in the host is on the event loop at a transition, and
+    `record_all` is a file lock, a read and an atomic rewrite. So `note` only notes the
+    change, and a writer hands everything noted so far to `record_all` in one
+    hop to a worker thread.
 
-    **Latest wins, per root, and a repeat costs nothing.** The writer remembers what
-    it last wrote for each root, so a host re-stating an unchanged entry — which it
-    does at every flush that wrote something — is dropped in `note` without a thread
-    hop or a read.
+    **The latest change wins, for each root, and a repeat costs nothing.** The
+    writer remembers what it last wrote for each root. A host states an
+    unchanged entry again at every flush that wrote something. `note` drops such
+    an entry without a thread hop or a read.
 
-    **`settle` writes; it does not wait for the background to.** It is for a host
-    shutting down, which may be unwinding with `tasks` already cancelled — one of
-    its tasks failed, or it was cancelled with nothing to turn that into a stop. The
-    drain its last `note` starts is spawned into that group, where it either never
-    runs or is cut off before its write. So `settle` drains in the caller's own task,
-    which a shutdown shields, once any batch in flight has landed; and a batch a
-    cancel cut off goes back to be written by whoever writes next.
+    **`settle` writes, and does not wait for the background drain to write.** It
+    is for a host that shuts down. Such a host can be unwinding with `tasks`
+    already cancelled: one of its tasks failed, or it was cancelled with nothing
+    to turn that into a stop. The drain that its last `note` starts is spawned
+    into that group. There the drain either never runs or is cut off before its
+    write. So `settle` drains in the task of the caller, which a shutdown
+    shields, after any batch in flight has landed. A batch that a cancel cut off
+    goes back, and whoever writes next writes it.
     """
 
     index: LiveIndex
     tasks: TaskGroup
     _pending: dict[str, LiveEntry | None] = field(default_factory=dict)
     _written: dict[str, LiveEntry | None] = field(default_factory=dict)
-    """What the file was last made to hold for each root by this writer."""
+    """What this writer last made the file hold for each root."""
     _scheduled: bool = False
-    """Whether a background drain was started and has not ended. A drain cancelled
-    before its first step never clears it — only a cancelled group does that, which
-    is a shutdown, and `settle` drains for itself there."""
+    """Whether a background drain was started and has not ended. A drain that is
+    cancelled before its first step never clears the flag. Only a cancelled
+    group cancels a drain in that way. That is a shutdown, and there `settle`
+    drains for itself."""
     _batch: anyio.Lock = field(default_factory=anyio.Lock)
-    """Held while a batch is written, by whichever task writes it: one batch at a
-    time, so a later one never lands under an earlier."""
+    """Held while a batch is written, by whichever task writes it. Only one batch
+    is written at a time, so a later batch never lands under an earlier one."""
 
     def note(self, session_id: str, entry: LiveEntry | None) -> None:
-        """Note one root's holds; start the writer if none is running."""
+        """Note the holds of one root, and start the writer if none is running."""
         if session_id not in self._pending and self._written.get(session_id, _UNSEEN) == entry:
             return
         self._pending[session_id] = entry
@@ -292,7 +311,8 @@ class LiveIndexWriter:
             self.tasks.start_soon(self._drain)
 
     async def settle(self) -> None:
-        """Write everything noted so far, or let it be refused, in the caller's task."""
+        """Write everything noted so far, or let the write be refused, in the task
+        of the caller."""
         async with self._batch:
             while self._pending:
                 batch, self._pending = self._pending, {}
@@ -302,8 +322,9 @@ class LiveIndexWriter:
                     log.warning("ph.seams.live_index: a batch was not written", exc_info=True)
                     written = False
                 except BaseException:
-                    # Cancelled: before the thread ran, or once it had, when the same
-                    # entries rewritten are no change. Back under anything since.
+                    # Cancelled. Either the thread had not run, or it had run, and
+                    # then to write the same entries again is no change. The batch
+                    # goes back under anything that was noted since.
                     self._pending = {**batch, **self._pending}
                     raise
                 if written:
@@ -317,12 +338,14 @@ class LiveIndexWriter:
 
 
 def holds_of(own: Sequence[SessionEvent], *, children_live: bool) -> tuple[Hold, ...]:
-    """What a stored root's log says it still owes — the fold a rebuild runs.
+    """What the log of a stored root says that the root still owes. This is the
+    fold that a rebuild runs.
 
-    `own` is the root's **own** events (`first_own_seq`), and needs only
-    `HOLD_TYPES`: a fork inherits its source's transcript, not its source's open
-    turn, goal or queue. `children_live` is the caller's, because it is a question
-    about other logs (`stored_children`).
+    `own` is the **own** events of the root (`first_own_seq`), and only the
+    `HOLD_TYPES` among them are needed. A fork inherits the transcript of its
+    source, and not the open turn, the goal or the queue of its source.
+    `children_live` comes from the caller, because it is a question about other
+    logs (`stored_children`).
     """
     goals: dict[str, GoalState] = {}
     for event in own:
@@ -342,9 +365,10 @@ def holds_of(own: Sequence[SessionEvent], *, children_live: bool) -> tuple[Hold,
 def stored_children(
     store: SessionArchive, session_id: str, family: str
 ) -> tuple[bool, tuple[str, ...]]:
-    """Whether any sub-agent beneath `session_id` is still live in its own log, and
-    which logs beneath it would not read — the family as `load_children` reads it
-    (`stored_tree`), so a rebuild and a mount cannot disagree about either."""
+    """Whether any sub-agent beneath `session_id` is still live in its own log,
+    and which logs beneath it cannot be read. The family is read as
+    `load_children` reads it (`stored_tree`), so a rebuild and a mount cannot
+    disagree about either answer."""
     tree = stored_tree(store, session_id, family, set())
     live = any(child_is_live(state) for level in tree.states.values() for state in level.values())
     return live, tuple(sorted(tree.unreadable))
@@ -361,22 +385,26 @@ def rebuild_live_index(
     vouch: bool = True,
 ) -> bool:
     """Rebuild `index` from every stored root, for an index that cannot vouch for
-    itself. Blocking: it reads every root's log. Whether it was written.
+    itself. The function blocks: it reads the log of every root. Returns whether
+    the index was written.
 
-    `since` is the survey the caller decided on, so the file is not read again to
-    learn what it already knows. `live` is what a host knows of the roots it holds
-    mounted: their logs lag the host until the next barrier, so their entries are
-    taken from it rather than from disk. `ladder` is the host's own fold for
-    `failed` (`Ladder`). A root whose own log will not read is logged and kept as the
-    file had it (`replace`), so it costs its own entry's freshness and not the
-    rebuild; a child's that will not read is the root's `damaged`, and the root is
-    listed for it whether or not it holds anything else.
+    `since` is the survey on which the caller decided, so the file is not read
+    again to learn what the caller already knows. `live` is what a host knows of
+    the roots that it holds mounted. Their logs lag the host until the next
+    barrier, so their entries are taken from `live` and not from disk. `ladder`
+    is the fold of the host for `failed` (`Ladder`).
 
-    **Every stored log, with no cap**, as the schedule index's rebuild reads. The
-    listing is flat across families, so sub-agent logs sit in it beside the roots
-    and are skipped one header each; under a cap they would crowd out the roots it
-    exists to find, and a root that died busy would be missed after the crash this
-    rebuild is for.
+    A root whose own log cannot be read is logged and kept as the file had it
+    (`replace`). It costs the freshness of its own entry and not the rebuild. A
+    child log that cannot be read goes into the `damaged` of the root, and the
+    root is listed for it whether or not it holds anything else.
+
+    **The rebuild reads every stored log, with no cap**, as the rebuild of the
+    schedule index does. The listing is flat across families, so sub-agent logs
+    are in it beside the roots, and each is skipped at the cost of one header.
+    Under a cap they would crowd out the roots that the rebuild exists to find.
+    A root that died busy would then be missed after the crash that this rebuild
+    is for.
     """
     read: dict[str, LiveEntry | None] = dict(live or {})
     types = HOLD_TYPES | ladder.types

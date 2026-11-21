@@ -1,26 +1,30 @@
-"""`ctx.compaction` — replacing history with a summary, without losing it.
+"""`ctx.compaction`: replace history with a summary, and lose nothing.
 
-The seam only. *Definition, Provider, Consumer* (invariant I5): the definition
-is `CompactionEngine`, a provider is any plugin calling `ctx.compaction.register`
-(`compaction-summarize` in `ph-stabilize`, P4-03), and the consumers are the
-`/compact` command and whatever policy row decides a session is under pressure.
-The loop knows nothing about any of it — compaction attaches to `agent/pre-step`
-and `agent/request-error` like every other stabilization feature (D12).
+This module holds the seam only. *Definition, Provider, Consumer* (invariant
+I5): the definition is `CompactionEngine`. A provider is any plugin that calls
+`ctx.compaction.register` (`compaction-summarize` in `ph-stabilize`, P4-03).
+The consumer through this seam is the `/compact` command (`compact_now`). The
+automatic triggers are the engine's own business: the engine row attaches to
+`agent/pre-step`, `agent/request` and `agent/request-error`, like every other
+stabilization feature (D12), and decides there whether a session is under
+pressure. The loop knows nothing about compaction.
 
-**Compaction is a surface `replace`, and that is the whole safety story (A3).**
-The engine appends one message whose `surfaceOp` shadows the range it stands
-for: `derive_messages()` yields the summary, the log keeps every shadowed event,
-and `transcript()` still shows the person the conversation they had. Nothing is
-deleted, so a summary that turns out to have dropped something important is a
-bad *reading* of the log rather than a hole in it (I4).
+**Compaction is a surface `replace`, and the safety of the seam depends on
+that (A3).** The engine appends one message. The `surfaceOp` of that message
+shadows the range that the message stands for. `derive_messages()` yields the
+summary, the log keeps every shadowed event, and `transcript()` still shows the
+user the conversation that they had. Nothing is deleted. So a summary that
+dropped something important is a bad *reading* of the log and not a hole in it
+(I4).
 
-**Notes are the part that is pH's own.** A summary replaces *conversation*, and
-pH has state that is not conversation: an RLM session's kernel namespace
-survives the cut completely untouched, because compaction rewrites a surface and
-a REPL is not on it. A summary that did not say so would leave the model
-believing its variables went wherever the conversation went — so a plugin that
-owns such state registers a `CompactionNote`, and the engine puts it in the
-summary prompt (G10). The state itself is never touched from here.
+**Notes are the part that is specific to pH.** A summary replaces
+*conversation*, and pH has state that is not conversation. The kernel namespace
+of an RLM session survives the cut untouched, because compaction rewrites a
+surface and a REPL is not on a surface. A summary that did not say so would let
+the model believe that its variables went where the conversation went. So a
+plugin that owns such state registers a `CompactionNote`, and the engine puts
+the note in the summary prompt (G10). This module never touches the state
+itself.
 
 @module ph.seams.compaction
 """
@@ -53,26 +57,32 @@ log = logging.getLogger("ph.seams.compaction")
 CompactionTrigger: TypeAlias = Literal["pressure", "window", "overflow", "manual"]
 """Why compaction is being considered.
 
-`pressure` is the estimate before a step, `window` the estimate at the request
-itself that it fills the whole window (one a provider would only refuse), `overflow`
-is the provider's own `CONTEXT_WINDOW_EXCEEDED` after one was sent, and `manual` is
-a person typing `/compact`. An engine is allowed to answer them differently: the
-first three are policy, the last is an instruction.
+- `pressure`: the estimate before a step.
+- `window`: the estimate at the request itself, when it says that the request
+  fills the whole window. A provider would only refuse such a request.
+- `overflow`: the provider answered `CONTEXT_WINDOW_EXCEEDED` after a request
+  was sent.
+- `manual`: a user typed `/compact`.
+
+An engine may answer them differently. The first three are policy, and the last
+is an instruction.
 """
 
 
 class CompactionError(Exception):
-    """A compaction that was attempted and failed, with a class a caller can act on.
+    """A compaction that was attempted and failed, with a class that a caller can act on.
 
-    `code` is a stable, small vocabulary so a front end can phrase the outcome
-    without parsing the message: `busy` (a compaction is already running, or the
-    agent is not idle), `summary` (the summarizing model call failed or returned
-    nothing usable), `unavailable` (no engine is registered).
+    `code` is a small, stable vocabulary, so a front end can phrase the outcome
+    without parsing the message:
 
-    Distinct from returning `None`, which means *nothing was compacted and that
-    is fine* — an empty session, or no cut that keeps every tool call with its
-    result. Merging the two would make "your conversation is short" and "your
-    summarizer is broken" the same outcome.
+    - `busy`: a compaction is already running, or the agent is not idle.
+    - `summary`: the summarizing model call failed or returned nothing usable.
+    - `unavailable`: no engine is registered.
+
+    This is distinct from a return of `None`, which means *nothing was compacted
+    and that is fine*: the session is empty, or no cut keeps every tool call
+    with its result. If the two were merged, "your conversation is short" and
+    "your summarizer is broken" would be the same outcome.
     """
 
     def __init__(self, code: Literal["busy", "summary", "unavailable"], message: str) -> None:
@@ -87,37 +97,31 @@ class CompactionResult:
     trigger: CompactionTrigger
     summary: str
     shadowed_seqs: tuple[int, ...]
-    """Every surface node the replacement shadows, in surface order. The same
-    seqs the replacement event cites as `sourceEventSeqs`, which is what makes
-    the substitution reversible reading rather than a deletion."""
+    """Every surface node that the replacement shadows, in surface order. The
+    replacement event cites the same seqs as `sourceEventSeqs`. That citation
+    makes the substitution a reversible reading and not a deletion."""
     shadowed_tokens: int
-    """Estimated cost of what left the derivation — the number that says whether
+    """The estimated cost of what left the derivation. This number shows whether
     the compaction was worth its model call."""
     replacement_seq: int
     locator: str | None = None
-    """Where the replaced conversation was written, when it could be. `None`
-    when no spill store took it: the summary is then all there is, and the
-    engine must not claim otherwise."""
+    """Where the replaced conversation was written, when it could be written.
+    `None` when no spill store took it. The summary is then all that exists, and
+    the engine must not claim otherwise."""
 
 
 @runtime_checkable
 class CompactionEngine(Protocol):
-    """A compaction backend: it owns trigger policy, retention and summarizing."""
-
-    async def compact_if_needed(
-        self, agent: AgentHandle, trigger: CompactionTrigger
-    ) -> CompactionResult | None:
-        """Compact only if this engine's own policy says to, else `None`."""
-        ...
+    """A compaction backend. It owns the trigger policy, retention and summarizing."""
 
     async def compact_now(
         self, agent: AgentHandle, *, instructions: str = ""
     ) -> CompactionResult | None:
-        """Compact useful history regardless of pressure; `None` when there is none.
+        """Compact useful history regardless of pressure. Return `None` when there is none.
 
-        `instructions` is the person's own account of what they are about to
-        work on. An engine may weight the summary towards it; one that cannot is
-        free to ignore it, which is why it has a default rather than being a
+        `instructions` is the user's own account of the work that comes next. An
+        engine may weight the summary towards it. An engine that cannot do so
+        may ignore it. That is why it is a parameter with a default and not a
         second method.
         """
         ...
@@ -126,9 +130,11 @@ class CompactionEngine(Protocol):
         """The share of the context window at which this engine compacts on its own,
         or `None` when it does not compact on pressure.
 
-        Asked by a row that warns the model before a summary is written for it — ph-clm's
-        readouts — so the warning can land ahead of the summary on any window size,
-        rather than at a share written down a second time beside this one.
+        A row that warns the model before a summary is written for it asks this
+        (the readouts of `ph-clm`). The warning can then arrive ahead of the
+        summary on any window size, and the row does not write the share down a
+        second time beside this one. The `limits` row and the daemon ask too:
+        they color a budget reading and the context gauge at the same share.
         """
         ...
 
@@ -137,10 +143,10 @@ class CompactionEngine(Protocol):
 class CompactionNote:
     """State that survives a compaction, and the sentence that says so.
 
-    `text` is called with the session at summarize time and returns the block to
-    put in the summary prompt, or `""` to contribute nothing — the same
-    empty-means-absent rule `PromptContext` uses, so a note about a namespace
-    that holds nothing costs no prompt.
+    The engine calls `text` with the session at summarize time. `text` returns
+    the block to put in the summary prompt, or `""` to contribute nothing.
+    `PromptContext` uses the same rule (empty means absent), so a note about a
+    namespace that holds nothing costs no prompt.
     """
 
     name: str
@@ -152,10 +158,10 @@ class CompactionNote:
 class _NoteRegistration:
     """A note and who registered it (P6-29).
 
-    A `Running` rather than a single scope, because it cannot be read as the wrong
-    half: `by.layer` is what `notes()` filters with, and `by.owner` is what the
-    note's body runs as. One field holding one of those under a name that reads like
-    the other is the P6-12 conflation."""
+    `by` is a `Running` and not a single scope, because a `Running` cannot be
+    read as the wrong half: `notes()` filters with `by.layer`, and the body of
+    the note runs as `by.owner`. One field that holds one of the two, under a
+    name that reads like the other, is the conflation of P6-12."""
 
     note: CompactionNote
     by: Running
@@ -167,20 +173,25 @@ class CompactionSeam:
 
     ctx: Context
     engine: CompactionEngine | None = None
-    """At most one. Two answers to "when and how is history replaced" is a
-    contradiction, and a profile picks its backend."""
+    """At most one. Two answers to "when and how is history replaced" would
+    contradict each other, and a profile picks its backend."""
     engine_by: Running | None = None
-    """Who registered the engine (P6-29). Set and cleared with it by `claim_slot`.
+    """Who registered the engine (P6-29). `claim_slot` sets it and clears it
+    together with the engine.
 
-    Entered around every call into the engine, so anything its body registers
-    unwinds with the row that registered the engine rather than with this seam.
-    The layer stays the registration's own — **not the agent being compacted**,
-    which both call sites have in hand — because an engine is one
-    deployment-wide object rather than a per-agent one. `ph.seams.fs` is the one
-    provider whose target is already derived, and it passes it. P6-24 did not
-    change that: it fixed the boundary a *policy* call is judged in, and an engine
-    is invoked on a lifetime question rather than a policy one. If this seam is
-    ever handed a scope, these are the lines that take it."""
+    The seam enters it around `compact_now`. So anything that the body of the
+    engine registers unwinds with the row that registered the engine, and not
+    with this seam. The automatic triggers already run as that row, because the
+    engine row calls its engine from its own listeners.
+
+    The layer stays the layer of the registration. It is **not the agent that
+    is being compacted**, although both call sites have that agent in hand. The
+    reason is that an engine is one object for the whole deployment and not one
+    object per agent. `ph.seams.fs` is the one provider whose target is already
+    derived, and it passes that target. P6-24 did not change this. P6-24 fixed
+    the boundary in which a *policy* call is judged, and a call into an engine
+    is a lifetime question and not a policy question. If this seam is ever
+    handed a scope, the `running(self.engine_by)` line is where it goes."""
     _notes: list[_NoteRegistration] = field(default_factory=list)
 
     # ------------------------------------------------------------ the engine --
@@ -199,33 +210,21 @@ class CompactionSeam:
             raise CompactionError("unavailable", "no compaction engine is registered")
         return self.engine
 
-    async def compact_if_needed(
-        self, agent: AgentHandle, trigger: CompactionTrigger
-    ) -> CompactionResult | None:
-        """Automatic policy. Absent an engine this is a no-op, never an error.
-
-        A profile that layered no compaction row has *chosen* not to compact, and
-        a policy hook that raised at it would turn that choice into a broken
-        session on the first long conversation.
-        """
-        if self.engine is None:
-            return None
-        with running(self.engine_by):
-            return await self.engine.compact_if_needed(agent, trigger)
-
     def trigger_fraction(self) -> float | None:
-        """The engine's own (`CompactionEngine.trigger_fraction`), or `None` when no
-        engine is registered — a profile that compacts nothing has no share to warn
-        ahead of."""
+        """The answer of the engine (`CompactionEngine.trigger_fraction`), or `None`
+        when no engine is registered. A profile that compacts nothing has no
+        share to warn ahead of."""
         return None if self.engine is None else self.engine.trigger_fraction()
 
     async def compact_now(
         self, agent: AgentHandle, *, instructions: str = ""
     ) -> CompactionResult | None:
-        """An explicit request. Absent an engine this *is* an error.
+        """An explicit request. With no engine this *is* an error.
 
-        Unlike the automatic path: somebody asked for something the deployment
-        cannot do, and silence would read as "nothing to compact".
+        A profile that layered no compaction row has *chosen* not to compact, and
+        nothing compacts on its own. But somebody who asked has asked for
+        something that the deployment cannot do, and silence would read as
+        "nothing to compact".
         """
         engine = self.require()
         with running(self.engine_by):
@@ -234,14 +233,14 @@ class CompactionSeam:
     # ------------------------------------------------------------- the notes --
 
     def note(self, note: CompactionNote, *, scope: Context | None = None) -> Disposer:
-        """Contribute a block to every summary prompt this context can reach."""
-        # Both questions, kept together (P6-29): `by.layer` is what `notes()`
-        # filters with `reaches`, `by.owner` is the disposer's scope and the one
-        # the body runs as. Through `claim_entry` because `_NoteRegistration` is
-        # a frozen dataclass and therefore compares by *value*: the
-        # `self._notes.remove(entry)` this replaces would have had one row's
-        # disposal take another's equal entry, which is the defect `_registry`
-        # exists to name.
+        """Contribute a block to every summary prompt that this context can reach."""
+        # Both questions are kept together (P6-29). `notes()` filters with
+        # `by.layer` through `reaches`. `by.owner` is the scope of the disposer
+        # and the scope that the body runs as. The entry goes through
+        # `claim_entry` because `_NoteRegistration` is a frozen dataclass, so it
+        # compares by *value*. The `self._notes.remove(entry)` that this
+        # replaces would have let the disposal of one row take the equal entry
+        # of another row. That is the defect that `_registry` describes.
         by = self.ctx.running_for(scope)
         entry = _NoteRegistration(note=note, by=by)
         return claim_entry(
@@ -252,31 +251,33 @@ class CompactionSeam:
         )
 
     def notes(self, session: Session, *, scope: Boundary) -> list[str]:
-        """The rendered blocks for one session, in `order` then registration order.
+        """The rendered blocks for one session, by `order` and then by registration order.
 
-        Scope-filtered by the same rule as event dispatch and every other scoped
-        registry: a global registration reaches every agent, an agent-scoped one
-        reaches that agent alone (B7).
+        The filter by scope follows the same rule as event dispatch and every
+        other scoped registry: a global registration reaches every agent, and an
+        agent-scoped registration reaches that agent alone (B7).
 
-        **The boundary is stated** (P6-32), and this reader is the one that shows
-        which way the axis runs. It resolved `scope or self.ctx`, and for a
-        registry that bears *restrictions* the mount is the widest answer — that
-        is the fail-open the row is named for. This registry bears none: `notes`
-        filters on `reaches` alone, so the mount is the **smallest** set, and the
-        old default could never over-include. It could only drop an agent's own
-        note from that agent's summary — silent-*narrow*, which the row rejects
-        for the same reason in the other direction ("degrades a model quietly
-        rather than erroring, and nobody notices").
+        **The boundary is stated** (P6-32), and this reader shows which way the
+        axis runs. It used to resolve `scope or self.ctx`. For a registry that
+        bears *restrictions*, the mount is the widest answer, and that is the
+        fail-open case that P6-32 is named for. This registry bears none:
+        `notes` filters on `reaches` alone. So the mount is the **smallest** set,
+        and the old default could never include too much. It could only drop a
+        note that is scoped to one agent from the summary of that agent. That
+        failure is silently *narrow*, and P6-32 rejects it for the same reason
+        in the other direction: an empty tool set or an empty prompt degrades a
+        model quietly with no error, and nobody notices.
 
-        So the test for a new registry is not "can I name the harm" but **does
-        this reader bear restrictions**: if it does, an unstated boundary widens;
-        if it filters on `reaches` alone, it under-includes. Either way a policy
-        reader takes a boundary. See `Deployment`, which states the axis from the
-        other side — widest along the restriction axis only.
+        So the test for a new registry is not "can I name the harm". The test is
+        **does this reader bear restrictions**. If it does, an unstated boundary
+        widens. If it filters on `reaches` alone, an unstated boundary includes
+        too little. In both cases a policy reader takes a boundary. See
+        `Deployment`, which states the axis from the other side: widest along
+        the restriction axis only.
 
-        A note that raises is dropped with its
-        traceback rather than taking the compaction down — a summary without one
-        block is worth more than an uncompacted session.
+        A note that raises is dropped, and its traceback is logged. It does not
+        stop the compaction, because a summary without one block is worth more
+        than a session that is not compacted.
         """
         target = boundary_of(scope, self.ctx)
         rendered: list[str] = []
@@ -284,13 +285,14 @@ class CompactionSeam:
         for entry in sorted(visible, key=lambda one: one.note.order):
             note = entry.note
             try:
-                # **As the row that registered it, for the scope being
-                # compacted** (P6-29). `text` is a row's body invoked by a
-                # registry — the same category as a tool's `execute` — and it ran
-                # unbound, so anything it registered landed on the seam and
-                # outlived its row. This is one of the four P6-26 could not reach
-                # while the binding held a single `Context`: the target here is a
-                # *layer* and the owner is still the registering row.
+                # **Run as the row that registered the note, for the scope that
+                # is being compacted** (P6-29). `text` is the body of a row that
+                # a registry invokes, in the same category as the `execute` of a
+                # tool. It used to run unbound, so anything that it registered
+                # landed on the seam and outlived its row. This is one of the
+                # four sites that P6-26 could not reach while the binding held a
+                # single `Context`: the target here is a *layer*, and the owner
+                # is still the registering row.
                 with running(entry.by, target):
                     text = note.text(session)
             except Exception:

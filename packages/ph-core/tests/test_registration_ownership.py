@@ -642,7 +642,6 @@ NOT_EXERCISED: frozenset[str] = frozenset(
         "ToolRuntime.present_transport",
         "ToolRuntime.register_code_namespace",
         "ToolRuntime.register_transport",
-        "TuiScreenRegistry.present_with",
         "TuiScreenRegistry.register",
         "WorkspaceSeam.acquire",
         "WorkspaceSeam.provision",
@@ -1492,7 +1491,7 @@ BOUND: dict[str, str] = {
     # row code the seam invokes later, so it enters the row's binding first.
     "_Registered.uploader": "UploadRegistry.handle_for",
     "CodeRuntimeSeam.provider": "CodeRuntimeSeam.run",
-    "CompactionSeam.engine": "CompactionSeam.compact_if_needed",
+    "CompactionSeam.engine": "CompactionSeam.compact_now",
     "SandboxSeam.provider": "SandboxSeam.confine",
     "WorkspaceSeam.provider": "WorkspaceSeam.acquire",
     "_Registered.provider": "SubagentService.start",
@@ -1548,8 +1547,6 @@ UNBOUND: dict[str, str] = {
     "TransportPresentation.present_call": "TUI presentation, outside the pipeline",
     "TransportPresentation.present_result": "TUI presentation, outside the pipeline",
     "ScreenDefinition.build": "TUI presentation, outside the pipeline",
-    "_FrontEnd.drawn": "TUI presentation, outside the pipeline",
-    "_FrontEnd.present": "TUI presentation, outside the pipeline",
     "_Layer.guards": "a monotonic policy answer, read on the deny path",
     # Asked, at a spawn, what a child of this row holds back — a `ChildLimit` or a
     # refusal. The child it limits does not exist yet, so there is nothing to register on.

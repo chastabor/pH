@@ -127,10 +127,10 @@ def test_the_index_records_clears_and_vouches(tmp_path: Path) -> None:
     assert index.read() == {}
     assert not index.survey().complete, "a missing file cannot vouch for itself"
     entry = LiveEntry("root", ("turn", "children"), updated=5, family="f", cwd="/w")
-    assert index.record("root", entry)
+    assert index.record_all({"root": entry})
     assert index.read() == {"root": entry}
     assert not index.survey().complete, "a writer keeps the completeness it found"
-    assert index.record("root", None)
+    assert index.record_all({"root": None})
     assert index.read() == {}
     assert index.replace({"root": entry}, since=index.survey())
     assert index.survey().complete, "only a rebuild marks the file complete"
@@ -182,7 +182,7 @@ def test_a_rebuild_writes_what_every_root_log_says(tmp_path: Path) -> None:
     log_event(done, "turn/start", {"turn": 1})
     log_event(done, "turn/end", {"turn": 1, "reason": {"kind": "completed"}})
     index = LiveIndex(tmp_path)
-    index.record("done", LiveEntry("done", ("turn",), updated=1))
+    index.record_all({"done": LiveEntry("done", ("turn",), updated=1)})
     assert rebuild_live_index(
         index, StoredLogs(busy, done, child), now=9, since=index.survey(), ladder=NO_LADDER
     )
@@ -233,7 +233,7 @@ def test_a_rebuild_keeps_the_entry_of_a_log_it_cannot_read(tmp_path: Path) -> No
     log_event(fine, "turn/start", {"turn": 1})
     index = LiveIndex(tmp_path)
     kept = LiveEntry("torn", ("goal",), updated=1)
-    index.record("torn", kept)
+    index.record_all({"torn": kept})
     assert rebuild_live_index(
         index, StoredLogs(torn, fine, broken="torn"), now=9, since=index.survey(), ladder=NO_LADDER
     )
@@ -247,9 +247,9 @@ def test_an_entry_that_differs_only_in_when_it_was_said_is_no_change(tmp_path: P
     and the entry keeps the moment the root began to owe them."""
     index = LiveIndex(tmp_path)
     first = LiveEntry("root", ("turn",), updated=1)
-    assert index.record("root", first)
+    assert index.record_all({"root": first})
     before = index.path.stat().st_mtime_ns
-    assert index.record("root", LiveEntry("root", ("turn",), updated=99))
+    assert index.record_all({"root": LiveEntry("root", ("turn",), updated=99)})
     assert index.path.stat().st_mtime_ns == before
     assert index.read()["root"].updated == 1
 
@@ -332,5 +332,5 @@ def test_a_rebuild_isolates_a_child_log_it_cannot_read_and_says_so(tmp_path: Pat
 def test_damaged_survives_the_file(tmp_path: Path) -> None:
     index = LiveIndex(tmp_path)
     entry = LiveEntry("root", (), updated=1, damaged=("root-bad",))
-    assert index.record("root", entry)
+    assert index.record_all({"root": entry})
     assert index.read()["root"] == entry

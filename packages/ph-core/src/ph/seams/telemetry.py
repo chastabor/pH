@@ -1,44 +1,46 @@
-"""`ctx.session_telemetry` — records, redaction, and no span tracer.
+"""`ctx.session_telemetry`: records, redaction, and no span tracer.
 
-**The session log is the trace** (§8). There is deliberately no span
-hierarchy: spans would be a second, lossier account of what already exists
-event-by-event in the log, and two accounts of one run diverge.
+**The session log is the trace** (§8). The seam deliberately has no span
+hierarchy. Spans would be a second, lossier account of what the log already
+holds event by event, and two accounts of one run diverge.
 
-What this seam adds is *export*: a record stream a sink can ship somewhere,
-with one hard ordering rule — **every record passes the
-`session-telemetry/record` redaction waterfall before any sink sees it**. A sink
-registered as a listener alongside redaction could observe an unredacted record
-by winning a race; a sink registered through `add_sink` cannot, because it runs
-after the waterfall settles.
+This seam adds *export*: a stream of records that a sink can ship somewhere. It
+has one hard ordering rule: **every record passes the
+`session-telemetry/record` redaction waterfall before any sink sees it**. A
+sink that was registered as a listener beside redaction could win a race and
+see an unredacted record. A sink that is registered through `add_sink` cannot,
+because it runs after the waterfall settles.
 
-Ledger records mirror session events one-to-one with one exception: only the
-*first* `assistant/chunk` per step ships, because a token-by-token export is
-thousands of records saying the same thing, and the first is the one that
-carries the latency signal. A record names its event and carries only the
-fields its type exports (`ph.session.exported_fields`): why the work failed, was
-refused or stopped.
+Ledger records mirror session events one-to-one, with one exception: only the
+*first* `assistant/chunk` of each step ships. A token-by-token export is
+thousands of records that say the same thing, and the first record carries the
+latency signal. A record names its event and carries only the fields that the
+type of the event exports (`ph.session.exported_fields`): why the work failed,
+was refused or stopped.
 
-**A ledger record ships once the log holds its event, and not before.** The
+**A ledger record ships after the log holds its event, and not before.** The
 record names its event by `(session, seq)`, and `session/event` fires on the
 in-memory append. A crash loses whatever no flush had written, and the resumed
-log appends at its own length, so a record exported off the firehose could name
-one event while the log, after a resume, put another at that seq. So the row
-keeps a cursor per session and, when `session/durable` says how much the log
-holds (`SessionStore.flush`), reads the events up to there off the log, the way a
-store reads what it owes. Nothing else changes: the record still carries the
-event's own `time`, so the latency the first chunk reports is the one it had, and
-the export lags only by the distance to the next flush, which every step, tool
-call and turn end makes.
+log appends at its own length. So a record exported from `session/event` could
+name one event while the log, after a resume, put another event at that seq.
+The row therefore keeps a cursor for each session. When `session/durable`
+reports how much the log holds (`SessionStore.flush`), the row reads the events
+up to that point from the log, as a store reads what it owes. Nothing else
+changes. The record still carries the `time` of the event itself, so the
+latency that the first chunk reports is the latency that it had. The export
+lags only by the distance to the next flush, and every step, tool call and turn
+end makes a flush.
 
-**The shutdown tail ships before the row goes.** This row sits in the log layer,
-beneath the agents, and rows unwind in reverse. So what the agents append as they
-let go is flushed by the checkpoint policy's last barrier while this row and the
-sinks beside it are still mounted, and ships like any other record; the barrier
-waits for that fan-out before the rows beneath it go.
+**The shutdown tail ships before the row goes.** This row sits in the log
+layer, beneath the agents, and rows unwind in reverse. So the last barrier of
+the checkpoint policy flushes what the agents append as they let go, while this
+row and the sinks beside it are still mounted. That tail ships like any other
+record. The barrier waits for that fan-out before the rows beneath it go.
 
-**A write that failed ships too, on the ops channel.** No event names it, since the
-log is what could not take it, so the store's `session/unwritten` is shipped as an
-`error` record with what the write said.
+**A write that failed ships too, on the ops channel.** No event names it,
+because the log is what could not take it. So the row ships the
+`session/unwritten` of the store as an `error` record that carries what the
+write reported.
 `docs/seams/session_telemetry.md` has the rest.
 
 @module ph.seams.telemetry
@@ -108,45 +110,48 @@ class SessionTelemetryRecord(WireModel):
 class _Sink:
     """An exporter and who registered it (P6-29).
 
-    A sink is a row's body this seam invokes, once per record — the same category
-    as a tool's `execute`, and it ran unbound, so an exporter that registered
-    anything landed it on the seam and outlived its row."""
+    A sink is the body of a row, and this seam invokes it one time for each
+    record. It is in the same category as the `execute` of a tool. It used to
+    run unbound, so anything that an exporter registered landed on the seam and
+    outlived its row."""
 
     export: Callable[[SessionTelemetryRecord], MaybeAwaitable[None]]
     by: Running
 
 
 _EXPORTING: ContextVar[bool] = ContextVar("ph.seams.telemetry.exporting", default=False)
-"""Whether *this task* is already inside a fan-out, so a sink cannot feed itself.
+"""Whether *this task* is already inside a fan-out, so that a sink cannot feed itself.
 
-A sink that records what it just failed to ship — through `ops_record`, or any
-indirection reaching it — would re-enter `record` and fan out to itself, a loop
-with no floor. The rule was a docstring asking each future sink author to
-remember; this is the same rule where it cannot be forgotten. Dropping the
-nested record is the intended answer, not a cost: it is a record *about* the
-export path, made while that path is the thing failing.
+A sink that records what it just failed to ship, through `ops_record` or
+through any indirection that reaches it, would enter `record` again and fan out
+to itself. That loop has no end. The rule used to be a docstring that asked
+each future sink author to remember it. This flag is the same rule, in a place
+where nobody can forget it. To drop the nested record is the intended answer
+and not a cost: it is a record *about* the export path, made while that path is
+the thing that fails.
 
-**Per task, and that is the whole correction.** It was an instance field, so the
-flag was raised for the *deployment* while any one record was in flight — and
-records are shipped from many tasks (a batch from each flush, `ops_record` from
-wherever the operation is). Two records a millisecond apart therefore raced, and
-the loser was dropped silently: exactly the bursts worth exporting — a turn's
-`step/start`, its first chunk, its `turn/end` — arrived as one record in three.
-Re-entrancy is a property of the call stack, so it is tracked where the call
-stack is. A task a sink spawns inherits the flag, which is right: it is still the
+**The flag is per task, and that is the complete correction.** It was an
+instance field, so the flag was raised for the *deployment* while any one
+record was in flight. Records are shipped from many tasks: a batch from each
+flush, and `ops_record` from wherever the operation is. So two records a
+millisecond apart raced, and the loser was dropped silently. Those are exactly
+the bursts worth exporting: the `step/start` of a turn, its first chunk and its
+`turn/end` arrived as one record in three. Re-entrancy is a property of the
+call stack, so the flag is tracked where the call stack is. A task that a sink
+spawns inherits the flag. That is correct, because the task is still on the
 export path.
 """
 
 
 @dataclass(slots=True)
 class _Cursor:
-    """How far the ledger has come through one session's log."""
+    """How far the ledger has come through the log of one session."""
 
     read: int
     """Every event below this seq has been read for shipping, and none past it."""
     chunked: tuple[int, int] | None = None
-    """The step whose first chunk already shipped. One per session rather than one
-    per step, so it does not grow with the conversation."""
+    """The step whose first chunk already shipped. There is one per session and
+    not one per step, so it does not grow with the conversation."""
 
     def wants(self, event: SessionEvent) -> bool:
         """Whether this event ships. Only the first `assistant/chunk` per step does."""
@@ -166,12 +171,12 @@ class SessionTelemetry:
     ctx: Context
     _sinks: list[_Sink] = field(default_factory=list)
     _cursors: SessionTable[_Cursor] = field(default_factory=SessionTable)
-    """Per live session, how far the ledger has come through its log, and gone with
-    the session.
+    """For each live session, how far the ledger has come through its log. The
+    entry goes with the session.
 
-    Keyed by the session and not its id, because a resume in the same process
-    makes a second copy of a log under the same id, and a flush of the first
-    copy finishing late says nothing about the second's events."""
+    The key is the session and not its id. A resume in the same process makes a
+    second copy of a log under the same id, and a late flush of the first copy
+    says nothing about the events of the second copy."""
 
     def add_sink(
         self,
@@ -207,26 +212,28 @@ class SessionTelemetry:
             _EXPORTING.reset(token)
 
     def _track(self, session: Session) -> None:
-        """Read a session already live when the row activates from here on: what it
-        held by then was this row's earlier life's to ship."""
+        """Give a session that is already live when the row activates a cursor at the
+        current end of its log. What the session held before then was for the
+        earlier life of this row to ship."""
         self._cursors.keep(session, _Cursor(read=session.seq))
 
     def _created(self, session: Session) -> None:
-        """Start a new session's cursor where this process's own writing begins.
+        """Start the cursor of a new session where the writing of this process begins.
 
-        That is `durable_length`, what a store already held when the session was
-        made: a fork's prefix was its parent's to ship, and a stored log was the run's
-        that wrote it. So a resume's repair closers ship, because the store does not
-        hold them yet; a cursor at the seed's end skipped them."""
+        That point is `durable_length`: what a store already held when the
+        session was made. The prefix of a fork was for its parent to ship, and a
+        stored log was for the run that wrote it to ship. So the repair closers
+        of a resume ship, because the store does not hold them yet. A cursor at
+        the end of the seed skipped them."""
         self._cursors.keep(session, _Cursor(read=session.durable_length))
 
     def _durable(self, session: Session, through: int) -> MaybeAwaitable[None]:
-        """Ship what the ledger owes now that the log holds every event below `through`.
+        """Ship what the ledger owes, now that the log holds every event below `through`.
 
-        The fan-out comes back for `emit` to schedule, never awaited on the flush
-        path, and a flush that released nothing costs no task at all. Nothing is
+        The fan-out is returned for `emit` to schedule, and is never awaited on
+        the flush path. A flush that released nothing costs no task. Nothing is
         read when no sink would receive it: a record is fanned out to the sinks
-        there are when it is made, so there is nobody to read it for."""
+        that exist when it is made, so there is nobody to read it for."""
         cursor = self._cursors.get(session)
         if cursor is None or through <= cursor.read:
             return None
@@ -238,8 +245,8 @@ class SessionTelemetry:
         return self.observe(session, ready) if ready else None
 
     def _unwritten(self, session: Session, error: Exception) -> MaybeAwaitable[None]:
-        """Ship a write of `session` that raised, with its reason, and nothing when no
-        sink would receive it, as `_durable`."""
+        """Ship a write of `session` that raised, with its reason. Ship nothing when
+        no sink would receive it, as `_durable` does."""
         if not self._sinks:
             return None
         reason = reason_of(error)
@@ -288,8 +295,9 @@ class SessionTelemetry:
 
 
 def _exported(event: SessionEvent) -> dict[str, PlainJsonValue]:
-    """The fields `event`'s type exports, each as `event.<field>`, thawed so a sink is
-    handed plain JSON. A field the payload leaves out ships nothing."""
+    """The fields that the type of `event` exports, each as `event.<field>`. They
+    are thawed, so a sink receives plain JSON. A field that the payload leaves
+    out ships nothing."""
     return {
         f"event.{name}": thaw_json(event.data[name])
         for name in exported_fields(event.type)
@@ -306,17 +314,18 @@ async def ops_record(
 ) -> None:
     """Record something about the harness, if this deployment has the seam (P5-09).
 
-    The producer's door. A row or a host holding a fact that is *not* a session
-    event — an open refused because another process holds the log, a store that
-    cannot take the I-5 lease, a workspace provider that broke and left an agent
-    uncontained — says it here and never looks for the seam itself. No seam, no
-    record and no error: telemetry is optional, and a producer must not fail its
-    own work for want of somewhere to put a note about it.
+    This is the function that a producer calls. A row or a host can hold a fact
+    that is *not* a session event: an open that was refused because another
+    process holds the log, a store that cannot take the I-5 lease, or a
+    workspace provider that broke and left an agent uncontained. The producer
+    reports the fact here and never looks for the seam itself. With no seam
+    there is no record and no error. Telemetry is optional, and a producer must
+    not fail its own work because it has nowhere to put a note about that work.
 
     A sink that failed and reported its own failure here would fan out to the
-    same sink, which is a loop with no floor; `record` refuses a nested fan-out
-    for that reason, so reaching this from inside a sink drops the record rather
-    than recursing.
+    same sink, which is a loop with no end. `record` refuses a nested fan-out
+    for that reason, so a call from inside a sink drops the record and does not
+    recurse.
     """
     telemetry = ctx.get(SESSION_TELEMETRY)
     if telemetry is None:

@@ -30,7 +30,7 @@ from textual.pilot import Pilot
 from tui_helpers import MakeApp, root_of, running, stand_in, turn_done, until
 
 import ph_app.tui
-from ph.keys import TUI_SCREENS
+from ph.keys import MOUNT, TUI_SCREENS
 from ph.seams.tui_screens import ScreenDefinition
 from ph.session import SessionEvent, substitute
 from ph.testing import not_none, revision_record
@@ -178,14 +178,12 @@ async def test_unloading_the_row_takes_the_verb_and_the_key_with_it(
     async with running(make_tui_app()) as (app, pilot):
         assert _routes(app, shipped.id) == ROUTES
 
-        row = root_of(tui_daemon).ctx.get("tui_screens")
-        assert row is not None
-        entry = row.get(shipped.id)
-        assert entry is not None
+        registry = root_of(tui_daemon).ctx.require(TUI_SCREENS)
+        assert shipped.id in {one.id for one in registry.list()}
         await until(pilot, lambda: _routes(app, shipped.id) == ROUTES)
 
-        # Unload it as the removal of the row does: dispose the scope that owns
-        # the registration.
+        # Unload it as the removal of the row does: unmount the row that
+        # registered the screen.
         await _unload(root_of(tui_daemon), shipped.id)
 
         await until(pilot, lambda: _routes(app, shipped.id) == set())
@@ -558,14 +556,14 @@ async def test_opened_from_the_chat_it_starts_at_the_nearest_change_before_the_r
 
 
 async def _unload(root: Root, screen_id: str) -> None:
-    """Dispose the scope that owns the registration of this screen.
+    """Unmount the row that registers this screen.
 
-    The removal of a row is the disposal of the scope that its `apply` received.
-    So this is that unwinding, and not a second way to take a screen away.
+    Each shipped screen comes from a row named after it
+    (`ph_app/profiles/presentation.yaml`). Unmounting the row unwinds what its
+    `apply` registered, so this is the removal of the row, and not a second way to
+    take a screen away.
     """
-    registry = root.ctx.get("tui_screens")
-    entry = registry._entries[screen_id]
-    await entry.owner.dispose()
+    await root.ctx.require(MOUNT).forks[f"tui-screen-{screen_id}"].dispose()
 
 
 def test_edits_past_the_drawn_budget_are_counted_not_rendered() -> None:

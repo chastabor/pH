@@ -1,39 +1,43 @@
-"""`ctx.invariants` — which invariants this deployment enforces, and whether they hold.
+"""`ctx.invariants`: which invariants this deployment enforces, and whether they hold.
 
-pH's invariants are enforced by rows, and a row is optional. So "I3 holds" was
-never a property of pH; it was a property of a profile that happened to mount
-`agent-loop-invariant` — and nothing said which profiles those were. A person
-reading `DESIGN.md` learned what pH promises, ran a profile that promised less,
-and had no way to find out. **That gap is what this registry closes**: an
-invariant that is enforced says so out loud, and one that nobody mounted is
-absent from the report rather than silently assumed.
+Rows enforce the invariants of pH, and a row is optional. So "I3 holds" was
+never a property of pH. It was a property of a profile that happened to mount
+`agent-loop-invariant`, and nothing said which profiles those were. A person who
+read `DESIGN.md` learned what pH promises, ran a profile that promised less, and
+had no way to find out. **This registry closes that gap.** An invariant that is
+enforced says so in the report. An invariant that nobody mounted is absent from
+the report, and is not silently assumed.
 
-**Two kinds, and the difference is load-bearing.** Some invariants are enforced
-*inline* — I3 checks every request as it is built, and refuses. Those cannot be
-polled, because there is no state between requests to poll: the answer to "does
-it hold" is "every request so far was checked". Others are *pollable* — a
-projection either equals its fold right now or it does not — and those carry a
-`check`. Reporting the two identically would be the overstatement E1 forbids in
-both directions: an inline invariant reported as "holds" claims a check that did
-not run, and a pollable one reported as "enforced" claims a guarantee about a
-file nobody read.
+**There are two kinds, and the difference matters.** Some invariants are
+enforced *inline*: I3 checks every request as it is built, and refuses. An
+inline invariant cannot be polled, because no state exists between requests to
+poll. The answer to "does it hold" is "every request so far was checked". Other
+invariants are *pollable*: a projection either equals its fold now or it does
+not. A pollable invariant carries a `check`. To report the two kinds in the same
+way would be the overstatement that E1 forbids, in both directions. An inline
+invariant reported as "holds" claims a check that did not run. A pollable
+invariant reported as "enforced" claims a guarantee about a file that nobody
+read.
 
-**A check that raises is a violation, not a dropped row.** This is where the
-seam parts company with `ctx.diagnostics`, which drops a failing section so the
-report survives. An invariant is the thing that says something is wrong; a check
-that cannot complete is at best "unknown" and at worst the failure itself, and
-swallowing it would make the quietest possible report the one where the most is
+**A check that raises is a violation, and its row is not dropped.** Here the
+seam differs from `ctx.diagnostics`, which drops a failing section so that the
+report survives. An invariant is the thing that says that something is wrong. A
+check that cannot complete is at best "unknown" and at worst the failure itself.
+If the seam swallowed it, the quietest report would be the one where the most is
 broken.
 
-**No severity, for `diagnostics`' reason** (§12 Q10): a violated invariant is a
-sentence a person reads, not a color they learn to skip.
+**There is no severity, for the reason that `diagnostics` gives** (§12 Q10). A
+violated invariant is a sentence that a person reads, not a color that they
+learn to skip.
 
-**Not enforced (§5 rule 6): a poll has content only in a live process.** The one
-caller of `ctx.diagnostics.report()` today is `phern doctor`, which mounts a fresh
-profile — no session created, no view cached, no scope disposed — so "holds"
-there says the checks run, not that the deployment's live state passed them. The
-daemon is where the same report has something to look at: it checks each root
-once the root settles after a write (`ph_app.daemon.supervisor.Supervisor.verifier`).
+**Not enforced (§5 rule 6): a poll has content only in a live process.**
+`ctx.diagnostics.report()` has two callers today: `phern doctor`, and the
+`status` verb of a package command line (`ph.toolcli`). Each mounts its rows
+fresh for the one command: no session is created, no view is cached and no scope
+is disposed. So "holds" there says that the checks run, and not that the live
+state of the deployment passed them. The daemon is where the same checks have
+something to look at. It checks each root when the root settles after a write
+(`ph_app.daemon.supervisor.Supervisor.verifier`).
 
 @module ph.seams.invariants
 """
@@ -70,7 +74,8 @@ __all__ = [
 log = logging.getLogger("ph.seams.invariants")
 
 ID_MAX = 32
-"""How long an invariant id may be. Matches the two sibling registries."""
+"""How long an invariant id may be. `diagnostics`, `tui_status` and `tui_screens`
+use the same bound."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +84,19 @@ class Invariant:
 
     id: str
     statement: str
-    """What must hold, in one sentence, phrased so a violation contradicts it.
+    """What must hold, in one sentence, phrased so that a violation contradicts it.
 
-    Read aloud in the report next to the answer, because "A11 holds" tells a
-    person nothing they can act on and "every projection equals its fold: holds"
-    tells them what was actually checked."""
+    The report prints it next to the answer. "A11 holds" tells a person nothing
+    that they can act on. "every projection equals its fold: holds" tells them
+    what was checked."""
     check: Callable[[], Sequence[str]] | None = None
-    """Violations found right now, empty when it holds.
+    """The violations found now. Empty when the invariant holds.
 
-    `None` for an invariant enforced *inline* — one whose rule runs on the path
-    it governs and refuses there. There is nothing to poll in that case, and a
-    `check` returning `[]` would be a lie shaped like reassurance: it would
-    report "holds" on a deployment where the enforcing listener had never been
-    reached at all."""
+    `None` for an invariant that is enforced *inline*: its rule runs on the path
+    that it governs and refuses there. In that case there is nothing to poll. A
+    `check` that returned `[]` would be a false reassurance. It would report
+    "holds" on a deployment where the enforcing listener had never been reached
+    at all."""
     order: int = 0
 
 
@@ -119,13 +124,13 @@ class InvariantRegistry:
     _entries: dict[str, _Registered] = field(default_factory=dict)
 
     def register(self, invariant: Invariant, *, scope: Context | None = None) -> Disposer:
-        """Declare an invariant this deployment enforces.
+        """Declare an invariant that this deployment enforces.
 
-        `scope=` means what it means everywhere else (P6-12, P6-25): a
-        registration from a row's own `apply` already unwinds with the row, so
-        pass it only to register on someone else's lifetime. **An invariant that
-        unwinds with its enforcer is the point** — a row that is unloaded stops
-        promising, and the report stops claiming.
+        `scope=` means what it means everywhere else (P6-12, P6-25). A
+        registration from the `apply` of a row already unwinds with the row, so
+        pass `scope=` only to register on the lifetime of someone else. **The
+        purpose is that an invariant unwinds with its enforcer.** A row that is
+        unloaded stops promising, and the report stops claiming.
         """
         require_slug(invariant.id, maximum=ID_MAX, kind="invariant id")
         by = self.ctx.running_for(scope)
@@ -136,12 +141,13 @@ class InvariantRegistry:
     def _checked(self) -> list[tuple[Invariant, list[str] | None]]:
         """Every invariant in `order` then id order, with what its check found.
 
-        `None` for an inline one, which has nothing to poll; an empty list for a
-        pollable one that holds. The one pass both readers project from, so the
-        order a report prints and the order checks run cannot drift apart.
+        The result is `None` for an inline invariant, which has nothing to poll,
+        and an empty list for a pollable invariant that holds. Both readers
+        project from this one pass, so the order that a report prints and the
+        order in which the checks run cannot drift apart.
 
-        A check that raises becomes a finding carrying its exception. It is not
-        dropped: this seam exists to report that something is wrong, and a
+        A check that raises becomes a finding that carries its exception. It is
+        not dropped. This seam exists to report that something is wrong, and a
         failure to determine that is not evidence of health.
         """
         checked: list[tuple[Invariant, list[str] | None]] = []
@@ -151,8 +157,9 @@ class InvariantRegistry:
                 checked.append((invariant, None))
                 continue
             try:
-                # As the row that registered it (P6-29), so a check that reads a
-                # scoped registry sees what its own row would see.
+                # The check runs as the row that registered it (P6-29), so a
+                # check that reads a scoped registry sees what its own row would
+                # see.
                 with running(entry.by):
                     found = list(invariant.check())
             except Exception as error:
@@ -175,9 +182,9 @@ class InvariantRegistry:
     def verify(self) -> list[Violation]:
         """Run every pollable check and collect what is not holding.
 
-        Empty means every *pollable* invariant holds — never that every invariant
-        holds, which no poll can establish. `enforced()` is what says which ones
-        were in scope of that claim.
+        An empty result means that every *pollable* invariant holds. It never
+        means that every invariant holds, which no poll can establish.
+        `enforced()` says which invariants were in the scope of that claim.
         """
         return [
             Violation(invariant.id, detail)
@@ -187,12 +194,12 @@ class InvariantRegistry:
         ]
 
     def describe(self) -> list[tuple[str, str]]:
-        """The `phern doctor` rows: one per invariant, answer first.
+        """The rows for `phern doctor`: one for each invariant, with the answer first.
 
-        Checks run here rather than being cached from somewhere earlier, because
-        the question a person is asking by typing `phern doctor` is about now.
-        `diagnostics` permits the cost — that is the whole distinction it draws
-        against `tui_status`, which is read on every spinner frame.
+        The checks run here and are not cached from an earlier time, because a
+        person who types `phern doctor` asks about now. `diagnostics` permits
+        the cost. That is the distinction that it draws against `tui_status`,
+        whose fields are read often and must be cheap.
         """
         rows: list[tuple[str, str]] = []
         for invariant, found in self._checked():
@@ -207,12 +214,12 @@ class InvariantRegistry:
 
 
 def contribute(ctx: Context, invariant: Invariant) -> None:
-    """Declare an invariant from a row's `apply`, whether or not this seam is mounted.
+    """Declare an invariant from the `apply` of a row, whether or not this seam is mounted.
 
-    `contribute_via` carries the rule and the reason. The sharper form of it here:
-    an invariant nobody can see is the same, to a reader, as one nobody enforces —
-    and a hard `inject=[INVARIANTS]` would make *declaring* an invariant a
-    precondition for *enforcing* it, which inverts the two.
+    `contribute_via` carries the rule and the reason. The reason is sharper
+    here. To a reader, an invariant that nobody can see is the same as one that
+    nobody enforces. A hard `inject=[INVARIANTS]` would make *declaring* an
+    invariant a precondition for *enforcing* it, which inverts the two.
     """
     contribute_item(ctx, INVARIANTS, invariant, label=f"invariant({invariant.id})")
 
@@ -220,38 +227,42 @@ def contribute(ctx: Context, invariant: Invariant) -> None:
 ORDER_FOLD_CACHE = 15
 """Where a fold-cache invariant sits: just after `session-log`, which it extends.
 
-`session-log` asks whether a `Session`'s own projections equal its folds; these
-ask the same of the caches consumers keep *over* that log. Adjacent in the report
-because a person reading one wants the other, and after it because a drifting log
-explains a drifting fold over it while the reverse is not true.
+`session-log` asks whether the projections of a `Session` itself equal its
+folds. These invariants ask the same about the caches that consumers keep *over*
+that log. They are adjacent in the report because a person who reads one wants
+the other. They come after `session-log` because a drifting log explains a
+drifting fold over it, and the reverse is not true.
 """
 
 
 def contribute_fold_cache(
     ctx: Context, *, id: str, subject: str, stale: Callable[[Iterable[Session]], Sequence[str]]
 ) -> None:
-    """Declare that one consumer's `SessionFoldCache` still equals its fold (I6).
+    """Declare that the `SessionFoldCache` of one consumer still equals its fold (I6).
 
-    `stale` is the owning service's delegate to `SessionFoldCache.stale`, handed
-    the sessions to check; the store lookup happens here so six rows do not each
-    write it. One statement, likewise written once: six consumers cache a fold
-    over the session log, and six hand-written sentences saying so would drift
-    into six slightly different promises about one property.
+    `stale` is the delegate of the owning service to `SessionFoldCache.stale`,
+    and it is given the sessions to check. The store lookup happens here, so
+    nine callers do not each write it. The statement is also written one time.
+    Nine consumers cache a fold over the session log, and nine hand-written
+    sentences would drift into nine slightly different promises about one
+    property.
 
-    **A row each rather than one row for all of them**, for the reason
-    `skills-invariant` gives about not folding itself into `tools-invariant`: they
-    are different folds with different failure stories, and a report naming which
-    cache drifted is what a person can act on. It also keeps each declaration
-    inside the row that owns the cache, so a profile that drops the seam drops the
-    claim with it instead of reporting `holds` about a cache nobody mounted.
+    **Each cache gets its own row, and one row does not cover all of them.** The
+    reason is the one that `skills-invariant` gives for not folding itself into
+    `tools-invariant`: they are different folds with different failure stories,
+    and a person can act on a report that names which cache drifted. It also
+    keeps each declaration inside the row that owns the cache. A profile that
+    drops the seam then drops the claim with it, and does not report `holds`
+    about a cache that nobody mounted.
     """
 
     def check() -> Sequence[str]:
-        # Read at poll time, never captured at `apply` time: the store may mount
-        # after this row. With no store there is nothing to enumerate and no
-        # cached answer that could be serving anybody, so `[]` is the honest
-        # answer rather than a reassuring one — `HarnessService.stale_projections`
-        # reads its sessions the same way and says so for the same reason.
+        # The store is read at poll time and never captured at `apply` time,
+        # because the store may mount after this row. With no store there is
+        # nothing to enumerate, and no cached answer that could be served to
+        # anybody. So `[]` is the correct answer and not a reassuring one.
+        # `HarnessService.stale_projections` reads its sessions the same way,
+        # for the same reason.
         sessions = ctx.get(SESSIONS)
         return [] if sessions is None else stale(sessions.list())
 
@@ -268,7 +279,7 @@ def contribute_fold_cache(
 
 @plugin("invariants", affects="deployment")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the registration seam. No invariant ships in `ph-base` from here."""
+    """Mount the registration seam. This row itself registers no invariant."""
     registry = InvariantRegistry(ctx=ctx)
     ctx.provide(INVARIANTS, registry)
     contribute_diagnostic(
@@ -277,8 +288,9 @@ async def apply(ctx: Context, config: None) -> None:
             id="invariants",
             title="Invariants",
             read=registry.describe,
-            # Last: a person scanning `phern doctor` for what is wrong should meet
-            # the deployment's own account of itself before its self-assessment.
+            # Last: a person who scans `phern doctor` for what is wrong should
+            # read the account that the deployment gives of itself before its
+            # self-assessment.
             order=ORDER_SELF_ASSESSMENT,
         ),
     )

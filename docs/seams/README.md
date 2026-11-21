@@ -38,7 +38,7 @@ than by replacing it.
 | [`ctx.shell`](shell.md) | `seams/shell.py` | Bash over `ctx.subprocess`, confined when a backend exists. |
 | [`ctx.sandbox`](sandbox.md) | `seams/sandbox.py` | Confinement, and the refusal to pretend. |
 | [`ctx.containment`](containment.md) | `seams/containment.py` | Which rung of the ladder this deployment asked for (E1, E8). |
-| [`ctx.code_runtime`](code_runtime.md) | `seams/code_runtime.py` | The seam definition only (P1-06, C1). |
+| [`ctx.code_runtime`](code_runtime.md) | `seams/code_runtime.py` | The definition of the seam only (P1-06, C1). |
 | [`ctx.workspace`](workspace.md) | `seams/workspace.py` | Where an agent's writes land, and how accurately that is stated. |
 
 Providers, which register into the seams above rather than publishing their own
@@ -71,32 +71,32 @@ caller's own content hash.
 
 | service | module | |
 |---|---|---|
-| [`ctx.attachments`](attachments.md) | `seams/attachments.py` | Media the log points at but cannot reconstruct. |
-| [`ctx.uploads`](uploads.md) | `seams/uploads.py` | A provider's copy of an attachment, and the handle for it (P7-03). |
-| [`ctx.spill_store`](spill_store.md) | `seams/spill.py` | Oversized content out of context, with a way back. |
-| [`ctx.compaction`](compaction.md) | `seams/compaction.py` | Replacing history with a summary, without losing it. |
-| [`ctx.token_meter`](token_meter.md) | `seams/token_meter.py` | The provider's count is the truth; ours is for pressure. |
-| [`ctx.skills`](skills.md) | `seams/skills.py` | The capability layer, and the boundary it must not cross. |
+| [`ctx.attachments`](attachments.md) | `seams/attachments.py` | Media that the log points at but cannot rebuild. |
+| [`ctx.uploads`](uploads.md) | `seams/uploads.py` | The copy of an attachment that a provider holds, and the handle for it (P7-03). |
+| [`ctx.spill_store`](spill_store.md) | `seams/spill.py` | Oversized content moved out of context, with a way back. |
+| [`ctx.compaction`](compaction.md) | `seams/compaction.py` | Replace history with a summary, and lose nothing. |
+| [`ctx.token_meter`](token_meter.md) | `seams/token_meter.py` | The provider's count is the truth, and ours is for pressure. |
+| [`ctx.skills`](skills.md) | `seams/skills.py` | The capability layer, and the boundary that it must not cross. |
 
 ## Asking a person
 
 | service | module | |
 |---|---|---|
-| [`ctx.approval`](approval.md) | `seams/approval.py` | Asking a human, and failing closed when you cannot. |
-| [`ctx.user_questions`](user_questions.md) | `seams/user_questions.py` | Asking the human something that is not an approval. |
-| [`ctx.commands`](commands.md) | `seams/commands.py` | Human slash commands that spend no model turn. |
+| [`ctx.approval`](approval.md) | `seams/approval.py` | Asking a human, and failing closed when nobody can be asked. |
+| [`ctx.user_questions`](user_questions.md) | `seams/user_questions.py` | Ask the user something that is not an approval. |
+| [`ctx.commands`](commands.md) | `seams/commands.py` | Slash commands of the user that spend no model turn. |
 | [`ctx.permission_presets`](permission_presets.md) | `seams/permission_presets.py` | One name for a sandbox mode *and* an approval policy. |
 
 ## Agents and work
 
 | service | module | |
 |---|---|---|
-| [`ctx.models`](models.md) | `seams/models.py` | The models a profile lists, and which one a root runs on. |
-| [`ctx.subagents`](subagents.md) | `seams/subagents.py` | Delegation to a child agent, and the handle it returns. |
+| [`ctx.models`](models.md) | `seams/models.py` | The models that a profile lists, and which one a root runs on. |
+| [`ctx.subagents`](subagents.md) | `seams/subagents.py` | Delegation to a child agent, and the handle that it returns. |
 | [`ctx.subagent_presets`](subagents.md) | `seams/subagents.py` | The named grants a child may be admitted under — documented with the delegation it configures. |
 | [`ctx.named_profiles`](subagents.md) | `seams/subagent_profiles.py` | A named profile a parent assigns its child, composed by the host and read as a narrowing on the parent's mount. |
 | [`ctx.jobs`](jobs.md) | `seams/jobs.py` | Background work with a handle, a cancel and a completion. |
-| [`ctx.schedule`](schedule.md) | `seams/schedule.py` | Work a root will do later, folded from its own log (P5-06). |
+| [`ctx.schedule`](schedule.md) | `seams/schedule.py` | Work that a root will do later, folded from its own log (P5-06). |
 | [`ctx.goals`](goals.md) | `seams/goals.py` | An objective, a budget, and the gates that decide it (P5-07). |
 
 `seams/schedule_index.py` answers which sessions hold a live appointment (P6-23).
@@ -107,7 +107,7 @@ mounts only those (P13-01).
 
 | service | module | |
 |---|---|---|
-| [`ctx.tui_screens`](tui_screens.md) | `seams/tui_screens.py` | The front end's registration seam (P4-17). |
+| [`ctx.tui_screens`](tui_screens.md) | `seams/tui_screens.py` | The registration seam of the front end (P4-17). |
 | [`ctx.tui_status`](tui_status.md) | `seams/tui_status.py` | A live reading in the footer, contributed by a row. |
 | [`ctx.diagnostics`](diagnostics.md) | `seams/diagnostics.py` | What a row wants `phern doctor` to say about it. |
 

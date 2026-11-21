@@ -1,59 +1,64 @@
-"""`ctx.uploads` — a provider's copy of an attachment, and the handle for it (P7-03).
+"""`ctx.uploads`: the copy of an attachment that a provider holds, and the handle
+for it (P7-03).
 
-Some things cannot be sent inline. A provider's file API takes the bytes once and
-gives back an id to reference on every later request — which video effectively
-requires everywhere, and which large documents are worth on any route that offers
-it, because a 4 MB PDF re-encoded as base64 on every step of a fifty-step session
-is the same 5.5 MB uploaded fifty times.
+Some things cannot be sent inline. The file API of a provider takes the bytes
+one time and gives back an id to reference on every later request. Video
+effectively requires this everywhere. Large documents are worth it on any route
+that offers it, because a 4 MB PDF that is encoded again as base64 on every step
+of a fifty-step session is the same 5.5 MB uploaded fifty times.
 
-That makes a `(provider, digest) → handle` map the one piece of genuinely
-non-derivable state in this phase, and **where it lives is this row's real
-question.** "State lives in the log" is the harness's default and departing from
-it needs the argument written down, so:
+So a map from `(provider, digest)` to a handle is the one piece of state in this
+phase that genuinely cannot be derived, and **where it lives is the real
+question of this row.** "State lives in the log" is the default of the harness,
+and a departure from it needs the argument written down:
 
-* **The handle is not in the log, and the upload is.** A handle is a *prediction*
-  — "this id will work until roughly T" — and predictions go stale on their own
-  schedule; an append-only log (A1) that recorded one would be asserting
-  something false the moment a provider expired it early, with no way to take it
-  back. That bytes left this machine for a named provider is a *fact*, it is
-  privacy-relevant, and it is exactly what a person auditing a session needs, so
-  it is appended as `attachment/uploaded`.
-* **It is keyed on the digest, not on the session.** Two sessions attaching one
-  photo share one blob already; making them share one upload follows from the
-  same naming. A per-session record would make one session's log the authority
-  for another session's uploads, which is a coupling neither session asked for.
-* **Losing it costs an upload, not information.** Every entry is reconstructible
-  from bytes the store still holds, which is the definition of a cache — so it
-  belongs beside the other derived state under `$PH_CACHE`, where a person can
+* **The handle is not in the log, and the upload is.** A handle is a
+  *prediction*: "this id will work until roughly T". A prediction goes stale on
+  its own schedule. An append-only log (A1) that recorded one would assert
+  something false as soon as a provider expired it early, with no way to take
+  it back. That bytes left this machine for a named provider is a *fact*. It is
+  privacy-relevant, and it is exactly what a person who audits a session needs.
+  So the log records it: `attachment/uploading` before the bytes leave, and
+  `attachment/uploaded` when the upload settles.
+* **It is keyed on the digest, not on the session.** Two sessions that attach
+  one photo already share one blob. That they share one upload follows from the
+  same naming. A record for each session would make the log of one session the
+  authority for the uploads of another session. Neither session asked for that
+  coupling.
+* **Losing it costs an upload, not information.** Every entry can be rebuilt
+  from bytes that the store still holds, which is the definition of a cache. So
+  it belongs beside the other derived state under `$PH_CACHE`, where a user can
   delete the directory and get nothing worse than one slow turn.
 
-**One file per entry, not an index.** The daemon runs many roots in one process
-and several processes may share a `$PH_CACHE`; a single index is a write
-contended by all of them and a corrupt read that loses every handle at once. A
-content-addressed file per `(provider, digest)` has the same failure mode as the
-blob store it mirrors — one entry, recoverable by re-uploading.
+**One file for each entry, not an index.** The daemon runs many roots in one
+process, and several processes may share a `$PH_CACHE`. A single index is a
+write that all of them contend for, and a corrupt read of it loses every handle
+at the same time. A content-addressed file for each `(provider, digest)` has the
+same failure mode as the blob store that it mirrors: one entry is lost, and a
+new upload recovers it.
 
-**Expiry is checked twice, and the second time is the one that matters.** A
-handle carries what the provider said, so an entry past its own `expires_at` is
-re-uploaded before a request is built. But providers expire files early, delete
-them from another session, or forget them; that shows up as a failure *mid-turn*,
-which `invalidate_handle` plus the retry waterfall turns into one more attempt
-rather than a lost turn.
+**Expiry is checked twice, and the second check is the one that matters.** A
+handle carries what the provider said, so an entry that is past its own
+`expires_at` is uploaded again before a request is built. But providers expire
+files early, delete them from another session, or forget them. That shows up as
+a failure *mid-turn*. `invalidate_handle` and the retry waterfall turn that
+failure into one more attempt and not a lost turn.
 
-**Pruned by `phern attachments gc`, off the same reference set as the blobs.** An
-entry is written per `(provider, digest)` ever uploaded and stays after the
-provider has forgotten the file, so without a sweep the directory grows with the
-number of distinct attachments a deployment has ever sent. It is swept there
-rather than here because the question is the same one — *does any stored session
-still point at this digest* — and answering it twice would be two folds that can
-disagree. What is **not** shared is the reason: losing an entry costs one upload
-and losing a blob costs the conversation, which is why the blobs are aged and
-guarded by a completeness check and these are not.
+**`phern attachments gc` prunes the entries, from the same reference set as the
+blobs.** An entry is written for each `(provider, digest)` that was ever
+uploaded, and it stays after the provider has forgotten the file. Without a
+sweep, the directory grows with the number of distinct attachments that a
+deployment has ever sent. The sweep is in that command and not here because the
+question is the same one: *does any stored session still point at this digest*.
+To answer it twice would be two folds that can disagree. The reason is **not**
+shared. Losing an entry costs one upload, and losing a blob costs the
+conversation. That is why the blobs are aged and guarded by a completeness
+check, and these entries are not.
 
-Still not enforced (§5 rule 6): **nothing prunes it automatically.** The command
-is manual, like the collection of the blobs it mirrors, so a deployment that never
-runs it keeps every entry it has ever written. Each is a few hundred bytes and the
-directory is safe to delete wholesale.
+Still not enforced (§5 rule 6): **nothing prunes the cache automatically.** The
+command is manual, like the collection of the blobs that the cache mirrors. A
+deployment that never runs it keeps every entry that it has ever written. Each
+entry is a few hundred bytes, and the whole directory is safe to delete.
 
 @module ph.seams.uploads
 """
@@ -73,7 +78,7 @@ from ..cordis import Context, Disposer, Running, plugin, running
 from ..json import JsonValue
 from ..keys import ATTACHMENTS, SESSIONS, UPLOADS
 from ..llm.types import AttachmentRef
-from ..paths import resolve_roots, write_atomic
+from ..paths import default_cache_path, write_atomic
 from ..session import IntentNotDurable, Session, intents_of, now_ms, session_written
 from ..session.kinds import UPLOAD, upload_settled
 from ..wire import WireModel
@@ -85,24 +90,26 @@ log = logging.getLogger("ph.seams.uploads")
 
 
 class FileHandle(WireModel):
-    """What a provider gave back for one attachment's bytes."""
+    """What a provider gave back for the bytes of one attachment."""
 
     provider: str
     attachment_id: str
     handle: str
-    """The provider's own id, opaque here and passed back verbatim on the wire."""
+    """The id that the provider chose. It is opaque here, and it is passed back
+    unchanged on the wire."""
     uploaded_at: int
     expires_at: int | None = None
-    """When the provider said it stops working, or `None` when it did not say.
+    """When the provider said that the handle stops working, or `None` when it did
+    not say.
 
-    `None` is "no expiry announced" rather than "never expires" — the difference
-    matters because the second would be a promise this file cannot keep for any
-    provider. Either way a mid-turn failure invalidates the entry, which is the
-    check that does not depend on anyone having told the truth."""
+    `None` means "no expiry announced" and not "never expires". The difference
+    matters, because "never expires" would be a promise that this file cannot
+    keep for any provider. In both cases a failure mid-turn invalidates the
+    entry, and that check does not depend on anyone having told the truth."""
 
 
 class Uploader(Protocol):
-    """A route's file API, as the seam needs it."""
+    """The file API of a route, as the seam needs it."""
 
     async def upload(self, ref: AttachmentRef, content: bytes) -> FileHandle: ...
 
@@ -111,10 +118,10 @@ class Uploader(Protocol):
 class _Registered:
     """An uploader and who registered it (P6-29).
 
-    The same shape `AdapterHandle` carries and for the same reason: `upload` is
-    row code this seam invokes *later*, so it has to run bound to the row that
-    contributed it rather than to whatever happened to be running when a request
-    needed a file.
+    This is the shape that `AdapterHandle` carries, for the same reason.
+    `upload` is row code that this seam invokes *later*. So it must run bound
+    to the row that contributed it, and not to whatever was running when a
+    request needed a file.
     """
 
     uploader: Uploader
@@ -124,9 +131,10 @@ class _Registered:
 def _uploading(provider: str, ref: AttachmentRef) -> dict[str, JsonValue]:
     """The `attachment/uploading` record: which file is about to go, and to whom.
 
-    Not the handle, which expires, but that a named provider is being given this
-    file — the half of this row that *is* the log's business. A person auditing
-    where their data went reads the pair; nothing reads it back to find a handle.
+    The record does not hold the handle, which expires. It holds the fact that
+    a named provider is being given this file, which is the part of this row
+    that *does* belong in the log. A person who audits where their data went
+    reads the pair of records. Nothing reads the record back to find a handle.
     """
     return {
         "provider": provider,
@@ -141,14 +149,14 @@ class Config(WireModel):
     """Row config for the handle cache."""
 
     root: str | None = None
-    """Where the entries live, else `$PH_CACHE/uploads`.
+    """Where the entries live. The default is `$PH_CACHE/uploads`.
 
-    A settable path like every other storage row, so a deployment can put this on
-    a different volume without moving `$PH_CACHE` wholesale. Spelled out rather
-    than through `default_home_path`, which every sibling uses: that helper roots
-    at `$PH_HOME`, and this is the first row whose default belongs under the
-    *cache* — which is the whole argument at the top of this file, so borrowing a
-    helper that says `home` would quietly contradict it."""
+    The path is a setting, like the path of every other storage row, so a
+    deployment can put this cache on a different volume without moving all of
+    `$PH_CACHE`. The default goes through `default_cache_path` and not through
+    `default_home_path`, which the storage rows under `$PH_HOME` use. This
+    default belongs under the *cache*. That is the argument at the top of this
+    file, so a helper that says `home` would quietly contradict it."""
 
 
 @dataclass(slots=True)
@@ -159,18 +167,22 @@ class UploadRegistry:
     root: Path
     uploaders: dict[str, _Registered] = field(default_factory=dict)
     _memo: dict[tuple[str, str], FileHandle] = field(default_factory=dict)
-    """Entries read this process, so a handle is read from disk once.
+    """The entries that this process has read, so that a handle is read from disk
+    one time.
 
-    `load_b64`'s reason exactly: an attachment stays in derived history for the
-    life of the session, so without this the same small JSON file is opened and
-    parsed on every step of every turn. Cleared by `invalidate_handle`, which is
-    the only thing that makes an entry wrong."""
+    The reason is the same as for `load_b64`. An attachment stays in derived
+    history for the life of the session. Without this memo, the same small JSON
+    file would be opened and parsed on every step of every turn.
+    `invalidate_handle` removes an entry, because a dead handle is the only
+    thing that makes an entry wrong. `prune` removes the entries that it
+    deletes from disk."""
 
     def register_uploader(self, provider: str, uploader: Uploader) -> Disposer:
         """Claim the file API for one provider.
 
-        Per provider rather than one slot, because a deployment routing to two of
-        them is ordinary and their file APIs have nothing in common.
+        There is a slot for each provider and not one slot, because a deployment
+        that routes to two providers is ordinary, and their file APIs have
+        nothing in common.
         """
         by = self.ctx.running_for()
         return claim_key(
@@ -182,11 +194,11 @@ class UploadRegistry:
         return self.root / provider / f"{digest}.json"
 
     def cached(self, provider: str, attachment_id: str) -> FileHandle | None:
-        """The stored handle, if there is one and it has not announced its own end.
+        """The stored handle, if there is one and its announced expiry has not passed.
 
-        A cache read that cannot raise: a truncated or hand-edited entry is
-        treated as absent, because the remedy for both is the same upload and
-        failing a turn over an unreadable *cache* would be absurd.
+        This is a cache read that cannot raise. A truncated or hand-edited entry
+        is treated as absent, because the remedy for both is the same upload. To
+        fail a turn because a *cache* is unreadable would be absurd.
         """
         handle = self._memo.get((provider, attachment_id))
         if handle is None:
@@ -201,17 +213,18 @@ class UploadRegistry:
         return handle
 
     def invalidate_handle(self, provider: str, handle: str) -> None:
-        """Forget the entry holding this provider id, wherever it is.
+        """Forget the entry that holds this provider id, wherever it is.
 
-        The adapter that meets a dead handle mid-request knows the *file id*, not
-        the digest it was made from — the request carries one and not the other.
-        The memo answers it without touching the disk in the ordinary case; the
-        scan is the cold path, after a restart, and it stops at the match.
+        The adapter that meets a dead handle mid-request knows the *file id* and
+        not the digest that it was made from, because the request carries the
+        id and not the digest. In the ordinary case the memo answers without
+        touching the disk. The scan is the cold path, after a restart, and it
+        stops at the match.
 
-        Called for the one handle the provider *named*, never for every handle a
-        request referenced: a twenty-file request that threw away nineteen live
-        uploads to replace one dead one would re-upload nineteen files to fix a
-        problem it did not have.
+        This method is called for the one handle that the provider *named*, and
+        never for every handle that a request referenced. A request with twenty
+        files that discarded nineteen live uploads to replace one dead upload
+        would upload nineteen files again to fix a problem that it did not have.
         """
         for key, stored in list(self._memo.items()):
             if key[0] == provider and stored.handle == handle:
@@ -233,24 +246,29 @@ class UploadRegistry:
     async def handle_for(
         self, ref: AttachmentRef, *, provider: str, session_id: str | None = None
     ) -> FileHandle | None:
-        """The handle to reference these bytes by, uploading them if needed.
+        """The handle to reference these bytes by. The bytes are uploaded if needed.
 
-        `None` when this provider has no uploader — not an error, because the
-        caller's alternative is to send the bytes inline, which is what every
-        route did before this row existed.
+        The result is `None` when this provider has no uploader or no attachment
+        store is mounted. That is not an error, because the caller has an
+        alternative. It sends the bytes inline, which is what every route did
+        before this row existed. For a file over the inline limit of the route
+        it sends a pointer (`load_media` in `ph_app.adapters._media`).
 
-        `session_id` is where the *fact* goes when an upload actually happens.
-        Recorded here rather than by the caller because this is the one place
-        that knows the difference between a cache hit and bytes leaving the
-        machine, and it is that difference a person is owed.
+        `session_id` names the session that records the *fact* when an upload
+        actually happens. The fact is recorded here and not by the caller,
+        because this is the one place that knows the difference between a cache
+        hit and bytes that leave the machine. The user is owed exactly that
+        difference.
 
-        **An id, and this resolves it** — where the first shape took the `Session`
-        itself and made every adapter look one up. Three of them had written the
-        same five lines by the time the third wire landed, and the omission that
-        shape invites is silent in the worst way: an adapter that forgets to pass
-        it loses `attachment/uploaded`, the only record that bytes left the
-        machine, while every request still succeeds. This has the `ctx` those
-        lookups needed, so the rule lives once beside the append it guards.
+        **The argument is an id, and this method resolves it.** The first
+        version took the `Session` itself and made every adapter look one up.
+        Three adapters had written the same five lines by the time the third
+        wire landed. That shape invites an omission that is silent in the worst
+        way. An adapter that forgets to pass the session loses the
+        `attachment/uploading` and `attachment/uploaded` records, the only
+        record that bytes left the machine, while every request still succeeds.
+        This method has the `ctx` that those lookups needed, so the rule is
+        written one time, beside the append that it guards.
         """
         cached = self.cached(provider, ref.attachment_id)
         if cached is not None:
@@ -266,13 +284,15 @@ class UploadRegistry:
                 handle = await entry.uploader.upload(ref, content)
         else:
             recorded = await self._recorded(session, provider, entry, ref, content)
-            # **The settle is durable before the cache is** (F10). The cache is what
-            # makes every later request skip this branch, so caching first meant a
-            # crash before the next barrier kept the handle and lost the fact — for
-            # good, since nothing ever uploads, or records, that file for that
-            # provider again. Not cached when the record cannot be written: the next
-            # request uploads again and records again, which is the direction a
-            # person auditing their data needs this to fail in.
+            # **The settle is durable before the cache is** (F10). The cache is
+            # what makes every later request skip this branch. When the cache
+            # was written first, a crash before the next barrier kept the handle
+            # and lost the fact. The loss was permanent, because nothing ever
+            # uploads that file for that provider again, or records it. The
+            # handle is not cached when the record cannot be written. The next
+            # request then uploads again and records again. That is the
+            # direction in which a person who audits their data needs this to
+            # fail.
             if recorded is None or not await session_written(self.ctx, session):
                 return recorded
             handle = recorded
@@ -287,13 +307,15 @@ class UploadRegistry:
         ref: AttachmentRef,
         content: bytes,
     ) -> FileHandle | None:
-        """Upload under `UPLOAD`: **on disk before the bytes leave** (S9).
+        """Upload under `UPLOAD`: **the record is on disk before the bytes leave** (S9).
 
-        The record used to follow the upload, so a crash between the two left the
-        provider holding a file this log never said it was given. `claim` settles an
-        upload that raised `outcome-unknown`: the bytes may have gone. One the log
-        cannot record is not uploaded — `None`, and the caller sends the bytes inline,
-        in the request its own barrier has recorded.
+        The record used to follow the upload. A crash between the two left the
+        provider with a file that this log never said it was given. When the
+        upload raises, `claim` settles it as `outcome-unknown`, because the
+        bytes may have gone. An upload that the log cannot record is not made.
+        The result is then `None`, and the caller sends the bytes inline, in the
+        request that its own barrier has recorded. A file over the inline limit
+        of the route goes as a pointer (`handle_for`).
         """
         journal = intents_of(self.ctx)
         try:
@@ -312,20 +334,22 @@ class UploadRegistry:
         return None if sessions is None or session_id is None else sessions.get(session_id)
 
     def stale(self, referenced: Container[str]) -> tuple[Path, ...]:
-        """Cache entries for digests nothing points at any more (P7-01).
+        """The cache entries for digests that nothing points at any more (P7-01).
 
-        The half of `phern attachments gc` that is this seam's, held here because the
-        layout is: `path_for` decides that an entry is `<provider>/<digest>.json`,
-        and a collector that reconstructed that rule from the outside would keep
-        reporting zero — silently, and with nothing failing — the day the scheme
-        changed. The *reference set* is still the attachment store's to compute;
-        what belongs here is which files answer to it.
+        This is the half of `phern attachments gc` that belongs to this seam. It
+        is here because the layout is here: `path_for` decides that an entry is
+        `<provider>/<digest>.json`. A collector that rebuilt that rule from the
+        outside would keep reporting zero, silently and with nothing failing,
+        from the day that the scheme changed. The attachment store still
+        computes the *reference set*. This seam decides which files answer to
+        it.
 
-        **Not aged, where the blobs are.** An unreferenced digest's cache entry is
-        dead the moment its blob is, and there is no staged-file window to wait
-        out because nothing uploads a file before a session mentions it. The two
-        halves are swept under one reference set but not for the same reason:
-        losing an entry costs one upload, losing a blob costs the conversation.
+        **The entries are not aged, although the blobs are.** The cache entry of
+        an unreferenced digest is dead as soon as its blob is. There is no
+        staged-file window to wait out, because nothing uploads a file before a
+        session mentions it. The two halves are swept under one reference set
+        but not for the same reason: losing an entry costs one upload, and
+        losing a blob costs the conversation.
         """
         if not self.root.is_dir():
             return ()
@@ -338,11 +362,12 @@ class UploadRegistry:
     def prune(self, paths: Iterable[Path]) -> int:
         """Remove these entries and forget what they said.
 
-        Through the seam rather than by unlinking from the collector, because the
-        memo is the part an outside deleter cannot see: `_memo` would go on
-        answering `cached()` with a handle whose file this command had just
-        removed, for the life of the process. `invalidate_handle` already pairs
-        the two for one entry; this is the same pairing for a sweep.
+        The removal goes through the seam and is not an unlink from the
+        collector, because an outside deleter cannot see the memo. `_memo` would
+        go on answering `cached()` with a handle whose file this command had
+        just removed, for the life of the process. `invalidate_handle` already
+        pairs the two steps for one entry. This method is the same pairing for a
+        sweep.
         """
         removed = 0
         for path in paths:
@@ -358,14 +383,14 @@ class UploadRegistry:
         self._memo[(handle.provider, handle.attachment_id)] = handle
         path = self.path_for(handle.provider, handle.attachment_id)
         payload = json.dumps(handle.to_wire())
-        # Atomically: a reader in another process must see either the old entry
-        # or the new one, since a half-written handle read as JSON is the
-        # corruption `cached` has to treat as absent.
+        # The write is atomic. A reader in another process must see either the
+        # old entry or the new one. A half-written handle that is read as JSON
+        # is the corruption that `cached` has to treat as absent.
         await anyio.to_thread.run_sync(write_atomic, path, payload)
 
 
 @plugin("uploads-local", affects="deployment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the handle cache. Uploaders come from the adapter rows."""
-    root = Path(config.root).expanduser() if config.root else resolve_roots().cache / "uploads"
+    root = default_cache_path(config.root, "uploads")
     ctx.provide(UPLOADS, UploadRegistry(ctx=ctx, root=root))

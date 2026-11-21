@@ -1,12 +1,13 @@
-"""`ctx.spill_store` — oversized content out of context, with a way back.
+"""`ctx.spill_store`: oversized content moved out of context, with a way back.
 
-An offloaded tool result is not deleted, it is *relocated*: the model gets a
+An offloaded tool result is not deleted. It is *relocated*: the model gets a
 preview and a locator, and the locator resolves to the full text. That is what
-makes G2/G3 offloading (Phase 4) an optimization rather than a lie — the
-harness never tells the model something is gone when it is on disk.
+makes G2/G3 offloading (Phase 4) an optimization and not a lie. The harness
+never tells the model that something is gone when it is on disk.
 
-`retrieval_hint` exists so the preview can say how to get the rest in the
-model's own vocabulary (`read` this path, offset N), rather than making it guess.
+`retrieval_hint` exists so that the preview can say how to get the rest in the
+vocabulary of the model (`read` this path, offset N). The model does not have
+to guess.
 
 @module ph.seams.spill
 """
@@ -45,15 +46,17 @@ class SpillRef(WireModel):
 
 @dataclass(frozen=True, slots=True)
 class PlannedBlob:
-    """Bytes, and the locator the store's naming rule gives them — derived together
-    (`SpillStore.plan`), for a caller that must name a blob before storing it.
+    """Bytes, together with the locator that the naming rule of the store gives
+    them (`SpillStore.plan`). It is for a caller that must name a blob before it
+    stores the blob.
 
-    One value rather than a locator and the bytes apart, for two reasons. The digest
-    is taken **once**: `plan` hashes the whole payload, and a caller that
-    derived the locator for its record and then stored the bytes hashed them
-    again — a second sha256 of a multi-megabyte tool result on the event loop. And
-    the name cannot come apart from what it names: `try_save` writes *these* bytes at
-    *this* locator, with no second derivation to disagree.
+    The locator and the bytes are one value and not two, for two reasons. First,
+    the digest is taken **one time**. `plan` hashes the whole payload. A caller
+    that derived the locator for its record and then stored the bytes hashed
+    them again, which was a second sha256 of a multi-megabyte tool result on
+    the event loop. Second, the name cannot come apart from what it names.
+    `try_save` writes *these* bytes at *this* locator, with no second derivation
+    that could disagree.
     """
 
     locator: Path
@@ -61,11 +64,12 @@ class PlannedBlob:
 
 
 def _plain_locator(data: Mapping[str, Any]) -> str | None:
-    """`data["locator"]` when it is a string — the seam's own convention.
+    """`data["locator"]` when it is a string, which is the convention of the seam.
 
-    A spill that failed open records its event with `locator: None`, so a
-    non-string is skipped rather than coerced: `"None"` in the reference set
-    keeps a file that does not exist and reads as a producer doing its job.
+    A spill that failed open records its event with `locator: None`. So a value
+    that is not a string is skipped and not coerced. A `"None"` in the reference
+    set would keep a file that does not exist, and it would look like a producer
+    that does its job.
     """
     locator = data.get("locator")
     return locator if isinstance(locator, str) else None
@@ -73,19 +77,21 @@ def _plain_locator(data: Mapping[str, Any]) -> str | None:
 
 @dataclass(frozen=True, slots=True)
 class SpillClaim:
-    """One producer's blobs: where they live, and which event names each (F7).
+    """The blobs of one producer: where they live, and which event names each (F7).
 
-    Contributed rather than known here. The sweep began as one producer's own
-    `session/created` listener; every producer added afterwards wrote blobs
-    nothing collected, and a crash between a blob write and the append naming it
-    leaked a file permanently. A per-producer sweep is how that happens twice, so
-    there is one sweep and producers contribute to its fold.
+    A claim is contributed by its producer and is not known here. The sweep
+    began as the `session/created` listener of one producer. Every producer that
+    was added afterwards wrote blobs that nothing collected, and a crash between
+    a blob write and the append that names the blob leaked a file permanently. A
+    sweep for each producer is how that happens a second time. So there is one
+    sweep, and producers contribute to its fold.
 
-    `owners` is unconditional — read even from a log with no spill events — so
-    the crash case (blob written, event never appended) is still visited. Both
-    readers are per event, which is what lets the seam fold every claim in **one
-    pass** over the log: a producer whose owner is templated from the event
-    (`kernel/<namespace>`) reads it there rather than scanning the log itself.
+    `owners` is unconditional: it is read even from a log with no spill events.
+    So the crash case (blob written, event never appended) is still visited. The
+    two readers, `locator` and `owner`, each take one event. That lets the seam
+    fold every claim in **one pass** over the log. A producer whose owner is
+    templated from the event (`kernel/<namespace>`) reads the owner there and
+    does not scan the log itself.
     """
 
     label: str
@@ -94,18 +100,20 @@ class SpillClaim:
     locator: Callable[[Mapping[str, Any]], str | None] = _plain_locator
     owner: Callable[[Mapping[str, Any]], str | None] = lambda _data: None
     hands_paths: bool = False
-    """Whether this producer's locator is put in front of the model to follow.
+    """Whether the locator of this producer is put in front of the model to follow.
 
     `tool-result-offload` and `input-offload` replace content with a preview and
-    the path it was written to, so a read of that path is the model following
-    something the harness handed it — see `handed_paths_of`, which folds this.
-    A kernel snapshot is *not*: nothing shows the model where it went, and a
-    producer that has to say so is the extension point the seam already has.
+    the path that the content was written to. `compaction-summarize` tells the
+    model where the history was saved. A read of such a path is the model
+    following something that the harness handed it. See `handed_paths_of`,
+    which folds this flag. A kernel snapshot is *not* handed, because nothing
+    shows the model where it went. A producer has to say which case it is, and
+    the claim is the extension point that the seam already has.
     """
 
     @classmethod
     def under_session(cls, label: str, event_type: str, *, hands_paths: bool = False) -> SpillClaim:
-        """A producer writing under `session.id` whose events carry `locator`."""
+        """A producer that writes under `session.id` and whose events carry `locator`."""
         return cls(
             label=label,
             event_type=event_type,
@@ -124,67 +132,73 @@ class SpillStore:
 
     @property
     def claims(self) -> tuple[SpillClaim, ...]:
-        """What producers have contributed, for a caller that folds them.
+        """What producers have contributed, for a caller that folds the claims.
 
-        A tuple rather than the list: the sweep folds on a worker thread while the
-        event loop goes on, and a claim registered meanwhile must not change the
-        fold under it."""
+        The value is a tuple and not the list. The sweep folds on a worker
+        thread while the event loop continues, and a claim that is registered in
+        the meantime must not change the fold."""
         return tuple(self._claims)
 
     def owner_root(self, owner: str) -> Path:
-        """Where one owner's blobs live. The other half of the naming rule.
+        """Where the blobs of one owner live. This is the other half of the naming rule.
 
-        `plan` derives a whole path; a caller that has to answer "is this
-        path one of yours" needs the directory, and reconstructing `root / owner`
-        outside this class is how the two spellings drift. `permissions-fs` is
-        that caller.
+        `plan` derives a whole path. A caller that must answer "is this path one
+        of yours" needs the directory. When `root / owner` is built again
+        outside this class, the two spellings drift apart. `handed_paths_of` is
+        that caller, on behalf of `permissions-fs`.
         """
         return self.root / owner
 
     def plan(self, *, owner: str, suggested_name: str, content: bytes) -> PlannedBlob:
-        """Where `content` will go, held with it — `try_save` writes what this names.
+        """Where `content` will go, held together with it. `try_save` writes what
+        this names.
 
-        The one home of the naming rule (digest + sanitized name), so a caller
-        that must name a blob's locator before storing it — in the wording that
-        replaces it, in the record that points at it — derives the same path the
-        write will use rather than mirroring the rule and hoping a test keeps the
-        two in step.
+        This method is the one place that holds the naming rule (digest plus
+        sanitized name). A caller sometimes must name the locator of a blob
+        before it stores the blob: in the wording that replaces the content, or
+        in the record that points at the blob. Such a caller derives the same
+        path that the write will use. It does not mirror the rule and hope that
+        a test keeps the two in step.
         """
         digest = hashlib.sha256(content).hexdigest()[:16]
         safe = "".join(char if char.isalnum() or char in "-._" else "_" for char in suggested_name)
         return PlannedBlob(self.owner_root(owner) / f"{digest}-{safe}", content)
 
     async def try_save(self, planned: PlannedBlob, *, source: str) -> SpillRef | None:
-        """Write `planned` at its locator, durably, and return its reference — or `None`
-        when the store could not take it.
+        """Write `planned` at its locator, durably, and return its reference. The
+        result is `None` when the store could not take the blob.
 
-        **Write first, then append the record naming it** (§4.9). The blob is on disk
-        before any record names it, so the log never names bytes that are not there,
-        and a write that fails does so while the producer has logged nothing. That is
-        what keeps the fail-open answer open: a producer that cannot store a blob must
-        not be the reason the model loses what it held — an offload keeps the text
-        inline, a kernel snapshot records a `clear`. A run that dies between the two
-        leaves a file nothing names, which the next read of the log collects
+        **Write first, then append the record that names the blob** (§4.9). The
+        blob is on disk before any record names it. So the log never names bytes
+        that are not there, and a write that fails does so while the producer
+        has logged nothing. That keeps the fail-open answer open. A producer
+        that cannot store a blob must not be the reason that the model loses
+        what it held: an offload keeps the text inline, and a kernel snapshot
+        records a `clear`. A run that dies between the write and the append
+        leaves a file that nothing names. The next read of the log collects it
         (`sweep_session`).
 
-        It used to be staged out of the locator's reach, named, and only then renamed
-        into place (`reserve`, `commit`), because the sweep ran beside producers and
-        collected a blob caught between its write and its append. The sweep runs only
-        where nothing writes the session now, so that window is no hazard and the
-        bytes go straight to where the record will say they are.
+        Earlier, the blob was staged out of reach of the locator, named, and
+        only then renamed into place (`reserve`, `commit`). The reason was that
+        the sweep ran beside producers, and it collected a blob that was caught
+        between its write and its append. The sweep now runs only where nothing
+        writes the session. So that window is no hazard, and the bytes go
+        straight to where the record will say they are.
 
-        A batch of one: `try_save_all` is the one writer.
+        This is a batch of one: `try_save_all` is the one writer.
         """
         [ref] = await self.try_save_all([(planned, source)])
         return ref
 
     def plan_text(self, *, owner: str, suggested_name: str, text: str) -> PlannedBlob | None:
-        """`plan`, for text as UTF-8 — `None` when the text has no UTF-8 form.
+        """`plan`, for text as UTF-8. The result is `None` when the text has no
+        UTF-8 form.
 
-        A lone surrogate, which a `\\ud800` escape in a JSON tool result decodes to,
-        cannot be encoded, and a text that cannot be encoded is one the store could
-        not take: its producer keeps it inline, as it would after a refused write.
-        The one place text becomes bytes here, so every text producer refuses alike.
+        A lone surrogate cannot be encoded, and a `\\ud800` escape in a JSON tool
+        result decodes to one. A text that cannot be encoded is a text that the
+        store could not take. Its producer keeps it inline, as it would after a
+        refused write. This is the one place here where text becomes bytes, so
+        every text producer refuses in the same way.
         """
         try:
             content = text.encode("utf-8")
@@ -196,31 +210,35 @@ class SpillStore:
     async def try_save_text(
         self, *, owner: str, source: str, suggested_name: str, content: str
     ) -> SpillRef | None:
-        """`try_save`, for text nobody planned (`plan_text`)."""
+        """`try_save`, for text that nobody planned (`plan_text`)."""
         planned = self.plan_text(owner=owner, suggested_name=suggested_name, text=content)
         return None if planned is None else await self.try_save(planned, source=source)
 
     async def try_save_all(self, blobs: Sequence[tuple[PlannedBlob, str]]) -> list[SpillRef | None]:
-        """Write planned blobs, each with the `source` its reference names, and answer
-        their references in order — the store's one writer.
+        """Write planned blobs, each with the `source` that its reference names, and
+        return their references in order. This is the one writer of the store.
 
-        For a producer that names more than one blob at once — a kernel cell's
-        variables, which all live under one owner. They are written together, each
-        file synced, and their directory synced **once** rather than once per blob
-        (`write_atomic_all`, which says how), so a cell that spills K variables costs
-        one directory sync rather than K. The records come after this returns, so every
-        blob is durable before anything names it.
+        It is for a producer that names more than one blob at the same time,
+        such as the variables of a kernel cell, which all live under one owner.
+        The blobs are written together. Each file is synced, and their directory
+        is synced **one time** and not one time for each blob
+        (`write_atomic_all`, whose docstring says how). So a cell that spills K
+        variables costs one directory sync and not K. The records come after
+        this method returns, so every blob is durable before anything names it.
 
-        **Through a temp and a rename (L7)**, because the name carries the sha256 of
-        the bytes: a write that truncated first and was cut off left a prefix under a
-        name that says it is complete, and nothing rewrote it, since the digest
-        already matched. The same digest is what makes skipping a blob already there
-        safe, so re-spilling identical output costs one file rather than one per
-        occurrence. A kill the temp's cleanup cannot reach leaves a `<name>.<hex>.tmp`
-        that no locator names, which the next sweep collects.
+        **The write goes through a temp file and a rename (L7)**, because the
+        name carries the sha256 of the bytes. A write that truncated first and
+        was cut off left a prefix under a name that says it is complete. Nothing
+        rewrote it, because the digest already matched. The same digest is what
+        makes it safe to skip a blob that is already there, so spilling
+        identical output again costs one file and not one file for each
+        occurrence. A kill that the cleanup of the temp file cannot reach leaves
+        a `<name>.<hex>.tmp` that no locator names, and the next sweep collects
+        it.
 
-        A blob that could not be written answers `None`, for the producer to record as
-        it would a refused `try_save`; the others are still written.
+        A blob that could not be written gets `None`, and the producer records
+        that as it would a refused `try_save`. The other blobs are still
+        written.
         """
         failures = await anyio.to_thread.run_sync(
             partial(
@@ -243,38 +261,42 @@ class SpillStore:
         return await anyio.to_thread.run_sync(lambda: Path(locator).read_bytes())
 
     def claim(self, claim: SpillClaim, *, scope: Context | None = None) -> Disposer:
-        """Contribute one producer's owners and references to the open-time sweep."""
+        """Contribute the owners and references of one producer to the open-time sweep."""
         return claim_entry(
             self.ctx.owner_for(scope), self._claims, claim, label=f"spill.claim({claim.label})"
         )
 
     async def sweep_session(self, session: Session) -> list[str]:
-        """Drop every blob this session's log no longer names (F7, P6-15).
+        """Drop every blob that the log of this session no longer names (F7, P6-15).
 
-        **Union first, then visit each owner once.** Three producers write under
-        `session.id`, so sweeping each claim against only *its own* references
-        would have each delete the others' files, every one behaving correctly.
+        **Union first, then visit each owner one time.** Three producers write
+        under `session.id`. If the sweep checked each claim against only *its
+        own* references, each claim would delete the files of the others, and
+        every one of them would be behaving correctly.
 
-        **A claim that raises aborts the sweep.** A reference set assembled from
-        some of the claims is *smaller* than the truth, and a small reference set
-        does not skip work — it deletes live blobs.
+        **A claim that raises aborts the sweep.** A reference set that is
+        assembled from some of the claims is *smaller* than the truth. A small
+        reference set does not skip work. It deletes live blobs.
 
-        One pass over the log and one thread hop for the whole thing: this runs
+        The whole sweep is one pass over the log and one thread hop. It runs
         whenever a stored log is read, before the session is handed out, and a
         fold of a long log belongs off the event loop.
 
-        **And it says what it cannot mend.** The fold holds both halves of the
-        comparison, so having used one of them to find files nothing names, it uses
-        the other for a log naming a blob that is nowhere — reported, because the
-        alternative is the model being handed a path that fails when it follows it.
+        **It also reports what it cannot mend.** The fold holds both halves of
+        the comparison. It uses one half to find files that nothing names. It
+        uses the other half to find a log that names a blob that is nowhere.
+        That is reported, because the alternative is that the model is handed a
+        path that fails when the model follows it.
 
-        **Only where nothing writes the session.** Its one caller is the reader's
-        `session/loaded`, before anyone holds the session — a test pins that it stays
-        the only one — and that is what lets it collect everything the log does not
-        name, a dead run's leftovers included: a blob whose record never landed, a
-        `write_atomic` temp a kill interrupted. Beside a producer it would delete what
-        that producer had written and not yet named (`try_save` writes first), which is
-        what it did while it rode `session/created` (S7, D17).
+        **It runs only where nothing writes the session.** Its one caller is the
+        `session/loaded` listener of this row, which the reader runs before
+        anyone holds the session. A test checks that it stays the only caller.
+        That is what lets the sweep collect everything that the log does not
+        name, including what a dead run left: a blob whose record never landed,
+        and a `write_atomic` temp file that a kill interrupted. Beside a
+        producer, the sweep would delete what that producer had written and not
+        yet named (`try_save` writes first). It did exactly that while it was a
+        `session/created` listener (S7, D17).
         """
         claims = self.claims
         seed = session.header.first_own_seq
@@ -291,10 +313,11 @@ class SpillStore:
                 by_type.setdefault(claim.event_type, []).append(claim)
 
             for event in session.events:
-                # **The seam's own convention names a blob whoever wrote it** (S7): a
-                # producer this profile does not mount has no claim, so its blobs were
-                # unreferenced to a sweep of the directory it shares with one that is —
-                # and deleted, while the log still pointed the model at them.
+                # **The convention of the seam names a blob, whoever wrote it**
+                # (S7). A producer that this profile does not mount has no claim.
+                # Its blobs were therefore unreferenced to a sweep of the
+                # directory that it shares with a mounted producer. They were
+                # deleted while the log still pointed the model at them.
                 plain = _plain_locator(event.data)
                 if plain is not None:
                     referenced.add(plain)
@@ -306,9 +329,10 @@ class SpillStore:
                         return _abort(claim, session)
                     if locator is not None:
                         referenced.add(locator)
-                    # **Only the session's own records own a directory** (S7): a fork's
-                    # seeded prefix names its parent's, where the parent went on writing
-                    # blobs this log never saw.
+                    # **Only the own records of the session own a directory**
+                    # (S7). The seeded prefix of a fork names the directory of
+                    # its parent, where the parent went on writing blobs that
+                    # this log never saw.
                     if owner is not None and event.seq >= seed:
                         owners.add(owner)
             removed: list[str] = []
@@ -339,7 +363,7 @@ def _abort(claim: SpillClaim, session: Session) -> list[str]:
 
 
 def _collectable(directory: Path) -> list[Path]:
-    """The files in one owner directory a sweep may collect, if nothing names them."""
+    """The files in one owner directory that a sweep may collect, if nothing names them."""
     if not directory.is_dir():
         return []
     return [path for path in sorted(directory.iterdir()) if path.is_file()]
@@ -356,12 +380,12 @@ def _remove_unreferenced(files: Iterable[Path], referenced: set[str]) -> list[st
 
 
 def _refused(what: str, error: BaseException) -> None:
-    """Say why a blob was not spilled."""
+    """Log why a blob was not spilled."""
     log.warning("ph.seams.spill: could not spill %s", what, exc_info=error)
 
 
 def _ref(planned: PlannedBlob, source: str) -> SpillRef:
-    """The reference a written blob is named by in a record."""
+    """The reference by which a record names a written blob."""
     return SpillRef(
         locator=str(planned.locator),
         bytes=len(planned.content),
@@ -376,33 +400,35 @@ class Config(WireModel):
 
 
 def handed_paths_of(ctx: Context, *, session: Session | None) -> tuple[Path, ...]:
-    """Paths this session was handed and may follow, asked of a seam that may not
-    be mounted.
+    """The paths that this session was handed and may follow, asked of a seam that
+    may not be mounted.
 
-    The twin of `ph.seams.sandbox.allowed_paths_of`, and deliberately a different
-    set: that one is "where the backend binds writes", this one is "what the
-    harness put in front of the model to read". `tool-result-offload` replaces an
-    oversized result with a preview and the file it was written to, so a rule
-    refusing reads outside the workspace would hand the model a path and then
-    refuse it when it followed it — the harness telling it something is on disk
-    and then denying it.
+    This function is the twin of `ph.seams.sandbox.allowed_paths_of`, and it is
+    deliberately a different set. That function answers "where the backend
+    binds writes". This function answers "what the harness put in front of the
+    model to read". `tool-result-offload` replaces an oversized result with a
+    preview and the file that the result was written to. A rule that refuses
+    reads outside the workspace would therefore hand the model a path and then
+    refuse the path when the model followed it. The harness would tell the model
+    that something is on disk and then deny it.
 
-    **Folded from the claims, not assumed.** The first cut answered
-    `root/<session id>` for every mounted deployment, which made the set a
-    property of the layout instead of of what any row actually does. Three
-    producers put a locator in front of the model — both offloads and the
-    compaction history — and each says so where it already declares everything
-    else. A producer whose owner is *not* the session id would be picked up too,
-    though none is today: `ph_rlm.snapshot`'s owner is per-event
-    (`kernel/<namespace>`), so it contributes nothing here whatever it declares,
-    and it is right not to — nothing shows the model where a snapshot went.
+    **The set is folded from the claims and is not assumed.** The first version
+    answered `root/<session id>` for every mounted deployment. That made the set
+    a property of the layout, and not of what any row actually does. Three
+    producers put a locator in front of the model: both offloads and the
+    compaction history. Each says so in its claim, where it already declares
+    everything else. A producer whose owner is *not* the session id would be
+    picked up too, though none exists today. The owner of `ph_rlm.snapshot` is
+    per event (`kernel/<namespace>`), so that producer contributes nothing here
+    whatever it declares. That is correct, because nothing shows the model where
+    a snapshot went.
 
-    Still this session's own directories and not the store: a locator is
-    `root/<owner>/…`, so answering with `root` would let any agent read every
-    other session's spilled results.
+    The answer is still the directories of this session and not the store. A
+    locator is `root/<owner>/…`, so an answer of `root` would let any agent read
+    the spilled results of every other session.
 
-    Empty without a session, and empty without a store: a caller with neither was
-    handed nothing.
+    The answer is empty without a session and empty without a store. A caller
+    with neither was handed nothing.
     """
     store = ctx.get(SPILL_STORE)
     if store is None or session is None:
@@ -421,18 +447,21 @@ async def apply(ctx: Context, config: Config) -> None:
     ctx.provide(SPILL_STORE, store)
 
     async def sweep_on_open(session: Session) -> None:
-        """The one open-time sweep, owned by the store rather than by a producer.
+        """The one sweep at open time. The store owns it, and no producer does.
 
-        **On `session/loaded`, which the reader awaits** (`SessionStore.loaded` says
-        why not `session/created`): the sweep is also the repair, and a resumed model
-        may follow a locator in its first turn. A fresh session or a fork, with no
-        crash to repair and no directory of its own to collect, is not asked.
+        **It runs on `session/loaded`, which the reader awaits.**
+        `SessionStore.loaded` says why the event is not `session/created`. The
+        sweep is also the repair, and a resumed model may follow a locator in
+        its first turn. A fresh session or a fork is not asked. It has no crash
+        to repair and no directory of its own to collect.
 
-        **No catch-up**, unlike `workspace-reconcile`. When this row activates no
-        producer has contributed a claim yet — they inject the store this provides,
-        and come up after it — so a sweep then would visit nothing; a session already
-        live was swept when it was read; and a sweep beside a live session's producers
-        is the one thing `sweep_session` must never be.
+        **There is no catch-up**, unlike `workspace-reconcile`, for three
+        reasons. When this row activates, no producer has contributed a claim
+        yet, because producers inject the store that this row provides and come
+        up after it. A sweep at that time would visit nothing. A session that is
+        already live was swept when it was read. And a sweep beside the
+        producers of a live session is the one thing that `sweep_session` must
+        never be.
         """
         removed = await store.sweep_session(session)
         if removed:

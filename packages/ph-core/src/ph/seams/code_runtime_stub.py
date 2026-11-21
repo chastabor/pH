@@ -1,14 +1,15 @@
-"""`code-runtime-stub` — a `ctx.code_runtime` provider for testing the bridge.
+"""`code-runtime-stub`: a `ctx.code_runtime` provider for tests of the bridge.
 
-Phase 1 verifies the *governance* half of Code Mode without owning a runtime
-yet (P1-05's gate: "against `code-runtime-worker-thread` semantics with a stub
-runtime"). This executes a program by calling a Python callable with the
-namespaces bound, which exercises the exact thing that matters here — bindings
-re-entering the pipeline, per-dispatch records, denial settling the run — while
-the real out-of-process CPython runtime lands in Phase 3 (D19).
+The stub lets a test verify the *governance* half of Code Mode without a real
+runtime. (The gate of P1-05 asked for the semantics of
+`code-runtime-worker-thread` with a stub runtime.) The stub executes a program
+by calling a Python callable with the namespaces bound. That exercises what
+matters here: bindings that re-enter the pipeline, a record for each dispatch,
+and a denial that settles the run. The real runtime is the out-of-process
+CPython kernel of `ph-rlm` (`code-runtime-python`, D19).
 
-It declares `persistence: "none"` and therefore owes no `kernel/snapshot`
-events, which is the honest answer for something with no namespace to keep.
+The stub declares `persistence: "none"` and therefore owes no `kernel/snapshot`
+events. That is the correct answer for a runtime with no namespace to keep.
 
 @module ph.seams.code_runtime_stub
 """
@@ -35,13 +36,13 @@ class StubCodeRuntime:
     isolation: Isolation = "in-process"
     persistence: Persistence = "none"
     declares_kernel_snapshots: bool = False
-    """Honest for `persistence="none"`: with no namespace to keep, there is no
-    cross-call state a `kernel/snapshot` would have to make visible."""
+    """Correct for `persistence="none"`. With no namespace to keep, there is no
+    cross-call state that a `kernel/snapshot` would have to make visible."""
     programs: dict[str, Callable[..., Any]] = field(default_factory=dict)
     logs: list[str] = field(default_factory=list)
 
     def register_program(self, name: str, program: Callable[..., Any]) -> None:
-        """Bind a name a test can use as the `program` string."""
+        """Bind a name that a test can use as the `program` string."""
         self.programs[name] = program
 
     async def run(self, request: CodeRunRequest) -> CodeRunResult:
@@ -58,9 +59,9 @@ class StubCodeRuntime:
         try:
             outcome = await maybe_await(program(namespaces, emit))
         except Exception as error:
-            # A raise inside the program is the program's outcome, not the
-            # runtime's failure — except for the ones the bridge raises to end
-            # the run, which the transport re-raises.
+            # A raise inside the program is the outcome of the program and not
+            # a failure of the runtime. The exceptions are the errors that the
+            # bridge raises to end the run, which the transport raises again.
             if isinstance(error, CodeRunFailure):
                 raise
             return CodeRunResult(logs="\n".join(emitted), error=str(error))

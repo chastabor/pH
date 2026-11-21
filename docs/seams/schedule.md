@@ -59,7 +59,7 @@ fire_due(ctx, session, now=..., deliver=...)   # claim, deliver, write, then rei
 ctx.schedule.claim(..., now=...)               # the tick, appended — fire_due's first step
 ctx.schedule.live(session)                     # what is still scheduled
 ctx.schedule.states(session)                   # the fold
-ctx.schedule.index()   ctx.schedule.reindex()
+ctx.schedule.reindex(session)                  # tell the index when it is next due
 ```
 
 A `Schedule` is `id`, `kind`, `spec`, `prompt`.
@@ -73,6 +73,13 @@ one — a small file read per pass, rather than a scan of every stored log.
 
 That index is a **derived cache**: losing it costs a late wake, not a lost
 schedule, because the schedule itself is in the session's log.
+
+**A session can stay out of it.** `index: false` on the `schedule` row means a
+daemon never wakes that session: its schedules fire only while something has it
+open. The mount then removes the session's entry instead of writing one, so an
+entry written while the setting was on does not outlive it. A rebuild honors the
+setting too: it reads the `profile/*` records of each log beside its schedules
+(`REBUILD_TYPES`), and the session's `profile/base` holds the row's config.
 
 **The daemon sleeps until something is due; it does not poll.** It knows from the
 index and its roots' logs when it next has work (`Supervisor.next_wake`): a

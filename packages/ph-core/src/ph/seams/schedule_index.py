@@ -1,48 +1,56 @@
 """Which sessions hold a live appointment, and when each is next due (P6-23).
 
-**A schedule outlives its process; the thing that reads it does not.** P5-06 is
-right about the log — `schedule/created` is still there on Wednesday — and a
-fresh daemon still fires nothing, because `Supervisor.tick` iterates the roots it
-has mounted and a boot has none. The appointment survives and is never kept,
-which fails in the worst available shape: **silence**. Nothing errors, nothing
-logs, and it is found by somebody noticing a run that did not happen.
+**A schedule outlives its process, and the reader of the schedule does not.**
+P5-06 is right about the log: `schedule/created` is still there on Wednesday.
+But a fresh daemon still fires nothing, because `Supervisor.tick` iterates the
+roots that it has mounted, and a daemon has none at boot. The appointment
+survives and is never kept. That failure has the worst form: **silence**.
+Nothing raises an error and nothing is logged. Somebody finds the failure by
+noticing a run that did not happen.
 
-**The obvious fix is the wrong one, and this file is the shape of the right one.**
-"Mount every stored session at boot" fails three ways. `StoredSession` carries no
-schedule, so "does this log hold an appointment" is answerable only by reading and
-folding the whole log — 500 reads before the daemon answers a connection, to find
-the three that matter. Mounting is not cheap: a root is a whole profile, a
-workspace, possibly a kernel, which is the cost P5-05 exists to *release*. And
-`Supervisor.start` takes P5-03's **lease**, so auto-mounting everything claims
-every session on the machine and the next `phern -p` over any of them is refused with
-`session_already_active` — a strictly worse failure, because it is loud,
-immediate, and hits sessions with no schedule at all.
+**The obvious fix is wrong, and this file has the form of the right fix.** "Mount
+every stored session at boot" fails in three ways.
 
-So this is an **index**: the seam knows the moment an appointment is created,
-canceled or fired, so it records which sessions have one and when each is next
-due. A daemon reads one small file and mounts only what is actually due.
+- `StoredSession` carries no schedule. So "does this log hold an appointment"
+  can be answered only by reading and folding the whole log. That is 500 reads
+  before the daemon answers a connection, to find the three that matter.
+- Mounting is not cheap. A root is a whole profile, a workspace and possibly a
+  kernel. P5-05 exists to *release* that cost.
+- `Supervisor.start` takes the **lease** of P5-03. To mount everything
+  automatically claims every session on the machine. The next `phern -p` over
+  any of them is then refused with `session_already_active`. That failure is
+  strictly worse, because it is loud and immediate, and it hits sessions with no
+  schedule at all.
 
-**It is a cache, and the logs stay authoritative (I-6).** Every value here is
-derived from a log that still holds it, so a missing, stale or corrupt index costs
-a late run and never a wrong one: a reader that finds nothing falls back to the
-behavior that shipped before this existed. The projection is never the source of
-truth, which is what keeps it from becoming a second answer to "what is
-scheduled" (A11).
+So this is an **index**. The seam knows the moment at which an appointment is
+created, canceled or fired, so it records which sessions have one and when each
+is next due. A daemon reads one small file and mounts only what is due.
 
-**Opening a session reconciles its entry.** The seam re-derives an entry from the
-log on every `session/created`, so one entry that went stale corrects itself the
-moment anything touches that session.
+**The index is a cache, and the logs stay authoritative (I-6).** Every value
+here is derived from a log that still holds it. A missing, stale or corrupt
+index therefore costs a late run and never a wrong run. A reader that finds
+nothing falls back to the behavior that shipped before this index existed. The
+projection is never the source of truth, so it does not become a second answer
+to "what is scheduled" (A11).
 
-**And an index that cannot vouch for itself is rebuilt from every log (S18)**,
-because "until someone opens that session" is silence again for a session nobody
-opens. The scan this file exists to avoid is paid only then, and it is known when:
-- **The index says it is complete.** Only a rebuild writes `complete: true`, and a
-  writer keeps the flag it found. So a file that is missing, corrupt, of another
-  version, or rewritten by a writer that read it as any of those is incomplete.
-- **A new appointment leaves a mark until it is written** (`Claim`). The write runs
-  after the log's append, off the loop, so a host that dies or fails in between
-  would otherwise lose it without a trace. A mark no live writer holds names that
-  loss.
+**Opening a session reconciles its entry.** The seam derives the entry from the
+log again on every `session/created`. An entry that went stale is therefore
+corrected the moment anything opens that session.
+
+**An index that cannot vouch for itself is rebuilt from every log (S18).**
+"Until someone opens that session" is silence again for a session that nobody
+opens. The scan that this file exists to avoid is paid only then. Two signs say
+when:
+
+- **The index says that it is complete.** Only a rebuild writes
+  `complete: true`, and a writer keeps the flag that it found. So a file is
+  incomplete when it is missing, corrupt or of another version, or when a writer
+  that read it as any of those wrote it again.
+- **A new appointment leaves a mark until it is written** (`Claim`). The write
+  runs after the append to the log, off the event loop. A host that dies or
+  fails in between would otherwise lose the appointment without a trace. A mark
+  that no live writer holds names that loss.
+
 `Survey` asks both, and a daemon rebuilds when either says so.
 
 @module ph.seams.schedule_index
@@ -83,26 +91,28 @@ __all__ = [
 log = logging.getLogger("ph.seams.schedule_index")
 
 INDEX_NAME = "schedules.json"
-"""One file per `$PH_HOME`, beside the sessions it indexes.
+"""One file for each `$PH_HOME`, beside the sessions that it indexes.
 
-A single document rather than a file per session: it is read whole on every
-daemon tick and written only when an appointment changes, which is the opposite
-of the access pattern a directory of files is good at.
+The index is a single document and not one file for each session. It is read
+whole on every scheduler pass of the daemon and written only when an appointment
+changes. A directory of files is good at the opposite access pattern.
 """
 
 CLAIMS_NAME = "schedules.claims"
-"""The directory of `Claim`s, beside the index they vouch for."""
+"""The directory of `Claim`s, beside the index that they vouch for."""
 
 
 @dataclass(frozen=True, slots=True)
 class Appointment:
-    """One session's next due moment, and when that was last established.
+    """The next due moment of one session, and when that moment was last
+    established.
 
-    `updated` is what makes waking bounded. A daily cron refreshes it on every
-    firing, so an index a daemon has been serving stays fresh; one nobody has
-    served since March goes stale, and a daemon started today can decline to
-    resurrect a root its owner abandoned. That question is the caller's — the
-    index reports the age and does not enforce a policy with it.
+    `updated` is what bounds waking. A daily cron refreshes it on every firing,
+    so an index that a daemon has been serving stays fresh. An index that nobody
+    has served since March goes stale, and a daemon that starts today can
+    decline to bring back a root that its owner abandoned. That decision belongs
+    to the caller. The index reports the age and does not enforce a policy with
+    it.
     """
 
     session_id: str
@@ -118,8 +128,8 @@ class Survey:
     complete: bool
     """Whether a rebuild wrote this file and every writer since kept it whole."""
     abandoned: tuple[Path, ...]
-    """Claims no live writer holds: a new appointment that may never have reached
-    the file."""
+    """The claims that no live writer holds. Each is a new appointment that
+    possibly never reached the file."""
 
     @property
     def trusted(self) -> bool:
@@ -128,20 +138,22 @@ class Survey:
 
 @dataclass(slots=True)
 class Claim:
-    """A new appointment on its way to the index, marked on disk until it lands.
+    """A new appointment on its way to the index, marked on disk until it is
+    written.
 
-    **Held with an exclusive `flock`** for as long as the change is on its way, so
-    the mark says whether its writer is still alive. `close` removes it once the
-    change is written, and otherwise lets go and leaves the file. A host that dies
-    leaves it too, because the kernel releases the lock. Either way a `Survey`
-    finds an unheld claim, and a rebuild answers it.
+    **The mark is held with an exclusive `flock`** for as long as the change is
+    on its way, so the mark says whether its writer is still alive. `close`
+    removes the mark when the change is written. Otherwise `close` releases the
+    lock and leaves the file. A host that dies leaves the file too, because the
+    kernel releases the lock. In both cases a `Survey` finds a claim that nobody
+    holds, and a rebuild answers it.
     """
 
     path: Path
     fd: int
 
     def close(self, *, written: bool) -> None:
-        """Let go, taking the mark back if the change is in the index."""
+        """Release the lock, and remove the mark if the change is in the index."""
         if written:
             with suppress(FileNotFoundError):
                 self.path.unlink()
@@ -150,15 +162,18 @@ class Claim:
 
 @dataclass(slots=True)
 class ScheduleIndex(JsonIndex[Appointment]):
-    """The index as a value, so a caller states where it lives and nothing guesses.
+    """The index as a value, so that a caller states where it lives and nothing
+    guesses.
 
-    The file's reading, locking, rewriting and rebuild merge are `JsonIndex`'s, which
-    the live-roots index shares. What is this index's own is its entry and its claims.
+    `JsonIndex` does the reading, the locking, the rewriting and the rebuild
+    merge of the file, and the live-roots index shares it. This class adds the
+    entry of this index and its claims.
     """
 
     NAME: ClassVar[str] = INDEX_NAME
     VERSION: ClassVar[int] = 2
-    """2 added `complete`. A version-1 file reads as incomplete, so it is rebuilt once."""
+    """Version 2 added `complete`. A version-1 file reads as incomplete, so it is
+    rebuilt one time."""
     WHAT: ClassVar[str] = "the schedule index"
 
     @property
@@ -180,7 +195,8 @@ class ScheduleIndex(JsonIndex[Appointment]):
         return {"nextAt": entry.next_at, "updated": entry.updated}
 
     def _abandoned(self) -> tuple[Path, ...]:
-        """Every claim whose writer is gone: one this process can lock."""
+        """Every claim whose writer is gone, which is every claim that this
+        process can lock."""
         try:
             entries = list(os.scandir(self.claims))
         except FileNotFoundError:
@@ -190,8 +206,9 @@ class ScheduleIndex(JsonIndex[Appointment]):
             return ()
         found: list[Path] = []
         for entry in entries:
-            # A claim is locked under a dot name and then renamed into view, so
-            # one being made is never taken for one left behind (`claim`).
+            # A claim is locked under a dot name and then renamed into view. A
+            # claim that is being made is therefore never taken for one that
+            # was left behind (`claim`).
             if entry.name.startswith("."):
                 continue
             try:
@@ -210,13 +227,14 @@ class ScheduleIndex(JsonIndex[Appointment]):
     def claim(self) -> Claim | None:
         """Mark a new appointment on disk before it is handed to a writer.
 
-        **Blocking, and paid on the loop, because it has to come first.** The log's
-        own flush follows the append this answers, and a mark written after it
-        would leave the window it exists to close. It costs a create, a lock, a
-        rename and one directory sync, and only a new appointment pays it.
+        **The call blocks on the event loop, because it must come first.** The
+        flush of the log follows the append that this mark answers. A mark that
+        was written after the flush would leave open the window that the mark
+        exists to close. The cost is a create, a lock, a rename and one
+        directory sync, and only a new appointment pays it.
 
-        `None` when the mark cannot be made. The write is still attempted, and
-        only the trace of its loss is missing.
+        Returns `None` when the mark cannot be made. The write is still
+        attempted, and only the trace of its loss is missing.
         """
         name = uuid.uuid4().hex
         hidden, path = self.claims / f".{name}", self.claims / name
@@ -238,25 +256,26 @@ class ScheduleIndex(JsonIndex[Appointment]):
         return Claim(path, fd)
 
     def record(self, session_id: str, *, next_at: int | None, now: int, new: bool = False) -> None:
-        """Set or clear one session's appointment. Blocking — see `IndexWriter`.
+        """Set or clear the appointment of one session. The call blocks: see
+        `IndexWriter`.
 
-        `next_at=None` removes the entry, which is what a cancellation and a
-        `once` that has fired both mean: nothing further is owed. Removing rather
-        than tombstoning keeps the file the size of the work outstanding instead
-        of the size of every schedule ever made.
+        `next_at=None` removes the entry. A cancellation and a `once` that has
+        fired both mean that nothing further is owed. The entry is removed and
+        not replaced by a tombstone, so the file stays the size of the
+        outstanding work and not the size of every schedule ever made.
 
-        Read-modify-write under a lock, because two sessions in two processes
-        legitimately schedule at the same moment and each knows only its own
-        entry. Best-effort throughout — an index that cannot be written costs a
-        late run, and taking a session's own `create` down to protect a cache
-        would be the projection outranking the log.
+        The call is a read-modify-write under a lock, because two sessions in
+        two processes can legitimately schedule at the same moment, and each
+        knows only its own entry. Every step is best-effort. An index that
+        cannot be written costs a late run. To fail the `create` of a session
+        to protect a cache would put the projection above the log.
 
-        **A no-op when nothing moved**, which is what makes this callable on every
-        session open: reconciling an entry that is already right must not cost a
-        lock and a rewrite, and every fork and every subagent opens a session.
+        **The call does nothing when nothing moved**, so it can run on every
+        session open. To reconcile an entry that is already right must not cost
+        a lock and a rewrite, and every fork and every subagent opens a session.
 
-        `new` (`ScheduleService.reindex`) is `claim`ed first, and the claim kept if
-        the write fails.
+        With `new` (`ScheduleService.reindex`), the appointment is claimed first
+        (`claim`), and the claim is kept if the write fails.
         """
         claim = self.claim() if new else None
         written = self.record_all({session_id: (next_at, now)})
@@ -266,11 +285,12 @@ class ScheduleIndex(JsonIndex[Appointment]):
     def record_all(self, changes: Mapping[str, tuple[int | None, int]]) -> bool:
         """`record` for several sessions at once: one read, and at most one rewrite.
 
-        `changes` maps a session to its `(next_at, now)`. What `IndexWriter`
-        hands over in one thread hop, so a fan-out opening N sessions costs one
-        read of the file rather than N, and a rewrite only if something moved.
+        `changes` maps a session to its `(next_at, now)`. `IndexWriter` hands
+        over one such mapping in one thread hop. A fan-out that opens N sessions
+        therefore costs one read of the file and not N, and a rewrite only if
+        something moved.
 
-        Whether the file now holds `changes`.
+        Returns whether the file now holds `changes`.
         """
 
         def apply(found: dict[str, Appointment]) -> None:
@@ -287,21 +307,23 @@ class ScheduleIndex(JsonIndex[Appointment]):
     def replace(
         self, read: Mapping[str, Appointment | None], *, since: Survey, vouch: bool = True
     ) -> bool:
-        """Write a rebuild's answer, mark the file complete, and clear the claims it
-        answered. Whether it was written.
+        """Write the answer of a rebuild, mark the file complete, and clear the
+        claims that the rebuild answered. Returns whether it was written.
 
-        `vouch` is whether the rebuild read the store the deployment keeps its logs
-        in. One that read somewhere else — a directory guessed with no store at hand —
-        still writes what it found, and leaves the file as complete as it was and the
-        claims where they are, so a rebuild that can vouch still comes.
+        `vouch` says whether the rebuild read the store in which the deployment
+        keeps its logs. A rebuild that read somewhere else, such as a directory
+        that was guessed with no store at hand, still writes what it found. It
+        leaves the file as complete as it was and leaves the claims where they
+        are, so a rebuild that can vouch still comes.
 
-        `read` holds each session whose log the rebuild read: its appointment, or
-        `None` for none. **What the rebuild did not read, it keeps**, since a log
-        it could not read or never found is no evidence the appointment is gone,
-        and an entry too many costs a wake that the reconcile on open takes back.
-        **What moved while it read, it keeps as moved**: an entry that differs
-        from `since`, the file as the rebuild began, was written since by a
-        writer who knew better.
+        `read` holds each session whose log the rebuild read: its appointment,
+        or `None` for none. **The rebuild keeps what it did not read.** A log
+        that it could not read or never found is no evidence that the
+        appointment is gone. An extra entry costs one wake, and the reconcile
+        on open then removes the entry. **The rebuild keeps what moved while it
+        read, as moved.** `since` is the file as the rebuild began. An entry
+        that differs from `since` was written after that by a writer that knew
+        better.
         """
         if not self._merge(read, before=since.appointments, vouch=vouch):
             return False
@@ -336,26 +358,29 @@ class IndexRecorder(Protocol):
 class IndexWriter:
     """`ScheduleIndex.record` without the wait on the event loop (K10).
 
-    Every caller — `create`, `cancel`, the tick's `reindex`, the `session/created`
-    reconcile — is synchronous and on the loop, and `record` is a file lock, a read and an
-    atomic rewrite. So `record` here only notes the change, and a writer hands
-    everything noted so far to `record_all` in one worker-thread hop.
+    Every caller is synchronous and on the event loop: `create`, `cancel`, the
+    `reindex` of `fire_due`, and the reconcile on `session/created`.
+    `ScheduleIndex.record` is a file lock, a read and an atomic rewrite. So
+    `record` here only notes the change, and a writer hands everything noted so
+    far to `record_all` in one hop to a worker thread.
 
-    **Latest wins, per session.** The index holds one entry per session, so only
-    the newest change for each matters: a `create` then a `cancel` noted before
-    the writer ran is one write of the cancel, not two writes in order. A change
-    noted *while* a batch is being written waits for the next one, so it still
-    lands last.
+    **The latest change wins, for each session.** The index holds one entry for
+    each session, so only the newest change for each matters. A `create` and
+    then a `cancel` that were noted before the writer ran are one write of the
+    cancel, and not two writes in order. A change that is noted *while* a batch
+    is being written waits for the next batch, so it still lands last.
 
-    **Started on demand and finished when nothing is noted**, not a task that
-    lives as long as the row: `Context.drain` awaits detached work, so a writer
-    that never ended would hold every drain to its deadline — while one that ends
-    makes `drain` the flush, which is what a host shutting down wants. The row's
-    dispose is the flush behind it: a batch still going when drain's share ran
-    out, or noted after it, is waited for there rather than left to the process.
+    **The writer starts on demand and ends when nothing is noted.** It is not a
+    task that lives as long as the row. `Context.drain` awaits detached work, so
+    a writer that never ended would hold every drain to its deadline. A writer
+    that ends makes `drain` the flush, which is what a host that shuts down
+    wants. The dispose of the row is the flush behind it. A batch that is still
+    running when the share of the drain ran out, or that was noted after it, is
+    waited for there and not left to the process.
 
-    **A claim travels with the batch it covers** (S18): taken with the first new
-    appointment noted, and closed by that batch's write.
+    **A claim travels with the batch that it covers** (S18). It is taken with
+    the first new appointment that is noted, and the write of that batch closes
+    it.
     """
 
     index: ScheduleIndex
@@ -363,16 +388,17 @@ class IndexWriter:
     _pending: dict[str, tuple[int | None, int]] = field(default_factory=dict)
     _writing: bool = False
     _claim: Claim | None = None
-    """The claim covering `_pending`'s new appointments, if it holds one."""
+    """The claim that covers the new appointments in `_pending`, if `_pending`
+    holds one."""
 
     def record(self, session_id: str, *, next_at: int | None, now: int, new: bool = False) -> None:
-        """Note one change; start the writer if none is running."""
+        """Note one change, and start the writer if none is running."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            # No loop, so no loop to stall — and `detach` would close the writer
-            # unstarted, leaving `_writing` set and every later change noted for
-            # a writer that never ran.
+            # There is no loop, so no loop can stall. `detach` would also close
+            # the writer before it started. That would leave `_writing` set, and
+            # every later change noted for a writer that never ran.
             self.index.record(session_id, next_at=next_at, now=now, new=new)
             return
         if new and self._claim is None:
@@ -380,14 +406,16 @@ class IndexWriter:
         self._pending[session_id] = (next_at, now)
         if not self._writing:
             self._writing = True
-            # `finish`: a change noted here is a write already promised, so the
-            # row's dispose waits for it where a cancel would drop the batch.
+            # `finish`: a change that is noted here is a write already promised.
+            # The dispose of the row therefore waits for it, where a cancel
+            # would drop the batch.
             self.ctx.detach(self._drain(), label="schedule index writer", at_dispose="finish")
 
     async def _drain(self) -> None:
-        # No await between the emptiness check and clearing the flag, so a change
-        # noted during the last batch is either taken by the `while` or finds the
-        # flag clear and starts a writer of its own.
+        # There is no await between the emptiness check and the clearing of the
+        # flag. A change that is noted during the last batch is therefore either
+        # taken by the `while`, or it finds the flag clear and starts a writer
+        # of its own.
         try:
             while self._pending:
                 batch, self._pending = self._pending, {}
@@ -396,8 +424,9 @@ class IndexWriter:
                 try:
                     written = await anyio.to_thread.run_sync(self.index.record_all, batch)
                 finally:
-                    # A batch cut off mid-write may not have landed, and a mark too
-                    # many costs a rebuild where one too few costs an appointment.
+                    # A batch that was cut off in mid-write possibly did not
+                    # land. An extra mark costs a rebuild, and a missing mark
+                    # costs an appointment.
                     if claim is not None:
                         claim.close(written=written)
         finally:

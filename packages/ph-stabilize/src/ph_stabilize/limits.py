@@ -751,10 +751,11 @@ async def apply(ctx: Context, config: Config) -> None:
         anything. The context gauge, one field over, already makes the same
         argument.
 
-        The reading is read on every redraw. It is therefore guarded first by
-        the cheapest possible check. It then uses the same `SessionFoldCache`
-        that the limits themselves read. That cache returns its previous value
-        directly when the events since the last read were all chunks.
+        The reading is read each time the daemon sends the footer. It is
+        therefore guarded first by the cheapest possible check. It then uses
+        the same `SessionFoldCache` that the limits themselves read. That cache
+        returns its previous value directly when the events since the last read
+        were all chunks.
         """
         model, tools = config.model_calls, config.tool_calls
         if model.unlimited and tools.unlimited:

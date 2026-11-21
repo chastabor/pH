@@ -448,7 +448,10 @@ async def apply(ctx: Context, config: Config) -> None:
         # with no agent has nowhere to put its bindings.
         if run.agent is None:
             raise ToolCallError(run.name, "this tool has to be called by an agent")
-        runtime = ctx.require(CODE_RUNTIME).require()
+        # The seam is asked before the bridge is built, so a profile with no
+        # runtime refuses the call before anything is set up for it.
+        runtime = ctx.require(CODE_RUNTIME)
+        runtime.require()
         bridge = DispatchBridge(
             tools=tools,
             ctx=ctx,
@@ -460,6 +463,9 @@ async def apply(ctx: Context, config: Config) -> None:
             max_spawns=config.max_subagent_spawns_per_run,
         )
         namespaces = await _namespaces(tools, CodeBindingsRequest(scope=run.scope, bridge=bridge))
+        # The run goes through the seam and not to the provider directly. The
+        # seam runs the provider as the row that registered it (P6-29). Called
+        # directly, the provider ran as the row of this transport.
         outcome = await runtime.run(
             CodeRunRequest(
                 program=program,

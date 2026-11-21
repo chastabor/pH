@@ -677,9 +677,9 @@ def owners(definitions: Sequence[Definition]) -> dict[int, Definition]:
     **The tightest definition, not the first.** A nested `def` inside a 40-line
     function is the caller that a reference belongs to. With the outer function,
     the calls of every closure would be attributed to whatever contains the
-    closure. In `_registry.py`, `claim_key` spans lines 40-75 and its inner
-    `release` spans lines 69-73. A call on line 70 has two candidates and exactly
-    one correct answer.
+    closure. Take a `claim_key` that spans lines 40-75 with an inner `release`
+    on lines 69-73, as `_registry.py` had when this was written. A call on line
+    70 has two candidates and exactly one correct answer.
 
     The table is built one time for the file. The earlier version searched for
     each reference, which was O(definitions x references). That was fine for a

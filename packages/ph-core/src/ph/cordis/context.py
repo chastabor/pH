@@ -956,7 +956,7 @@ class Running:
     The class is public because it is also **what a registry records at
     registration time**. Every registry invokes the body of a row later: a tool,
     a command, a compaction note, a prompt section, a status field, a diagnostic,
-    a telemetry sink, each of the five single-slot providers. To enter the right
+    a telemetry sink, each of the single-slot providers. To enter the right
     binding at that time, the registry must have kept both answers at
     registration. `Context.running_for` gives it exactly this object.
 
@@ -1027,7 +1027,7 @@ class running:
     registered on.
 
     **`None` binds nothing.** This is for the empty half of an at-most-one slot:
-    five seams hold a provider that might not be registered.
+    several seams hold a provider that might not be registered.
 
     **`layer` defaults to `owner`**, which covers the ordinary case. An `apply`
     and a listener each run as one scope, so `running(scope)` means what it

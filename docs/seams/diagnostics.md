@@ -21,7 +21,7 @@ same order-then-id sort. The difference is what it is read **for**:
 
 | | answers | so it must be |
 |---|---|---|
-| a footer field | "where am I now", every spinner frame | **cheap** |
+| a footer field | "where am I now", each time the footer is sent | **cheap** |
 | a diagnostic | "what is this deployment", once, on request | free to stat a tree or spawn a subprocess |
 
 Two seams rather than one parameterized seam, because a field that quietly became

@@ -1,25 +1,26 @@
 """Who owns a seam registration, and the one "release only if still mine" rule.
 
 Every seam lets a plugin claim a slot (the sandbox provider, the code runtime) or
-a key in a table (a command, a skill, a renderer) and hand back a disposer.
-Written by hand six times, the release step drifted: some copies checked
-identity before removing, some did not. A disposer that removes whatever
-*currently* occupies the slot would tear down a successor registered after its
-own owner was replaced — so identity is checked here, once.
+a key in a table (a command, a skill, a renderer), and returns a disposer. The
+release step was written by hand six times, and the copies drifted: some checked
+identity before they removed, and some did not. A disposer that removes whatever
+*currently* occupies the slot would tear down a successor that was registered
+after its own owner was replaced. So identity is checked here, in one place.
 
-**A `Running` may be passed wherever a `Context` may** (P6-29). Both spell
-`add_disposer(release, label=)`, and the pair's releases on *either* of its two
-scopes — which is what a registry whose container is keyed by the visibility
-scope needs, and what one keyed only by the owner does not. Opting in is passing
-`by` rather than `by.owner`; nothing else changes.
+**A `Running` may be passed wherever a `Context` may** (P6-29). Both have
+`add_disposer(release, label=)`. The pair releases when *either* of its two
+scopes ends. A registry whose container is keyed by the visibility scope needs
+that, and a registry that is keyed only by the owner does not. To opt in, pass
+`by` and not `by.owner`. Nothing else changes.
 
-**Who owns a registration is `Context.owner_for`, not here** (P6-12). It was
-briefly this module's, and it does not belong: this module is about *tables* —
-release only what is still mine — while ownership is about `Context` lifetimes
-and touches nothing else. Two of its three consumers (`ph.tools.registry`,
-`ph.system_prompt.assembly`) are not seams at all, so keeping it here made them
-reach into a sibling package's underscore module and left a latent import cycle
-one re-export away.
+**`Context.owner_for` says who owns a registration, and this module does not**
+(P6-12). The function was in this module for a short time, and it does not
+belong here. This module is about *tables*: release only what is still mine.
+Ownership is about the lifetimes of a `Context` and touches nothing else. At that
+time the function had three consumers, and two of them (`ph.tools.registry`,
+`ph.system_prompt.assembly`) are not seams at all. With the function here, those
+two imported an underscore module of a sibling package, and a latent import
+cycle was one re-export away.
 
 @module ph.seams._registry
 """
@@ -46,21 +47,22 @@ def claim_key[T](
     label: str,
     then: Callable[[], None] | None = None,
 ) -> Disposer:
-    """Put `value` under `key`; the disposer removes it only while it is still there.
+    """Put `value` under `key`. The disposer removes it only while it is still there.
 
-    Parameterized so the value and the table it lands in have to agree. `Any`
-    here was the last hop of a chain that is otherwise checked end to end: a
-    registry threads its element type through its own bucket and its `_register`,
-    and then handed both to a helper that would take either from anywhere. Free
-    at every call site, because `T` is inferred from the table.
+    The function is generic, so the value and the table that it lands in must
+    agree. `Any` here was the last hop of a chain that is otherwise checked end
+    to end. A registry threads its element type through its own bucket and its
+    `_register`. It then passed both to a helper that took either from anywhere.
+    The type parameter costs nothing at a call site, because `T` is inferred
+    from the table.
 
-    `then` runs **after** the removal and **inside** the disposer the owner
-    holds, which is the only placement that works: a registry that announces its
-    own changes has to announce the one an unwinding scope makes, and a scope
-    unwinds by running what `add_disposer` was given. Composing the pair outside
-    — wrapping the returned disposer — leaves the scope holding the bare
-    removal, so unloading a row took its command away and told nobody. It is the
-    shape `ToolRuntime._claim` already uses for `tools/change`.
+    `then` runs **after** the removal and **inside** the disposer that the owner
+    holds. No other placement works. A registry that announces its own changes
+    must also announce the change that an unwinding scope makes, and a scope
+    unwinds by running what `add_disposer` was given. If a caller composes the
+    pair outside, by wrapping the returned disposer, the scope holds the bare
+    removal. The unload of a row then took its command away and told nobody.
+    `ToolRuntime._claim` already has this shape for `tools/change`.
     """
     if key in table:
         raise ValueError(f"{label}: {key!r} is already registered")
@@ -71,24 +73,27 @@ def claim_key[T](
         if then is not None:
             then()
 
-    # The teardown before the entry, here and in the two below: an owner that is
-    # down refuses, and written first the entry stayed with nothing to remove it.
+    # The teardown is registered before the entry is written, here and in the
+    # two functions below. An owner that is down refuses the teardown. If the
+    # entry were written first, it would stay with nothing to remove it.
     releaser = owner.add_disposer(release, label=f"{label}({key})")
     table[key] = value
     return releaser
 
 
 def claim_entry[T](owner: Context | Running, entries: list[T], value: T, *, label: str) -> Disposer:
-    """Append `value`; the disposer removes **that object**, not one equal to it.
+    """Append `value`. The disposer removes **that object**, not one equal to it.
 
-    Parameterized for the reason `claim_key` above is: the type a registry took
-    care to thread through its bucket stopped being checked at this boundary.
+    The function is generic for the same reason as `claim_key` above. The type
+    that a registry threaded through its bucket was no longer checked at this
+    boundary.
 
-    `list.remove` compares with `==`, which is identity for the closures and
-    objects the other contribution lists in this package hold — so those got the
-    right answer by accident. A registry of *values* does not: two rows
-    contributing an equal entry would have one disposer take the other's, which
-    is this module's whole complaint one container over.
+    `list.remove` compares with `==`. For the closures and objects that the
+    other contribution lists in this package hold, `==` is identity, so those
+    lists got the right answer by accident. A registry of *values* does not. If
+    two rows contribute an equal entry, the disposer of one would take the entry
+    of the other. That is the failure that this module exists to prevent, in a
+    list and not in a table.
     """
     releaser = owner.add_disposer(lambda: remove_identical(entries, value), label=label)
     entries.append(value)
@@ -103,29 +108,31 @@ def claim_slot(
     *,
     label: str,
 ) -> Disposer:
-    """Set `holder.<attribute>`; the disposer clears it only while it still holds `value`.
+    """Set `holder.<attribute>`. The disposer clears it only while it still holds `value`.
 
-    **Takes the pair rather than the owner** (P6-29), and holds it in
-    `<attribute>_by` for exactly as long as the slot itself. A provider is a body
-    the seam invokes *later* — every one of the five in this tree is — so to
-    enter the right binding then it has to have kept who registered it and where
-    that landed. Set and cleared with the slot in one claim, because the
-    alternative was five seams writing the same four lines around this call, and
-    five chances for the record to outlive the value it describes.
+    **It takes the pair and not the owner** (P6-29), and holds the pair in
+    `<attribute>_by` for exactly as long as the slot itself. Most slots hold a
+    provider, and a provider is a body that the seam invokes *later*. To enter
+    the right binding at that time, the seam must have kept who registered the
+    provider and where the registration landed. The record is set and cleared
+    with the slot in one claim. The alternative was five seams that each wrote
+    the same four lines around this call, which gave five chances for the record
+    to outlive the value that it describes.
 
-    **The name is derived, not a parameter**, and that is the difference between
-    a rule and a reminder. All five sites spelled `f"{attribute}_by"`, so the
-    argument carried no information — and being optional, it made "forgot to
-    record" a silent state: `running(None)` binds nothing, and the P6-30 gate
-    classifies the *registration method*, which is present either way. Derived,
-    a sixth slot that omits the field fails at registration instead, because
-    every one of these holders is `slots=True` and `setattr` for an undeclared
-    name raises there and then.
+    **The name is derived and is not a parameter.** That is the difference
+    between a rule and a reminder. When the name was a parameter, all five call
+    sites passed `f"{attribute}_by"`, so the argument carried no information.
+    The argument was also optional, so "forgot to record" was a silent state:
+    `running(None)` binds nothing, and the P6-30 gate classifies the
+    *registration method*, which is present in both cases. With a derived name,
+    a new slot that omits the field fails at registration. Every one of these
+    holders is `slots=True`, and `setattr` for an undeclared name raises
+    immediately.
 
-    That does not move the ownership decision here, which the module docstring
-    above is right to refuse: the caller still decides, through
+    This does not move the ownership decision here, which the module docstring
+    above correctly refuses. The caller still decides, through
     `Context.running_for`, exactly as it decided through `owner_for` before.
-    This stores what it was told.
+    This function stores what it was told.
     """
     if getattr(holder, attribute) is not None:
         raise RuntimeError(f"{label}: a provider is already registered")
@@ -138,7 +145,8 @@ def claim_slot(
 
     releaser = by.owner.add_disposer(release, label=label)
     try:
-        # The record first: a holder that omits the field fails with nothing set.
+        # The record is set first, so a holder that omits the field fails with
+        # nothing set.
         setattr(holder, record, by)
         setattr(holder, attribute, value)
     except BaseException:
@@ -148,36 +156,39 @@ def claim_slot(
 
 
 class Registers[T](Protocol):
-    """A service whose door is `register(item, *, scope=…)`.
+    """A service whose registration method is `register(item, *, scope=…)`.
 
-    Ten of them in this tree — `diagnostics`, `invariants`, `commands`, `skills`,
-    `tui_status`, `tui_screens`, `compaction`, `code_runtime`, `ph.tools` and
-    `ph_text_index` — all spelling `register(self, item, *, scope) -> Disposer`.
-    An unnamed Protocol every seam already obeys is one worth naming: it is what
-    lets `contribute_item` read the door off the key instead of making each
-    caller restate it.
+    Ten services in this tree have that method: `diagnostics`, `invariants`,
+    `commands`, `skills`, `tui_status`, `tui_screens`, `compaction`,
+    `code_runtime`, `ph.tools` and `ph_text_index`. All ten have the signature
+    `register(self, item, *, scope) -> Disposer`. Every seam already obeyed this
+    Protocol before it had a name, and such a Protocol is worth a name. With
+    the name, `contribute_item` reads the method from the key, and no caller has
+    to restate it.
 
-    `item` is positional-only, because the ten spell its *name* differently
-    (`diagnostic`, `invariant`, `skill`, `definition`, `provider`) and none of
-    them is called by keyword.
+    `item` is positional-only, because the ten give it different *names*
+    (`diagnostic`, `invariant`, `definition`, `skill`, `status_field`, `screen`,
+    `engine`, `provider`) and no caller passes it by keyword.
     """
 
     def register(self, item: T, /, *, scope: Context | None = None) -> Disposer: ...
 
 
 def contribute_item[T](ctx: Context, key: ServiceKey[Registers[T]], item: T, *, label: str) -> None:
-    """Register `item` on the service at `key` once it exists — the common case.
+    """Register `item` on the service at `key` when that service exists.
 
-    `contribute_via`'s shape with the closure removed. Seven callers had written
+    This is the common case. It has the shape of `contribute_via` with the
+    closure removed. Seven callers had written
     `lambda service, scope: service.register(item, scope=scope)` by hand, which
-    is the door restated at each site — and one of them then needed a *binder*
-    exported from `ph.seams.skills`, because a lambda built in a loop reads its
-    free variable when the contribution finally runs and every skill registered
-    the last one. Passing the item is what makes that impossible: it is bound at
-    the call, so there is no free variable to be late.
+    restates the registration method at each call site. One of them then needed
+    a *binder* exported from `ph.seams.skills`. A lambda that is built in a loop
+    reads its free variable when the contribution finally runs, so every skill
+    registered the last one. Passing the item makes that impossible: the item is
+    bound at the call, so no free variable can be read late.
 
-    `contribute_via` stays for a door that is not `register` — `ctx.subagents`
-    and `ctx.tools` both spell theirs `guard` — which is one call site today.
+    `contribute_via` stays for a method that is not named `register`.
+    `ctx.subagents` and `ctx.tools` both name theirs `guard`. That is one call
+    site today.
     """
     contribute_via(
         ctx, key, lambda service, scope: service.register(item, scope=scope), label=label
@@ -187,36 +198,41 @@ def contribute_item[T](ctx: Context, key: ServiceKey[Registers[T]], item: T, *, 
 def contribute_via[S](
     ctx: Context, key: ServiceKey[S], contribute: Callable[[S, Context], object], *, label: str
 ) -> None:
-    """Run `contribute(service, scope)` once the service at `key` exists — mounted yet or not.
+    """Run `contribute(service, scope)` when the service at `key` exists, whether
+    it is mounted yet or not.
 
-    **Through `ctx.inject` rather than a `ctx.get` at `apply` time**, which is the
-    difference between a contribution that works and one that works if the rows
-    happen to be in the right order. A `ctx.get` reads whatever has been provided
-    *so far*, so a contributor mounted above the seam finds nothing, contributes
-    nothing, and reports that nowhere. `inject` waits for the key through the
-    loader's reconcile fixpoint instead, so the two rows may sit in either order —
-    which is what `base.yaml` promises about every other row in it.
+    **It goes through `ctx.inject` and not through a `ctx.get` at `apply` time.**
+    That is the difference between a contribution that works and one that works
+    only if the rows happen to be in the right order. A `ctx.get` reads what has
+    been provided *so far*. A contributor that is mounted above the seam
+    therefore finds nothing, contributes nothing, and reports that nowhere.
+    `inject` waits for the key through the reconcile fixpoint of the loader, so
+    the two rows may sit in either order. `base.yaml` promises that about every
+    other row in it.
 
-    Optional, still: a hard `inject=[key]` on the contributing row would make the
-    *report* a precondition for the thing being reported on.
+    The dependency is still optional. A hard `inject=[key]` on the contributing
+    row would make the *report* a precondition for the thing that is reported
+    on.
 
-    The unwind comes free: the contribution is handed a child scope that disposes
-    when the key goes away or the row unloads, so it leaves with whatever answers
-    it and no caller has to remember `scope=`.
+    The unwind needs no extra work. The contribution is given a child scope that
+    disposes when the key goes away or the row unloads. The contribution
+    therefore leaves with the service that answers it, and no caller has to
+    remember `scope=`.
 
-    **The caller passes the call, not the name of a method.** This took an `item`
-    and a `method: str` and dispatched `getattr(service, method)(item)`, which no
-    checker follows — so a renamed `SkillService.register` broke at mount for all
-    eight callers, which is the failure P8-05 exists to end one layer down. `S`
-    comes from the key, so `contribute(skills, scope)` is an ordinary call mypy
-    resolves; the `method` hatch, which existed solely because `ctx.subagents`'
-    door is called `guard`, disappears with the string.
+    **The caller passes the call, not the name of a method.** This function used
+    to take an `item` and a `method: str`, and it dispatched
+    `getattr(service, method)(item)`. No checker follows that. A renamed
+    `SkillService.register` therefore broke at mount for all eight callers,
+    which is the failure that P8-05 exists to end one layer down. `S` comes from
+    the key, so `contribute(skills, scope)` is an ordinary call that mypy
+    resolves. The `method` parameter existed only because the method of
+    `ctx.subagents` is named `guard`, and it is gone with the string.
 
-    Here beside `claim_key` for the same reason it is: this rule was written by
-    hand in two seams with a paragraph of prose each explaining why, and a third
-    seam wanting it would copy whichever it read first — and a fourth then wrote
-    it in a *downstream package*, where the next reader finds the copy before the
-    rule.
+    The function is here beside `claim_key` for the same reason that `claim_key`
+    is here. This rule was written by hand in two seams, each with a paragraph
+    of prose that explained why. A third seam that wanted the rule would copy
+    whichever version it read first. A fourth then wrote it in a *downstream
+    package*, where the next reader finds the copy before the rule.
     """
 
     def register(scope: Context) -> None:

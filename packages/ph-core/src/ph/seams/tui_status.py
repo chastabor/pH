@@ -1,26 +1,29 @@
-"""`ctx.tui_status` — a live reading in the footer, contributed by a row.
+"""`ctx.tui_status`: a live reading in the footer, contributed by a row.
 
-The sibling of `ctx.tui_screens`, for the other thing a row wants from a front
-end: not a whole screen, but one short reading beside the model name and the
-context gauge. The gauge is the shape being generalized — *"the number a user
-needs to see coming is the one where the harness will act"* — and a limit is
-exactly that number for a different mechanism.
+This seam is the sibling of `ctx.tui_screens`. It serves the other thing that a
+row wants from a front end: not a whole screen, but one short reading beside the
+model name and the context gauge. The seam generalizes the gauge. The gauge
+shows the number where the harness will act, because that is the number that a
+user needs to see coming. A limit is exactly that number for a different
+mechanism.
 
-**A reading, not a notice.** The two answer different questions and both are
-worth having: a notice in the transcript says why something *happened*, after
-the fact; a reading says how close you are to it happening, before. A budget
-that only announces itself on the step it stops you is a budget you cannot plan
-around.
+**A reading, not a notice.** The two answer different questions, and both are
+worth having. A notice in the transcript says why something *happened*, after
+the fact. A reading says how close you are to it, before it happens. A budget
+that announces itself only on the step where it stops you is a budget that you
+cannot plan around.
 
-**Semantic level, never a color.** `level` says a reading is `warning`; what
-that looks like is the front end's business — the same rule `ContextForm` and
-`CardKind` are held to, and the reason ph-core can own this seam without knowing
-what a terminal is.
+**A semantic level, never a color.** `level` says that a reading is `warning`.
+What that looks like is the business of the front end. `ContextForm` and
+`CardKind` are held to the same rule. It is also the reason why ph-core can own
+this seam without knowing what a terminal is.
 
-**A field is read on every redraw**, which for a running agent is every spinner
-frame. It must therefore be cheap: fold through `SessionFoldCache` or read
-`Session.latest`, never scan the log. A field that raises is dropped with its
-traceback rather than taking the footer down with it.
+**A field is read often, so it must be cheap.** The daemon reads every field
+each time it sends the footer: when a client attaches, and with each
+`session.status` (`ph_app.daemon.projections.readings_of`). Fold through
+`SessionFoldCache` or read `Session.latest`, and never scan the log. A field
+that raises is dropped and its traceback is logged, so it does not take the
+footer down with it.
 
 @module ph.seams.tui_status
 """
@@ -52,108 +55,113 @@ __all__ = [
 log = logging.getLogger("ph.seams.tui_status")
 
 ID_MAX = 32
-"""How long a field id may be — `tui_screens`' bound, for the same reason: it
-shares a line with everything else the footer says."""
+"""How long a field id may be. It is the bound of `tui_screens`, for the same
+reason: it shares a line with everything else that the footer says."""
 
 
 ReadingLevel: TypeAlias = Literal["normal", "warning"]
-"""How much attention a reading is asking for.
+"""How much attention a reading asks for.
 
-Named rather than inlined, and semantic rather than visual — the rule
-`ContextForm` and `CardKind` are held to. Two values because two is what a
-footer can express without becoming a legend; a third would be a breaking
-change for every front end, which is the right amount of friction."""
+The type is named and not inlined, and it is semantic and not visual. That is
+the rule that `ContextForm` and `CardKind` are held to. There are two values
+because two is what a footer can express without becoming a legend. A third
+value would be a breaking change for every front end, which is the right amount
+of friction."""
 
 
 ReadingSlot: TypeAlias = Literal["line", "session", "model", "context"]
 """Where a reading belongs, semantically.
 
-* `line` — the footer line, in `order`. The default.
-* `session` — the session panel, beside the directory a session is bound to.
-* `model` — qualifies the model name the line opens with. One model at two
+* `line`: the footer line, in `order`. This is the default.
+* `session`: the session panel, beside the directory that a session is bound to.
+* `model`: qualifies the model name that the line opens with. One model at two
   efforts is two costs and two answers, so the effort is drawn *onto* the name
-  (`flash/high`) rather than somewhere down the line.
-* `context` — qualifies the context gauge. A cache rate is the other half of
+  (`flash/high`) and not somewhere further down the line.
+* `context`: qualifies the context gauge. A cache rate is the other half of
   "how much of the window is in use", so it is drawn onto the gauge
   (`context 12%/cache 28.8k(98%)`).
 
-The two joined slots say *what figure a reading is about*, not how the join is
-drawn — the slash is the front end's, as the colors are. A front end with no
-gauge to draw still draws a `context` reading, on its own.
+The two joined slots say *what figure a reading is about*, and not how the join
+is drawn. The slash belongs to the front end, as the colors do. A front end with
+no gauge to draw still draws a `context` reading, on its own.
 
-Closed and small for `ReadingLevel`'s reason: each value is a placement every
-front end must be able to express, and `StatusReading` validates it, so a value
-added here is refused by a client built before it (`PROTOCOL_VERSION` says so)."""
+The set is closed and small for the same reason as `ReadingLevel`. Each value is
+a placement that every front end must be able to express. `StatusReading`
+validates the value, so a client that was built before a new value refuses that
+value (`PROTOCOL_VERSION` says so)."""
 
 
 class StatusReading(WireModel):
     """What one field currently says.
 
-    A `WireModel`, so it crosses a socket in both directions with nothing spelled
-    at the edge (P7-11): `to_wire()` out, `model_validate` back. A field added
-    here reaches a browser tab with no projection edited and no reader edited,
-    where a hand-written dict would have dropped it silently on one side or the
-    other. The same mechanism every other type a remote front end rebuilds uses,
-    so there is one extras policy rather than two.
+    This is a `WireModel`, so it crosses a socket in both directions with
+    nothing written by hand at the edge (P7-11): `to_wire()` out, and
+    `model_validate` back. A field that is added here reaches a browser tab with
+    no projection edited and no reader edited. A hand-written dict would have
+    dropped the field silently on one side or the other. Every other type that a
+    remote front end rebuilds uses the same mechanism, so there is one extras
+    policy and not two.
     """
 
     id: str = ""
-    slot: ReadingSlot = "line"
-    """The contributing field's `slot`, stamped by the registry beside `id`."""
-    """Which field this came from, stamped by the registry rather than written
-    by the row (see `readings`).
+    """Which field this reading came from. The registry stamps it, and the row
+    does not write it (see `readings`).
 
     A reading used to be an anonymous string on one line, so a front end could
-    only render the lot in order. Naming them is what lets a *particular* one be
-    placed — the sandbox posture belongs in the sidebar's session panel, beside
-    the directory it bounds — without the fact traveling as a bespoke field on
-    every status frame. A client that does not recognize an id still renders it
-    on the line, which is what keeps a new reading additive."""
+    only render all of them in order. With a name, a *particular* reading can be
+    placed. The sandbox posture belongs in the session panel of the sidebar,
+    beside the directory that it bounds. The fact then does not travel as a
+    special field on every status frame. A client that does not recognize an id
+    still renders the reading on the line, which keeps a new reading additive."""
+    slot: ReadingSlot = "line"
+    """The `slot` of the contributing field. The registry stamps it beside `id`."""
     text: str
     """One compact phrase: `high`, `cache 28.8k(98%)`, `read-only accepted`.
 
     A front end puts its own marks between readings, and between a reading and
-    the figure its slot names, so a reading carries no separator of its own — a
-    row that wrote one would draw as two readings where it meant one."""
+    the figure that its slot names. So a reading carries no separator of its
+    own. A row that wrote one would be drawn as two readings where it meant
+    one."""
     level: ReadingLevel = "normal"
 
 
 @dataclass(frozen=True, slots=True)
 class StatusField:
-    """A row's contribution to the footer.
+    """The contribution of a row to the footer.
 
-    `read` returns `None` when the field has nothing to say — an unset limit, a
-    counter at zero — and the footer shows nothing rather than a placeholder. A
-    line that always carries every field is a line where the one that matters
-    cannot be seen.
+    `read` returns `None` when the field has nothing to say: an unset limit, or
+    a counter at zero. The footer then shows nothing, and not a placeholder. On
+    a line that always carries every field, the one that matters cannot be seen.
     """
 
     id: str
     read: Callable[[Session], StatusReading | None]
     order: int = 0
     slot: ReadingSlot = "line"
-    """Where this belongs on screen, semantically — not which widget draws it.
+    """Where this belongs on screen, semantically. It does not say which widget
+    draws it.
 
-    `level`'s shape, and for `level`'s reason: the meaning is the contributing
-    row's and the *looks* are the front end's. The sandbox posture is a fact
-    about the session — it bounds the directory the session panel already names
-    — while a budget is a live figure that belongs on the line with the others.
-    The reasoning effort qualifies the model name (`model`) and the cache rate
-    qualifies the context gauge (`context`): each is half of a figure the footer
-    already draws, and is drawn onto it.
+    It has the shape of `level`, for the same reason: the meaning belongs to the
+    contributing row and the *looks* belong to the front end. The sandbox
+    posture is a fact about the session, because it bounds the directory that
+    the session panel already names. A budget is a live figure that belongs on
+    the line with the others. The reasoning effort qualifies the model name
+    (`model`) and the cache rate qualifies the context gauge (`context`). Each
+    is half of a figure that the footer already draws, and is drawn onto it.
 
-    Front ends that draw only one region ignore this and render everything; the
-    alternative it replaced was a hardcoded set of ids in `ph_app`'s status
-    widget, which put a placement decision about a ph-core row in the consumer,
-    where a renamed id would silently relocate the reading."""
+    A front end that draws only one region ignores this and renders everything.
+    The alternative that this replaced was a hardcoded set of ids in the status
+    widget of `ph_app`. That put a placement decision about a ph-core row in the
+    consumer, where a renamed id would silently relocate the reading."""
 
 
 @dataclass(frozen=True, slots=True)
 class _Registered:
     """A field and who registered it (P6-29).
 
-    In the table rather than beside it, so `claim_key`'s identity-checked release
-    takes both away at once — the same reason `ph.seams.commands` holds one."""
+    The two are in the table and not beside it, so the identity-checked release
+    of `claim_key` takes both away in one step. `ph.seams.commands` holds one for
+    the same reason."""
 
     status_field: StatusField
     by: Running
@@ -169,10 +177,10 @@ class TuiStatusRegistry:
     def register(self, status_field: StatusField, *, scope: Context | None = None) -> Disposer:
         """Contribute a field.
 
-        `scope=` is no longer needed for the ordinary case (P6-12, P6-25):
-        a registration made from a row's `apply` — or from a listener that row
-        wrote — already unwinds with the row. Pass it to register on *someone
-        else's* lifetime, which is what it now means and all it now means.
+        The ordinary case needs no `scope=` (P6-12, P6-25). A registration made
+        from the `apply` of a row, or from a listener that the row wrote,
+        already unwinds with the row. Pass `scope=` to register on the lifetime
+        of *someone else*. That is its only meaning now.
         """
         require_slug(status_field.id, maximum=ID_MAX, kind="status field id")
         by = self.ctx.running_for(scope)
@@ -187,13 +195,13 @@ class TuiStatusRegistry:
     def readings(self, session: Session) -> list[StatusReading]:
         """Every field that has something to say, in `order` then id order.
 
-        **`read` runs as the row that contributed it** (P6-29). It is a row's
-        body this registry invokes — the same category as a tool's `execute` —
-        and it ran unbound, so a field that registered anything landed it on the
-        seam. There is no *target* here the way `compaction.notes` and
-        `system_prompt.assemble` have one: the footer is one line for one
-        session, not a per-agent view, so both halves are what registration
-        recorded and a reading is contained to wherever the field was declared.
+        **`read` runs as the row that contributed it** (P6-29). It is the body
+        of a row that this registry invokes, the same category as the `execute`
+        of a tool. It used to run unbound, so anything that a field registered
+        landed on the seam. There is no *target* here, as `compaction.notes` and
+        `system_prompt.assemble` have one. The footer is one line for one
+        session and not a per-agent view. So both halves are what registration
+        recorded, and a reading is contained to wherever the field was declared.
         """
         ordered = sorted(
             self._fields.values(), key=lambda one: (one.status_field.order, one.status_field.id)
@@ -210,9 +218,10 @@ class TuiStatusRegistry:
                 )
                 continue
             if reading is not None:
-                # Stamped here, not trusted from the row: the id is the
-                # registry's own key, and a field free to answer with somebody
-                # else's would let one row's reading be placed as another's.
+                # The id and the slot are stamped here and not trusted from the
+                # row. The id is the key of the registry itself. A field that
+                # was free to answer with the id of another field would let the
+                # reading of one row be placed as the reading of another.
                 readings.append(
                     reading.model_copy(update={"id": status_field.id, "slot": status_field.slot})
                 )
@@ -221,5 +230,5 @@ class TuiStatusRegistry:
 
 @plugin("tui-status", affects="presentation")
 async def apply(ctx: Context, config: None) -> None:
-    """Mount the footer's registration seam. No field ships in `ph-base`."""
+    """Mount the registration seam of the footer. This row itself registers no field."""
     ctx.provide(TUI_STATUS, TuiStatusRegistry(ctx=ctx))
