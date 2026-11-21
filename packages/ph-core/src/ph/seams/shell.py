@@ -265,8 +265,8 @@ class ShellService:
             # where something can enforce it: `confine()` refuses rather than
             # passing through, so requesting confinement with no backend would
             # turn every shell command into a `SANDBOX_UNAVAILABLE` denial. The
-            # policy is the same set `workspace-write-scope` prompts about, so
-            # the two describe one boundary.
+            # policy is the same set that the `outside-workspace` rule of
+            # `permissions-fs` prompts about, so the two describe one boundary.
             sandbox = self.ctx.get(SANDBOX)
             if sandbox is not None and sandbox.available:
                 policy = workspace_policy(workspace)

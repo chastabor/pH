@@ -1,36 +1,38 @@
-"""Making a fresh workspace *usable*: the materials, never an installer (E14).
+"""Make a fresh workspace *usable*: copy the materials, never run an installer (E14).
 
-`git worktree add` carries no ignored file. A child handed its own checkout has
-no `.env`, no `node_modules`, no `.venv`, no `vendor/` — so "run the tests" fails
-for a reason the model cannot see and reads as its own bug, which is the same
-failure E12's redirection env prevents from the *output* side. This is the input
-side: the materials are already sitting in the parent's tree, so they are copied
-rather than rebuilt.
+`git worktree add` carries no ignored file. A child that is given its own
+checkout has no `.env`, no `node_modules`, no `.venv` and no `vendor/`. So "run
+the tests" fails for a reason that the model cannot see, and the model reads the
+failure as its own bug. The redirection env of E12 prevents the same failure
+from the *output* side. This module is the input side: the materials are
+already in the tree of the parent, so they are copied and not rebuilt.
 
-**No command runs here, and that is the design.** The tool this is read off
-(`sources/wtp`) has a third hook type that shells out — `npm ci`, `make
-db:setup` — and the reasoning against it is lifespan, not danger. A person's
-branch amortizes a thirty-second install over weeks; an agent's worktree may
-live for one turn, and in a fan-out that install is paid per child, before each
-child's first step. It also converts a local, deterministic, offline operation
-into a network-dependent one: `git worktree add` cannot fail because a registry
-is down, and an install can. Two properties fall out of refusing it. There is no
-provisioning process, so F1's scrub of `*KEY*`/`*SECRET*`/`*TOKEN*` needs no
-exception. And a *repo-discovered* list is data — a `copy` entry cannot execute
-— so cloning a repository and starting pH runs nothing that repository authored.
+**No command runs here, and that is the design.** The tool that this design is
+taken from (`sources/wtp`) has a third hook type that runs a shell command, such
+as `npm ci` or `make db:setup`. The argument against it is lifespan, not danger.
+The branch of a person amortizes a thirty-second install over weeks. The
+worktree of an agent may live for one turn, and in a fan-out each child pays
+for that install before its first step. An install also turns a local,
+deterministic, offline operation into one that depends on the network: `git
+worktree add` cannot fail because a registry is down, and an install can. Two
+properties follow from the refusal. There is no provisioning process, so the
+scrub of `*KEY*`/`*SECRET*`/`*TOKEN*` in F1 needs no exception. And a list that
+is *discovered in the repository* is data, because a `copy` entry cannot
+execute. So to clone a repository and start pH runs nothing that the repository
+authored.
 
-**Nothing outside the tree, in either direction, ever.** Every path is relative,
-resolves against its own base (`source` against the parent's tree, `dest`
-against the new root), and is re-checked *after* resolution, which is what makes
-symlinked traversal fail rather than escape. wtp does the opposite and its code
-is explicit about it — `ensureWithinBase` is called only
-`if !filepath.IsAbs(hook.From)` — so `from: ~/.ssh/id_rsa` is a supported mode
-there. That is coherent for a tool whose config is the developer's own and whose
-threat is a typo; it is not available to a harness whose premise is that the
-thing reading the repository may be adversarial. The symlink case is why the
-rule is absolute rather than advisory: a symlink *inside* the writable root
-pointing outside it is the classic escape, and under a sandbox it would fail
-only because the backend catches a hole this layer dug.
+**Nothing outside the tree, in either direction, ever.** Every path is relative
+and resolves against its own base: `source` against the tree of the parent, and
+`dest` against the new root. Each path is checked again *after* resolution,
+which makes a traversal through a symlink fail and not escape. wtp does the
+opposite, and its code is explicit about it: `ensureWithinBase` is called only
+`if !filepath.IsAbs(hook.From)`, so `from: ~/.ssh/id_rsa` is a supported mode
+there. That is coherent for a tool whose config belongs to the developer and
+whose threat is a typo. It is not available to a harness whose premise is that
+the thing reading the repository may be adversarial. The symlink case is why
+the rule is absolute and not advisory. A symlink *inside* the writable root
+that points outside it is the classic escape. Under a sandbox it would fail
+only because the backend catches a hole that this layer made.
 
 @module ph.seams.workspace_provision
 """
@@ -65,83 +67,88 @@ __all__ = [
 log = logging.getLogger("ph.seams.workspace_provision")
 
 ProvisionMode: TypeAlias = Literal["copy", "hardlink", "symlink"]
-"""How a material reaches the new workspace. Three costs, three guarantees.
+"""How a material reaches the new workspace. Three modes, each with its cost and guarantee.
 
-`copy` is **isolated** and the default. `hardlink` is near-free and safe for the
-replace-and-rename pattern every package manager uses — pnpm's whole store is a
-hardlink farm — but a build step that writes *in place* (a native addon,
-`patch-package`) mutates the parent's copy through the shared inode, so it is
-opt-in with that named. `symlink` is instant and zero-space and **shared and
-mutable**: a child writing through it reaches the parent's tree, handing back some
-of the collision isolation the tier exists to buy.
+`copy` is **isolated** and is the default. `hardlink` is nearly free. It is safe
+for the replace-and-rename pattern that every package manager uses (the whole
+store of pnpm is a hardlink farm). But a build step that writes *in place* (a
+native addon, `patch-package`) changes the copy of the parent through the shared
+inode. So `hardlink` is opt-in, with that risk named. `symlink` is instant and
+takes no space, and it is **shared and mutable**: a child that writes through it
+reaches the tree of the parent. That gives back some of the collision isolation
+that the tier exists to provide.
 """
 
 _FICLONE = 0x40049409
 """Linux `FICLONE`: make `dst` a copy-on-write clone of `src`.
 
-Isolation at symlink cost, where the filesystem has it (btrfs, XFS, and OpenZFS
-only with block cloning enabled). Tried first and allowed to fail — an `ioctl`
-is cheaper than asking whether it will work, and every failure mode is the same
-answer: fall back to a real copy.
+This gives isolation at the cost of a symlink, where the filesystem supports it
+(btrfs, XFS, and OpenZFS only with block cloning enabled). It is tried first
+and allowed to fail. An `ioctl` is cheaper than a check of whether it will
+work, and every failure mode has the same answer: fall back to a real copy.
 """
 
 _GIT_DIR = ".git"
-"""Refused in both directions, and not merely as tidiness: a `dest` under `.git`
-is a planted hook, i.e. code that runs on the agent's next commit — the exact
-execution this module exists to not have."""
+"""Refused in both directions, and not only for tidiness. A `dest` under `.git`
+is a planted hook: code that runs on the next commit of the agent. That is
+exactly the execution that this module exists to prevent."""
 
 
 class ProvisionRefused(Exception):
     """An entry was rejected before anything was touched.
 
-    Refusal is per *entry* and never fatal: a workspace with a missing `.env` is
-    worse than one without, but a harness that will not start because one line of
-    a config is wrong is worse than both.
+    A refusal applies to one *entry* and is never fatal. A workspace that lacks
+    its `.env` is worse than one that has it, but a harness that does not start
+    because one line of a config is wrong is worse than both.
     """
 
 
 class ProvisionEntry(WireModel):
-    """One material, and how it should arrive.
+    """One material, and how it arrives.
 
-    `source`/`dest` where `wtp` says `from`/`to`. Not a preference: this repo
-    pins every wire alias to `wire_alias(field_name)` (Q2 — "declare aliases,
-    never derive them"), and an explicit `alias="from"` would be the one field in
-    the tree with a name the convention does not generate. `from` is also a
-    Python keyword, so the Python side could never have matched it anyway.
+    The fields are `source` and `dest` where `wtp` says `from` and `to`. This is
+    not a preference. This repo holds every wire alias equal to
+    `wire_alias(field_name)`, because the rule of Q2 is to declare aliases and
+    never derive them. An explicit `alias="from"` would be the one field in the
+    tree with a name that the convention does not generate. `from` is also a
+    Python keyword, so the Python side could never have matched it.
     """
 
     source: str
-    """Relative to the *base* — the tree the workspace was branched from, which
-    for a child is its parent's. Never absolute."""
+    """A path relative to the *base*: the tree that the workspace was branched
+    from, which for a child is the tree of its parent. Never absolute."""
     dest: str | None = None
-    """Relative to the new workspace root. Defaults to `source`, which is what it
-    is nearly always wanted to be."""
+    """A path relative to the new workspace root. It defaults to `source`, which
+    is nearly always the wanted value."""
     mode: ProvisionMode = "copy"
     optional: bool = True
-    """A source that is not there is usually a project that does not have one —
-    no `.env` in a fresh clone — so the default is to say so and carry on. Set
-    `false` for a material the agent genuinely cannot work without."""
+    """Whether a missing source is skipped without a failure. A source that is
+    not there usually means a project that does not have one (no `.env` in a
+    fresh clone), so the default is to skip it and continue. Set `false` for a
+    material that the agent cannot work without."""
 
     @field_validator("source", "dest")
     @classmethod
     def _relative(cls, value: str | None) -> str | None:
-        """Refuse an absolute path *here*, where the operator finds out.
+        """Refuse an absolute path *here*, where the operator sees the refusal.
 
-        Half of the guard needs no `base` and no `root`, and running that half at
-        use-time sent an operator's YAML typo down the failure channel to the
-        **model's prompt line**, once per agent, forever — while the person who
-        wrote it saw nothing. `provision_failures` reaching the agent is right
-        for "this project has no `.env`" and wrong for "your config is
-        malformed". So the syntactic half fires at profile-config load and
-        inside `discover_provisioning`'s `model_validate`, which is the same
-        enforcement point `extra="forbid"` already uses to make the data-only
-        claim real rather than aspirational.
+        Half of the guard needs no `base` and no `root`. When that half ran at
+        the time of use, a typo in the YAML of an operator went down the failure
+        channel to the **prompt line of the model**, one time per agent,
+        forever. The person who wrote the typo saw nothing. It is right that
+        `provision_failures` reaches the agent for "this project has no `.env`",
+        and wrong for "your config is malformed". So the syntactic half runs
+        when the profile config is loaded, and inside the `model_validate` of
+        `discover_provisioning`. That is the same enforcement point that
+        `extra="forbid"` already uses to make the data-only claim real and not
+        only intended.
         """
         if value is None:
             return None
-        # A `..` that climbs out is the same typo in relative clothing, and just as
-        # answerable without a tree: `a/../..` leaves whatever it is joined to. What
-        # still needs `base` and `root` is a *symlink* out, which `_contained` catches.
+        # A `..` that climbs out is the same typo in relative form, and it can be
+        # answered without a tree as well: `a/../..` leaves whatever it is joined
+        # to. What still needs `base` and `root` is a *symlink* that leads out,
+        # and `_contained` catches that.
         climbs_out = Path(os.path.normpath(value)).parts[:1] == ("..",)
         if not value or value.startswith("~") or Path(value).is_absolute() or climbs_out:
             raise ValueError(
@@ -152,7 +159,7 @@ class ProvisionEntry(WireModel):
 
     @property
     def target(self) -> str:
-        """Where this lands, named once — `dest` is nearly always `source`."""
+        """Where this entry lands, named in one place. `dest` is nearly always `source`."""
         return self.dest or self.source
 
 
@@ -160,44 +167,48 @@ class ProvisionEntry(WireModel):
 class ProvisionReport:
     """What arrived, and what did not.
 
-    `failed` is the load-bearing half: it rides `workspace/provisioned` and
-    reaches the agent's own prompt line, because the one party that has to know
-    `.env` is missing is the agent about to wonder why the tests fail.
+    `failed` is the half that matters most. It is carried on
+    `workspace/provisioned` and reaches the own prompt line of the agent. The
+    one party that has to know that `.env` is missing is the agent that is
+    about to wonder why the tests fail.
     """
 
     provisioned: tuple[str, ...] = ()
-    """Every path that now exists in the workspace because we put it there.
+    """Every path that now exists in the workspace because the seam put it there.
 
-        Carried to disposal, where it is what keeps this row from defeating the
-        tier it serves — and, since disposal commits, what keeps a copied secret
-        out of git. A `.env` the project does not gitignore is an untracked file:
-        `git status` calls the tree dirty, and `git add -A` would put it on the
-        branch somebody merges.
+    The list is carried to disposal. There it keeps this row from defeating the
+    tier that it serves. Because disposal commits, it also keeps a copied secret
+    out of git. A `.env` that the project does not gitignore is an untracked
+    file: `git status` calls the tree dirty, and `git add -A` would put the file
+    on the branch that somebody merges.
 
-        **Not** solved with `info/exclude`, and that is worth writing down
-        because it is the obvious wrong answer. Git resolves `info/exclude`
-        against the *common* directory even from inside a linked worktree
-        (`git rev-parse --git-path info/exclude` proves it), so there is no
-        per-worktree exclude file to write: the only one that works is the
-        repository's own, which would hide these paths in every other worktree
-        and in the user's own tree. The provisioned list rides to `_dirty`
-    instead and becomes `:(exclude)` pathspecs there, so the rule reaches exactly
-    the one decision it is about and mutates nothing."""
+    This is **not** solved with `info/exclude`. That is worth writing down,
+    because it is the obvious wrong answer. git resolves `info/exclude` against
+    the *common* directory even from inside a linked worktree (`git rev-parse
+    --git-path info/exclude` proves it). So there is no per-worktree
+    `info/exclude` to write. The only one that works is the file of the
+    repository, which would hide these paths in every other worktree and in the
+    own tree of the user. The provisioned list goes to `_dirty` instead and
+    becomes `:(exclude)` pathspecs there. The rule then reaches exactly the one
+    decision that it is about, and it mutates nothing. Staging reads the same
+    list through a per-workspace `core.excludesFile`
+    (`workspace_git._excludes`)."""
     failed: tuple[str, ...] = ()
 
 
 def resolve_entry(entry: ProvisionEntry, *, base: Path, root: Path) -> tuple[Path, Path]:
-    """`(source, dest)` as absolute paths, or `ProvisionRefused`.
+    """Return `(source, dest)` as absolute paths, or raise `ProvisionRefused`.
 
-    Only the *contextual* half of the guard lives here — whether these two
-    relative paths, resolved, are still inside the trees they belong to. The
-    syntactic half (absolute, `~`, empty) is a `ProvisionEntry` validator, so it
-    fires where the operator can see it rather than once per agent forever.
+    Only the *contextual* half of the guard is here: whether these two relative
+    paths, when resolved, are still inside the trees that they belong to. The
+    syntactic half (absolute, `~`, empty, or a `..` that climbs out) is a
+    `ProvisionEntry` validator. It therefore runs where the operator can see it,
+    and not one time per agent forever.
 
-    Resolution is `Path.resolve()` — symlinks followed — and the containment
-    check happens on the *result*. Checking the joined-but-unresolved path would
-    accept `link/passwd` wherever `link` points outside, which is the whole
-    escape.
+    Resolution is `Path.resolve()`, which follows symlinks, and the containment
+    check is made on the *result*. A check of the joined but unresolved path
+    would accept `link/passwd` wherever `link` points outside, and that is the
+    whole escape.
     """
     source_path = _contained(base, entry.source, label="source")
     dest_path = _contained(root, entry.target, label="dest", leaf=False)
@@ -209,14 +220,15 @@ def resolve_entry(entry: ProvisionEntry, *, base: Path, root: Path) -> tuple[Pat
 def _contained(base: Path, relative: str, *, label: str, leaf: bool = True) -> Path:
     """Resolve `relative` against `base` and refuse anything that leaves it.
 
-    `label` is the *wire* key (`source`/`dest`), so a person can grep the message
-    against the line of YAML that caused it.
+    `label` is the *wire* key (`source`/`dest`), so a person can grep the
+    message against the line of YAML that caused it.
 
-    `leaf=False` for a destination: its parent is resolved and its own name kept,
-    since what is judged is where the entry lives, not where a link already at it
-    points. Followed, a link provisioning made read as outside the tree, and every
-    later pass reported it as a failure. Nothing is written through a link at the
-    leaf — `_materialize` replaces it, or leaves it be.
+    `leaf=False` is for a destination. Its parent is resolved and its own name
+    is kept, because the question is where the entry is, not where a link that
+    is already there points. When the leaf was followed, a link that
+    provisioning had made read as outside the tree, and every later pass
+    reported it as a failure. Nothing is written through a link at the leaf:
+    `_materialize` replaces it or leaves it alone.
     """
     root = base.resolve()
     joined = base / relative
@@ -238,13 +250,14 @@ def _contained(base: Path, relative: str, *, label: str, leaf: bool = True) -> P
 
 
 ProvisionStop: TypeAlias = threading.Event
-"""Asks a copy under way to stop before its next file (W1): set from the event loop,
-read on the copy's own thread, so a thread-safe flag and not an `anyio.Event`."""
+"""Asks a copy that is under way to stop before its next file (W1). It is set
+from the event loop and read on the own thread of the copy, so it is a
+thread-safe flag and not an `anyio.Event`."""
 
 
 class _Stopped(Exception):
-    """Raised on the copy's thread when its `ProvisionStop` is set; `provision` ends
-    there and reports what it finished."""
+    """Raised on the thread of the copy when its `ProvisionStop` is set.
+    `provision` ends there and reports what it finished."""
 
 
 async def provision(
@@ -255,20 +268,21 @@ async def provision(
     fill: bool = False,
     stop: ProvisionStop | None = None,
 ) -> ProvisionReport:
-    """Put every material in place, and report rather than raise.
+    """Put every material in place. Report a failure, and do not raise it.
 
-    Off the event loop wholesale: a `node_modules` walk is thousands of syscalls
-    and the loop has an agent waiting on it.
+    The whole job runs off the event loop. A walk of `node_modules` is thousands
+    of syscalls, and the loop has an agent waiting on it.
 
-    `fill` is for a tree the tier reused (`Workspace.reused`): only what is missing
-    is put there, down to a file inside a copied directory, and nothing present is
-    replaced. It was provisioned when it was made — or part-way, by a process that
-    crashed mid-copy — and the agent may have edited it since.
+    `fill` is for a tree that the tier reused (`Workspace.reused`). Only what is
+    missing is put there, down to a file inside a copied directory, and nothing
+    present is replaced. The tree was provisioned when it was made, or part-way
+    by a process that crashed during the copy, and the agent may have edited it
+    since.
 
-    `stop` ends the copy before its next file once set (W1). The thread cannot be
-    canceled, so a release that must not take the tree from under it asks it to stop
-    here, and waits at most one file for it to return. What it did not reach is in
-    neither half of the report.
+    `stop` ends the copy before its next file after it is set (W1). The thread
+    cannot be canceled. So a release that must not take the tree from under the
+    copy asks it to stop here, and waits at most one file for it to return. What
+    the copy did not reach is in neither half of the report.
     """
     if not entries:
         return ProvisionReport()
@@ -311,8 +325,9 @@ def _provision_sync(
 def _stoppable(
     copy: Callable[[str | Path, str | Path], None], stop: ProvisionStop
 ) -> Callable[[str | Path, str | Path], None]:
-    """`copy`, refusing to start a file once `stop` is set: `copytree` calls it per
-    file, so a stop lands between two files rather than after the whole tree."""
+    """Wrap `copy` so that it refuses to start a file after `stop` is set.
+    `copytree` calls it per file, so a stop takes effect between two files and
+    not after the whole tree."""
 
     def checked(source: str | Path, dest: str | Path) -> None:
         if stop.is_set():
@@ -336,9 +351,9 @@ def _materialize(
         # A link already to this source is in place, whoever made it.
         if dest.is_symlink() and Path(os.readlink(dest)) == source:
             return
-        # Refusing to clobber rather than replacing: a destination that already
-        # exists is a checked-in file, and quietly turning it into a link to
-        # somewhere else is not something a config line should be able to do.
+        # Refuse to clobber, and do not replace. A destination that already
+        # exists is a checked-in file. A config line must not be able to turn it
+        # silently into a link to somewhere else.
         if dest.exists() or dest.is_symlink():
             raise ProvisionRefused(f"{dest} already exists")
         dest.symlink_to(source, target_is_directory=source.is_dir())
@@ -352,15 +367,15 @@ def _materialize(
     if stop is not None:
         copy = _stoppable(copy, stop)
     if source.is_dir():
-        # `shutil.copytree`, not a hand-rolled walk. `symlinks=True` is the
-        # load-bearing argument: `os.walk` puts a symlinked *directory* in
-        # `dirs` and never descends, so a walk that only recreates entries from
-        # `files` drops it entirely — which is most of a pnpm `node_modules`
-        # and every `.venv/lib64 -> lib`. `copy_function` is also exactly the
-        # per-file dispatch the walk was hand-rolled for, and `scandir` answers
-        # "is this a symlink" from the directory entry instead of a fresh stat
-        # per file. `shutil.Error` subclasses `OSError`, so the caller's handler
-        # is unchanged.
+        # `shutil.copytree`, not a hand-written walk. `symlinks=True` is the
+        # argument that matters. `os.walk` puts a symlinked *directory* in
+        # `dirs` and never descends, so a walk that recreates entries only from
+        # `files` drops it entirely. That is most of a pnpm `node_modules` and
+        # every `.venv/lib64 -> lib`. `copy_function` is also exactly the
+        # per-file dispatch that the walk was written for. And `scandir` answers
+        # "is this a symlink" from the directory entry, without a fresh stat per
+        # file. `shutil.Error` subclasses `OSError`, so the handler of the
+        # caller is unchanged.
         shutil.copytree(
             source,
             dest,
@@ -378,8 +393,9 @@ def _real_dir(path: Path) -> bool:
 
 
 def _present(source: Path, dest: Path) -> Callable[[str, list[str]], set[str]]:
-    """`copytree`'s `ignore` for a fill: every name already at its destination, bar
-    a directory on both sides, which is descended into for what it lacks."""
+    """The `ignore` of `copytree` for a fill: every name that is already at its
+    destination. The exception is a directory on both sides, which is descended
+    into for what it lacks."""
 
     def ignore(directory: str, names: list[str]) -> set[str]:
         here = Path(directory)
@@ -396,13 +412,14 @@ def _present(source: Path, dest: Path) -> Callable[[str, list[str]], set[str]]:
 
 @dataclass(slots=True)
 class _Cloner:
-    """Copy-on-write where the filesystem has it, asked **once** per pair of devices.
+    """Copy-on-write where the filesystem has it, asked **one time** per pair of devices.
 
-    `FICLONE` costs an open, an open, a failing `ioctl`, an unlink and two closes *per
-    file* on a filesystem that cannot clone, paid per child in a fan-out. The answer
-    never varies within one device pair, so it is latched — and a source and
-    destination on different devices can only ever return `EXDEV`, which two `stat`
-    calls settle without attempting anything.
+    On a filesystem that cannot clone, `FICLONE` costs two opens, a failing
+    `ioctl`, an unlink and two closes *per file*, and a fan-out pays that per
+    child. The answer never varies within one device pair, so it is latched. A
+    source and a destination on different devices can only return `EXDEV`.
+    After the first attempt has latched that answer, two `stat` calls settle
+    the pair without another attempt.
     """
 
     _supported: dict[tuple[int, int], bool] = field(default_factory=dict)
@@ -423,7 +440,7 @@ class _Cloner:
         return self._supported.get(pair, True)
 
     def _clone(self, source: Path, dest: Path) -> bool:
-        """One `FICLONE` attempt; `False` means "fall back", and latches why."""
+        """One `FICLONE` attempt. `False` means "fall back", and the answer is latched."""
         try:
             pair = (source.stat().st_dev, dest.parent.stat().st_dev)
         except OSError:

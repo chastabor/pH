@@ -1,33 +1,34 @@
-"""`ctx.workspace` — where an agent's writes land, and how honestly that is stated.
+"""`ctx.workspace`: where an agent's writes land, and how accurately that is stated.
 
-The seam the containment ladder hangs off (D21, §4.8). Its consumer is the
-**agent lifecycle**, not a tool: an agent acquires a workspace, and `ctx.fs`'s
-root and `ctx.subprocess`'s cwd resolve to `workspace.root`, which is what makes
-a tier bound *authored* code rather than merely observe it.
+The containment ladder is built on this seam (D21, §4.8). Its consumer is the
+**agent lifecycle**, and not a tool. An agent acquires a workspace. The root of
+`ctx.fs` and the cwd of `ctx.subprocess` then resolve to `workspace.root`. That
+is what makes a tier bound *authored* code, where it would otherwise only
+observe it.
 
-Invariants this seam holds:
+Invariants that this seam holds:
 
-* **`repo_writable` records which guarantee was obtained, never which was
-  requested.** A caller asking `access="read"` gets the strongest kind the
-  mounted tier can actually provide; `False` means a tier is enforcing it. Any
-  wording here, in `phern doctor`, or in a config comment that blurs request and
-  guarantee is a defect (§12 Q10).
+* **`repo_writable` records which guarantee was obtained, and never which was
+  requested.** A caller that asks for `access="read"` gets the strongest kind
+  that the mounted tier can really provide. `False` means that a tier enforces
+  it. Any wording that blurs request and guarantee is a defect (§12 Q10),
+  whether it is here, in `phern doctor`, or in a config comment.
 * **There is always a workspace.** `acquire` never fails and never returns
   `None`. A provider that cannot serve a request *declines*, and the seam falls
   back to `shared` with a logged notice.
 * **A workspace is an effect of the scope that took it (I2).** `acquire`
-  registers its teardown through `ctx.effect`, so a disposed agent scope unwinds
-  the workspace. That is the in-process half of cleanup; the
-  `workspace/acquired`/`disposed` pair is the crash half, reconciled at session
-  open (§4.9).
+  registers its teardown through `ctx.effect`, so a disposed agent scope
+  unwinds the workspace. That is the in-process half of cleanup. The
+  `workspace/acquired`/`disposed` pair is the crash half, and it is reconciled
+  at session open (§4.9).
 * **`scratch` is always present and always writable**, on every kind and every
-  tier, and the *seam* creates it — one implementation rather than one per
-  provider. It lives in pH's own state directory rather than in the workspace,
-  so it survives disposal as a session artifact. A provider is handed the path
-  and may substitute its own, but never has to invent the layout.
-* **The kind predicates below are exhaustive `match`es, never membership tests**,
-  so a seventh `WorkspaceKind` fails to type-check rather than silently
-  classifying.
+  tier. The *seam* creates it, so there is one implementation and not one for
+  each provider. It is in the state directory of pH and not in the workspace,
+  so it survives disposal as a session artifact. A provider receives the path
+  and may substitute its own, but it never has to invent the layout.
+* **The kind predicates below are exhaustive `match` statements, and never
+  membership tests.** A seventh `WorkspaceKind` therefore fails to type-check.
+  It cannot be classified silently.
 
 @module ph.seams.workspace
 """
@@ -70,9 +71,9 @@ from ..tools.errors import HarnessError, error_message
 from ..wire import WireModel, literal_lookup, validation_summary
 
 if TYPE_CHECKING:
-    # Annotation-only. `ph/persistence/__init__.py` imports the JSONL backend, so
-    # an unguarded import would put it — and `filelock`, and `sqlite3` — into every
-    # process that mounts a workspace.
+    # For annotations only. `ph/persistence/__init__.py` imports the JSONL
+    # backend. An unguarded import would therefore load that backend, `filelock`
+    # and `sqlite3` into every process that mounts a workspace.
     from ..persistence.protocol import SessionArchive
 
 from . import workspace_provision
@@ -143,8 +144,8 @@ __all__ = [
 log = logging.getLogger("ph.seams.workspace")
 
 ContainmentTier: TypeAlias = Literal["advisory", "worktree", "sandbox"]
-"""The ladder, named once: `phern doctor` prints it (P4-12) and `containment.tier`
-selects it (P4-11).
+"""The ladder, named in one place. `phern doctor` prints it (P4-12), and
+`containment.tier` selects it (P4-11).
 """
 
 WorkspaceKind: TypeAlias = Literal[
@@ -155,55 +156,63 @@ WorkspaceKind: TypeAlias = Literal[
     "overlay",
     "overlay-ephemeral",
 ]
-"""What an agent actually got.
+"""What an agent really got.
 
-* `shared` — one checkout, no isolation. The only kind whose root *is* the base.
-* `worktree` — that agent's own branch, merged back deliberately.
-* `worktree-ephemeral` — a full checkout the agent may write and whose writes
-  **reach nobody**: discarded on disposal, never merged.
-* `readonly-scratch` — the repository is genuinely unwritable. Only a sandbox
-  backend can deliver it.
-* `overlay` / `overlay-ephemeral` — copy-on-write *views* of the tree: the agent
-  may write anywhere and the host sees none of it, because every change lands in
-  a delta layer. They split as the worktree kinds do: `overlay` keeps its delta
-  at release so the work can be exported onto a branch, `overlay-ephemeral`
-  throws it away.
+* `shared`: one checkout, no isolation. It is the only kind whose root *is* the
+  base.
+* `worktree`: a branch that belongs to that agent, and that is merged back
+  deliberately.
+* `worktree-ephemeral`: a full checkout that the agent may write, and whose
+  writes **reach nobody**. They are discarded on disposal and never merged.
+* `readonly-scratch`: the repository is really unwritable. Only a sandbox
+  backend can deliver this kind.
+* `overlay` / `overlay-ephemeral`: copy-on-write *views* of the tree. The agent
+  may write anywhere and the host sees none of it, because every change lands
+  in a delta layer. They divide as the worktree kinds do. `overlay` keeps its
+  delta at release, so that the work can be exported onto a branch.
+  `overlay-ephemeral` discards it.
 
-An overlay is **not** a flavor of `worktree-ephemeral`: it contains the tree as
-it is, untracked and ignored files included, and its history is not git's, so
-`workspace_git` must decline it rather than run `write-tree` against a mountpoint.
+An overlay is **not** a flavor of `worktree-ephemeral`. It contains the tree as
+it is, with untracked and ignored files included, and its history is not the
+history of git. So `workspace_git` must decline it, and must not run
+`write-tree` against a mountpoint.
 """
 
 WorkspaceAccess: TypeAlias = Literal["write", "read"]
-"""What the *caller* needs of `base` — a request, not a guarantee. The tier decides
-whether a read-only claim can be enforced; the answer comes back as `kind` and
-`repo_writable`.
+"""What the *caller* needs of `base`. It is a request and not a guarantee. The
+tier decides whether a read-only claim can be enforced. The answer comes back as
+`kind` and `repo_writable`.
 """
 
 
 def project_access(kind: WorkspaceKind) -> WorkspaceAccess:
     """What a workspace of this kind grants of the **project** (E3).
 
-    Not of the directory: `worktree-ephemeral` may be written freely and merges
-    nothing, so what its holder was granted of the project is `read`. Recorded by a
-    spawn as `granted_access` and printed per agent by `phern doctor`.
+    The answer is about the project and not about the directory. A
+    `worktree-ephemeral` may be written freely and merges nothing, so its holder
+    was granted `read` of the project. A spawn records the answer as
+    `granted_access`, and the parent reads it in the admission of the child.
+    `phern doctor` prints the kind and `repo_writable` for each agent, not this
+    answer.
     """
     match kind:
         case "shared" | "worktree" | "overlay":
             # `overlay`: its delta survives release and can be exported onto a
-            # branch, so what the holder wrote can reach the project. Deliberate,
-            # exactly as a merge is — granting write promises nobody ran it.
+            # branch, so what the holder wrote can reach the project. That is
+            # deliberate, exactly as a merge is: granting write promises nobody
+            # ran it.
             return "write"
         case "worktree-ephemeral" | "readonly-scratch" | "overlay-ephemeral":
             return "read"
 
 
 def fresh_root(kind: WorkspaceKind) -> bool:
-    """Whether this kind hands the agent a directory that is not the base.
+    """Whether this kind gives the agent a directory that is not the base.
 
-    `shared` is the only one whose root *is* the base, which is why nothing is
-    provisioned into it: every material is already there, and copying `.env` onto
-    itself would destroy the file the provisioning exists to provide.
+    `shared` is the only kind whose root *is* the base. For that reason nothing
+    is provisioned into it. Every material is already there, and a copy of
+    `.env` onto itself would destroy the file that the provisioning exists to
+    provide.
     """
     match kind:
         case "shared":
@@ -215,11 +224,12 @@ def fresh_root(kind: WorkspaceKind) -> bool:
 
 
 def discards_writes(kind: WorkspaceKind) -> bool:
-    """Whether release throws the agent's writes away, dirty tree and all (P6-28).
+    """Whether release discards the writes of the agent, even from a dirty tree
+    (P6-28).
 
-    The predicate the retention policy keys on. The kinds answering `True` are the
-    only ones whose *evidence* an ordinary release can lose, which is what makes
-    them the only ones a policy has any business retaining by default.
+    The retention policy reads this predicate. An ordinary release can lose
+    *evidence* only for the kinds that answer `True`. So those are the only
+    kinds that a policy has reason to retain by default.
     """
     match kind:
         case "shared" | "worktree" | "readonly-scratch" | "overlay":
@@ -229,23 +239,24 @@ def discards_writes(kind: WorkspaceKind) -> bool:
 
 
 def redirection_env(scratch: Path) -> dict[str, str]:
-    """Where the toolchain's droppings go instead of into the workspace (E12).
+    """Where the toolchain writes its caches and temporary files, in place of the
+    workspace (E12).
 
-    Every entry is a cache or temp location a build tool writes *beside the sources*
-    by default, pointed inside `scratch` — which is outside the workspace and
-    survives disposal. At the `worktree` tier this is what makes `git status` report
-    the agent's work rather than `pytest`'s, so "remove a clean worktree, keep a
-    dirty one" keeps meaning something.
+    Every entry is a cache or a temp location that a build tool writes *beside
+    the sources* by default. Each one is pointed inside `scratch`, which is
+    outside the workspace and survives disposal. At the `worktree` tier, this is
+    what makes `git status` report the work of the agent and not the files of
+    `pytest`. So "remove a clean worktree, keep a dirty one" keeps its meaning.
 
-    A property of *scratch*, not of worktrees, so it lives beside `Workspace.env`
-    rather than in the git tier that first needed it; §4.8 gives the same env to
-    `readonly-scratch`.
+    This is a property of *scratch* and not of worktrees. So it is beside
+    `Workspace.env`, and not in the git tier that needed it first. §4.8 gives
+    the same env to `readonly-scratch`.
 
-    `PYTEST_ADDOPTS` disables the cache provider outright as well as moving
-    `--basetemp`, because `.pytest_cache/` is written next to `rootdir` and no
-    environment variable relocates it. `TMPDIR` is `scratch` itself: it must exist
-    before the first `tempfile` call, and `scratch` is the one directory the seam
-    guarantees.
+    `PYTEST_ADDOPTS` disables the cache provider completely and also moves
+    `--basetemp`. `.pytest_cache/` is written next to `rootdir`, and no
+    environment variable relocates it. `TMPDIR` is `scratch` itself. It must
+    exist before the first `tempfile` call, and `scratch` is the one directory
+    that the seam guarantees.
     """
     return {
         "TMPDIR": str(scratch),
@@ -260,21 +271,23 @@ def redirection_env(scratch: Path) -> dict[str, str]:
 def writable_roots(workspace: Workspace) -> tuple[Path, ...]:
     """Where this agent may write without being asked (E6).
 
-    The one definition of the set, because `permissions-fs`'s default rule prompts
-    about what falls outside it and `workspace_policy` hands the same set to a
-    backend to enforce; two spellings that drifted would be a tier whose name
-    promises what its policy does not do.
+    This is the one definition of the set. The default rule of `permissions-fs`
+    prompts about what falls outside it, and `workspace_policy` gives the same
+    set to a backend to enforce. If two spellings drifted apart, the name of a
+    tier would promise what its policy does not do.
 
-    `scratch` is always in it. It is outside the worktree by design (E5) and is the
-    one place a read-only or ephemeral agent is *told* it may write, so a set naming
-    only `root` would prompt on exactly the writes the design invites.
+    `scratch` is always in the set. It is outside the worktree by design (E5),
+    and it is the one place where a read-only or ephemeral agent is *told* that
+    it may write. A set that named only `root` would prompt on exactly the
+    writes that the design invites.
 
-    **Canonical, by construction rather than by resolving here.** The kernel matches
-    the path it resolves — Seatbelt refused a workspace spelled `/var/folders/…` its
-    own writes, because that is `/private/var/…` to the kernel — and a backend that
-    re-spelled the set privately would have made the enforced boundary and the
-    prompted one two different strings. So the seam canonicalizes every input it
-    mints roots from (`acquire`), and this returns what the seam handed out.
+    **The set is canonical by construction, and this function does not resolve
+    it.** The kernel matches the path that it resolves. Seatbelt refused a
+    workspace spelled `/var/folders/…` its own writes, because that path is
+    `/private/var/…` to the kernel. A backend that re-spelled the set privately
+    would have made the enforced boundary and the prompted boundary two
+    different strings. So the seam makes canonical every input from which it
+    builds roots (`acquire`), and this function returns what the seam gave out.
     """
     return (workspace.root, workspace.scratch)
 
@@ -282,14 +295,16 @@ def writable_roots(workspace: Workspace) -> tuple[Path, ...]:
 def workspace_policy(workspace: Workspace) -> SandboxPolicy:
     """The workspace as a confinement request: write here, ask about elsewhere.
 
-    Derived from `writable_roots` rather than restating it, so `ctx.shell`'s
-    enforced boundary and `workspace-write-scope`'s prompt boundary cannot drift.
+    The policy is derived from `writable_roots` and does not restate it. So the
+    boundary that `ctx.shell` enforces and the boundary that the
+    `outside-workspace` rule of `permissions-fs` prompts about cannot drift.
 
-    **No mode** (N1). This knows *where* the agent writes, not whether the person
-    allowed writing at all — and saying `workspace-write` answered the second
-    question as well as the first, which capped a logged `danger-full-access` and
-    floored a `defaultMode: read-only`. `SandboxSeam.effective` fills it from the
-    session's resolved posture; the roots stand whatever that turns out to be,
+    **No mode** (N1). This function knows *where* the agent writes. It does not
+    know whether the user allowed writing at all. When it said
+    `workspace-write`, it answered the second question as well as the first.
+    That capped a logged `danger-full-access` and floored a
+    `defaultMode: read-only`. `SandboxSeam.effective` fills the mode from the
+    resolved posture of the session. The roots stand whatever that mode is,
     because `writable_paths` consults them only under `workspace-write`.
     """
     first, *extra = writable_roots(workspace)
@@ -300,27 +315,30 @@ def workspace_policy(workspace: Workspace) -> SandboxPolicy:
 
 
 def confined_env(workspace: Workspace) -> dict[str, str]:
-    """The redirection a confined process gets: the workspace's own, and a
-    `TMPDIR` in the scratch whatever the tier.
+    """The redirection that a confined process gets: the redirection of the
+    workspace, and a `TMPDIR` in the scratch directory whatever the tier.
 
-    **A confined process has no `/tmp` of its own.** The sandbox writes only the
-    workspace — under `workspace-write` — and the scratch, and a workspace that
-    is the person's own checkout carries no redirection, so the first `tempfile`
-    call failed: a model library under a read-only sandbox, measured. The
-    scratch is the one directory every mode lets the agent write, and it exists.
-    One rule for everything that confines by `workspace_policy` — a command
-    `ctx.shell` runs and a code kernel — so neither is left without it."""
+    **A confined process has no `/tmp` of its own.** The sandbox lets it write
+    only the workspace (under `workspace-write`) and the scratch directory. A
+    workspace that is the user's own checkout carries no redirection, so the
+    first `tempfile` call failed. That was measured with a model library under a
+    read-only sandbox. The scratch directory is the one directory that every
+    mode lets the agent write, and it exists. This is one rule for everything
+    that confines by `workspace_policy`: a command that `ctx.shell` runs, and a
+    code kernel. So neither is left without a `TMPDIR`."""
     return {"TMPDIR": str(workspace.scratch), **workspace.env}
 
 
 def scratch_of(ctx: Context, session_id: str, agent: AgentHandle | str) -> Path:
-    """Where this agent's scratch is — the one it holds, or where the seam would put it.
+    """The scratch directory of this agent: the one that it holds, or the place
+    where the seam would put it.
 
-    For a row that keeps a per-agent artifact the agent's own tools must reach and
-    write, under every tier (ph-clm's context file): `scratch` is that place. Asked
-    before a workspace is acquired — or with no workspace row mounted at all — the
-    answer is the seam's own layout under its configured root, or under the default
-    one, so a reader never spells the layout a second time.
+    This is for a row that keeps a per-agent artifact that the tools of the
+    agent must reach and write under every tier (the context file of ph-clm).
+    `scratch` is that place. A caller may ask before a workspace is acquired, or
+    with no workspace row mounted at all. The answer is then the layout of the
+    seam under its configured root, or under the default root. So a reader never
+    spells the layout a second time.
     """
     held = workspace_of(ctx, agent)
     if held is not None:
@@ -332,26 +350,28 @@ def scratch_of(ctx: Context, session_id: str, agent: AgentHandle | str) -> Path:
 
 
 def _scratch_layout(root: Path, session_id: str, agent_id: str) -> Path:
-    """Per session *and* per agent: two children of one session writing notes into one
-    directory is the collision this avoids. Canonical, for `_scratch_for`'s reason."""
+    """One directory for each session *and* each agent. Without the agent part,
+    two children of one session would write notes into one directory. The path
+    is canonical, for the reason that `_scratch_for` gives."""
     return canonical(root / session_id / agent_id)
 
 
 def workspace_of(ctx: Context, agent: AgentHandle | str | None) -> Workspace | None:
-    """This agent's workspace, asked of a seam that may not be mounted.
+    """The workspace of this agent, asked of a seam that may not be mounted.
 
-    **A handle, a bare id, or nothing.** The body always accepted all three —
-    `rlm-prompt` passes the id it was given, the fs resolver passes whatever it
-    holds — and `Any` was hiding that this is one function answering for two
+    **A handle, a bare id, or nothing.** The body always accepted all three:
+    `rlm-prompt` passes the id that it was given, and the fs resolver passes
+    whatever it holds. `Any` hid the fact that this one function serves two
     calling conventions (plan P8-03, issue 3).
 
-    The question written once, for the five callers that had it: the prompt line,
-    `bash`, the kernel, the spawn path and the fs resolver.
+    The question is written in one place for all of its callers. The first five
+    were the prompt line, `bash`, the kernel, the spawn path and the fs
+    resolver.
 
-    **Fail-soft on purpose.** A caller asking "where does this agent write" during a
-    teardown, or in a profile that layers no workspace row, gets `None` and carries
-    on with the process's own directory — a raising seam here would make an absent
-    optional row fatal.
+    **It fails soft on purpose.** A caller may ask "where does this agent write"
+    during a teardown, or in a profile that layers no workspace row. It gets
+    `None` and continues with the directory of the process. A seam that raised
+    here would make an absent optional row fatal.
     """
     seam = ctx.get(WORKSPACE)
     if seam is None or agent is None:
@@ -366,148 +386,170 @@ def workspace_of(ctx: Context, agent: AgentHandle | str | None) -> Workspace | N
 
 
 BRANCH_PREFIX = "ph/"
-"""What every ref pH makes is named under.
+"""The prefix under which every ref that pH makes is named.
 
-Here rather than in the git tier that first wrote it, for the reason `CHECKPOINT`
-moved: **it is the seam's ref namespace, not one tier's**. Three tiers and one
-command have to agree on it — the jj tier names its bookmarks with it, the overlay
-tier its exports, and `/workspaces` enumerates it — so leaving it in
-`workspace_git` made it a vocabulary the others borrowed, and made a deployment
-that never layers the git tier import it anyway for a string constant.
+It is here, and not in the git tier that wrote it first, for the same reason
+that `CHECKPOINT` moved: **it is the ref namespace of the seam, and not of one
+tier**. Three tiers and one command must agree on it. The jj tier names its
+bookmarks with it, the overlay tier names its exports with it, and
+`/workspaces` enumerates it. While it was in `workspace_git`, it was a
+vocabulary that the others borrowed. A deployment that never layers the git
+tier also had to import that module for a string constant.
 
-
-Shared with `/workspaces`, which enumerates the prefix to find the artifacts
-disposal leaves. A management command that offered to delete a person's own
-branches would be a different and much worse tool, and this prefix is the whole
-of what keeps it from being one — so the two must not drift.
+It is shared with `/workspaces`, which enumerates the prefix to find the
+artifacts that disposal leaves. A management command that offered to delete a
+user's own branches would be a different and much worse tool. This prefix is
+all that keeps `/workspaces` from being that tool, so the two must not drift.
 """
 
 
 _UNSAFE_REF = re.compile(r"[^A-Za-z0-9._-]+")
-"""Everything git refuses in a ref component, plus `/`, which would nest.
+"""Everything that git refuses in a ref component, plus `/`, which would nest.
 
-Session and agent ids are pH's, not a user's, but a ref name is a filesystem
-path under `.git/refs` on most setups — so this collapses rather than trusts.
+Session ids and agent ids come from pH and not from a user. But on most setups
+a ref name is a filesystem path under `.git/refs`. So this pattern collapses
+the unsafe characters and does not trust the ids.
 """
 
 
 def sanitize_ref(component: str) -> str:
     """One ref path component, safe by construction.
 
-    Git's own rules are a deny-list (`git check-ref-format`); this is the
-    allow-list, because a branch name that fails validation *after* a worktree
-    has been created is a half-made artifact to clean up.
+    The rules of git itself are a deny-list (`git check-ref-format`). This is
+    the allow-list. A branch name that fails validation *after* a worktree has
+    been created leaves a half-made artifact to clean up.
     """
     cleaned = _UNSAFE_REF.sub("-", component).strip("-.")
     return cleaned or "agent"
 
 
 EXCLUDE = ":(exclude)"
-"""Git's pathspec magic for "everything but this".
+"""The pathspec magic of git for "everything but this".
 
-Named because `workspace_git._commit` reads it back off the pathspec to learn
-which entries were provisioned: the two are one fact, and a marker spelled twice
-is a secret that reaches a branch the day one of them changes.
+It has a name because `workspace_git._commit` reads it back off the pathspec to
+learn which entries were provisioned. The two uses are one fact. If the marker
+were spelled in two places, a secret would reach a branch on the day that one
+of them changed.
 """
 
 
 def work_pathspec(provisioned: Sequence[str]) -> list[str]:
-    """A `git` pathspec selecting a tree *minus* what the seam put in it.
+    """A `git` pathspec that selects a tree *minus* what the seam put in it.
 
-    A function of the provisioned list alone, so a live `Workspace` and a
-    `WorkspaceRecord` read back after a crash build their pathspec one way: reclaim
-    staging with a pathspec of its own is how a provisioned `.env` rode the branch
-    on exactly the path that has no person watching (S13). The lists differ in one
-    direction — the record's is what was configured, the live one what arrived —
-    and excluding a configured path that never arrived is the safe side.
+    It is a function of the provisioned list alone. So a live `Workspace` and a
+    `WorkspaceRecord` that is read back after a crash build their pathspec in
+    one way. When reclaim staged with a pathspec of its own, a provisioned
+    `.env` was committed to the branch, on exactly the path that no person
+    watches (S13). The two lists differ in one direction: the list of the record
+    is what was configured, and the live list is what arrived. To exclude a
+    configured path that never arrived is the safe side.
 
-    The positive `.` is required: exclusions alone match everything, which is the
-    opposite of what they read as.
+    The positive `.` is required. Exclusions alone match everything, which is
+    the opposite of what they appear to say.
     """
     return [".", *(f"{EXCLUDE}{entry}" for entry in provisioned)]
 
 
 @dataclass(frozen=True, slots=True)
 class Workspace:
-    """One agent's working directory, and the truth about what it bounds.
+    """The working directory of one agent, and the facts about what it bounds.
 
-    A value: what the provider decided, and nothing about who is holding it. The
-    seam keeps the bookkeeping — which agent, which session, how to end it — so a
-    provider cannot half-implement the lifecycle.
+    It is a value. It holds what the provider decided, and nothing about who
+    holds it. The seam keeps the bookkeeping: which agent, which session, and
+    how to end it. So a provider cannot implement only half of the lifecycle.
     """
 
     root: Path
     """The agent's cwd: `ctx.fs`'s root and `ctx.subprocess`'s default cwd."""
     scratch: Path
-    """Always writable, on every kind and tier, and outside `root` on purpose —
-    so it survives disposal even when the workspace itself is discarded. Handed
-    to the provider already created; a provider substitutes only if its tier
-    needs the path somewhere else."""
+    """Always writable, on every kind and tier, and outside `root` on purpose.
+    So it survives disposal even when the workspace itself is discarded. The
+    provider receives it already created. A provider substitutes its own path
+    only if its tier needs the path somewhere else."""
     kind: WorkspaceKind
     repo_writable: bool
-    """Whether `root` can actually be written. **`False` only when a tier is
-    enforcing it** — never as a statement of intent, and never inferred from
-    `access`."""
+    """Whether `root` can really be written. **It is `False` only when a tier
+    enforces it.** It is never a statement of intent, and it is never inferred
+    from `access`."""
     ref: str | None = None
     """The git branch, when the kind has one."""
     env: Mapping[str, str] = field(default_factory=dict)
-    """Environment a runner should apply, for a kind that needs redirecting.
+    """The environment that a runner should apply, for a kind that needs
+    redirection.
 
-    Empty for `shared`. The read-only kinds point `TMPDIR`, `PYTEST_ADDOPTS` and
-    friends inside `scratch`, because build tools write into the tree they are run
-    against. Best-effort by construction: a toolchain that insists on writing beside
-    its sources will still fail, and the answer to that is `access="write"` for that
-    agent, not a weaker tier.
+    Empty for `shared`. Every shipped tier that makes a fresh root points
+    `TMPDIR`, `PYTEST_ADDOPTS` and the other variables of `redirection_env`
+    inside `scratch`, because build tools write into the tree that they run
+    against. It is best-effort by construction. A toolchain that insists on
+    writing beside its sources still fails. The answer to that is
+    `access="write"` for that agent, and not a weaker tier.
     """
     provisioned: tuple[str, ...] = ()
-    """Paths the seam put in this workspace (E14) — not the agent's work."""
+    """Paths that the seam put in this workspace (E14). They are not the work of
+    the agent."""
     reused: bool = False
-    """Whether the tier handed back a tree it found already made for this agent — a
-    resume, a child given its workspace back — rather than one it made now.
+    """Whether the tier returned a tree that it found already made for this
+    agent, and did not make one now. Examples are a resume, and a child that
+    gets its workspace back.
 
-    Set by the tier, the one party that knows. What the seam provisioned when the
-    tree was made is still in it, and the agent may have edited it since, so only
-    what is missing is provisioned (`provision(fill=True)`): a copy went back over
-    those edits."""
+    The tier sets it, because the tier is the one party that knows. What the
+    seam provisioned when the tree was made is still in it, and the agent may
+    have edited it since. So the seam provisions only what is missing
+    (`provision(fill=True)`). A full copy overwrote those edits."""
     provision_failures: tuple[str, ...] = ()
-    """Materials the seam could not put in place (E14).
+    """Materials that the seam could not put in place (E14).
 
-    On the value rather than in a log line because the party that has to know
-    `.env` is missing is the *agent* about to wonder why the tests fail — it is
-    read straight onto the workspace prompt line. Empty is the ordinary case,
-    including "this profile provisions nothing"."""
+    They are on the value and not in a log line, because the party that must
+    know that `.env` is missing is the *agent*, which is about to wonder why the
+    tests fail. The workspace prompt line reads them directly. Empty is the
+    ordinary case, and that includes "this profile provisions nothing"."""
     retained: str = ""
-    """Why this tree is being kept, set late by whoever learns the outcome (P6-28).
+    """Why this tree is kept. Whoever learns the outcome sets it late (P6-28).
 
-    Late state rather than an acquire-time field or a `release` argument: nobody
-    knows at acquire how the child will end, and `release` runs as a *scope
-    disposer*, so it is told nothing about why.
+    It is late state, and not a field set at acquire or an argument of
+    `release`. Nobody knows at acquire how the child will end. And `release`
+    runs as a *scope disposer*, so it is told nothing about the reason.
 
-    A **reason**, not a flag, which is what lets the fold tell apart three states
-    that all leave a tree on disk: a deliberate keep says why here, a dirty-tree
-    keep is `kept` with no reason, and a leak has no `disposed` event at all.
+    It is a **reason** and not a flag. That lets the fold tell apart three
+    states that all leave a tree on disk. A deliberate keep gives its reason
+    here. A dirty-tree keep is `kept` with no reason. A leak has no `disposed`
+    event at all.
+    """
+    fork: str | None = None
+    """The commit that this tree started from, for a tier whose disposal has to
+    ask what the tree has done *since* (the jj tier). `None` for a tier that
+    does not need it.
+
+    It is on the value so that the seam can put it on `workspace/acquired`. A
+    crash reclaim has only the record, and without the fork point the jj tier
+    cannot tell a tree that did nothing from a tree whose work was frozen into
+    a commit for a child. See `WorkspaceRecord.fork`.
     """
     release: Callable[[Workspace], Awaitable[bool]] | None = None
-    """The provider's teardown, returning whether anything was **kept**.
+    """The teardown of the provider. It returns whether anything was **kept**.
 
-    Takes the whole workspace, not one field: a teardown policy needs what was
-    provisioned *and* what kind it holds, and P4-09's checkpoint refs will be a
-    third such fact.
+    It takes the whole workspace and not one field. A teardown policy needs what
+    was provisioned *and* what kind the workspace holds. The shipped tiers also
+    read `retained` from it. The checkpoint refs of P4-09 were expected to be a
+    further such fact.
 
-    The answer is only knowable here — P4-08's policy is "commit, then remove,
-    discard ephemeral even if dirty", so `kind` cannot be asked instead. The seam
-    records it on `workspace/disposed` so a reader can tell "nothing changed, so it
-    was removed" from "these writes were thrown away by design".
+    Only the teardown can know the answer. The policy of P4-08 is "commit, then
+    remove, discard ephemeral even if dirty", so `kind` cannot be asked in its
+    place. The seam records the answer on `workspace/disposed`. A reader can
+    then tell "nothing changed, so it was removed" from "these writes were
+    discarded by design".
     """
 
     def agent_work_pathspec(self) -> list[str]:
-        """A `git` pathspec selecting this tree *minus* what the seam put in it.
+        """A `git` pathspec that selects this tree *minus* what the seam put in it.
 
-        The one definition of "the agent's work", for three consumers that must not
-        disagree: the disposal policy (`workspace_git._dirty`), `/workspaces list`, and
-        P4-09's `/revert` — whose "restore tracked + untracked-not-ignored" is exactly
-        the set that must not clobber a provisioned `node_modules`. Crash reclaim is
-        the fourth, through `work_pathspec` and the list `workspace/acquired` records.
+        This is the one definition of "the work of the agent". The disposal
+        policy of the git tier uses it: `workspace_git._release` gives it to
+        `_dirty` and `_commit`. Crash reclaim builds the same pathspec through
+        `work_pathspec`, from the list that `workspace/acquired` records. The
+        `/revert` of P4-09 reads `provisioned` directly and must not disagree
+        with it. Its "restore tracked + untracked-not-ignored" is exactly the
+        set that must not clobber a provisioned `node_modules`.
         """
         return work_pathspec(self.provisioned)
 
@@ -519,19 +561,20 @@ DeclineReason: TypeAlias = Literal[
     "provider-failed",
     "overlay-failed",
 ]
-"""Why a tier could not serve a request, as a code rather than prose.
+"""Why a tier could not serve a request, as a code and not as prose.
 
-`phern doctor` prints it (P4-12). An operator who set `worktree` and got `shared`
-is owed the reason, and a durable event carrying an English sentence is
-unparseable by the consumer that has to branch on it.
+`phern doctor` prints it (P4-12). An operator who set `worktree` and got
+`shared` must be told the reason. And the consumer that must branch on a durable
+event cannot parse an English sentence in it.
 """
 
 
 class WorkspaceDeclined(Exception):
-    """A provider declining *with* a reason. Never fatal; the seam falls back.
+    """A provider that declines *with* a reason. It is never fatal, and the seam
+    falls back.
 
-    Raised rather than returned so the `acquire` protocol keeps one shape: a
-    bare `None` is still a decline, it simply cannot say why.
+    It is raised and not returned, so that the `acquire` protocol keeps one
+    shape. A bare `None` is still a decline. It only cannot say why.
     """
 
     def __init__(self, reason: DeclineReason, detail: str = "") -> None:
@@ -540,35 +583,38 @@ class WorkspaceDeclined(Exception):
 
 
 class ChildWorkspaceMissing(HarnessError):
-    """A child reached its first step holding no workspace. Refused, loudly (§6.5).
+    """A child reached its first step with no workspace. This is refused, and the
+    refusal is loud (§6.5).
 
-    **The lazy acquire below is for the person's own agent, and answering it for a
-    child would widen that child.** A child's workspace is its *parent's* decision
-    — the base to fork from and the `access` to grant both arrive with the spawn and
-    are recorded on its admission — so the only thing this row could do for a child
-    is invent them: the process's own directory as `base`, and whatever the profile
-    configured for the *root* as `access`, which defaults to `write`. A research
-    child admitted as `read` would come back holding a writable checkout of
-    somebody else's tree, and every event about it would say so honestly while being
-    wrong about what was asked for.
+    **The lazy acquire in `lifecycle` below is for the user's own agent. If it
+    answered for a child, it would widen that child.** The workspace of a child
+    is the decision of its *parent*. The base to fork from and the `access` to
+    grant both arrive with the spawn and are recorded on its admission. So the
+    only thing that this row could do for a child is invent them: the directory
+    of the process as `base`, and whatever the profile configured for the *root*
+    as `access`, which defaults to `write`. A research child admitted as `read`
+    would come back with a writable checkout of a tree that is not its own.
+    Every event about it would report that accurately, and would still be wrong
+    about what was asked for.
 
-    So the absence is treated as the bug it is. A spawn path that forgot to acquire
-    is a **missing call**, and the loud version costs a failed turn that names the
-    child; the quiet version costs a child that holds more than its admission
-    recorded, which nothing downstream can detect — `workspace/acquired` reports
-    what it got, not what it should have got, and §6.5 is checked at admission where
-    this never appeared.
+    So the absence is treated as the bug that it is. A spawn path that forgot to
+    acquire has a **missing call**. The loud version costs a failed turn that
+    names the child. The quiet version costs a child that holds more than its
+    admission recorded, and nothing downstream can detect that.
+    `workspace/acquired` reports what the child got and not what it should have
+    got, and §6.5 is checked at admission, where this never appeared.
 
-    Not `WorkspaceDeclined`: that is a *tier* saying it cannot serve a request, and
-    the seam is right to fall back for it. This is a caller asking a question that
-    was never this row's to answer.
+    This is not `WorkspaceDeclined`. That is a *tier* that says it cannot serve
+    a request, and the seam is right to fall back for it. This is a caller that
+    asks a question which this row was never the one to answer.
 
-    A `HarnessError`, so the code survives the trip. Raised from `agent/pre-step`
-    this becomes a recorded `turn/end` with `reason.kind: "error"` — loud, and
-    durable — and `error_info` is what puts a name in it: a bare exception reaches
-    that record as `UNKNOWN`, which is the prose-only failure the code exists to
-    avoid. `HarnessError` sets `self.code`, which is also the attribute the daemon's
-    `respond` reads, so one spelling serves both readers.
+    It is a `HarnessError`, so that the code survives to the record. Raised from
+    `agent/pre-step`, it becomes a recorded `turn/end` with
+    `reason.kind: "error"`, which is loud and durable. `error_info` is what puts
+    a name in it. A bare exception reaches that record as `UNKNOWN`, and that is
+    the prose-only failure that the code exists to avoid. `HarnessError` sets
+    `self.code`. That is also the attribute that the `respond` function of the
+    daemon reads, so one spelling serves both readers.
     """
 
     def __init__(self, message: str) -> None:
@@ -577,15 +623,16 @@ class ChildWorkspaceMissing(HarnessError):
 
 @runtime_checkable
 class WorkspaceProvider(Protocol):
-    """A tier's implementation. `None` declines, and declining is normal.
+    """The implementation of a tier. `None` declines, and a decline is normal.
 
-    Typed rather than duck-typed, and `tier` is a member rather than a `getattr`
-    probe: a provider whose method drifted would otherwise fail at runtime inside
-    the seam's `except`, be reported to the operator as `shared`, and take the
-    containment with it silently.
+    The provider is typed and not duck-typed, and `tier` is a member and not a
+    `getattr` probe. Otherwise a provider whose method drifted would fail at
+    runtime inside the `except` of the seam. The operator would see it reported
+    as `shared`, and the containment would be lost silently.
 
-    `tier` is a property for `CodeRuntime`'s reason: every tier declares it as a
-    frozen field, and a settable Protocol attribute refused all of them.
+    `tier` is a property for the same reason as in `CodeRuntime`: every tier
+    declares it as a frozen field, and a settable Protocol attribute refused all
+    of them.
     """
 
     @property
@@ -604,7 +651,8 @@ class WorkspaceProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceSite:
-    """Where a tier will put an agent's tree, said before it makes one (S12)."""
+    """Where a tier will put the tree of an agent, stated before the tier makes
+    one (S12)."""
 
     root: Path
     kind: WorkspaceKind
@@ -613,18 +661,21 @@ class WorkspaceSite:
 
 @runtime_checkable
 class LocatingProvider(Protocol):
-    """A tier that can say where a tree will go before making it (S12).
+    """A tier that can say where a tree will go before it makes the tree (S12).
 
-    **What lets the record come first.** The seam writes `workspace/acquiring` from
-    this and flushes it before the tier acts, so a crash inside `worktree add`, an
-    overlay's init, or its mount leaves a record naming the root — which reconcile
-    then reclaims. Without it the act ran with nothing in the log, and a mounted
-    overlay that nothing named was never unmounted.
+    **This is what lets the record come first.** The seam writes
+    `workspace/acquiring` from this answer and flushes it before the tier acts.
+    So a crash inside `worktree add`, the init of an overlay, or its mount
+    leaves a record that names the root, and reconcile then reclaims it. Without
+    the record, the act ran with nothing in the log, and a mounted overlay that
+    nothing named was never unmounted.
 
-    `acquire` must put the tree exactly here, which is why every tier that
-    implements this derives its own `acquire` from it rather than a second time.
-    Pure: no I/O, so a tier that is about to decline has cost a record, not a
-    subprocess. An optional capability, `ReclaimingProvider`'s shape and reason.
+    `acquire` must put the tree exactly at this site. For that reason every tier
+    that implements this Protocol derives its own `acquire` from `locate`, and
+    does not compute the site a second time. `locate` is pure, with no I/O. So a
+    tier that is about to decline has cost a record and not a subprocess. This
+    is an optional capability, with the shape and the reason of
+    `ReclaimingProvider`.
     """
 
     def locate(
@@ -633,11 +684,12 @@ class LocatingProvider(Protocol):
 
 
 def tree_path(root: Path, session_id: str, agent_id: str) -> Path:
-    """Where a tier puts one agent's tree under its own `root`: `<root>/<session>/<agent>`.
+    """Where a tier puts the tree of one agent under its own `root`:
+    `<root>/<session>/<agent>`.
 
-    **One lossy id→path mapping for every tier**, through `sanitize_ref`: reconcile
-    and `/workspaces` invert it, and a second spelling in a second tier is a second
-    inversion to be wrong about.
+    **One lossy mapping from id to path for every tier**, through
+    `sanitize_ref`. Reconcile and `/workspaces` invert it. A second spelling in
+    a second tier would be a second inversion that could be wrong.
     """
     return root / sanitize_ref(session_id) / sanitize_ref(agent_id)
 
@@ -645,9 +697,10 @@ def tree_path(root: Path, session_id: str, agent_id: str) -> Path:
 def checkout_site(
     root: Path, session_id: str, agent_id: str, access: WorkspaceAccess
 ) -> WorkspaceSite:
-    """A version-controlled tier's site: a checkout at `tree_path`, on the branch named
-    the same way, and ephemeral when only reading was asked for — the git tier's and
-    jj's alike, so a record either writes names what the other would."""
+    """The site of a version-controlled tier: a checkout at `tree_path`, on the
+    branch that is named the same way. The checkout is ephemeral when the caller
+    asked only to read. The git tier and the jj tier share this function, so a
+    record that either tier writes names what the other tier would name."""
     return WorkspaceSite(
         root=tree_path(root, session_id, agent_id),
         kind="worktree-ephemeral" if access == "read" else "worktree",
@@ -657,16 +710,17 @@ def checkout_site(
 
 @runtime_checkable
 class ReclaimingProvider(Protocol):
-    """A provider that can release a workspace it did not create (F6).
+    """A provider that can release a workspace that it did not create (F6).
 
-    **An optional capability as its own Protocol, never a `getattr` probe** — the
-    shape `ExportingProvider` and `RehydratableProvider` also take. Not every tier
-    can reclaim (an in-memory one has nothing to), and a probe would report a
-    provider whose method is *misnamed* as one that cannot, which hides a leak
-    instead of closing it.
+    **An optional capability as its own Protocol, never a `getattr` probe.**
+    `ExportingProvider` and `RehydratableProvider` take the same shape. Not
+    every tier can reclaim (an in-memory tier has nothing to reclaim), and a
+    probe would report a provider whose method is *misnamed* as one that cannot.
+    That hides a leak when it should close it.
 
-    Returns whether anything was **kept**, matching `Workspace.release`, so the
-    `workspace/disposed` a reconciliation writes says what an orderly one would.
+    It returns whether anything was **kept**, as `Workspace.release` does. So
+    the `workspace/disposed` that a reconciliation writes says what an orderly
+    release would say.
     """
 
     async def reclaim(self, record: WorkspaceRecord) -> bool: ...
@@ -674,15 +728,17 @@ class ReclaimingProvider(Protocol):
 
 @runtime_checkable
 class ExportingProvider(Protocol):
-    """A provider that can put an agent's work where the project can see it.
+    """A provider that can put the work of an agent where the project can see it.
 
-    An optional capability for `ReclaimingProvider`'s reason: `shared` has nothing
-    to export, and a tier that isolates by *discarding* has nothing to offer.
+    It is an optional capability, for the reason that `ReclaimingProvider`
+    gives. `shared` has nothing to export, and a tier that isolates by
+    *discarding* has nothing to offer.
 
-    Returns the git ref the work is on, so one verb serves both isolating tiers — a
-    worktree answers with the branch it has been committing to, an overlay builds
-    one out of its delta first. `/workspaces` asks the seam rather than asking which
-    tier it is talking to.
+    It returns the git ref that the work is on, so one verb serves all three
+    tiers that export: git, agentfs and jj. A worktree answers with the branch
+    that it has committed to. A jj workspace answers with the bookmark that has
+    tracked its work. An overlay first builds a branch out of its delta.
+    `/workspaces` asks the seam, and does not ask which tier it is talking to.
     """
 
     async def export(self, record: WorkspaceRecord) -> str: ...
@@ -690,26 +746,28 @@ class ExportingProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class Stray:
-    """One checkout a tier still has on disk, and what removing it would cost.
+    """One checkout that a tier still has on disk, and what its removal would cost.
 
-    Named for the interesting case rather than the common one: since disposal
-    commits and takes the checkout back, a directory that is still there means a
-    live agent is working in it or disposal could not remove it.
+    The name describes the interesting case and not the common one. Disposal
+    commits and takes the checkout back. So a directory that is still there
+    means that a live agent is working in it, or that disposal could not remove
+    it.
     """
 
     ref: str
-    """The branch or bookmark this checkout is on — the key `/workspaces` joins on,
-    because it is the one name every tier puts on a `Workspace` and carries rather
-    than derives from a path."""
+    """The branch or bookmark that this checkout is on. `/workspaces` joins on
+    it, because it is the one name that the git tier and the jj tier both put on
+    a `Workspace` and carry. They do not derive it from a path."""
     path: Path
     dirty: bool
-    """Whether removing the directory would lose something the ref does not have.
+    """Whether removal of the directory would lose something that the ref does
+    not have.
 
-    **Each tier answers in its own terms and they are not the same question.** A git
-    worktree is dirty when it holds uncommitted changes. A jj workspace's working
-    copy *is* a commit and its bookmark follows it, so asking is also what makes the
-    answer safe — a `True` there means "there is work, and it is now on the ref",
-    which is a better answer than git can give.
+    **Each tier answers in its own terms, and the questions are not the same.**
+    A git worktree is dirty when it holds uncommitted changes. The working copy
+    of a jj workspace *is* a commit, and its bookmark follows it. So the act of
+    asking is also what makes the answer safe. A `True` there means "there is
+    work, and it is now on the ref", which is a better answer than git can give.
     """
 
 
@@ -720,24 +778,25 @@ async def measure_strays(
     with_status: bool,
     skip: Container[str] = (),
 ) -> list[Stray]:
-    """`(ref, path)` pairs into `Stray`s, measuring `dirty` concurrently.
+    """Turn `(ref, path)` pairs into `Stray`s, and measure `dirty` concurrently.
 
-    Beside `Stray` because it was the same twelve lines in both tiers — the
-    `dict.fromkeys`, the `with_status` guard, the task group, the comprehension —
-    differing only in the probe, which is the one part that is genuinely the tier's.
-    A change to the fan-out or to `Stray` landed twice, in files that already share
-    code deliberately.
+    It is beside `Stray` because it was the same twelve lines in the git tier
+    and in the jj tier: the `dict.fromkeys`, the `with_status` guard, the task
+    group and the comprehension. Only the probe differed, and the probe is the
+    one part that really belongs to the tier. A change to the fan-out or to
+    `Stray` had to be made twice, in files that already share code deliberately.
 
-    Concurrent because each probe is a subprocess, and a run that stranded one
-    checkout has usually stranded several.
+    It is concurrent because each probe is a subprocess, and a run that left one
+    checkout behind has usually left several.
 
-    **`skip` is the refs a live agent holds, and leaving it out cost more than
-    time.** `/workspaces` never reads `dirty` for a held row — `describe` reports it
-    as `held` and stops — so every probe against one was a subprocess spent on an
-    answer nobody looks at, one per live child per listing. On the jj tier it was
-    worse than waste: the probe snapshots, so *listing* mutated the working-copy
-    commit of every agent that was mid-turn. The old command filtered these out and
-    the filter did not survive being moved behind a Protocol; it lives here now,
+    **`skip` is the refs that a live agent holds. To leave it out cost more
+    than time.** `/workspaces` never reads `dirty` for a held row: `describe`
+    reports it as `held` and stops. So every probe against a held row was a
+    subprocess spent on an answer that nobody reads, one for each live child in
+    each listing. On the jj tier it was worse than waste. The probe snapshots,
+    so *listing* mutated the working-copy commit of every agent that was in the
+    middle of a turn. The old command filtered these rows out, and the filter
+    was lost when the code moved behind a Protocol. The filter is here now,
     where both tiers get it.
     """
     dirty = dict.fromkeys((ref for ref, _ in found), False)
@@ -755,27 +814,30 @@ async def measure_strays(
 
 @runtime_checkable
 class ArtifactProvider(Protocol):
-    """A provider that can list, merge and delete the refs it leaves behind (E15).
+    """A provider that can list, merge and delete the refs that it leaves behind
+    (E15).
 
-    An optional capability as its own Protocol, `ReclaimingProvider`'s shape and for
-    its reason. It exists because `/workspaces` was doing this itself, **in git** —
-    `git branch --list ph/*`, `git merge`, `git branch -d` — and `jj` embeds its own
-    git implementation. *Measured*: the whole acquire, bookmark and export flow runs
-    with a `git` on `PATH` that exits 127 and the binary is never invoked. So a jj
-    deployment need not have it, and there the branch listing failed and
-    `/workspaces` answered "no agent workspaces are left behind" while the bookmarks
-    were sitting right there.
+    It is an optional capability as its own Protocol, with the shape and the
+    reason of `ReclaimingProvider`. It exists because `/workspaces` did this
+    work itself, **in git**: `git branch --list ph/*`, `git merge`,
+    `git branch -d`. But `jj` embeds its own git implementation. *Measured*:
+    the whole acquire, bookmark and export flow runs with a `git` on `PATH` that
+    exits 127, and the binary is never invoked. So a jj deployment need not have
+    the binary. There the branch listing failed, and `/workspaces` answered "no
+    agent workspaces are left behind" while the bookmarks were present.
 
-    `refs` returns **everything**, not just what pH made: the prefix guard belongs to
-    the command that would otherwise offer to delete somebody's `feature/x`, and the
-    second caller is `merge`, which has to accept a ref outside the prefix.
+    `refs` returns **everything**, and not only what pH made. The prefix guard
+    belongs to the command that would otherwise offer to delete the `feature/x`
+    of a user. The second caller is `merge`, which must accept a ref outside the
+    prefix.
 
-    Both acting verbs return `""` for "it happened" and otherwise **the sentence a
-    person reads**, rather than a bool: what went wrong is the tier's to say, and the
-    two tiers do not fail the same way. A conflicted merge is the case that proves
-    it — git exits non-zero and refuses, jj exits **zero** and records the conflict
-    in the commit, so a caller testing an exit code reports a clean merge that a
-    person then discovers by opening the file.
+    Both acting verbs return `""` for "it happened", and otherwise **the
+    sentence that a person reads**. They do not return a bool, because the tier
+    is the one to say what went wrong, and the git-backed tiers and the jj tier
+    do not fail in the same way. A conflicted merge is the case that proves it.
+    git exits non-zero and refuses. jj exits **zero** and records the conflict
+    in the commit. So a caller that tests an exit code reports a clean merge,
+    and a person then discovers the conflict by opening the file.
     """
 
     async def refs(self, base: Path) -> list[str]: ...
@@ -787,24 +849,28 @@ class ArtifactProvider(Protocol):
 
 @runtime_checkable
 class EnumeratingProvider(Protocol):
-    """A provider that can find and take back the checkouts it left on disk (E15).
+    """A provider that can find and take back the checkouts that it left on disk
+    (E15).
 
-    **Separate from `ArtifactProvider`, and the overlay tier is why.** These were one
-    Protocol of five verbs, justified as "`/workspaces`' whole surface — a tier
-    serves that command or it does not". `workspace-agentfs` falsified that in the
-    same breath: its artifact is a git branch like anyone else's, so it answers the
-    ref verbs, but a *mountpoint is not a checkout* this command can hand back — so
-    it had to write two stubs to be admitted, and `isinstance` could not tell a tier
-    that meant them from one that had merely typed them. Two Protocols along the line
-    the code was already drawing, and the stubs are gone.
+    **It is separate from `ArtifactProvider`, and the overlay tier is the
+    reason.** The two were one Protocol of five verbs. The justification was
+    that the five are the whole surface of `/workspaces`, so a tier serves that
+    command or it does not. `workspace-agentfs` showed at once that this was
+    false. Its artifact is a git branch like that of any other tier, so it
+    answers the ref verbs. But a *mountpoint is not a checkout* that this
+    command can hand back. So the tier had to write two stubs to be admitted,
+    and `isinstance` could not tell a tier that meant them from a tier that had
+    only typed them. There are now two Protocols along the line that the code
+    already drew, and the stubs are gone.
 
-    `strays` filters by the provider's **own root**, which is the whole safety of
-    `discard`: `jj workspace list` reports the person's own `default` workspace at
-    the repository root, and a `remove` that trusted it would delete their
-    repository. It is also what let the command stop carrying a copy of that setting.
+    `strays` filters by the **own root** of the provider, and that is all that
+    makes `discard` safe. `jj workspace list` reports the user's own `default`
+    workspace at the repository root, and a `remove` that trusted the list would
+    delete the repository of the user. The filter is also what let the command
+    stop carrying a copy of that setting.
 
-    `discard` removes a checkout and nothing else — the ref is the artifact, and
-    `/workspaces` deletes that separately, deliberately, behind its own flag.
+    `discard` removes a checkout and nothing else. The ref is the artifact, and
+    `/workspaces` deletes that separately and deliberately, behind its own flag.
     """
 
     async def strays(
@@ -816,29 +882,31 @@ class EnumeratingProvider(Protocol):
 
 @runtime_checkable
 class CheckpointingProvider(Protocol):
-    """A provider that can name a workspace's state and put it back (P4-09).
+    """A provider that can name the state of a workspace and put it back
+    (P4-09).
 
-    An optional capability as its own Protocol — `ReclaimingProvider`'s shape, and
-    for its reason. Not every tier has a restore mechanism: `shared` is the
-    person's own checkout, and an overlay's delta is a perfectly good restore point
-    that simply is not a git tree. A `getattr` probe would report a provider whose
-    method drifted as one that cannot checkpoint, which loses `/revert` for a tier
-    that has it, silently.
+    It is an optional capability as its own Protocol, with the shape and the
+    reason of `ReclaimingProvider`. Not every tier has a restore mechanism.
+    `shared` is the user's own checkout. The delta of an overlay is a good
+    restore point, but it is not a git tree. A `getattr` probe would report a
+    provider whose method drifted as one that cannot checkpoint. That silently
+    loses `/revert` for a tier that has it.
 
-    **`capture` returns one token serving two readers**, which is the rule the git
-    tier already argued for its tree hash: P4-09 stores it as a restore point and
-    P5-07 uses it as a *fingerprint*, to decide that a quality gate which failed
-    against this exact state need not run again. One derivation, so a gate memo and
-    a restore point can never disagree about whether the work changed.
+    **`capture` returns one token that serves two readers.** The git tier
+    already argued this rule for its tree hash. P4-09 stores the token as a
+    restore point. P5-07 uses it as a *fingerprint*, to decide that a quality
+    gate which failed against this exact state need not run again. There is one
+    derivation, so a gate memo and a restore point can never disagree about
+    whether the work changed.
 
-    What a token must promise is therefore narrow and exact: **equal tokens mean
-    equal content**. The converse is *not* required — a tier whose token moves
-    while the content stands still only makes a gate re-run, which is the safe
-    direction — and `workspace-jj` is such a tier and says so in its own words.
+    So what a token must promise is narrow and exact: **equal tokens mean equal
+    content**. The converse is *not* required. A tier whose token changes while
+    the content stays the same only makes a gate run again, which is the safe
+    direction. `workspace-jj` is such a tier, and its own docstring says so.
 
-    `capture` also **pins** what it names, for as long as the workspace lives. An
-    unreferenced git tree is eligible for `gc`, and a restore point that evaporates
-    is worse than none, because `/revert` listed it.
+    `capture` also **pins** what it names, for as long as the workspace lives.
+    An unreferenced git tree is eligible for `gc`. A restore point that
+    disappears is worse than none, because `/revert` listed it.
     """
 
     async def capture(self, workspace: Workspace) -> str | None: ...
@@ -847,24 +915,26 @@ class CheckpointingProvider(Protocol):
 
 
 Backend: TypeAlias = Literal["git", "jj", ""]
-"""Which version control a tier is backed by, or `""` for none of them.
+"""Which version control backs a tier, or `""` for none of them.
 
-Here rather than in `ph.seams.changes`, which is the module that consumes it: a
-tier stating what backs it is describing *itself*, and importing the change
-filter to do so made the two tiers depend on an indexing helper — the wrong way
-round, and the reason this moved.
+It is here and not in `ph.seams.changes`, which is the module that consumes it.
+A tier that states what backs it describes *itself*. To do so, the two tiers had
+to import the change filter, which made them depend on an indexing helper. That
+dependency pointed the wrong way, and it is the reason why this moved.
 """
 
 
 @runtime_checkable
 class VersionedProvider(Protocol):
-    """A provider that knows which version control backs the tree it hands out.
+    """A provider that knows which version control backs the tree that it gives
+    out.
 
-    An optional capability as its own Protocol — `ReclaimingProvider`'s shape and
-    its reason. **`Workspace.kind` cannot answer this**: the git and jj tiers both
-    hand back `worktree`, so the provider is the only thing that can say. A tier
-    declaring nothing falls through to `ph.seams.changes`'s filesystem probe,
-    which is the `shared` case and therefore the common one.
+    It is an optional capability as its own Protocol, with the shape and the
+    reason of `ReclaimingProvider`. **`Workspace.kind` cannot answer this.** The
+    git tier and the jj tier both return `worktree`, so only the provider can
+    say. A tier that declares nothing falls through to the filesystem probe of
+    `ph.seams.changes`. That is the `shared` case, and therefore the common
+    case.
     """
 
     vcs: Backend
@@ -874,16 +944,16 @@ class VersionedProvider(Protocol):
 class SnapshottingProvider(Protocol):
     """A tier whose version control commits the tree in order to *read* it.
 
-    jj is the one that does: it snapshots the working copy on any command, which
-    is what makes `ph.seams.changes`'s jj backend a single call — and, in the same
-    breath, means a read adopts whatever is untracked. `auto_track` exists to keep
-    the seam's own provisioned materials (E14) out of that commit, and it can only
-    be applied by the tier, which is the only thing that knows what it provisioned.
+    jj is the one that does. It snapshots the working copy on any command. That
+    is what makes the jj backend of `ph.seams.changes` a single call. It also
+    means that a read adopts whatever is untracked. `auto_track` exists to keep
+    the provisioned materials of the seam (E14) out of that commit. Only the
+    tier can apply it, because only the tier knows what it provisioned.
 
-    So a caller that needs the snapshot asks for it **here** rather than reaching
-    for the raw `jj` helper, whose own docstring sends callers through the
-    provider for exactly this reason. A tier that does not declare this capability
-    is one whose reads cost the tree nothing.
+    So a caller that needs the snapshot asks for it **here**, and does not use
+    the raw `jj` helper. The docstring of that helper sends callers through the
+    provider for exactly this reason. A tier that does not declare this
+    capability is one whose reads cost the tree nothing.
     """
 
     async def snapshotting(self, cwd: Path, *args: str) -> tuple[int, str, str]: ...
@@ -891,15 +961,18 @@ class SnapshottingProvider(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class SharedWorkspaceProvider:
-    """`workspace-shared` — today's behavior, and the floor under every tier.
+    """`workspace-shared`: the behavior with no tier, and the floor under every
+    tier.
 
-    Returns `base` itself: mounting the seam changes nothing, no checkout, no copy,
-    no cost. It is also the fallback for a provider that declines, which is why it
-    lives beside the seam rather than in a row of its own — "there is always a
-    workspace" cannot be a promise kept by a row a profile might not layer.
+    It returns `base` itself. To mount the seam changes nothing: no checkout, no
+    copy, no cost. It is also the fallback for a provider that declines. For
+    that reason it is beside the seam and not in a row of its own. "There is
+    always a workspace" cannot be a promise kept by a row that a profile might
+    not layer.
 
-    `access="read"` is honored by *saying so*: the kind stays `shared` and
-    `repo_writable` stays `True`, because nothing here enforces anything.
+    A request for `access="read"` is answered truthfully and is not enforced.
+    The kind stays `shared` and `repo_writable` stays `True`, because nothing
+    here enforces anything.
     """
 
     tier: ContainmentTier = "advisory"
@@ -920,17 +993,18 @@ class SharedWorkspaceProvider:
 class _Held:
     """One live workspace and the disposer that ends it.
 
-    Paired here rather than on `Workspace` because the disposer is the *scope's*,
-    not the provider's: a value handed to a caller should not carry the seam's
-    bookkeeping.
+    The two are paired here and not on `Workspace`, because the disposer belongs
+    to the *scope* and not to the provider. A value that is given to a caller
+    should not carry the bookkeeping of the seam.
     """
 
     workspace: Workspace
     dispose: Releaser | None = None
     session: Session | None = None
-    """Where this workspace's closing event goes, set once the acquisition is logged.
-    The release closure reads it here rather than capturing it, so the two halves of
-    the pair cannot disagree about which log they belong to.
+    """Where the closing event of this workspace goes. It is set when the
+    acquisition is logged. The release closure reads it here and does not
+    capture it, so the two halves of the pair cannot disagree about which log
+    they belong to.
     """
     copying: _Copy | None = None
     """The provisioning copy running into this tree, while it runs (W1)."""
@@ -938,18 +1012,20 @@ class _Held:
 
 @dataclass(slots=True, eq=False)
 class _Copy:
-    """A provisioning copy under way, as a release mid-copy needs it (W1).
+    """A provisioning copy in progress, as a release in the middle of the copy
+    needs it (W1).
 
-    The workspace is held before it is provisioned, so its scope can release it while
-    the copy runs on a thread no cancel reaches: the release read a workspace that
-    said nothing was provisioned, committed the half-copied materials to the agent's
-    branch as its work, and removed the tree under the copy. Now it stops the copy,
-    waits for it, and counts every one of these targets as provisioned.
+    The workspace is held before it is provisioned. So its scope can release it
+    while the copy runs on a thread that no cancel reaches. The release then
+    read a workspace that said nothing was provisioned. It committed the
+    half-copied materials to the branch of the agent as its work, and it removed
+    the tree under the copy. Now the release stops the copy, waits for it, and
+    counts every one of these targets as provisioned.
     """
 
     targets: tuple[str, ...]
-    """What is being provisioned, whether or not it arrived: all of it is the seam's,
-    as reclaim after a crash counts it (S13)."""
+    """What is being provisioned, whether or not it arrived. All of it belongs
+    to the seam, as reclaim after a crash counts it (S13)."""
     stop: ProvisionStop = field(default_factory=ProvisionStop)
     done: anyio.Event = field(default_factory=anyio.Event)
 
@@ -963,46 +1039,52 @@ class WorkspaceSeam:
     scratch_root: Path
     provider: WorkspaceProvider | None = None
     provider_by: Running | None = None
-    """Who registered the tier (P6-29). Entered around every call into the
-    provider; see `CompactionSeam.engine_by` for why the layer stays the
-    registration's."""
+    """Who registered the tier (P6-29). The seam enters it around every call
+    into the provider. See `CompactionSeam.engine_by` for the reason why the
+    layer stays that of the registration."""
     _provisioning: list[ProvisionEntry] = field(default_factory=list)
     """Materials to put in a fresh workspace, in registration order (E14).
 
-    A list rather than a `claim_slot`, because two sources legitimately compose: the
-    profile's own row, and a repository's `.ph-workspace.yml`. Later entries win a
-    collision.
+    This is a list and not a `claim_slot`, because two sources legitimately
+    compose: the own row of the profile, and the `.ph-workspace.yml` of a
+    repository. A later entry wins a collision.
     """
     _held: dict[str, _Held] = field(default_factory=dict)
-    """Live workspaces by agent id — keyed by id because the question is asked by
-    things that have an agent id and no agent object (the prompt's workspace line,
-    `phern doctor`'s per-agent report). Emptied by the effect disposer, so an entry
-    surviving its agent is the same leak `workspace/acquired` without a `disposed`
-    records durably.
+    """Live workspaces by agent id. The key is the id because the callers that
+    ask have an agent id and no agent object (the workspace line of the prompt,
+    the per-agent report of `phern doctor`). The effect disposer empties it. So
+    an entry that outlives its agent is the same leak that a
+    `workspace/acquired` without a `disposed` records durably.
     """
 
     _claimed: dict[str, anyio.Event] = field(default_factory=dict)
-    """Agent ids whose tree is being acquired or reclaimed right now, each with the
-    event set when that is done (J6). **One act on an agent's tree at a time.**
+    """Agent ids whose tree is being acquired or reclaimed right now. Each has
+    the event that is set when that act is done (J6). **One act on the tree of
+    an agent at a time.**
 
-    A reclaim runs a `git worktree remove --force` per leaked tree, and an `acquire`
-    can ask the tier for the *same* agent's tree meanwhile: the row's catch-up and
-    `collect` run beside agents that are already working. Either order lost the tree:
-    an acquire handed a root the reclaim was deleting, or a reclaim that found no
-    holder deleting the tree an acquire had yet to hold — `acquire` awaits the
-    scratch directory, its `acquiring` flush and the tier before `_held` names it.
-    So an acquire waits out any claim on its agent and takes its own, and a reclaim
-    leaves any claimed tree alone and takes one while it deletes. Each side checks and
-    takes with no await between, so under one event loop each sees the other.
+    A reclaim runs a `git worktree remove --force` for each leaked tree.
+    Meanwhile an `acquire` can ask the tier for the tree of the *same* agent,
+    because the catch-up of the `workspace-reconcile` row and `collect` run
+    beside agents that are already working. Either order lost the tree. In one,
+    an acquire returned a root that the reclaim was deleting. In the other, a
+    reclaim that found no holder deleted the tree that an acquire had not yet
+    held: `acquire` awaits the scratch directory, its `acquiring` flush and the
+    tier before `_held` names the tree. So an acquire waits for any claim on its
+    agent to end and then takes its own. A reclaim leaves any claimed tree
+    alone, and takes a claim while it deletes. Each side checks and takes with
+    no await between the two steps, so under one event loop each side sees the
+    other.
 
-    Keyed by agent id rather than by root because that is the identity both sides
-    already have — `acquire` knows it before the tier computes a root, and a record
-    carries it — so the wait happens *before* the tree is built rather than after.
+    The key is the agent id and not the root, because that is the identity that
+    both sides already have. `acquire` knows it before the tier computes a root,
+    and a record carries it. So the wait happens *before* the tree is built and
+    not after.
     """
 
     def of(self, agent_id: str) -> Workspace | None:
-        """The workspace this agent holds, if it has acquired one. `None` is a real answer
-        and the common one: nothing acquires until the agent lifecycle does (P4-08).
+        """The workspace that this agent holds, if it has acquired one. `None` is
+        a real answer and the common one: nothing acquires until the agent
+        lifecycle does (P4-08).
         """
         held = self._held.get(agent_id)
         return None if held is None else held.workspace
@@ -1010,20 +1092,22 @@ class WorkspaceSeam:
     def provision(
         self, entries: Sequence[ProvisionEntry], *, scope: Context | None = None
     ) -> Disposer:
-        """Contribute materials for every fresh workspace this seam hands out.
+        """Contribute materials for every fresh workspace that this seam gives out.
 
-        On the *seam* rather than on the tier, so `readonly-scratch` (P6-05) and any
-        later fresh-root kind inherit the guards without re-implementing them — the same
-        argument that put `scratch` here. Nothing is provisioned into a `shared`
-        workspace, whose root *is* the base.
+        This is on the *seam* and not on the tier. So `readonly-scratch` (P6-05)
+        and any later fresh-root kind inherit the guards and do not implement
+        them again. The same argument put `scratch` here. Nothing is
+        provisioned into a `shared` workspace, whose root *is* the base.
 
-        `scope=` registers on *someone else's* lifetime, which is all it now means
-        (P6-12, P6-25): a registration made from a row's `apply`, or from a listener
-        that row wrote, already unwinds with the row.
+        `scope=` registers on the lifetime of *someone else*, and that is all
+        that it now means (P6-12, P6-25). A registration made from the `apply`
+        of a row, or from a listener that the row wrote, already unwinds with
+        the row.
 
-        Through `claim_entry` because a `ProvisionEntry` is a **value**: two rows
-        contributing `{source: .env}` compare equal, and `list.remove` would have one
-        row's disposer take the other's.
+        It goes through `claim_entry` because a `ProvisionEntry` is a
+        **value**. Two rows that contribute `{source: .env}` compare equal, and
+        with `list.remove` the disposer of one row would remove the entry of
+        the other.
         """
         disposers = [
             claim_entry(
@@ -1039,19 +1123,21 @@ class WorkspaceSeam:
         return self.ctx.owner_for(scope).add_disposer(release, label="workspace.provision")
 
     def live(self) -> list[Workspace]:
-        """Every workspace an agent currently holds — what `/workspaces` needs before it
-        offers to delete a directory.
+        """Every workspace that an agent currently holds. `/workspaces` needs
+        this before it offers to delete a directory.
 
-        Matched by root rather than by inverting a directory name back into an agent id:
-        `sanitize_ref` is lossy, so an id that does not sanitize to itself would read as
-        unheld and lose the refusal that protects it.
+        Callers match these by ref (`/workspaces`, `strays`) or by root
+        (`collectable`). They do not turn a directory name back into an agent
+        id. `sanitize_ref` is lossy, so an id that does not sanitize to itself
+        would read as unheld and lose the refusal that protects it.
         """
         return [held.workspace for held in self._held.values()]
 
     def register_provider(
         self, provider: WorkspaceProvider, *, scope: Context | None = None
     ) -> Disposer:
-        """Claim the tier. One at a time; `shared` remains the fallback."""
+        """Claim the tier. One provider holds it at a time, and `shared` remains
+        the fallback."""
         return claim_slot(
             self.ctx.running_for(scope),
             self,
@@ -1061,16 +1147,17 @@ class WorkspaceSeam:
         )
 
     def effective_tier(self, *, child: bool) -> ContainmentTier:
-        """What one role actually gets, provider and choice reconciled.
+        """What one role really gets, with the provider and the choice reconciled.
 
-        **Effective, not configured, in both directions**: a `worktree` row over a
-        directory that is not a repository declines on every acquire, and the shipped
-        `rlm` profile layers the git provider while choosing `advisory` for the person's
-        own agent. Reading either half alone names containment somebody does not have.
+        **It is effective and not configured, in both directions.** A `worktree`
+        row over a directory that is not a repository declines on every
+        acquire. And the shipped `rlm` profile layers the git provider while it
+        chooses `advisory` for the user's own agent. To read either half alone
+        names containment that somebody does not have.
 
-        The two halves can each only *lower* the answer and neither can raise it.
-        `acquire` makes the same reconciliation by *doing* it, which is why this is the
-        only other place allowed to state it.
+        Each of the two halves can only *lower* the answer, and neither can
+        raise it. `acquire` makes the same reconciliation by *doing* it. For
+        that reason this is the only other place that may state it.
         """
         if self.provider is None:
             return "advisory"
@@ -1083,10 +1170,12 @@ class WorkspaceSeam:
     def describe(self) -> list[tuple[str, str]]:
         """What `phern doctor` prints about workspaces (E10).
 
-        **Per agent, not per profile**: since P4-11 there is no single answer — the
-        shipped `rlm` posture puts the person's own agent in their checkout and its
-        children in worktrees. An agent that has acquired nothing prints nothing, rather
-        than inventing a row per configured agent for workspaces nobody holds.
+        **One row for each agent, and not one for the profile.** Since P4-11
+        there is no single answer: the shipped `rlm` posture puts the user's own
+        agent in the checkout of the user, and its children in worktrees. An
+        agent that has acquired nothing prints nothing. The alternative would
+        invent a row for each configured agent, for workspaces that nobody
+        holds.
         """
         provider = self.provider
         rows: list[tuple[str, str]] = [
@@ -1110,20 +1199,21 @@ class WorkspaceSeam:
         return rows
 
     def _retained_summary(self) -> str:
-        """How many trees are being kept as evidence, across stored sessions (P6-28).
+        """How many trees are kept as evidence, across stored sessions (P6-28).
 
-        The row that makes the pile visible. The per-agent rows above cannot show it —
-        `doctor` mounts a profile with no agents, so every retained tree is by
-        definition one nobody holds any more.
+        This is the row that makes the pile visible. The per-agent rows above
+        cannot show it. `doctor` mounts a profile with no agents, so every
+        retained tree is by definition one that nobody holds any more.
 
-        Printed **even when the answer is none**, on rule 6: the assumption a reader
-        makes in the absence of a row is that nothing is accumulating, which is the
-        assumption this row exists to check.
+        It is printed **even when the answer is none**, by rule 6. When a row is
+        absent, a reader assumes that nothing is accumulating, and this row
+        exists to check that assumption.
 
-        Bounded by whatever `stored()` lists rather than by walking every log ever
-        written, so it is a **floor, not a census**, and it says so. Broad `except` for
-        `doctor`'s own reason: a profile that cannot answer one question must still
-        answer the rest.
+        It is bounded by whatever `stored()` lists, and does not walk every log
+        ever written. So it is a **floor and not a census**, and the row says
+        so. `stored_survivors` catches broadly, for the reason that `doctor`
+        itself has: a profile that cannot answer one question must still answer
+        the rest.
         """
         store = self.ctx.get(SESSION_PERSISTENCE)
         if store is None:
@@ -1133,8 +1223,8 @@ class WorkspaceSeam:
         if not found:
             return f"none, across the {len(touched)} most recent session(s)"
         sessions = len({record.session_id for record in found})
-        # Two lines: this renders into a two-column table, and a sentence that
-        # wraps at 80 columns reads as a stray.
+        # Two lines. This text renders into a two-column table, and a sentence
+        # that wraps at 80 columns looks like a stray line.
         return (
             f"{len(found)} across {sessions} of the {len(touched)} most recent session(s)\n"
             "collect them with `phern workspaces gc`"
@@ -1151,34 +1241,37 @@ class WorkspaceSeam:
         scope: Context | None = None,
         tier: ContainmentTier | None = None,
     ) -> Workspace:
-        """Take a workspace for one agent. Never fails, never returns `None`.
+        """Take a workspace for one agent. Never fails, and never returns `None`.
 
-        **The rung is derived, not asked of the caller** (P4-11): the role is already in
-        hand, because a child's session says so (`origin: "subagent"`), so no caller can
-        forget it and get the provider where the shipped profile says a *root* agent
-        should have to ask for the escalation.
+        **The rung is derived, and the caller is not asked for it** (P4-11).
+        The role is already known, because the session of a child says so
+        (`origin: "subagent"`). So no caller can forget it and get the provider
+        where the shipped profile says that a *root* agent must ask for the
+        escalation.
 
-        `tier` overrides that derivation for a caller who means something specific,
-        exactly as `cwd` overrides `shell.run`'s. `advisory` declines a registered
-        provider; anything else consults it.
+        `tier` overrides that derivation for a caller that means something
+        specific, exactly as `cwd` overrides the default of `shell.run`.
+        `advisory` declines a registered provider. Any other value consults it.
 
-        `scope` bounds the workspace's life — the agent's own scope. Disposing it
-        releases the workspace and writes the closing event, so an error path that never
-        reaches an explicit `dispose` is not a leak. **Omitted, it is still the agent's**
-        when `ctx.agents` knows `agent_id` (P4-16): the caller has already said whose
-        workspace this is, and the only lifetime that can own a live agent's checkout is
-        that agent's. An id the registry has never seen keeps `owner_for`'s fallback.
+        `scope` bounds the life of the workspace. It is the own scope of the
+        agent. To dispose it releases the workspace and writes the closing
+        event, so an error path that never reaches an explicit `dispose` is not
+        a leak. **When `scope` is omitted, the workspace still belongs to the
+        agent** if `ctx.agents` knows `agent_id` (P4-16). The caller has already
+        said whose workspace this is, and the only lifetime that can own the
+        checkout of a live agent is the lifetime of that agent. An id that the
+        registry has never seen keeps the fallback of `owner_for`.
 
-        **Every root this hands out is canonical** (`ph.paths.canonical`), because the
-        inputs are: `base` is resolved here, `scratch` is resolved in `_scratch_for`,
-        and a provider's own root comes from `default_home_path`. The
-        kernel matches resolved paths, and the same set is what `permissions-fs`
-        prompts about — one spelling at the source is what keeps those two boundaries
-        one boundary (E6, `writable_roots`).
+        **Every root that this gives out is canonical** (`ph.paths.canonical`),
+        because the inputs are. `base` is resolved here, `scratch` is resolved
+        in `_scratch_for`, and the own root of a provider comes from
+        `default_home_path`. The kernel matches resolved paths, and
+        `permissions-fs` prompts about the same set. One spelling at the source
+        is what keeps those two boundaries one boundary (E6, `writable_roots`).
         """
         base = canonical(base)
-        # Before anything is built: an act in flight on this agent's tree owns it
-        # until it is done (J6).
+        # This comes before anything is built. An act that is in progress on the
+        # tree of this agent owns the tree until the act is done (J6).
         while (claimed := self._claimed.get(agent_id)) is not None:
             await claimed.wait()
         done = self._claimed[agent_id] = anyio.Event()
@@ -1225,8 +1318,8 @@ class WorkspaceSeam:
                         access=access,
                     )
             except WorkspaceDeclined as refusal:
-                # Not an error path: half the directories a person runs pH in
-                # are not repositories.
+                # This is not an error path. Half of the directories in which a
+                # user runs pH are not repositories.
                 declined = refusal.reason
                 log.info(
                     "ph.seams.workspace: tier declined %s for agent %s (%s); using a shared "
@@ -1240,8 +1333,8 @@ class WorkspaceSeam:
                 # `workspace/acquired` says `shared`.
                 declined = "provider-failed"
                 log.exception("ph.seams.workspace: provider failed; falling back to shared")
-                # An operator's fact as much as the log's (E1): an agent that
-                # was meant to be contained and is not.
+                # The operator must know this as much as the log must (E1): an
+                # agent that was meant to be contained is not contained.
                 await ops_record(
                     self.ctx,
                     "workspace provider failed; the agent is not contained",
@@ -1252,18 +1345,19 @@ class WorkspaceSeam:
                 if site is not None:
                     await self._take_back(site, agent_id, session_id)
             except BaseException:
-                # Stopped inside the tier (W2): a turn stopped while its worktree was
-                # being cut. What the tier made at the site it named is taken back now,
-                # as for a tier that raised, rather than left for the next
-                # `session/loaded` of this session, which for a child may never come.
+                # Stopped inside the tier (W2): a turn was stopped while the tier
+                # was making its worktree. The seam takes back now what the tier
+                # made at the site that it named, as it does for a tier that
+                # raised. It does not leave that for the next `session/loaded` of
+                # this session, which may never come for a child.
                 if site is not None:
                     with releasing():
                         await self._take_back(site, agent_id, session_id)
                 raise
             else:
                 if workspace is None:
-                    # No reason is fabricated: a provider that declined without
-                    # giving one has not told us why.
+                    # The seam invents no reason. A provider that declined
+                    # without a reason has not said why.
                     log.info(
                         "ph.seams.workspace: provider declined %s for agent %s; using a shared "
                         "workspace, so this agent is not contained",
@@ -1278,18 +1372,19 @@ class WorkspaceSeam:
                 scratch=scratch,
                 access=access,
             )
-        # Owned *before* provisioning: materializing a dependency directory is
-        # thousands of syscalls, and running it before the `ctx.effect`
-        # registration would leave the worktree existing with nothing to unwind
-        # it — against I2, in the module that argues I2.
+        # The workspace is owned *before* it is provisioned. To materialize a
+        # dependency directory takes thousands of syscalls. If that ran before
+        # the `ctx.effect` registration, the worktree would exist with nothing
+        # to unwind it. That would break I2 in the module that argues I2.
         if scope is None:
             scope = self._agent_scope(agent_id)
         try:
             held = await self._track(workspace, agent_id, scope)
         except InactiveScopeError:
-            # Whoever was to own it went away while the tier made it. Given back
-            # now, as `effect` gives back an artifact whose scope died mid-acquire:
-            # nothing holds it, so nothing else ever would.
+            # The scope that was to own the workspace went away while the tier
+            # made it. The seam gives it back now, as `effect` gives back an
+            # artifact whose scope died in the middle of an acquire. Nothing
+            # holds it, so nothing else would ever release it.
             if workspace.release is not None:
                 with releasing():
                     await workspace.release(workspace)
@@ -1297,22 +1392,24 @@ class WorkspaceSeam:
         fresh = fresh_root(workspace.kind)
         materials = self._provisioning if fresh else []
         self._log(workspace, agent_id, session, declined, materials)
-        # The `acquiring` already on disk names this tree, and what is about to be
-        # provisioned into it, whenever the tier made the tree where it said it would.
+        # When the tier made the tree at the site that it named, the `acquiring`
+        # record on disk already names this tree and what is about to be
+        # provisioned into it.
         covered = site is not None and (site.root, site.kind, site.ref) == (
             workspace.root,
             workspace.kind,
             workspace.ref,
         )
         if session is not None and fresh and not covered:
-            # **On disk before the seam provisions into the tree** (S12), and so
-            # before the agent is handed it: the copy is thousands of syscalls, and
-            # a crash inside it used to leave a tree no record named — reconcile
-            # reads only recorded pairs, so it was never reclaimed. Best effort, as
-            # every flush a seam cannot refuse over: the tree already exists, and
-            # declining to hand it over would not un-make it. A `shared` root
-            # leaves no directory to reclaim, so its record waits for the step's
-            # own barrier.
+            # **The record is on disk before the seam provisions into the tree**
+            # (S12), and so before the agent receives the tree. The copy takes
+            # thousands of syscalls. A crash inside it used to leave a tree that
+            # no record named, and reconcile reads only recorded pairs, so the
+            # tree was never reclaimed. The flush is best effort, as is every
+            # flush whose failure a seam cannot turn into a refusal: the tree
+            # already exists, and to withhold it would not un-make it. A `shared`
+            # root leaves no directory to reclaim, so its record waits for the
+            # own barrier of the step.
             await session_written(self.ctx, session)
         copy = _Copy(targets=tuple(entry.target for entry in materials)) if materials else None
         held.copying = copy
@@ -1325,9 +1422,11 @@ class WorkspaceSeam:
             if copy is not None:
                 copy.done.set()
         if self._held.get(agent_id) is not held:
-            # Released while it was provisioned (W1): its release stopped the copy and
-            # gave the tree back, and `workspace/disposed` is already in the log. Not
-            # handed out, and nothing more said about a tree that is gone.
+            # The workspace was released while it was provisioned (W1). Its
+            # release stopped the copy and gave the tree back, and
+            # `workspace/disposed` is already in the log. The seam does not give
+            # the workspace out, and it records nothing more about a tree that
+            # is gone.
             raise InactiveScopeError(
                 f"agent {agent_id}'s workspace was released while it was being provisioned"
             )
@@ -1349,18 +1448,22 @@ class WorkspaceSeam:
     ) -> WorkspaceSite | None:
         """Record where the tier is about to put a fresh tree, on disk before it does.
 
-        The opening half of the pair, moved ahead of the tier's own act (S12) —
-        `worktree add`, an overlay's `init` and FUSE mount — which used to run with
-        nothing in the log, so a crash inside it left a tree reconcile could not
-        find. `workspace/acquired` still follows and supersedes it, carrying what
-        only the finished tree knows; a decline supersedes it with a `shared` one.
+        This is the opening half of the pair, moved ahead of the act of the tier
+        (S12). That act is `worktree add`, or the `init` and FUSE mount of an
+        overlay. It used to run with nothing in the log, so a crash inside it
+        left a tree that reconcile could not find. `workspace/acquired` still
+        follows and supersedes this record, and it carries what only the
+        finished tree knows. A decline supersedes this record with a `shared`
+        one.
 
-        Best effort, as the flush after `acquired` is: a log that cannot take this
-        loses the pre-record, not the agent's workspace.
+        The flush is best effort, as the flush after `acquired` is. A log that
+        cannot take this record loses the pre-record, and not the workspace of
+        the agent.
 
-        It names what is about to be provisioned, too — the list `acquired` repeats —
-        so once it is on disk, a tree the tier made where it said needs no second
-        flush before provisioning. Returns the site it recorded, or `None`.
+        The record also names what is about to be provisioned, which is the list
+        that `acquired` repeats. So when the record is on disk, a tree that the
+        tier made at the site that it named needs no second flush before
+        provisioning. Returns the site that was recorded, or `None`.
         """
         provider = self.provider
         if session is None or not isinstance(provider, LocatingProvider):
@@ -1376,14 +1479,15 @@ class WorkspaceSeam:
         return site
 
     async def _take_back(self, site: WorkspaceSite, agent_id: str, session_id: str) -> None:
-        """Reclaim whatever a tier that *raised* made at the site it named.
+        """Reclaim whatever a tier that *raised* made at the site that it named.
 
-        The `shared` acquire that follows supersedes the `acquiring` record, so after
-        it nothing names this root — and a tier can raise part-way through: an
-        overlay mounted, then its base not recorded. So the seam does now what
-        reconcile would do after a crash, through the tier's own reclaim. Not for a
-        tier that *declined*: a decline is decided before the tree is made, and
-        `path-exists` names a directory that is not this agent's to remove.
+        The `shared` acquire that follows supersedes the `acquiring` record, so
+        after it nothing names this root. And a tier can raise part-way through:
+        an overlay is mounted, and then its base is not recorded. So the seam
+        does now what reconcile would do after a crash, through the reclaim of
+        the tier itself. This is not done for a tier that *declined*. A decline
+        is decided before the tree is made, and `path-exists` names a directory
+        that is not for this agent to remove.
         """
         record = WorkspaceRecord(
             agent_id=agent_id, kind=site.kind, root=site.root, ref=site.ref, session_id=session_id
@@ -1399,14 +1503,16 @@ class WorkspaceSeam:
         materials: Sequence[ProvisionEntry],
         stop: ProvisionStop | None,
     ) -> Workspace:
-        """Put the configured materials in a *fresh* root (E14) — and into one the tier
-        reused (`Workspace.reused`), only what it lacks: the rest arrived when it was
-        made, and the agent may have edited it since.
+        """Put the configured materials in a *fresh* root (E14).
+
+        A root that the tier reused (`Workspace.reused`) gets only what it
+        lacks. The rest arrived when the tree was made, and the agent may have
+        edited it since.
         """
         if not materials:
             return workspace
-        # Qualified: `provision` on this class is the *registration*; the module
-        # function is the work.
+        # The name is qualified. `provision` on this class is the
+        # *registration*, and the module function does the work.
         report: ProvisionReport = await workspace_provision.provision(
             materials,
             base=base,
@@ -1423,11 +1529,11 @@ class WorkspaceSeam:
         return replace(workspace, provisioned=report.provisioned, provision_failures=report.failed)
 
     async def dispose(self, agent_id: str) -> None:
-        """Release this agent's workspace early.
+        """Release the workspace of this agent early.
 
-        "Early" because the scope owns it either way (I2); this is the same teardown
-        reached deliberately rather than by unwinding. Calling it twice is a no-op — the
-        disposer deregisters itself.
+        It is "early" because the scope owns the workspace in either case (I2).
+        This is the same teardown, reached deliberately and not by unwinding. A
+        second call does nothing, because the disposer deregisters itself.
         """
         held = self._held.get(agent_id)
         if held is None or held.dispose is None:
@@ -1435,27 +1541,33 @@ class WorkspaceSeam:
         await maybe_await(held.dispose())
 
     async def _scratch_for(self, session_id: str, agent_id: str) -> Path:
-        """Per session *and* per agent, created rather than merely named. Owned by the seam
-        so the layout has one implementation: two children of one session writing notes
-        into one directory is the collision this avoids.
+        """The scratch directory for one session *and* one agent. It is created,
+        and not only named.
 
-        Canonical here rather than trusting `scratch_root` to be: the shipped row gets
-        it from `default_home_path`, which already is, but the guarantee `acquire`
-        makes is the seam's, so it does not depend on how the seam was built.
+        The seam owns it, so the layout has one implementation. The collision
+        that this avoids is two children of one session that write notes into
+        one directory.
+
+        The path is made canonical here, and `scratch_root` is not trusted to be
+        canonical already. The shipped row gets `scratch_root` from
+        `default_home_path`, which is canonical. But the guarantee that
+        `acquire` makes belongs to the seam, so it does not depend on how the
+        seam was built.
         """
         scratch = _scratch_layout(self.scratch_root, session_id, agent_id)
         await anyio.to_thread.run_sync(lambda: scratch.mkdir(parents=True, exist_ok=True))
         return scratch
 
     def _chosen_tier(self, session: Session | None) -> ContainmentTier | None:
-        """Which rung this acquisition gets, read off the deployment's choice.
+        """Which rung this acquisition gets, read from the choice of the deployment.
 
-        The role comes from the session rather than from an argument: a child's header
-        carries `origin: "subagent"`, so "is this a child" is a fact the seam holds.
+        The role comes from the session and not from an argument. The header of
+        a child carries `origin: "subagent"`, so "is this a child" is a fact
+        that the seam holds.
 
-        `None` — no containment row — means nobody chose, and a deployment that layered
-        a provider and never mentioned containment gets that provider: layering it *was*
-        the choice.
+        `None` means that there is no containment row, so nobody chose. A
+        deployment that layered a provider and never mentioned containment gets
+        that provider, because layering it *was* the choice.
         """
         containment = self.ctx.get(CONTAINMENT)
         if containment is None:
@@ -1465,37 +1577,41 @@ class WorkspaceSeam:
         return chosen
 
     def _agent_scope(self, agent_id: str) -> Context | None:
-        """The live agent's own scope for `agent_id`, or `None` when nobody knows it.
+        """The own scope of the live agent `agent_id`, or `None` when nobody knows
+        that id.
 
-        `acquire` with no `scope=` used to fall straight through to `owner_for(None)`,
-        which outside a row's `apply` is the seam itself — a worktree taken for a real
-        agent then outlived that agent by the whole process, and the containment-ladder
-        tests had to remember `scope=agent.ctx` by hand (P4-16). The registry already
-        knows the answer, so the seam asks it (`AgentRegistry.scope_of`).
+        `acquire` with no `scope=` used to fall straight through to
+        `owner_for(None)`. Outside the `apply` of a row, that is the context of
+        the seam itself. A worktree taken for a real agent then outlived that
+        agent for the whole life of the process, and the containment-ladder
+        tests had to remember `scope=agent.ctx` by hand (P4-16). The registry
+        already knows the answer, so the seam asks it
+        (`AgentRegistry.scope_of`).
         """
         agents = self.ctx.get(AGENTS)
         return None if agents is None else agents.scope_of(agent_id)
 
     async def _track(self, workspace: Workspace, agent_id: str, scope: Context | None) -> _Held:
-        """Register the teardown as an effect, so the workspace has an owner.
+        """Register the teardown as an effect, so that the workspace has an owner.
 
-        The release closure reads `held.workspace` rather than capturing one, because
-        provisioning replaces the value a moment later and the teardown policy needs the
-        *final* one — what was put in the tree is what it must not mistake for the
-        agent's work.
+        The release closure reads `held.workspace` and does not capture a
+        workspace. Provisioning replaces the value a moment later, and the
+        teardown policy needs the *final* one. What was put in the tree is what
+        the policy must not mistake for the work of the agent.
         """
         held = _Held(workspace=workspace)
 
         def enter() -> Disposer:
-            # Written here, which `effect` reaches only past its check that the
-            # owner is up, and with nothing that suspends before the release is
-            # registered. Written ahead of the call, a refusal left the entry for
-            # good and had already dropped the release of the one it replaced.
+            # The entry is written here. `effect` reaches this point only after
+            # its check that the owner is up, and nothing suspends between here
+            # and the registration of the release. When the entry was written
+            # ahead of the call, a refusal left the entry for good, and it had
+            # already dropped the release of the entry that it replaced.
             replaced = self._held.get(agent_id)
             if replaced is not None and replaced.dispose is not None:
-                # An agent that acquired again: the previous release is dropped
-                # unrun, so it cannot evict the live workspace from `_held` when
-                # its scope goes.
+                # The agent acquired again. The previous release is dropped
+                # without being run, so it cannot evict the live workspace from
+                # `_held` when its scope goes.
                 replaced.dispose.drop()
             self._held[agent_id] = held
 
@@ -1504,19 +1620,23 @@ class WorkspaceSeam:
                 current = held.workspace
                 copy = held.copying
                 if copy is not None:
-                    # Mid-copy (W1): stopped before its next file, and waited for, so
-                    # the tree is not removed under the copy's thread; and everything
-                    # it was putting there is the seam's, never the agent's work.
+                    # A copy is running (W1). It is stopped before its next file
+                    # and waited for, so the tree is not removed under the
+                    # thread of the copy. Everything that the copy was putting
+                    # there belongs to the seam, and is never the work of the
+                    # agent.
                     copy.stop.set()
                     await copy.done.wait()
                     current = replace(current, provisioned=copy.targets)
                 kept = True if current.release is None else await current.release(current)
                 if held.session is not None:
-                    # After the act, which is idempotent: an open `acquired` is its
-                    # intent, and reconcile re-drives a release whose record never
-                    # landed. The agent's scope flushes its log as the last thing it
-                    # unwinds (`AgentRegistry.create`), which is what gets this to
-                    # disk on every path a child ends by (S12).
+                    # The record comes after the act, which is idempotent. An
+                    # open `acquired` is the intent of the act, and reconcile
+                    # drives again a release whose record never landed. The
+                    # scope of the agent flushes its log as the last thing that
+                    # it unwinds (`AgentRegistry.create`). That is what gets
+                    # this record to disk on every path by which a child ends
+                    # (S12).
                     _LOG.append(held.session, DISPOSED, self._payload(current, agent_id, kept=kept))
 
             return release
@@ -1532,12 +1652,15 @@ class WorkspaceSeam:
         declined: DeclineReason | None,
         materials: Sequence[ProvisionEntry],
     ) -> None:
-        """Both halves of the durable pair are written by the seam: a pair only reconciles
-        if one place owns both, and a provider that forgot the second would leave every
-        workspace looking leaked.
+        """Record the opening half of the durable pair. The seam writes both
+        halves.
 
-        The tier's own act — `worktree add`, an overlay's init and mount — is already
-        on record by now, as `workspace/acquiring` (`_acquiring`); this supersedes it
+        A pair reconciles only if one place owns both halves. A provider that
+        forgot the second half would leave every workspace looking leaked.
+
+        The act of the tier itself is `worktree add`, or the init and mount of
+        an overlay. By now that act is already on record as
+        `workspace/acquiring` (`_acquiring`). This record supersedes that one
         with what only the finished tree knows.
         """
         if session is None:
@@ -1551,45 +1674,52 @@ class WorkspaceSeam:
             repoWritable=workspace.repo_writable,
         )
         if declined is not None:
-            # Only when a tier was asked and could not serve: absent means
-            # "no tier configured", which is a different fact and the one
-            # `phern doctor` must not confuse it with (E15).
+            # This key is set only when a tier was asked and could not serve.
+            # An absent key means "no tier configured". That is a different
+            # fact, and `phern doctor` must not confuse the two (E15).
             data["declined"] = declined
         if materials:
-            # On the opening half, because reclaim has nothing else to read it
-            # from: without it a crashed tree's provisioned secret is staged as
-            # the agent's work and committed to a branch somebody merges (S13).
-            # What is *about* to be provisioned, since the copy has not run yet —
-            # so a crash mid-copy still names every path it may have written, and
-            # a material that never arrived keeps its path off the branch too.
-            # No target here climbs out of the tree: `ProvisionEntry` refuses one at
-            # config load, which matters beyond tidiness — git exits 128 on a
-            # pathspec that names a path outside the repository.
+            # The list is on the opening half, because reclaim has nothing else
+            # to read it from. Without it, the provisioned secret of a crashed
+            # tree is staged as the work of the agent and committed to a branch
+            # that somebody merges (S13). The list is what is *about* to be
+            # provisioned, because the copy has not run yet. So a crash in the
+            # middle of the copy still names every path that the copy may have
+            # written, and a material that never arrived keeps its path off the
+            # branch too. No target here climbs out of the tree, because
+            # `ProvisionEntry` refuses such a target when the config is loaded.
+            # That matters for more than tidiness: git exits 128 on a pathspec
+            # that names a path outside the repository.
             data["provisioned"] = [entry.target for entry in materials]
+        if workspace.fork is not None:
+            # On the opening half for the reason that `provisioned` is: reclaim
+            # has nothing else to read it from (`WorkspaceRecord.fork`).
+            data["fork"] = workspace.fork
         _LOG.append(session, ACQUIRED, data)
 
     def retain(self, agent_id: str, reason: str) -> bool:
-        """Keep this agent's tree past disposal, and say why (P6-28).
+        """Keep the tree of this agent past disposal, and say why (P6-28).
 
-        Called by whoever learns how an agent ended, at any point before the scope
-        unwinds; the teardown policy reads `Workspace.retained` and skips the discard.
+        Whoever learns how an agent ended calls this, at any point before the
+        scope unwinds. The teardown policy reads `Workspace.retained` and skips
+        the discard.
 
-        **An empty `reason` clears the mark**, and it is the same call because it is the
-        same decision revisited: the shipped policy retains *by default* for the kind
-        that discards, so a clean settle is a caller saying "never mind" — and that has
-        to be as durable as the mark it withdraws.
+        **An empty `reason` clears the mark.** It is the same call because it is
+        the same decision, revisited. The shipped policy retains *by default*
+        for the kind that discards, so a clean settle is a caller that withdraws
+        the mark. The withdrawal must be as durable as the mark.
 
-        Returns whether anything was marked; `False` for an agent holding no workspace,
-        so a caller that retains speculatively needs no `hasattr` probe and no
-        exception.
+        Returns whether anything was marked. The answer is `False` for an agent
+        that holds no workspace, so a caller that retains speculatively needs no
+        `hasattr` probe and no exception.
         """
         held = self._held.get(agent_id)
         if held is None:
             return False
         held.workspace = replace(held.workspace, retained=reason)
         if held.session is not None:
-            # Durable at the moment of marking, not only on the closing half:
-            # the worst way for a run to go wrong writes no `disposed`.
+            # The mark is recorded when it is made, and not only on the closing
+            # half. The worst way for a run to go wrong writes no `disposed`.
             _LOG.append(
                 held.session, RETAINED, pair_payload(agent_id, held.workspace.ref, retained=reason)
             )
@@ -1602,23 +1732,26 @@ class WorkspaceSeam:
         **extra: JsonValue,
     ) -> dict[str, JsonValue]:
         payload = pair_payload(agent_id, workspace.ref, **extra)
-        # The reason rides the closing half, because that is the half a fold
-        # reads to tell a deliberate keep from a dirty-tree keep (P6-28).
+        # The reason is added to the closing half, because that is the half
+        # that a fold reads to tell a deliberate keep from a dirty-tree keep
+        # (P6-28).
         if workspace.retained:
             payload["retained"] = workspace.retained
         return payload
 
     async def reconcile(self, session: Session) -> None:
-        """Close the pairs a crash left open in this session's log (F6).
+        """Close the pairs that a crash left open in the log of this session (F6).
 
-        On the seam because both facts it needs are here: `_held` answers "is this tree
-        anybody's", and `_payload` owns the shape of the pair, so the `disposed` a
-        reconciliation writes is the one an orderly release would have written.
+        It is on the seam because what it needs is here. `_held` says whether a
+        tree belongs to anybody. `pair_payload` holds the shape of the pair, so
+        the `disposed` that a reconciliation writes is the one that an orderly
+        release would have written.
 
-        A leak this profile cannot reclaim is **reported and left alone**: the tree
-        belongs to a tier that is not mounted here, and removing a directory on the
-        strength of a record written by a configuration we are not running is the one
-        way this could destroy the work it exists to protect.
+        A leak that this profile cannot reclaim is **reported and left alone**.
+        The tree belongs to a tier that is not mounted here. To remove a
+        directory because of a record that a different configuration wrote is
+        the one way in which this could destroy the work that it exists to
+        protect.
         """
         leaks = [
             one
@@ -1633,23 +1766,23 @@ class WorkspaceSeam:
             kept = await self._reclaim(provider, record, "reclaim")
             if kept is None:
                 return
-            # The pair closes either way: a leak left open is one reported at
-            # every future open.
+            # The pair closes whether or not anything was kept. A leak that is
+            # left open is reported at every later open.
             _LOG.append(
                 session,
                 DISPOSED,
                 pair_payload(record.agent_id, record.ref, kept=kept, reconciled=True),
             )
 
-        # Concurrent: several subprocesses per leaked tree.
+        # Concurrent, because each leaked tree takes several subprocesses.
         async with anyio.create_task_group() as group:
             for record in leaks:
                 group.start_soon(reclaim, record)
         if leaks:
-            # The closing halves with the acts they record: no agent scope owns
-            # these, so nothing else flushes them, and a second reclaim of a tree
-            # the first removed can no longer tell what reached the branch — it
-            # says `kept: false`.
+            # The closing halves are flushed with the acts that they record. No
+            # agent scope owns these records, so nothing else flushes them. And
+            # a second reclaim of a tree that the first one removed can no
+            # longer tell what reached the branch: it says `kept: false`.
             await session_written(self.ctx, session)
 
     def collectable(
@@ -1662,31 +1795,34 @@ class WorkspaceSeam:
     ) -> list[Collectable]:
         """Which retained trees may be removed, and why the others may not.
 
-        **Only `retained` trees, and that boundary is the whole safety argument.** A
-        `kept` tree is a dirty checkout the disposal policy left for a person to inspect
-        — `/workspaces remove` is the deliberate way to end that. A `leaked` tree
-        belongs to `reconcile`, the only thing that can tell "the process died" from
-        "the process is running". What a policy retained without anybody asking is all
-        this may collect.
+        **Only `retained` trees are considered, and that boundary is the safety
+        argument.** A `kept` tree is work that the disposal policy kept for a
+        person to inspect, and `/workspaces remove` is the deliberate way to end
+        it. A `leaked` tree belongs to `reconcile`, which is the only
+        thing that can tell "the process died" from "the process is running".
+        This may collect only what a policy retained without anybody asking.
 
-        Three refusals, in the order they are cheap to test:
+        There are three refusals, in the order in which they are cheap to test:
 
-        * `open` — an unclosed pair is a live process or a crash, and either way not
-          this mechanism's to settle. Listed in `survivors` so an enumeration can show
-          it; never collected.
-        * `held` — this process holds the tree, matched by **root path** and not by
-          agent id: an agent that retained a tree and then acquired another is the
-          ordinary case, and an id match would refuse to collect the first one for
-          as long as the agent lives. `_reclaim`'s `_is_held` is deliberately the
-          stricter pair — it guards a teardown, where over-refusing is free.
-        * `recent` — inside the age bound, dated from `touched`. A session id *absent*
-          from `touched` is refused as `recent` rather than collected: "I could not date
-          this" and "this is old" are different answers and only one may delete a
-          checkout.
+        * `open`: an unclosed pair is a live process or a crash, and in either
+          case this mechanism does not settle it. Such a record is listed in
+          `survivors` so that an enumeration can show it. It is never
+          collected.
+        * `held`: this process holds the tree. The match is by **root path** and
+          not by agent id. An agent that retained a tree and then acquired
+          another is the ordinary case, and an id match would refuse to collect
+          the first tree for as long as the agent lives. The `_is_held` of
+          `_reclaim` is deliberately the stricter test: it matches the id or
+          the root. It guards a teardown, where it costs nothing to refuse too
+          often.
+        * `recent`: the tree is inside the age bound, dated from `touched`. A
+          session id that is *absent* from `touched` is refused as `recent` and
+          is not collected. "I could not date this" and "this is old" are
+          different answers, and only one of them may delete a checkout.
 
-        The age is the **log's** last write, not the tree's own mtime — a person reading
-        a retained tree without editing it bumps neither, so no clock here detects
-        interest.
+        The age is the last write of the **log**, and not the mtime of the tree.
+        A person who reads a retained tree without editing it changes neither,
+        so no clock here detects interest.
         """
         rows: list[Collectable] = []
         held = {workspace.root for workspace in self.live()}
@@ -1706,20 +1842,23 @@ class WorkspaceSeam:
         return rows
 
     async def collect(self, rows: Iterable[Collectable]) -> list[WorkspaceRecord]:
-        """Remove the trees `collectable` cleared, and answer with what went.
+        """Remove the trees that `collectable` cleared, and return the records of
+        the trees that went.
 
-        **Retention is revoked, not overridden**: this hands the record back to
-        `reclaim` with its reason cleared, so what runs is the disposal policy that
-        would have run at release time had nobody retained the tree. Nothing here can
-        destroy more than an ordinary disposal would have, which is what lets the age
-        bound be a *default* rather than a decision.
+        **Retention is revoked, and not overridden.** This gives the record back
+        to `reclaim` with its reason cleared. So what runs is the disposal
+        policy that would have run at release if nobody had retained the tree.
+        Nothing here can destroy more than an ordinary disposal would have
+        destroyed. That is what lets the age bound be a *default* and not a
+        decision.
 
-        Sequential, unlike `reconcile`'s fan-out: this is a person watching a command
-        they typed, where a failure halfway through a fan-out is a report they cannot
-        act on.
+        The removals are sequential, unlike the fan-out of `reconcile`. Here a
+        user watches a command that they typed, and a failure halfway through a
+        fan-out is a report that they cannot act on.
 
-        Nothing is appended — the pair is already closed, and `reclaim` answers `False`
-        for a directory that is not there, so re-running is a no-op either way.
+        Nothing is appended, because the pair is already closed. `reclaim`
+        answers `False` for a directory that is not there, so a second run
+        changes nothing.
         """
         wanted = [row.record for row in rows if row.verdict == "collect"]
         provider = self._reclaimer(wanted, "collect")
@@ -1727,18 +1866,19 @@ class WorkspaceSeam:
             return []
         removed: list[WorkspaceRecord] = []
         for record in wanted:
-            # Revoked, not overridden: `reason=""` is what makes `reclaim` run
-            # the disposal policy it would have run had nobody retained the tree.
+            # Revoked, and not overridden. `reason=""` is what makes `reclaim`
+            # run the disposal policy that it would have run if nobody had
+            # retained the tree.
             if await self._reclaim(provider, replace(record, reason=""), "collect") is False:
                 removed.append(record)
         return removed
 
     async def export(self, record: WorkspaceRecord) -> str | None:
-        """The ref this agent's work is on, or `None` if no tier can say.
+        """The ref that the work of this agent is on, or `None` if no tier can say.
 
-        `None` rather than a raise, matching `_reclaimer`: a profile whose tier cannot
-        export is not a broken deployment, it is one where the answer is "there is
-        nothing to move".
+        The answer is `None` and not a raise, as in `_reclaimer`. A profile
+        whose tier cannot export is not a broken deployment. It is one where the
+        answer is "there is nothing to move".
         """
         provider = self.provider
         if not isinstance(provider, ExportingProvider):
@@ -1747,7 +1887,8 @@ class WorkspaceSeam:
         return await provider.export(record)
 
     def _artifacts(self) -> ArtifactProvider | None:
-        """The mounted tier's ref verbs, or `None` — `_reclaimer`'s shape, one line."""
+        """The ref verbs of the mounted tier, or `None`. It has the shape of
+        `_reclaimer`, in one line."""
         provider = self.provider
         return provider if isinstance(provider, ArtifactProvider) else None
 
@@ -1756,17 +1897,18 @@ class WorkspaceSeam:
         return provider if isinstance(provider, EnumeratingProvider) else None
 
     def _checkpointer(self, workspace: Workspace) -> CheckpointingProvider | None:
-        """The tier able to checkpoint *this* workspace, or `None` (P6-20).
+        """The tier that can checkpoint *this* workspace, or `None` (P6-20).
 
-        Both halves of `can_checkpoint` in one place, so the predicate and the
-        narrowing cannot come apart — it was the same `isinstance` written twice,
-        once to decide and once to convince the type checker.
+        Both halves of `can_checkpoint` are in one place, so the predicate and
+        the narrowing cannot come apart. They were the same `isinstance` written
+        twice: one time to decide, and one time to convince the type checker.
 
-        `fresh_root` is the **kind** half: a `shared` workspace's root is the
-        person's own checkout, and offering to overwrite their uncommitted work with
-        whatever an agent found is the one thing this must never do. The Protocol
-        test is the **tier** half, which replaced a kind-keyed table of provider
-        facts kept where no provider could see it.
+        `fresh_root` is the **kind** half. The root of a `shared` workspace is
+        the user's own checkout. To offer to overwrite the uncommitted work of
+        the user with whatever an agent found is the one thing that this must
+        never do. The Protocol test is the **tier** half. It replaced a table of
+        provider facts that was keyed by kind and kept where no provider could
+        see it.
         """
         provider = self.provider
         if not fresh_root(workspace.kind) or not isinstance(provider, CheckpointingProvider):
@@ -1776,9 +1918,10 @@ class WorkspaceSeam:
     async def refs(self, base: Path) -> list[str]:
         """Every ref in this repository, as the mounted tier lists them.
 
-        Unfiltered on purpose: `/workspaces` applies `BRANCH_PREFIX` itself, because
-        that prefix is the whole of what keeps it from offering to delete a person's
-        own branch, and `merge` deliberately accepts a ref outside it.
+        The list is unfiltered on purpose. `/workspaces` applies `BRANCH_PREFIX`
+        itself, because that prefix is all that keeps it from offering to delete
+        a user's own branch. And `merge` deliberately accepts a ref outside the
+        prefix.
         """
         provider = self._artifacts()
         if provider is None:
@@ -1787,11 +1930,13 @@ class WorkspaceSeam:
             return await provider.refs(base)
 
     async def delete_ref(self, base: Path, ref: str, *, force: bool) -> str:
-        """Delete one ref. `""` when it went, else the tier's own reason.
+        """Delete one ref. Returns `""` when it went, and otherwise the reason
+        that the tier gives.
 
-        `force` is the caller's decision, not the tier's: both tiers refuse a ref
-        holding work nothing else has, and a person overriding that is answering a
-        question only they can.
+        `force` is the decision of the caller and not of the tier. Each of the
+        three tiers that delete refs (git, agentfs and jj) refuses a ref that
+        holds work which nothing else has. A user who overrides that refusal
+        answers a question that only the user can answer.
         """
         provider = self._artifacts()
         if provider is None:
@@ -1800,11 +1945,13 @@ class WorkspaceSeam:
             return await provider.delete_ref(base, ref, force=force)
 
     async def merge(self, base: Path, ref: str) -> str:
-        """Merge `ref` where the person is standing. `""` when it merged cleanly.
+        """Merge `ref` into the checkout that the user is in. Returns `""` when it
+        merged cleanly.
 
-        Anything else is the tier's sentence, which is not always a failure: jj
-        records conflicts *in the commit* and exits zero, so "merged, with conflicts
-        at these paths" is a true thing this can answer and a bool could not.
+        Any other answer is the sentence of the tier, and it is not always a
+        failure. jj records conflicts *in the commit* and exits zero. So
+        "merged, with conflicts at these paths" is a true answer that this can
+        give and that a bool could not.
         """
         provider = self._artifacts()
         if provider is None:
@@ -1813,30 +1960,33 @@ class WorkspaceSeam:
             return await provider.merge(base, ref)
 
     async def strays(self, base: Path, *, with_status: bool = True) -> dict[str, Stray]:
-        """Checkouts the mounted tier still has on disk, by ref. `{}` if none can say.
+        """The checkouts that the mounted tier still has on disk, by ref. `{}` if
+        no tier can say.
 
-        Keyed by ref rather than returned as a list, because every caller is joining
-        it against something — `/workspaces` against the branches pH made — and a
-        list would have each of them build the same index.
+        The answer is keyed by ref and is not a list, because every caller joins
+        it against something. `/workspaces` joins it against the branches that
+        pH made. With a list, each caller would build the same index.
         """
         provider = self._checkouts()
         if provider is None:
             return {}
-        # The refs live agents hold, so no tier spends a probe on a `dirty` the
-        # caller discards — `describe` reports a held row as held and reads no
-        # further. The seam supplies it because `live()` is the seam's.
+        # `held` is the refs that live agents hold. With it, no tier spends a
+        # probe on a `dirty` that the caller discards: `describe` reports a held
+        # row as held and reads no further. The seam supplies the set because
+        # `live()` belongs to the seam.
         held = frozenset(workspace.ref for workspace in self.live() if workspace.ref)
         with running(self.provider_by):
             found = await provider.strays(base, with_status=with_status, skip=held)
         return {one.ref: one for one in found}
 
     async def discard(self, path: Path) -> str:
-        """Remove one checkout. `""` when it went, else the sentence saying why not.
+        """Remove one checkout. Returns `""` when it went, and otherwise the
+        sentence that says why not.
 
-        A message rather than a bool, because the only caller is a person who typed
-        `remove` and is owed the tier's own reason. A profile whose tier cannot
-        enumerate cannot have produced this path in the first place, so the refusal
-        is a guard rather than a case.
+        The answer is a message and not a bool. The only caller is a user who
+        typed `remove`, and that user is owed the reason of the tier itself. A
+        profile whose tier cannot enumerate cannot have produced this path in
+        the first place. So the refusal is a guard and not a case.
         """
         provider = self._checkouts()
         if provider is None:
@@ -1847,23 +1997,26 @@ class WorkspaceSeam:
     def can_checkpoint(self, workspace: Workspace) -> bool:
         """Whether a restore point can be taken for this workspace at all (P6-20).
 
-        The gate `/revert` asks before offering one, so a workspace that can never
-        have a restore point **refuses** rather than reporting "no restore points in
-        this session" — true, useless, and indistinguishable from a run that had
-        simply not checkpointed yet.
+        `/revert` asks this before it offers a restore point. So a workspace
+        that can never have a restore point **refuses**, and does not report "no
+        restore points in this session". That report is true and useless, and
+        it cannot be told apart from a run that has not checkpointed yet.
 
-        Both halves live in `_checkpointer`, which is also what `capture` narrows
-        through — the predicate and the narrowing were the same `isinstance` written
-        twice, and two spellings of one gate is one that can come apart.
+        Both halves are in `_checkpointer`, and `capture` narrows through the
+        same function. The predicate and the narrowing were the same
+        `isinstance` written twice, and two spellings of one gate can come
+        apart.
         """
         return self._checkpointer(workspace) is not None
 
     async def capture(self, workspace: Workspace) -> str | None:
-        """A token naming this workspace's state now, or `None` if no tier can say.
+        """A token that names the state of this workspace now, or `None` if no
+        tier can say.
 
-        `None` rather than a raise, matching `export`: a profile whose tier cannot
-        checkpoint is not a broken deployment, and the fingerprint's consumer reads
-        an empty answer as "always re-run", which is the safe direction.
+        The answer is `None` and not a raise, as in `export`. A profile whose
+        tier cannot checkpoint is not a broken deployment. The consumer of the
+        fingerprint reads an empty answer as "always run again", which is the
+        safe direction.
         """
         provider = self._checkpointer(workspace)
         if provider is None:
@@ -1874,24 +2027,27 @@ class WorkspaceSeam:
     async def checkpoint(
         self, workspace: Workspace, *, session: Session, agent_id: str, call_id: str
     ) -> str | None:
-        """Capture a restore point and record it. `None` when the tier has none to give.
+        """Capture a restore point and record it. Returns `None` when the tier has
+        none to give.
 
-        The event is the *seam's*, for `_log`'s reason: two tiers write restore
-        points and three consumers fold them, so the payload's shape belongs to
-        neither tier.
+        The event belongs to the *seam*, for the reason that `_log` gives. Two
+        tiers take restore points and three consumers fold them, so the shape of
+        the payload belongs to neither tier.
 
-        **Pinned before it is recorded**, which reverses the order the git tier used
-        while it owned this. That ordering existed for a mechanical reason — the ref
-        was named by the event's own `seq`, so a pin written first had no name to
-        write — and a token now names its own pin. What that changes is the
-        direction a crash between the two can fail in, and the new one is better: it
-        loses the *record* of a restore point whose state is safely pinned, where
-        before it kept a record of state that had not been pinned yet. A pin nobody
-        recorded is idempotent garbage the next capture writes over.
+        **The restore point is pinned before it is recorded.** That reverses the
+        order that the git tier used while it owned this. The old order had a
+        mechanical reason: the ref was named by the `seq` of the event, so a pin
+        written first had no name to write. A token now names its own pin. What
+        changes is the direction in which a crash between the two steps can
+        fail, and the new direction is better. It loses the *record* of a
+        restore point whose state is safely pinned. The old order kept a record
+        of state that had not been pinned yet. A pin that nobody recorded is
+        idempotent garbage, and the next capture writes over it.
 
-        `tree` is the payload key, and it is historical rather than descriptive: the
-        git tier's token is a tree, jj's is a commit. Renaming it would break every
-        reader of a log written before today for no gain a person can see.
+        `tree` is the payload key, and it is historical and not descriptive. The
+        token of the git tier is a tree, and the token of jj is a commit. To
+        rename the key would break every reader of a log that was written
+        before the rename, for no gain that a user can see.
         """
         token = await self.capture(workspace)
         if token is None:
@@ -1900,23 +2056,27 @@ class WorkspaceSeam:
         return token
 
     async def restore(self, agent_id: str, token: str, *, session: Session) -> tuple[str, ...]:
-        """Put this agent's workspace back to `token`. Returns the paths the run had added.
+        """Put the workspace of this agent back to `token`. Returns the paths that
+        the run had added.
 
-        Raises rather than answering `None`, unlike every other optional capability
-        here: each caller is acting on a restore point a person or a retry ladder
-        asked for **by name**, and "it silently did nothing" is the one answer none
-        of them may mistake for success.
+        This raises and does not answer `None`, unlike every other optional
+        capability here. Each caller acts on a restore point that a user or a
+        retry ladder asked for **by name**. "It silently did nothing" is the one
+        answer that none of them may mistake for success.
 
-        **Recorded, always** (`WORKSPACE_RESTORE`): a restore rewrites and deletes
-        files, and one the process died inside leaves a tree that is neither the
-        restore point nor what was there — repair closes that pair
-        `outcome-unknown`, which is what a reader is owed. On disk before the tree
-        is touched, and a restore the log cannot record is not run
-        (`IntentNotDurable`); one that raised is settled `ok: false`, then raised on.
-        Here rather than at each caller, and `session` required as `checkpoint`
-        requires it, so `/revert`, a supervisor's retry and any third caller say it
-        one way — and none can leave it out. The workspace is the agent's own, looked
-        up here, so a caller cannot hand in one tree and record another agent.
+        **The restore is always recorded** (`WORKSPACE_RESTORE`). A restore
+        rewrites and deletes files. If the process dies inside one, the tree is
+        neither the restore point nor what was there. Repair closes that pair as
+        `outcome-unknown`, which is what a reader is owed. The record is on disk
+        before the tree is touched, and a restore that the log cannot record is
+        not run (`IntentNotDurable`). A restore that raised is settled
+        `ok: false`, and the error is then raised again.
+
+        The record is written here and not at each caller, and `session` is
+        required as `checkpoint` requires it. So `/revert`, the retry of a
+        supervisor and any third caller record it in one way, and none can leave
+        it out. The workspace is the own workspace of the agent, looked up here.
+        So a caller cannot give one tree and record another agent.
         """
         workspace = self.of(agent_id)
         if workspace is None:
@@ -1940,13 +2100,15 @@ class WorkspaceSeam:
     def _reclaimer(
         self, records: Sequence[WorkspaceRecord], verb: str
     ) -> ReclaimingProvider | None:
-        """The mounted tier, or `None` having said which trees nobody can end.
+        """The mounted tier, or `None` after a warning that names the trees that
+        nobody can end.
 
-        Once per batch rather than once per record: a profile with no reclaiming tier
-        owes one sentence naming what it cannot touch, not one per directory. The
-        refusal is the point — removing a directory on the strength of a record written
-        by a configuration we are not running is the one way either caller could destroy
-        the work it exists to protect.
+        The warning comes one time for each batch, and not one time for each
+        record. A profile with no reclaiming tier owes one sentence that names
+        what it cannot touch, and not one sentence for each directory. The
+        refusal is the purpose. To remove a directory because of a record that
+        a different configuration wrote is the one way in which a caller could
+        destroy the work that it exists to protect.
         """
         provider = self.provider
         if isinstance(provider, ReclaimingProvider):
@@ -1960,15 +2122,17 @@ class WorkspaceSeam:
         return None
 
     def _is_held(self, record: WorkspaceRecord) -> bool:
-        """Whether this process is using the tree this record names, either way round.
+        """Whether this process uses the tree that this record names, by agent id
+        or by root.
 
-        **The strict pair, and only `_reclaim` wants it.** Its two siblings ask
-        narrower questions on purpose: `reconcile` folds leaks per agent, so the
-        id is the identity there, and `collectable` matches roots because an agent
-        that retained one tree and acquired another must not keep the first one
-        alive. This is the door that *deletes*, where refusing one tree too many
-        costs a directory somebody can remove by hand and refusing one too few
-        costs the work in it.
+        **This is the strict test, and only `_reclaim` wants it.** Its two
+        siblings ask narrower questions on purpose. `reconcile` folds leaks for
+        each agent, so the id is the identity there. `collectable` matches
+        roots, because an agent that retained one tree and acquired another must
+        not keep the first tree alive. `_reclaim` is the function that
+        *deletes*. There, to refuse one tree too many costs a directory that
+        somebody can remove by hand, and to refuse one too few costs the work in
+        it.
         """
         if record.agent_id in self._held:
             return True
@@ -1982,25 +2146,29 @@ class WorkspaceSeam:
         *,
         own: bool = False,
     ) -> bool | None:
-        """One call into a tier's teardown: whether it **kept**, or `None` if it raised.
+        """One call into the teardown of a tier. Returns whether the tier **kept**
+        anything, or `None` if the tier raised or an agent took the tree.
 
-        A tri-state answer rather than an exception, because neither caller may abort
-        its batch: `reconcile` would leave the rest of a crash's pairs open, and
-        `collect` would stop at the first tree git is unhappy about.
+        The answer has three states and is not an exception, because a caller
+        that works through a batch may not abort the batch. `reconcile` would
+        leave the rest of the pairs of a crash open, and `collect` would stop at
+        the first tree on which git failed.
 
-        `verb` reaches the log only, telling an operator whether a warning came from a
-        reconciliation at session open or from a `gc` they typed.
+        `verb` reaches the log only. It tells an operator whether a warning came
+        from a reconciliation at session open or from a `gc` that the operator
+        typed.
 
-        **Both callers decided this tree was nobody's, and then awaited something**
-        (J6): `reconcile` folds its leaks before starting a task per tree, and
-        `collect` asks `collectable` before it removes any of them. An `acquire`
-        landing in that gap gets a tree this is about to delete, so the question
-        is asked again here — where "again" is worth something, because it is the
-        last line before the removal, along with whether an act is in flight on it
-        (`_claimed`), and a claim is taken while it deletes.
+        **`reconcile` and `collect` both decided that this tree was nobody's,
+        and then awaited something** (J6). `reconcile` folds its leaks before it
+        starts a task for each tree, and `collect` asks `collectable` before it
+        removes any tree. An `acquire` that lands in that gap gets a tree that
+        this is about to delete. So the question is asked again here, where a
+        second answer is worth something, because this is the last line before
+        the removal. This also asks whether an act is in progress on the tree
+        (`_claimed`), and it takes a claim while it deletes.
 
-        `own` is an `acquire` taking back its own half-made tree, under the claim
-        it already has.
+        `own` is an `acquire` that takes back its own half-made tree, under the
+        claim that it already has.
         """
         if self._is_held(record) or (not own and record.agent_id in self._claimed):
             log.info(
@@ -2026,24 +2194,28 @@ class WorkspaceSeam:
 
 
 WorkspaceOutcome: TypeAlias = Literal["leaked", "kept", "retained"]
-"""Why a tree is still on disk — the three things `git worktree list` reports
+"""Why a tree is still on disk. `git worktree list` reports the three cases
 identically (P6-28).
 
-`leaked` is an `acquired` the log never saw closed, the only one nobody decided.
-`kept` is the disposal policy keeping a dirty tree for review. `retained` is
-somebody naming a reason, and it **wins over the other two**: a tree that was
-asked for is asked for whether or not the process that held it exited cleanly.
+* `leaked`: an `acquired` that the log never saw closed. It is the only outcome
+  that nobody decided.
+* `kept`: the disposal policy kept the work of a dirty tree for review. The git
+  tier and the jj tier remove the checkout and keep the work on its ref, so
+  for them the record outlives the directory.
+* `retained`: somebody named a reason. This outcome **wins over the other two**.
+  A tree that was asked for stays asked for, whether or not the process that
+  held it exited cleanly.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRecord:
-    """One tree a session left on disk, and why.
+    """One tree that a session left on disk, and why.
 
-    What survives a crash, and only that: the log's own fields. Not a `Workspace` —
-    `scratch`, `env` and the `release` closure are process state that died with the
-    process, and a value carrying empty versions of them would invite a caller to
-    use them.
+    It holds what survives a crash, and only that: the fields of the log. It is
+    not a `Workspace`. `scratch`, `env` and the `release` closure are process
+    state that died with the process. A value that carried empty versions of
+    them would invite a caller to use them.
     """
 
     agent_id: str
@@ -2051,38 +2223,55 @@ class WorkspaceRecord:
     root: Path
     ref: str | None = None
     reason: str = ""
-    """Why it was retained; empty for the other two outcomes."""
+    """Why it was retained. Empty for the other two outcomes."""
     closed: bool = False
-    """Whether the durable pair reconciled — a separate axis from `reason`.
+    """Whether the durable pair reconciled. This is a separate axis from `reason`.
 
     A retention is marked *while the agent is live*, so a process that then dies
     leaves a record that is both retained and unclosed. One axis would force a
-    choice between two wrong answers: leaked, and reconciliation discards the
-    evidence it was told to keep; retained, and the pair never closes, so the tree
-    is re-reported at every open forever.
+    choice between two wrong answers. If the record counts as leaked,
+    reconciliation discards the evidence that it was told to keep. If it counts
+    as retained, the pair never closes, so the tree is reported again at every
+    open.
     """
     provisioned: tuple[str, ...] = ()
-    """What the seam provisions into the tree, as `workspace/acquired` recorded it.
+    """What the seam provisions into the tree, as the opening record
+    (`workspace/acquiring` or `workspace/acquired`) recorded it.
 
-    The one piece of the live `Workspace` a reclaim cannot do without: every other
-    file in the tree is the agent's work, and these are the files that must stay
-    off its branch. Recorded before the copy runs, so it is what was *configured*
-    rather than what arrived — a superset, and the safe one to exclude.
+    This is the one piece of the live `Workspace` that a reclaim cannot do
+    without. Every other file in the tree is the work of the agent, and these
+    are the files that must stay off its branch. The list is recorded before the
+    copy runs, so it is what was *configured* and not what arrived. That is a
+    superset, and it is the safe one to exclude.
+    """
+    fork: str | None = None
+    """The commit that the tree started from, as `workspace/acquired` recorded
+    it (`Workspace.fork`). `None` when the record does not say: the tier does
+    not use one, the process died before `acquired` was written, or an older
+    build wrote the log.
+
+    The jj tier reads it at a crash reclaim. A parent that spawned a child has
+    an empty working copy, because its work was frozen into a commit for the
+    child. Without the fork point, a reclaim read that parent as a tree that
+    had done nothing, deleted its bookmark and removed the tree. With `None`,
+    the tier keeps the bookmark, because it cannot tell.
     """
     session_id: str = ""
-    """Whose log this came from. Not derivable from `agent_id` — a cross-session reader
-    (the family fold, the collector) needs to get back to the log, and inferring it
-    from a sanitized directory name is the lossy round-trip `/workspaces` refuses to
-    make.
+    """The session whose log this record came from. It cannot be derived from
+    `agent_id`. A reader that crosses sessions (the family fold, the collector)
+    must get back to the log. To infer the session from a sanitized directory
+    name is the lossy round trip that `/workspaces` refuses to make.
     """
 
     @property
     def outcome(self) -> WorkspaceOutcome:
-        """Which of the three this is — **derived from the two facts, never stored**.
+        """Which of the three outcomes this is. It is **derived from the two facts
+        and never stored**.
 
-        A third name for what `reason` and `closed` already say is a third chance to
-        disagree with them: `collect` revokes a retention by clearing `reason`, and a
-        stored field went on reporting `retained` after the decision was withdrawn.
+        A third name for what `reason` and `closed` already say is a third
+        chance to disagree with them. `collect` revokes a retention by clearing
+        `reason`, and a stored field went on reporting `retained` after the
+        decision was withdrawn.
         """
         if self.reason:
             return "retained"
@@ -2090,59 +2279,64 @@ class WorkspaceRecord:
 
 
 CollectVerdict: TypeAlias = Literal["collect", "held", "recent", "gone"]
-"""What the collector decided about one retained tree. Every one is a sentence a
-person reads: `held` and `recent` are refusals they may want to argue with,
-`gone` is a tree somebody already removed by hand.
+"""What the collector decided about one retained tree. Each verdict is a
+sentence that a user reads. `held` and `recent` are refusals that the user may
+want to argue with. `gone` is a tree that somebody already removed by hand.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class Collectable:
-    """One retained tree, with the collector's verdict and how old it is.
+    """One retained tree, with the verdict of the collector and the age of the
+    tree.
 
-    A verdict per record rather than a filtered list, because the refusals are the
-    useful half: "nothing to collect" and "three trees, all still held by live
-    sessions" are very different answers to `phern workspaces gc`.
+    There is a verdict for each record and not a filtered list, because the
+    refusals are the useful half. "Nothing to collect" and "three trees, all
+    still held by live sessions" are very different answers to
+    `phern workspaces gc`.
     """
 
     record: WorkspaceRecord
     verdict: CollectVerdict
     age: float
-    """Seconds since the owning session's log was last written."""
+    """Seconds since the log of the owning session was last written."""
 
 
 def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
-    """Every tree this session left on disk, and which of three reasons put it there.
+    """Every tree that this session left on disk, and which of three reasons put
+    it there.
 
-    **The log is the only thing that can tell the three apart** — they all leave a
-    worktree that `git worktree list` reports identically, so `/workspaces` cannot.
-    Two are features and the third is the leak F6 exists to close.
+    **Only the log can tell the three apart.** They all leave a worktree that
+    `git worktree list` reports identically, so `/workspaces` cannot. Two are
+    features, and the third is the leak that F6 exists to close.
 
-    Folded rather than tracked, for `subagent_roster`'s reason one seam over: the
-    answer has to be computable from a log being read off disk by a process that was
-    not running when it was written.
+    The answer is folded and not tracked, as the subagents seam folds the state
+    of a child (`ChildState`). The answer must be computable from a log that a
+    process reads off disk, when that process was not running while the log was
+    written.
 
-    **From `seed_length`, not from the beginning.** A fork seeds the child with the
-    parent's transcript, so a fold over the whole log reports the parent's
-    still-held worktrees as the child's — and reconciliation would then remove a
-    tree an agent is actively working in. What a session inherited is not what it
-    acquired.
+    **The fold starts at `seed_length`, and not at the beginning.** A fork seeds
+    the child with the transcript of the parent. A fold over the whole log
+    would report the worktrees that the parent still holds as those of the
+    child, and reconciliation would then remove a tree in which an agent is
+    working. What a session inherited is not what it acquired.
 
-    Only kinds with a fresh root can leave a directory behind: a `shared`
-    workspace's root *is* the base, so an unclosed pair there records a crash and no
-    stray.
+    Only a kind with a fresh root can leave a directory behind. The root of a
+    `shared` workspace *is* the base, so an unclosed pair there records a crash
+    and no stray.
 
-    **`acquiring` opens a record as `acquired` does** (S12): it is written before the
-    tier makes the tree, so one with nothing after it names a tree a crash may have
-    left half-made. The `acquired` that follows supersedes it — a `shared` one too,
-    which is a tier that declined and made nothing where it said.
+    **`acquiring` opens a record as `acquired` does** (S12). It is written
+    before the tier makes the tree, so an `acquiring` with nothing after it
+    names a tree that a crash may have left half-made. The `acquired` that
+    follows supersedes it. A `shared` one supersedes it too: that is a tier that
+    declined and made nothing at the site that it named.
     """
     open_records: dict[str, WorkspaceRecord] = {}
     closed: list[WorkspaceRecord] = []
     for event in session.own_events():
-        # The type test first: a long log is mostly `assistant/chunk`, and
-        # reading `agentId` off every one of them to discover it is absent costs
-        # a mapping get and a string per event.
+        # The type test comes first. A long log is mostly `assistant/chunk`. To
+        # read `agentId` from every one of them, only to find it absent, costs a
+        # mapping get and a string for each event.
         if event.type not in _SURVIVOR_TYPES:
             continue
         data = event.data
@@ -2150,36 +2344,40 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
         if not agent_id:
             continue
         if event.type == RETAINED:
-            # Marked while the agent was live, so the record is already open —
-            # unless this session only ever *seeded* the acquire, in which case
-            # there is nothing here to mark and nothing on disk we may claim.
+            # The mark was made while the agent was live, so the record is
+            # already open. The exception is a session that only *seeded* the
+            # acquire. Then there is nothing here to mark, and nothing on disk
+            # that this session may claim.
             marked = open_records.get(agent_id)
             if marked is not None:
-                # An empty reason is a withdrawal, and it returns the record to
-                # the outcome an open acquire has by default. Reading it as a
-                # retention with a blank reason would make a clean settle the
-                # thing that pins a tree forever.
+                # An empty reason is a withdrawal. It returns the record to the
+                # outcome that an open acquire has by default. If it were read
+                # as a retention with a blank reason, a clean settle would keep
+                # a tree forever.
                 open_records[agent_id] = replace(marked, reason=as_str(data.get("retained")))
             continue
         if event.type == DISPOSED:
             record = open_records.pop(agent_id, None)
             if record is None:
                 continue
-            # A reason wins over `kept`, and over a `kept: false` too: the
-            # closing half repeats it precisely so an orderly release says it,
-            # and a policy that discarded a tree it had been asked to keep would
-            # have written `kept: false` about a directory that is still there.
+            # A reason wins over `kept`, and over a `kept: false` too. The
+            # closing half repeats the reason so that an orderly release states
+            # it. And a policy that discarded a tree that it had been asked to
+            # keep would have written `kept: false` about a directory that is
+            # still there.
             reason = as_str(data.get("retained") or record.reason)
             if reason or data.get("kept"):
                 closed.append(replace(record, closed=True, reason=reason))
             continue
-        # A Literal read off JSON is a claim to check, not a cast to make.
-        # Built once at import beside the alias rather than per event:
-        # `get_args` is not memoized and rebuilds its tuple on every call.
+        # A Literal that is read from JSON is a claim to check, and not a cast
+        # to make. The lookup is built one time at import, and not for each
+        # event: `get_args` is not memoized and rebuilds its tuple on every
+        # call.
         kind = _WORKSPACE_KINDS.get(as_str(data.get("kind")), "shared")
         if not fresh_root(kind):
-            # A `shared` acquire answers an `acquiring` the tier then declined:
-            # nothing was made where it said, so nothing there is this agent's.
+            # A `shared` acquire answers an `acquiring` that the tier then
+            # declined. Nothing was made at the site that the tier named, so
+            # nothing there belongs to this agent.
             open_records.pop(agent_id, None)
             continue
         ref = data.get("ref")
@@ -2189,59 +2387,64 @@ def workspace_survivors(session: Session) -> list[WorkspaceRecord]:
             root=Path(as_str(data.get("root"))),
             ref=str(ref) if ref else None,
             provisioned=tuple(filter(None, map(as_str, as_seq(data.get("provisioned"))))),
+            fork=as_str(data.get("fork")) or None,
             session_id=session.id,
         )
     return [*open_records.values(), *closed]
 
 
 def workspace_leaks(session: Session) -> list[WorkspaceRecord]:
-    """Workspaces this session took and never released (F6).
+    """The workspaces that this session took and never released (F6).
 
-    A filter over `workspace_survivors`, not a fold of its own: the two questions
-    differ by one predicate and share every rule that is easy to get wrong — the
-    seed offset, the fresh-root test, which acquire is the live one — and here a
-    second implementation would disagree about whether a directory may be deleted
-    (A11).
+    This is a filter over `workspace_survivors`, and not a fold of its own. The
+    two questions differ by one predicate, and they share every rule that is
+    easy to get wrong: the seed offset, the fresh-root test, and which acquire
+    is the live one. A second implementation here would disagree about whether a
+    directory may be deleted (A11).
 
-    The predicate is **`closed`, not `outcome == "leaked"`**: a tree somebody
-    retained before the process died is a survivor with a reason *and* an open pair.
-    Reconciliation still owes it the closing event, and it is `reclaim`'s job to
-    know that a reason means leave the directory alone.
+    The predicate is **`closed`, and not `outcome == "leaked"`**. A tree that
+    somebody retained before the process died is a survivor with a reason *and*
+    an open pair. Reconciliation still owes it the closing event. `reclaim` is
+    what knows that a reason means that the work is not discarded.
     """
     return [one for one in workspace_survivors(session) if not one.closed]
 
 
 def has_restore_point(session: Session, call_id: str) -> bool:
-    """Whether the run `call_id` took a restore point — the latest this session
-    recorded is its own (S4).
+    """Whether the run `call_id` took a restore point: whether the latest restore
+    point that this session recorded belongs to that run (S4).
 
-    The checkpoint policy asks before it lets a nested dispatch skip its barrier on
-    the strength of a restore: one that does not exist covers nothing, and there is
-    none on a profile whose tier cannot take one, nor for a run whose capture failed
-    (the `workspace-checkpoint` row only warns). The latest, because that row records
-    it immediately before the run it covers, and a session's cells run one at a time.
+    The `session-checkpoint-policy` row asks this before it lets a nested
+    dispatch skip its barrier because a restore covers it. A restore point that
+    does not exist covers nothing. There is none on a profile whose tier cannot
+    take one, and none for a run whose capture failed (the
+    `workspace-checkpoint` row only warns). The latest one is the right one to
+    test, because that row records it immediately before the run that it
+    covers, and the cells of a session run one at a time.
     """
     latest = session.latest(CHECKPOINT)
     return latest is not None and as_str(latest.data.get("callId")) == call_id
 
 
 def checkpoints(session: Session) -> dict[int, dict[str, Any]]:
-    """Every restore point in this session, by the event's own seq — a fold.
+    """Every restore point in this session, by the seq of its event. This is a
+    fold.
 
-    A checkpoint is a fact in the log, so a resumed or forked session finds the same
-    restore points a live one has, without anything having remembered them.
+    A checkpoint is a fact in the log. So a resumed or forked session finds the
+    same restore points that a live one has, and nothing had to remember them.
     """
     return {event.seq: dict(event.data) for event in session.events if event.type == CHECKPOINT}
 
 
 @dataclass(frozen=True, slots=True)
 class _CheckpointOf:
-    """One agent's restore point, read off a `workspace/checkpoint` event.
+    """The restore point of one agent, read from a `workspace/checkpoint` event.
 
-    Frozen, so it hashes by value — which is what gets each agent its own fold
-    out of one parser class. `Session.projection` keys on `(event_type, parse)`,
-    so `_CheckpointOf("a")` and `_CheckpointOf("b")` are two keys and a closure
-    (a new object per call, hashing by identity) would be a new fold per call.
+    It is frozen, so it hashes by value. That is what gets each agent its own
+    fold out of one parser class. `Session.projection` keys on
+    `(event_type, parse)`, so `_CheckpointOf("a")` and `_CheckpointOf("b")` are
+    two keys. A closure is a new object on each call and hashes by identity, so
+    it would be a new fold on each call.
     """
 
     agent_id: str
@@ -2249,9 +2452,9 @@ class _CheckpointOf:
     def __call__(self, event: SessionEvent) -> str | None:
         """The tree, or `None` when some other agent took this checkpoint.
 
-        `""` is a value here, not a miss: a checkpoint that recorded no tree is
-        still the newest one this agent took, and answering with an *older* tree
-        would revert further than the log says to.
+        `""` is a value here, and not a miss. A checkpoint that recorded no tree
+        is still the newest one that this agent took. To answer with an *older*
+        tree would revert further than the log says to.
         """
         if as_str(event.data.get("agentId")) != self.agent_id:
             return None
@@ -2259,21 +2462,23 @@ class _CheckpointOf:
 
 
 def latest_checkpoint(session: Session, agent_id: str) -> str:
-    """The newest restore point *this agent* took, or `""` if it has none.
+    """The newest restore point that *this agent* took, or `""` if it has none.
 
-    An incremental fold rather than `checkpoints()` plus `max()`: the caller that
-    wants one restore point does not need a dict of every restore point, and
-    building it copies each payload to discard all but the last — on a crash path
-    that runs once per retry. It is not a reverse scan of `session.events`
-    either, which materialized a snapshot of the whole log to read one field;
-    `Session.projection` keeps the fold and parses only what has arrived since.
+    This is an incremental fold, and not `checkpoints()` plus `max()`. The
+    caller that wants one restore point does not need a dict of every restore
+    point. To build that dict copies each payload and then discards all but the
+    last, on a crash path that runs one time for each retry. It is not a reverse
+    scan of `session.events` either. That scan materialized a snapshot of the
+    whole log to read one field. `Session.projection` keeps the fold and parses
+    only what has arrived since.
 
-    Scoped to the agent, which is the rule `/revert` already states: a restore point
-    belongs to the agent that took it. Only one agent writes into a root session
-    today, so this is a latent difference rather than a live one — it is here so the
-    two readers of this fold cannot disagree about it later. The agent rides in
-    the *parser*, which is half `Session.projection`'s key — so two agents get
-    two folds without this having to invent a name for either.
+    The answer is scoped to the agent, which is the rule that `/revert` already
+    states: a restore point belongs to the agent that took it. Only one agent
+    writes into a root session today, so this is a latent difference and not a
+    live one. It is here so that the two readers of this fold cannot disagree
+    about it later. The agent id is in the *parser*, which is half of the key of
+    `Session.projection`. So two agents get two folds, and this function does
+    not have to invent a name for either.
     """
     return session.projection(CHECKPOINT, _CheckpointOf(agent_id)) or ""
 
@@ -2284,38 +2489,43 @@ def stored_survivors(
     limit: int = 50,
     family: str = "",
 ) -> tuple[list[WorkspaceRecord], dict[str, float]]:
-    """Every tree the *store* can still account for, and when each log was written.
+    """Every tree that the *store* can still account for, and when each log was
+    written.
 
-    The deployment-wide half of the fold, where `family_survivors` is the per-parent
-    one. Both consumers — `phern doctor`'s count and the collector — need the same two
-    things, and a second loop over `stored()` is where a listing limit and a
-    tolerance rule quietly diverge.
+    This is the deployment-wide half of the fold, and `family_survivors` is the
+    half for one parent. Three callers use it: the count of `phern doctor`, the
+    collector, and the `export` of `/workspaces`. The first two need both
+    answers. A second loop over `stored()` is where a listing limit and a
+    tolerance rule would diverge without notice.
 
-    **A session that will not read is skipped, not fatal**, and the direction is the
-    safe one for both consumers: doctor under-counts and the collector removes
-    nothing, which is what you want from a half-written file. Logged, because a
-    store that cannot read most of what it listed is a real problem wearing a small
-    number. Since reference-forking there are two ways a log will not read, and a
-    *good* file whose ancestor was removed takes every descendant with it — so this
-    count can fall by more than the number of damaged files. `phern doctor`'s "Session
-    lineage" section is what answers which.
+    **A session that cannot be read is skipped, and is not fatal.** The
+    direction is the safe one for the count and for the collector: doctor counts
+    too few, and the collector removes nothing. That is the right result for a
+    half-written file. The failure is logged, because a store that cannot read
+    most of what it listed has a real problem that shows only as a small
+    number. Since reference-forking there are two ways in which a log cannot be
+    read. A *good* file whose ancestor was removed takes every descendant with
+    it, so this count can fall by more than the number of damaged files. The
+    "Session lineage" section of `phern doctor` says which of the two it is.
 
-    `family` narrows the answer to one agent and its descendants, through
-    `descendants` so this and `family_survivors` cannot disagree about who counts.
-    Applied to the **listing**, before anything is read: `StoredSession` already
-    carries `parent`, and descent needs nothing else.
+    `family` narrows the answer to one agent and its descendants. It goes
+    through `descendants`, so this function and `family_survivors` cannot
+    disagree about who counts. It is applied to the **listing**, before anything
+    is read: `StoredSession` already carries `delegating_parent`, and descent
+    needs nothing else.
 
-    `touched` is **not** narrowed with it — the caller is reporting how much of the
-    store it looked at, and a denominator that shrank with the filter would say a
-    family's trees came from every session on disk.
+    `touched` is **not** narrowed with it. The caller reports how much of the
+    store it looked at. A denominator that shrank with the filter would say that
+    the trees of a family came from every session on disk.
 
-    **Folded and discarded one at a time.** A stored log is seeded through the same
-    surface validation a resume makes, which is what stops this counting a tree in a
-    log the harness would refuse to reopen; the fold reads three event types and
-    keeps nothing else.
+    **Each log is folded and discarded, one at a time.** A stored log is seeded
+    through the same surface validation that a resume makes. That stops this
+    function from counting a tree in a log that the harness would refuse to
+    reopen. The fold reads four event types and keeps nothing else.
 
     `limit` is whatever `stored()` will show, which makes the answer a **floor**
-    rather than a census — both callers say so in their own words.
+    and not a census. The count and the collector both say so in their own
+    words.
     """
     survivors: list[WorkspaceRecord] = []
     touched: dict[str, float] = {}
@@ -2336,9 +2546,10 @@ def stored_survivors(
             continue
         try:
             filed = entry.family or None
-            # Its own tree-making records first, which is a fraction of the read: a
-            # log that never made a tree of its own leaves none, whether or not it
-            # would reopen, and is not read and seeded whole to say so.
+            # The records of this log that make a tree are read first, which is
+            # a fraction of the full read. A log that never made a tree of its
+            # own leaves none, whether or not it would reopen. So it is not read
+            # and seeded whole to learn that.
             _header, own = store.read_own(entry.session_id, family=filed, types=_OPENERS)
             if not any(_makes_a_tree(event) for event in own):
                 continue
@@ -2354,18 +2565,19 @@ def stored_survivors(
 def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[WorkspaceRecord]:
     """What one agent and everything beneath it left on disk (P6-28).
 
-    **The fold a parent cannot do from its own log**, because a child's workspace
-    events are in the *child's* log. The link already exists: a child's session
-    names its parent in its own header, so this is a walk over state rather than an
-    index to maintain.
+    **A parent cannot make this fold from its own log**, because the workspace
+    events of a child are in the log of the *child*. The link already exists:
+    the session of a child names its parent in its own header. So this is a walk
+    over state, and not an index to maintain.
 
-    Ordered **parent-first, then by descent** — what the agent I asked about left,
-    then what it delegated. `descendants` is breadth-first and this preserves it.
+    The order is **parent first, then by descent**: what the agent that was
+    asked about left, and then what it delegated. `descendants` is
+    breadth-first, and this function preserves that order.
 
-    Sessions are passed in, not fetched, for `reachable_family`'s reason: the caller
-    has already decided which logs it may open. A session named by `agent_id` that
-    is not in `sessions` yields nothing rather than raising, because a truncated
-    listing is an ordinary answer.
+    Sessions are passed in and not fetched, as in `reachable_family`. The caller
+    has already decided which logs it may open. A session that `agent_id` names
+    and that is not in `sessions` yields nothing and does not raise, because a
+    truncated listing is an ordinary answer.
     """
     by_id = {session.id: session for session in sessions}
     lineage = [(session.id, session.header.delegating_parent) for session in sessions]
@@ -2378,12 +2590,13 @@ def family_survivors(sessions: Sequence[Session], agent_id: str) -> list[Workspa
 
 
 def pair_payload(agent_id: str, ref: str | None, **extra: JsonValue) -> dict[str, JsonValue]:
-    """The keys both halves of the durable pair share, spelled once.
+    """The keys that both halves of the durable pair share, spelled one time.
 
-    `ref` rides both so a reader can say which branch a turn ran against without
-    inspecting the repository, and is omitted rather than sent as `null` for kinds
-    that have none. A module function because the pair has two writers — an orderly
-    release and a reconciliation — and the second is the half nobody watches.
+    `ref` is on both halves, so that a reader can say which branch a turn ran
+    against without inspecting the repository. It is omitted, and not sent as
+    `null`, for a kind that has none. This is a module function because the pair
+    has two writers, an orderly release and a reconciliation, and the second is
+    the half that nobody watches.
     """
     data: dict[str, JsonValue] = {"agentId": agent_id, **extra}
     if ref is not None:
@@ -2392,35 +2605,38 @@ def pair_payload(agent_id: str, ref: str | None, **extra: JsonValue) -> dict[str
 
 
 ACQUIRING = "workspace/acquiring"
-"""Where a tier is about to put a fresh tree, before it makes one (S12). Opens the
-pair as `ACQUIRED` does; an `ACQUIRED` for the same agent supersedes it."""
+"""Where a tier is about to put a fresh tree, before it makes one (S12). It
+opens the pair as `ACQUIRED` does. An `ACQUIRED` for the same agent supersedes
+it."""
 ACQUIRED = "workspace/acquired"
 DISPOSED = "workspace/disposed"
-"""The durable pair, named once: the fold below and both producers have to agree on
-these exactly.
+"""The durable pair, named one time. The fold (`workspace_survivors`) and both
+producers must agree on these names exactly.
 """
 
 RETAINED = "workspace/retained"
-"""A tree marked as evidence, recorded the moment it is marked (P6-28).
+"""A tree marked as evidence, recorded at the moment that it is marked (P6-28).
 
-**Not part of the pair, and the reason is the crash.** The decision records that
-a run went wrong, and the most complete way for a run to go wrong is for the
-process to die — which writes no `disposed` at all. A retention held only in
-memory would be lost by exactly the failure it exists to survive, and
-reconciliation would discard the tree it was told to keep.
+**It is not part of the pair, and the reason is the crash.** The decision
+records that a run went wrong, and the most complete way for a run to go wrong
+is for the process to die. That writes no `disposed` at all. A retention held
+only in memory would be lost by exactly the failure that it exists to survive,
+and reconciliation would discard the tree that it was told to keep.
 
-Ignorable: an older build that skips it reads a keep as an ordinary keep.
+It is ignorable. An older build that skips it reads a deliberate keep as an
+ordinary keep.
 """
 
 CHECKPOINT = "workspace/checkpoint"
-"""One restore point, recorded the moment it is taken (P4-09).
+"""One restore point, recorded at the moment that it is taken (P4-09).
 
-Here rather than in the git tier that first wrote it, because the capability is
-the seam's now: two providers append this and three consumers fold it, so an
-event name spelled in one of them would be a vocabulary the other borrowed.
+It is here, and not in the git tier that first wrote it, because the capability
+now belongs to the seam. The seam appends this event for the two tiers that
+take restore points, and three consumers fold it. An event name spelled in one
+tier would be a vocabulary that the other tier borrowed.
 
-Not part of the acquire/dispose pair — a checkpoint opens nothing and closes
-nothing, and a fold over the pair must ignore it.
+It is not part of the acquire/dispose pair. A checkpoint opens nothing and
+closes nothing, and a fold over the pair must ignore it.
 """
 
 
@@ -2431,27 +2647,29 @@ _OPENERS = frozenset({ACQUIRING, ACQUIRED})
 
 
 def _makes_a_tree(event: SessionEvent) -> bool:
-    """Whether `event` puts a tree on disk: an acquire of a kind that is not the base."""
+    """Whether `event` puts a tree on disk: an opening record of a kind whose root
+    is not the base."""
     kind = _WORKSPACE_KINDS.get(as_str(event.data.get("kind")))
     return event.type in _OPENERS and kind is not None and fresh_root(kind)
 
 
 _WORKSPACE_KINDS: Mapping[str, WorkspaceKind] = literal_lookup(WorkspaceKind)
-"""Every `WorkspaceKind` by its own spelling — the read-side check for a kind
-named in a stored log, which a different build may have written. See
-`literal_lookup`.
+"""Every `WorkspaceKind` by its own spelling. It is the read-side check for a
+kind that is named in a stored log, which a different build may have written.
+See `literal_lookup`.
 
-Built here rather than in the fold: tested once per event in the hot loop."""
+It is built here and not in the fold, because the fold tests it one time for
+each event in its hot loop."""
 
 PROJECT_PROVISION_FILE = ".ph-workspace.yml"
 """Where a repository states what its worktrees need (E14).
 
-Discovered by walking up from the project directory, and read for **data only**:
-a `copy`/`symlink`/`hardlink` entry, nothing that executes. That is what makes
-cloning a repository and starting pH safe, and why the `command` hook was
-refused rather than trust-gated.
+The file is found by a walk up from the project directory, and it is read for
+**data only**: a `copy`, `symlink` or `hardlink` entry, and nothing that
+executes. That is what makes it safe to clone a repository and start pH. It is
+also why the `command` hook was refused and not gated on trust.
 
-Read once, at mount; a file that appears later needs a restart.
+The file is read one time, at mount. A file that appears later needs a restart.
 """
 
 
@@ -2461,15 +2679,15 @@ class LifecycleConfig(WireModel):
     access: WorkspaceAccess = "write"
     """What the *root* agent needs of the project directory.
 
-    A child's access is its parent's to decide and arrives with the spawn
-    (E4, Q11); this is the person at the keyboard, who asked for a harness in
-    their own repository.
+    The access of a child is decided by its parent and arrives with the spawn
+    (E4, Q11). This setting is for the user at the keyboard, who asked for a
+    harness in their own repository.
     """
     provision: list[ProvisionEntry] = Field(default_factory=list)
-    """Materials every fresh workspace gets — `.env`, a dependency directory, a
-    local config the project gitignores (E14). Empty by default: a profile that
-    names none provisions none, and a `shared` workspace is never provisioned at
-    all because its root already *is* the base."""
+    """Materials that every fresh workspace gets: `.env`, a dependency directory,
+    or a local config that the project gitignores (E14). The list is empty by
+    default, and a profile that names none provisions none. A `shared` workspace
+    is never provisioned at all, because its root already *is* the base."""
 
 
 @plugin(
@@ -2478,17 +2696,18 @@ class LifecycleConfig(WireModel):
 async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
     """Give every agent a workspace, and point `ctx.fs` at it.
 
-    **The seam alone changes nothing; this row is what makes a tier bite.** Separate
-    from the seam's own row because the two answer different questions — "what
-    happens when someone acquires" and "who acquires, and when" — and a deployment
-    driving the lifecycle itself wants the first without the second.
+    **The seam alone changes nothing, and this row is what puts a tier in
+    force.** It is separate from the row of the seam, because the two answer
+    different questions: "what happens when someone acquires" and "who acquires,
+    and when". A deployment that drives the lifecycle itself wants the first
+    without the second.
 
     Acquisition is *lazy and idempotent*, at the first `agent/pre-step`.
-    `agent/created` is an `emit`, so a listener that has to `await git worktree add`
-    could not hold the agent up and the first tool call would race the checkout. And
-    a child's workspace is its parent's decision — base and `access` both — so the
-    spawn path acquires first and this row must find that one rather than overwrite
-    it.
+    `agent/created` is an `emit`. A listener there that must
+    `await git worktree add` could not hold the agent up, and the first tool
+    call would race the checkout. And the workspace of a child is the decision
+    of its parent, both the base and the `access`. So the spawn path acquires
+    first, and this row must find that workspace and not overwrite it.
     """
 
     def root_of(agent: AgentHandle) -> Path | None:
@@ -2497,9 +2716,9 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
 
     ctx.require(FS).rebase(root_of, scope=ctx)
 
-    # The profile's list and the project's, composed here rather than by two
-    # registrations: `provision()` accepts many contributors, and this row is
-    # simply the one that knows about both sources.
+    # The list of the profile and the list of the project are composed here, and
+    # not by two registrations. `provision()` accepts many contributors, and
+    # this row is the one that knows about both sources.
     entries = [*config.provision, *discover_provisioning(ctx.require(FS).root)]
     if entries:
         ctx.require(WORKSPACE).provision(entries, scope=ctx)
@@ -2511,10 +2730,11 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
         agent = request.agent
         if ctx.require(WORKSPACE).of(agent.id) is None:
             if request.session.header.is_subagent:
-                # Refused rather than answered: see `ChildWorkspaceMissing`. The
-                # test is the seam's own — `_chosen_tier` reads the same field to
-                # decide which rung a child gets, so "is this a child" has one
-                # spelling here and cannot come apart from the tier decision.
+                # Refused, and not answered: see `ChildWorkspaceMissing`. The
+                # test is the one that the seam uses. `_chosen_tier` reads the
+                # same field to decide which rung a child gets. So "is this a
+                # child" has one spelling here and cannot come apart from the
+                # tier decision.
                 raise ChildWorkspaceMissing(
                     f"agent {agent.id} is a subagent with no workspace: its base and access "
                     "are its parent's to decide and arrive with the spawn, so acquiring one "
@@ -2523,40 +2743,42 @@ async def lifecycle(ctx: Context, config: LifecycleConfig) -> None:
             await ctx.require(WORKSPACE).acquire(
                 session_id=request.session.id,
                 agent_id=agent.id,
-                # The process's directory, never `fs.root_for(agent)`: that is
-                # the workspace we are about to take, and branching a worktree
-                # from the previous one would nest a checkout per turn.
+                # The directory of the process, and never `fs.root_for(agent)`.
+                # That is the workspace that is about to be taken, and a
+                # worktree branched from the previous one would nest a checkout
+                # for each turn.
                 base=ctx.require(FS).root,
                 access=config.access,
                 session=request.session,
-                # The agent's own scope, so the worktree is released when the
-                # agent is — the in-process half of cleanup (I2), with the event
-                # pair covering the crash the scope cannot (§4.9).
+                # The own scope of the agent, so the worktree is released when
+                # the agent is. That is the in-process half of cleanup (I2). The
+                # event pair covers the crash that the scope cannot (§4.9).
                 scope=agent.ctx,
             )
         return await next_()
 
-    # Outermost, so a listener that reads or writes files during the step —
-    # compaction's summarizer, a permissions row — sees the agent's own root
-    # rather than the process's.
+    # Outermost, so a listener that reads or writes files during the step sees
+    # the own root of the agent and not the root of the process. Examples are
+    # the summarizer of compaction and a permissions row.
     ctx.on("agent/pre-step", ensure, prepend=True)
 
 
 def discover_provisioning(start: Path) -> list[ProvisionEntry]:
-    """The project's own materials list, walking up from `start`.
+    """The materials list of the project itself, found by a walk up from `start`.
 
-    Nearest-first and *first-wins*, `memory-agents-md`'s rule: the file beside the
-    code knows what the code needs, and a monorepo root should not override a
-    package that states its own.
+    The nearest file comes first, as in `memory-agents-md`, and here the *first
+    file wins*. The file beside the code knows what the code needs, and a
+    monorepo root should not override a package that states its own list.
 
-    Read with `safe_yaml_load`, the same reader every profile row goes through —
-    this is the *least* trusted config the harness opens, so it is the last one that
-    should have its own parsing rules.
+    The file is read with `safe_yaml_load`, the reader that every profile row
+    goes through. This is the *least* trusted config that the harness opens, so
+    it is the last one that should have parsing rules of its own.
 
-    **Every failure is a shrug**: a malformed file, an unknown key, a `source`
-    naming somewhere outside the tree. Refusing to start because a repository's
-    optional config is wrong would make this list load-bearing. **Per entry**, the
-    way `resolve_entry` refuses at use: one line naming `../../etc/passwd` is
+    **Every failure is logged and ignored**: a malformed file, an unknown key,
+    or a `source` that names a place outside the tree. To refuse to start
+    because the optional config of a repository is wrong would make this list
+    load-bearing. The refusal is **for each entry**, in the way that
+    `resolve_entry` refuses at use. One line that names `../../etc/passwd` is
     dropped, and the `.env` beside it still arrives.
     """
     for directory in (start, *start.parents):
@@ -2579,7 +2801,8 @@ def discover_provisioning(start: Path) -> list[ProvisionEntry]:
 
 
 def _discovered(item: object, candidate: Path) -> ProvisionEntry | None:
-    """One entry of a project's list, or `None` having said why it was dropped."""
+    """One entry of the list of a project, or `None` after a warning that says why
+    the entry was dropped."""
     try:
         return ProvisionEntry.model_validate(item)
     except ValidationError as refused:
@@ -2595,18 +2818,19 @@ class Config(WireModel):
     """Row config for the shared provider."""
 
     scratch: str | None = None
-    """Where scratch directories live. `$PH_HOME/scratch` by default — the idiom
-    `default_home_path` exists for, and outside the workspace on purpose."""
+    """Where scratch directories are kept. The default is `$PH_HOME/scratch`,
+    which is the idiom that `default_home_path` exists for. It is outside the
+    workspace on purpose."""
 
 
 @plugin("workspace-shared", affects="environment", config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Mount the seam with the shared provider as its floor.
 
-    Named for the provider rather than for the seam, because there is no useful
-    "seam with no behavior" state here: `sandbox-policy` can mount a seam whose
-    `confine()` refuses, since refusing is a real answer, but an agent with no
-    working directory is not.
+    The row is named for the provider and not for the seam, because a "seam with
+    no behavior" state is not useful here. `sandbox-policy` can mount a seam
+    whose `confine()` refuses, because a refusal is a real answer. An agent with
+    no working directory is not.
     """
     seam = WorkspaceSeam(
         ctx=ctx,
@@ -2620,20 +2844,23 @@ async def apply(ctx: Context, config: Config) -> None:
 
 @plugin("workspace-reconcile", affects="environment", inject=[WORKSPACE])
 async def reconcile(ctx: Context, config: None) -> None:
-    """Run the seam's reconciliation whenever a stored session is read (F6).
+    """Run the reconciliation of the seam whenever a stored session is read (F6).
 
-    **On `session/loaded`, which the reader awaits** (`SessionStore.loaded` says why
-    not `session/created`), so a session is handed out with its crash already settled
-    and its `workspace/disposed` records ahead of anything the new start writes.
+    **It runs on `session/loaded`, which the reader awaits.**
+    `SessionStore.loaded` says why the event is not `session/created`. So a
+    session is handed out with its crash already settled, and with its
+    `workspace/disposed` records ahead of anything that the new start writes.
 
-    A tree git cannot remove and a log that cannot be written are answered inside the
-    seam (`_reclaim`, `session_written`), so what still raises is a bug — and the
-    reader logs it rather than refusing the open (`SessionStore.loaded`).
+    A tree that git cannot remove and a log that cannot be written are both
+    handled inside the seam (`_reclaim`, `session_written`). So anything that
+    still raises is a bug, and the reader logs it and does not refuse the open
+    (`SessionStore.loaded`).
     """
     seam = ctx.require(WORKSPACE)
-    # Catch-up, for the reason `session-persistence-jsonl` does the same: a row
-    # activated after sessions already exist owes them what a loaded one gets — and
-    # a failure is logged, as the reader would log it, rather than taking the row down.
+    # Catch-up, for the reason that `ph.persistence.protocol.attach` gives: a
+    # row that is activated after sessions already exist owes them what a loaded
+    # session gets. A failure is logged, as the reader would log it, and does
+    # not take the row down.
     for session in ctx.require(SESSIONS).list():
         try:
             await seam.reconcile(session)
@@ -2646,27 +2873,28 @@ async def reconcile(ctx: Context, config: None) -> None:
 async def checkpoint_policy(ctx: Context, config: None) -> None:
     """Take a restore point before every code run that has a workspace to save.
 
-    Around the *transport*, because a run is the unit that can be denied with work
-    already done (Q9a) — a native call that is denied never ran, so there is nothing
-    to restore it to. The transport is identified by the view's own
-    `transport_name`, since a profile may present it as `python`.
+    The row wraps the *transport*, because a run is the unit that can be denied
+    with work already done (Q9a). A native call that is denied never ran, so
+    there is nothing to restore it to. The transport is identified by the
+    `transport_name` of the view, because a profile may present it as `python`.
 
-    **Tier-agnostic since the capability became the seam's.** This was a git row
-    that cached git directories and asked a kind-keyed predicate, so a second tier
-    with restore points would have needed a second copy of the policy to get them —
-    and would have had to be added to that predicate to be allowed to. It now asks
-    the seam, and `subprocess` is gone from `inject` because nothing here spawns
-    anything any more.
+    **The row does not depend on a tier, since the capability became the
+    seam's.** This was a git row that cached git directories and asked a
+    predicate keyed by kind. A second tier with restore points would have needed
+    a second copy of the policy to get them, and it would have had to be added
+    to that predicate to be allowed to. The row now asks the seam. `subprocess`
+    is gone from `inject`, because nothing here spawns anything any more.
     """
 
     async def around(
         execution: ToolExecution,
         next_: Next[ToolExecutionResult],
     ) -> ToolExecutionResult:
-        # A failure here never blocks the run: a missing restore point is worse than
-        # no restore point only if it is believed in, and the log records which runs
-        # have one. The guard is inside the `try` on purpose — reading the tool view
-        # is itself a call that must not take a cell down.
+        # A failure here never blocks the run. A missing restore point is worse
+        # than no restore point only if somebody believes that it exists, and
+        # the log records which runs have one. The guard is inside the `try` on
+        # purpose: to read the tool view is itself a call that must not take a
+        # cell down.
         try:
             view = ctx.require(TOOLS).view(execution.scope)
             workspace = workspace_of(ctx, execution.agent)
@@ -2686,8 +2914,9 @@ async def checkpoint_policy(ctx: Context, config: None) -> None:
             log.warning("ph.seams.workspace: no restore point for this run", exc_info=True)
         return await next_()
 
-    # **Outermost** (F5), so the snapshot stays out of the cell's own
-    # `tools-timeout` budget, which is the model's, not the harness's. The
-    # checkpoint barrier makes the restore point durable before the cell runs
-    # whatever the order: it is on `tools/body`, after every wrapper.
+    # **Outermost** (F5), so the snapshot stays out of the `tools-timeout`
+    # budget of the cell. That budget belongs to the model and not to the
+    # harness. The checkpoint barrier makes the restore point durable before the
+    # cell runs, whatever the order: the barrier is on `tools/body`, after every
+    # wrapper.
     ctx.on("tools/execute", around, prepend=True)

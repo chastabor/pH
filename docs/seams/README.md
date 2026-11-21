@@ -39,7 +39,7 @@ than by replacing it.
 | [`ctx.sandbox`](sandbox.md) | `seams/sandbox.py` | Confinement, and the refusal to pretend. |
 | [`ctx.containment`](containment.md) | `seams/containment.py` | Which rung of the ladder this deployment asked for (E1, E8). |
 | [`ctx.code_runtime`](code_runtime.md) | `seams/code_runtime.py` | The seam definition only (P1-06, C1). |
-| [`ctx.workspace`](workspace.md) | `seams/workspace.py` | Where an agent's writes land, and how honestly that is stated. |
+| [`ctx.workspace`](workspace.md) | `seams/workspace.py` | Where an agent's writes land, and how accurately that is stated. |
 
 Providers, which register into the seams above rather than publishing their own
 key: `seams/sandbox_local.py` (bwrap and Seatbelt, P6-04/P6-40), `seams/sandbox_egress.py` (the

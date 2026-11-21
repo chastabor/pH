@@ -70,6 +70,7 @@ import pytest
 from ph.agent.types import AgentDriver
 from ph.cordis import DEPLOYMENT, Context, Profile, ProfileDocument
 from ph.keys import AGENTS, FS, SESSIONS
+from ph.llm.types import text_of
 from ph.paths import is_under
 from ph.seams.fs import (
     Config as FsConfig,
@@ -150,9 +151,9 @@ def test_a_dot_dot_write_at_the_worktree_tier_is_refused(tmp_path: Path) -> None
     than a security check means to ask. That makes it exactly as good as the path
     it is handed, and joining an unnormalized relative path onto the root handed
     it `<root>/../../../etc/cron.d/x`, which *starts with* the root. Every check
-    the `worktree` tier makes passed: no `workspace-write-scope` prompt, the
-    write landing outside the tree, and the log recording the relative spelling
-    that concealed it.
+    the `worktree` tier makes passed: no prompt from the `outside-workspace` rule
+    of `permissions-fs`, the write landing outside the tree, and the log
+    recording the relative spelling that concealed it.
 
     An absolute path is still passed through — refusing one here would be a
     confinement claim this layer cannot make (N2) — and that is why the escape
@@ -835,7 +836,8 @@ async def test_no_path_the_model_reads_names_the_machine(
     has no use for the outside of its workspace, so the outside does not appear.
 
     Asserted over `read`, `write` and `edit` together, because they were three
-    separate spellings of the same echo and only `glob`/`grep` were relative.
+    separate spellings of the same echo. The test below holds `glob` and `grep`
+    to the same form.
 
     Sabotage: return `str(target)` from any of the three, and the workspace root
     is in a result the model reads.
@@ -860,6 +862,41 @@ async def test_no_path_the_model_reads_names_the_machine(
     # keeps its absolute form, because that is not a name the workspace has.
     outside = tmp_path / "elsewhere.txt"
     assert ctx.require(FS).named(outside, agent=agent) == str(outside)
+
+
+async def test_a_search_names_its_files_the_way_the_other_tools_do(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """`glob` and `grep` answer in the form that `read` takes (A11/A12).
+
+    The two search tools passed on the absolute paths that the seam returns. A
+    search therefore put the directory of the run into the transcript, and
+    `read`, `write` and `edit` did not. A file outside the workspace keeps its
+    absolute form, as `FsService.named` says.
+
+    Sabotage: return `paths` unchanged from `glob_tool`, or the dumped match
+    from `grep_tool`, and the workspace root is in a result that the model reads.
+    """
+    project = tmp_path / "repo"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "x.py").write_text("needle = 1\n", encoding="utf-8")
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "y.py").write_text("needle = 2\n", encoding="utf-8")
+    ctx = await mount({"id": "fs", "config": {"root": str(project)}})
+    agent = ctx.require(AGENTS).create(ctx.require(SESSIONS).create("search"), FAKE_OPTIONS)
+
+    globbed = await run_tool(ctx, "glob", {"pattern": "**/*.py"}, agent=agent)
+    grepped = await run_tool(ctx, "grep", {"pattern": "needle"}, agent=agent, call_id="call-2")
+    beyond = await run_tool(
+        ctx, "glob", {"pattern": "*.py", "path": str(outside)}, agent=agent, call_id="call-3"
+    )
+
+    assert globbed.value == {"paths": ["src/x.py"], "truncated": False}
+    assert [match["path"] for match in grepped.value["matches"]] == ["src/x.py"]
+    for result in (globbed, grepped):
+        assert str(project) not in text_of(result.content), "a search named the machine"
+    assert beyond.value["paths"] == [str(outside / "y.py")]
 
 
 async def test_a_read_records_the_workspace_relative_name(

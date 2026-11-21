@@ -1,23 +1,26 @@
-"""`workspace-readonly-scratch` — the `sandbox` rung's workspace kind (P6-05, E3, E11).
+"""`workspace-readonly-scratch`: the workspace kind of the `sandbox` rung (P6-05, E3, E11).
 
-The one kind where the repository is genuinely unwritable, and the only one a tier
-below `sandbox` cannot fake. The agent's root is a directory inside its own
-scratch; the repository is readable at its own path and writable nowhere.
+This is the one kind where the repository is truly unwritable, and the only
+kind that a tier below `sandbox` cannot fake. The root of the agent is a
+directory inside its own scratch directory. The repository is readable at its
+own path and writable nowhere.
 
-**The workspace produces the policy; it does not enforce it.** `writable_roots`
-answers `(root, scratch)` and `workspace_policy` turns that into
-`SandboxPolicy(mode="workspace-write", …)`, so rooting at scratch is the whole
-mechanism — the repository is unwritable because it is not in the writable set.
-`ctx.shell` confines every command against that policy.
+**The workspace produces the policy. It does not enforce it.**
+`writable_roots` returns `(root, scratch)`, and `workspace_policy` turns that
+pair into the `workspace_root` and the `writable_extra` of a `SandboxPolicy`.
+So to root the workspace at the scratch directory is the whole mechanism: the
+repository is unwritable because it is not in the writable set. `ctx.shell`
+confines every command against that policy.
 
-Invariants this row holds:
+This row holds two invariants:
 
 * **It claims the rung only when a backend is mounted and enforcing.**
-  `repo_writable=False` is the one field §12 Q10 says must never be a statement of
-  intent, and without a kernel behind it, handing it out is E1's failure in the
-  field E1 is about.
-* **`access` does not widen the tier.** A caller asking `write` gets the kind too,
-  with `repo_writable=False` saying it did not get what it asked for.
+  `repo_writable=False` is the one field that §12 Q10 says must never be a
+  statement of intent. To hand it out without a kernel behind it is the
+  failure that E1 describes, in the field that E1 is about.
+* **`access` does not widen the tier.** A caller that asks for `write` gets
+  this kind too, and `repo_writable=False` says that it did not get what it
+  asked for.
 
 @module ph.seams.workspace_scratch
 """
@@ -41,9 +44,9 @@ __all__ = ["ReadonlyScratchProvider", "apply"]
 log = logging.getLogger("ph.seams.workspace_scratch")
 
 WORK_DIR = "work"
-"""The agent's root, a subdirectory of scratch so the redirected caches
-`redirection_env` points there are siblings of the work tree rather than litter
-inside it."""
+"""The root of the agent. It is a subdirectory of the scratch directory, so that
+the caches that `redirection_env` redirects there are siblings of the work tree
+and not litter inside it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +66,8 @@ class ReadonlyScratchProvider:
     ) -> Workspace:
         """A workspace rooted at scratch, whatever was asked for. Never declines.
 
-        The enforcement question is settled at registration, so there is no
-        per-acquire failure left for this to have.
+        The enforcement question is settled at registration, so no per-acquire
+        failure is left for this method.
         """
         root = scratch / WORK_DIR
         await anyio.to_thread.run_sync(lambda: root.mkdir(parents=True, exist_ok=True))
@@ -79,7 +82,7 @@ class ReadonlyScratchProvider:
 
 @plugin("workspace-readonly-scratch", affects="environment", inject=[WORKSPACE, SANDBOX])
 async def apply(ctx: Context, config: None) -> None:
-    """Claim the `sandbox` rung on `profile/mounted`, once a backend can enforce it."""
+    """Claim the `sandbox` rung on `profile/mounted`, if a backend can enforce it."""
     contribute(
         ctx,
         Diagnostic(
@@ -101,11 +104,12 @@ async def apply(ctx: Context, config: None) -> None:
 
 
 def _describe(ctx: Context) -> list[tuple[str, str]]:
-    """What `phern doctor` prints, read when it is asked rather than at mount.
+    """What `phern doctor` prints. It is read when doctor asks, not at mount.
 
-    Only the reason the rung is *not* held: whether it is, and what the backend
-    enforces, are already the Containment section's two rows, and a fact stated
-    twice is the drift `enforcement_of` exists to prevent.
+    It gives only the reason why the rung is *not* held. Whether the rung is
+    held, and what the backend enforces, are already the two rows of the
+    Containment section. A fact that is stated in two places can drift, and
+    `enforcement_of` exists to prevent that drift.
     """
     because = _unenforceable(ctx)
     return [("declined", because)] if because is not None else []
@@ -114,11 +118,11 @@ def _describe(ctx: Context) -> list[tuple[str, str]]:
 def _unenforceable(ctx: Context) -> str | None:
     """Why this rung cannot be claimed, or `None` if it can.
 
-    A sentence rather than a bool, because the diagnostic prints it: "why am I not
-    on the sandbox tier" is a question asked of the tool rather than of the source.
-    Deliberately the same threshold `ContainmentService.verify` applies — a partial
-    boundary is a refusal rather than a downgrade (E8) — so the two never disagree
-    about one backend.
+    The result is a sentence and not a bool, because the diagnostic prints it.
+    "Why am I not on the sandbox tier" is a question that a user asks of the
+    tool and not of the source. The threshold is deliberately the same one that
+    `ContainmentService.verify` applies: a partial boundary is a refusal and
+    not a downgrade (E8). So the two never disagree about one backend.
     """
     enforcement = enforcement_of(ctx)
     if enforcement is None:

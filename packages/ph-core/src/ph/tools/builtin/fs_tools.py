@@ -263,11 +263,26 @@ async def apply(ctx: Context, config: None) -> None:
         )
         return {"path": fs.named(args.path, agent=run.agent), "replacements": count}
 
+    def named(found: str, run: ToolRunContext, root: Path) -> str:
+        """A path that a walk found, as the model reads it: relative to the root
+        of the agent (`FsService.named`, A11/A12).
+
+        `fs.glob` and `fs.grep` return absolute paths, and these two tools
+        passed them on. `read`, `write` and `edit` already answered in the
+        relative form, so a search named the machine and the tools that act on
+        its results did not.
+        """
+        return fs.named(found, agent=run.agent, root=root)
+
     async def glob_tool(args: GlobArgs, run: ToolRunContext) -> dict[str, Any]:
         paths = await fs.glob(
             args.pattern, root=args.path, limit=GLOB_LIMIT, agent=run.agent, scope=run.scope
         )
-        return {"paths": paths, "truncated": len(paths) >= GLOB_LIMIT}
+        root = fs.root_for(run.agent)
+        return {
+            "paths": [named(path, run, root) for path in paths],
+            "truncated": len(paths) >= GLOB_LIMIT,
+        }
 
     async def grep_tool(args: GrepArgs, run: ToolRunContext) -> dict[str, Any]:
         matches = await fs.grep(
@@ -278,8 +293,11 @@ async def apply(ctx: Context, config: None) -> None:
             agent=run.agent,
             scope=run.scope,
         )
+        root = fs.root_for(run.agent)
         return {
-            "matches": [match.model_dump() for match in matches],
+            "matches": [
+                {**match.model_dump(), "path": named(match.path, run, root)} for match in matches
+            ],
             "truncated": len(matches) >= GREP_LIMIT,
         }
 

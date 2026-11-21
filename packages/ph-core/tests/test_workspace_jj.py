@@ -25,6 +25,7 @@ to the generic code.
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from ph.seams.workspace import (
     CHECKPOINT,
     ReclaimingProvider,
     WorkspaceRecord,
+    workspace_leaks,
     workspace_survivors,
 )
 from ph.seams.workspace_jj import _needs_the_tree
@@ -437,6 +439,77 @@ async def test_reclaim_recovers_a_crashed_childs_work_from_the_record_alone(
     code, out, err = await git(ctx, base, "show", "--stat", "ph/s1/a1")
     assert code == 0, err
     assert "unsaved.txt" in out
+
+
+async def test_reclaim_keeps_the_work_of_a_parent_that_spawned_a_child(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The data loss of `test_a_parent_that_spawned_a_child_still_keeps_its_own_work`,
+    on the path that nobody watches.
+
+    To freeze the work of a parent for a child leaves the `@` of the parent
+    empty, with the work in `@-`. An orderly release knew the fork point and
+    asked what the tree had done since. A crash reclaim has only the record, and
+    the record did not carry the fork point. So the reclaim asked "is `@`
+    non-empty", read the parent as a tree that had done nothing, deleted its
+    bookmark and removed the tree.
+
+    `workspace/acquired` now records the fork point, and the record that
+    reconciliation reads from the log carries it.
+
+    Sabotage: stop passing `fork=record.fork` in `reclaim` and answer `False`
+    for an empty tip with no fork in `_has_work`, as before. The reclaim then
+    reports `kept` as `False` and `git show` finds no branch.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
+    parent = await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="parent", base=base, access="write", session=session
+    )
+    (parent.root / "parent-work.txt").write_text("hours of it\n", encoding="utf-8")
+    # Spawning is what empties the tip of the parent.
+    await ctx.require(WORKSPACE).acquire(
+        session_id="s1", agent_id="child", base=parent.root, access="write", session=session
+    )
+    await ctx.require(WORKSPACE).dispose("child")
+
+    # The process dies here. Reconciliation has the log and nothing else.
+    (record,) = [one for one in workspace_leaks(session) if one.agent_id == "parent"]
+    assert record.fork, "the opening record does not say where the tree started"
+    kept = await ctx.require(WORKSPACE).provider.reclaim(record)
+
+    assert kept is True, "the parent was reclaimed as a tree that had done nothing"
+    assert not parent.root.exists()
+    code, out, err = await git(ctx, base, "show", "ph/s1/parent:parent-work.txt")
+    assert code == 0, err
+    assert out == "hours of it\n"
+
+
+async def test_reclaim_tells_an_idle_tree_from_one_it_cannot_judge(
+    mount: MountProfile, tmp_path: Path
+) -> None:
+    """The fork point makes the reclaim exact, and its absence makes it careful.
+
+    A tree that did nothing is reclaimed as nothing when the record says where
+    it started: the bookmark goes with the tree. A record with no fork point (a
+    crash before `workspace/acquired`, or a log from an older build) cannot
+    separate that tree from a parent whose work was frozen for a child, so the
+    bookmark is kept.
+    """
+    ctx, base = await _tiered(mount, tmp_path)
+    session = ctx.require(SESSIONS).create("s1")
+    for agent_id in ("known", "unknown"):
+        await ctx.require(WORKSPACE).acquire(
+            session_id="s1", agent_id=agent_id, base=base, access="write", session=session
+        )
+    records = {one.agent_id: one for one in workspace_leaks(session)}
+
+    assert await ctx.require(WORKSPACE).provider.reclaim(records["known"]) is False
+    assert await ctx.require(WORKSPACE).provider.reclaim(replace(records["unknown"], fork=None))
+    code, _, _ = await git(ctx, base, "rev-parse", "--verify", "--quiet", "refs/heads/ph/s1/known")
+    assert code != 0, "a tree that did nothing left a branch"
+    code, _, err = await git(ctx, base, "rev-parse", "--verify", "refs/heads/ph/s1/unknown")
+    assert code == 0, err
 
 
 async def test_reclaiming_a_tree_that_is_already_gone_says_so(

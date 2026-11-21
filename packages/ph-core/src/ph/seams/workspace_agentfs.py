@@ -1,41 +1,43 @@
-"""`workspace-agentfs` — a copy-on-write overlay as a second workspace provider (P6-21).
+"""`workspace-agentfs`: a copy-on-write overlay as a second workspace provider (P6-21).
 
-AgentFS presents the host tree as a **read-only base** and lands every change in a
-per-agent delta layer, so an agent gets an isolated view of the whole directory
-without a checkout.
+AgentFS presents the host tree as a **read-only base** and puts every change in
+a delta layer that belongs to one agent. So an agent gets an isolated view of
+the whole directory without a checkout.
 
-**It is a peer of `worktree`, not a rung above it.** A `mount`-based overlay does
-not confine the *process*: a command whose cwd is inside the mount can write to
-an absolute path outside it and the write lands on the host for real. Its honest
-columns are the worktree tier's verbatim — it bounds tool-mediated and
-relative-path writes, because both resolve against cwd, and does not bound an
-absolute-path raw write. So `tier` is `worktree` here, and the rung between
-`worktree` and `sandbox` is left for something that actually confines.
+**It is a peer of `worktree`, not a rung above it.** An overlay that is made
+with `mount` does not confine the *process*. A command whose cwd is inside the
+mount can write to an absolute path outside it, and the write really lands on
+the host. What the overlay bounds is exactly what the worktree tier bounds. It
+bounds tool-mediated writes and relative-path writes, because both resolve
+against the cwd. It does not bound a raw write to an absolute path. So `tier` is
+`worktree` here, and the rung between `worktree` and `sandbox` is left for
+something that really confines.
 
-**The one column that differs cuts against the overlay**: a relative write into a
-worktree *lands*, and git can see it; the same write into an overlay lands in the
-delta, so the agent believes work is durable that no one else will ever see.
-`discards_writes` is therefore true of `overlay-ephemeral`; an `overlay` keeps its
-delta so the work can be exported afterwards.
+**Where the overlay differs from a worktree, the difference counts against the
+overlay.** A relative write into a worktree *lands*, and git can see it. The
+same write into an overlay lands in the delta. So the agent believes that work
+is durable which nobody else will ever see. `discards_writes` is therefore true
+of `overlay-ephemeral`. An `overlay` keeps its delta so that the work can be
+exported afterwards.
 
-**`mount`, not `run`, and not `exec`.** `run` is the mode that would confine, and
-it is unavailable on any host with
-`kernel.apparmor_restrict_unprivileged_userns=1` (the Ubuntu 23.10+ default).
-`exec` mounts and runs in one shot, which would suit `acquire` exactly, and fails
-on a brand-new agent with nothing mounted. So this provider owns a mount lifecycle
-rather than wrapping a command.
+**The mode is `mount`, not `run` and not `exec`.** `run` is the mode that would
+confine. It is unavailable on any host with
+`kernel.apparmor_restrict_unprivileged_userns=1`, which is the default on
+Ubuntu 23.10 and later. `exec` mounts and runs in one step, which would suit
+`acquire` exactly. But it fails on a new agent that has nothing mounted. So this
+provider owns a mount lifecycle and does not wrap a command.
 
-**The probe gates registration, not acquisition**, and it asserts *isolation*
-rather than availability. `register_provider` is `claim_slot`: exclusive, so a row
-that claims the slot and then declines every `acquire` falls back to `shared` —
-advisory — and a deployment that asked for more isolation would silently get
-none. Availability is the wrong question anyway, because
-`agentfs run --experimental-sandbox` exits 0, prints nothing, and writes straight
-through to the host. The probe writes a canary through a throwaway overlay and
-registers only if the host copy is untouched.
+**The probe gates registration, not acquisition.** It also asserts *isolation*
+and not availability. `register_provider` is `claim_slot`, which is exclusive. A
+row that claimed the slot and then declined every `acquire` would fall back to
+`shared`, which is advisory. A deployment that asked for more isolation would
+silently get none. Availability is the wrong question in any case, because
+`agentfs run --experimental-sandbox` exits 0, prints nothing, and writes
+straight through to the host. The probe writes a canary through a throwaway
+overlay, and the row registers only if the host copy is untouched.
 
 **Nothing is ever installed.** A missing binary or an unavailable backend is a
-decline that says so, in `phern doctor`, through the diagnostics seam.
+decline. `phern doctor` reports it, through the diagnostics seam.
 
 @module ph.seams.workspace_agentfs
 """
@@ -99,38 +101,43 @@ log = logging.getLogger("ph.seams.workspace_agentfs")
 
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
-"""AgentFS refuses an id that is not alphanumeric, hyphen or underscore.
+"""AgentFS refuses an id that holds anything but alphanumerics, hyphens and
+underscores.
 
-Refuses, not sanitizes — `Invalid agent ID` is an error, not a warning — so the
-mapping happens here rather than being discovered at the first acquire.
+It refuses and does not sanitize: `Invalid agent ID` is an error and not a
+warning. So the mapping happens here, and is not discovered at the first
+acquire.
 """
 
 
 def fs_id(session_id: str, agent_id: str) -> str:
-    """One AgentFS id per (session, agent), inside its own alphabet."""
+    """One AgentFS id per (session, agent), in the characters that AgentFS accepts."""
     return _UNSAFE.sub("_", f"{session_id}-{agent_id}")
 
 
 def store_for(root: Path, session_id: str, agent_id: str) -> Path:
-    """Where one agent's delta and mountpoint live — the seam's `tree_path`, which is
-    where the worktree tiers put their checkouts too, so one lossy id→path mapping
-    serves every tier. `fs_id` next door is a genuinely different question, because
-    AgentFS refuses ids git would accept.
+    """Where the delta and the mountpoint of one agent live.
+
+    It is the `tree_path` of the seam, which is also where the git tier and the
+    jj tier put their checkouts. So one lossy mapping from id to path serves
+    every tier. `fs_id` answers a different question, because AgentFS refuses
+    ids that git would accept.
     """
     return tree_path(root, session_id, agent_id)
 
 
 async def open_overlay(ctx: Context, store: Path, identifier: str, mountpoint: Path) -> str:
-    """Mount one overlay. `""` when it is up, else the reason it is not.
+    """Mount one overlay. Return `""` when it is up, or else the reason why it is not.
 
-    **Both halves of the success rule, in one place.** A mount is up when the
-    command exited zero *and* something is actually mounted there — `agentfs run
-    --experimental-sandbox` is the standing reminder that an exit code alone
-    proves nothing — and the three callers that needed this were each spelling
-    the pair, and the two operator-facing strings, for themselves.
+    **Both halves of the success rule are in one place.** A mount is up when the
+    command exited zero *and* something is really mounted there.
+    `agentfs run --experimental-sandbox` shows that an exit code alone proves
+    nothing. Three callers needed this rule. Each of them wrote out the pair of
+    checks, and the two operator-facing strings, for itself.
 
-    A reason rather than an exception, because the three callers raise different
-    things: a probe result, a `WorkspaceDeclined`, an `ExportRefused`.
+    The answer is a reason and not an exception, because the three callers turn
+    it into different things: a probe result, a `WorkspaceDeclined`, and an
+    `ExportRefused`.
     """
     await anyio.to_thread.run_sync(lambda: mountpoint.mkdir(parents=True, exist_ok=True))
     code, _, err = await agentfs(ctx, store, "mount", identifier, str(mountpoint))
@@ -140,20 +147,21 @@ async def open_overlay(ctx: Context, store: Path, identifier: str, mountpoint: P
 
 
 async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, str, str]:
-    """One AgentFS invocation, through `ctx.subprocess` — never `os.system`.
+    """One invocation of `agentfs` or of an unmount tool, through `ctx.subprocess`.
+    It never goes through `os.system`.
 
-    `git`'s reasoning one module over: the seam scrubs the credential-shaped
-    environment (F1) and reaps the child in a `finally` (F4).
+    The reasons are those of `workspace_git.git`: the seam scrubs the
+    credential-shaped environment (F1) and reaps the child in a `finally` (F4).
 
-    `LC_ALL=C` because stderr is gettext-translated and the seam passes `LANG`
-    through, so a refusal reason read off a tool's words would otherwise depend on the
-    operator's locale.
+    `LC_ALL=C` is set because stderr is translated with gettext and the seam
+    passes `LANG` through. Without it, a refusal reason that is read from the
+    words of a tool would depend on the locale of the operator.
 
-    **`cwd` is load-bearing rather than incidental.** `agentfs init` writes its delta
-    database to `./.agentfs/<id>.db`, relative to the working directory — so where
-    this is run from decides where an agent's overlay is stored, and running it from
-    the agent's own directory is what keeps two agents' deltas apart on disk as well
-    as in the filesystem they see.
+    **`cwd` matters here.** `agentfs init` writes its delta database to
+    `./.agentfs/<id>.db`, relative to the working directory. So the directory
+    that this runs from decides where the overlay of an agent is stored. To run
+    it from the agent's own directory keeps the deltas of two agents apart on
+    disk, as well as in the filesystem that they see.
     """
     spec = SubprocessSpawnSpec(
         argv=(program, *args), cwd=cwd, env=ctx.require(SUBPROCESS).env(extra={"LC_ALL": "C"})
@@ -163,22 +171,23 @@ async def run(ctx: Context, program: str, cwd: Path, *args: str) -> tuple[int, s
 
 
 async def agentfs(ctx: Context, cwd: Path, *args: str) -> tuple[int, str, str]:
-    """One AgentFS invocation. `run` with the program named once."""
+    """One AgentFS invocation. It is `run`, with the program named in one place."""
     return await run(ctx, "agentfs", cwd, *args)
 
 
 async def unmount(ctx: Context, mountpoint: Path) -> bool:
-    """Drop a FUSE mount. `True` if the path is no longer mounted afterwards.
+    """Drop a FUSE mount. Return `True` if the path is no longer mounted afterwards.
 
-    `fusermount3` because that is what an unprivileged user has: `umount(8)`
-    needs `CAP_SYS_ADMIN` for anything that is not in `/etc/fstab`, and the whole
-    point of the FUSE path is that it needs no privilege. `fusermount` is the
-    same tool on a host still shipping FUSE 2 — the fallback that was here named
-    `umount`, which the sentence above says cannot work.
+    It uses `fusermount3` because that is what an unprivileged user has.
+    `umount(8)` needs `CAP_SYS_ADMIN` for anything that is not in `/etc/fstab`,
+    and the purpose of the FUSE path is that it needs no privilege.
+    `fusermount` is the same tool on a host that still ships FUSE 2. The
+    fallback that was here before named `umount`, which cannot work for the
+    reason above.
 
-    Not raising on failure, because this runs at teardown: a mount that will not
-    release is a leak worth logging and not a reason to fail a disposal that has
-    other work to do.
+    It does not raise on failure, because this runs at teardown. A mount that
+    will not release is a leak that is worth a log line. It is not a reason to
+    fail a disposal that has other work to do.
     """
     for argv in (("fusermount3", "-u", str(mountpoint)), ("fusermount", "-u", str(mountpoint))):
         if shutil.which(argv[0]) is None:
@@ -191,15 +200,15 @@ async def unmount(ctx: Context, mountpoint: Path) -> bool:
 
 
 async def is_mount(path: Path) -> bool:
-    """Whether a FUSE filesystem is actually mounted here.
+    """Whether a FUSE filesystem is really mounted here.
 
-    `os.path.ismount` rather than "does the directory have anything in it": an
-    empty base is legal, and a mount that failed silently leaves an empty
-    directory that reads exactly the same way.
+    It uses `os.path.ismount` and does not ask "does the directory have anything
+    in it". An empty base is legal, and a mount that failed silently leaves an
+    empty directory that reads in exactly the same way.
 
-    Off the event loop, because this is the one call in this module most likely
-    to block for real: it stats a FUSE mountpoint whose server may be wedged, and
-    everything cheaper here was already being threaded.
+    It runs off the event loop, because this is the one call in this module that
+    is most likely to block. It stats a FUSE mountpoint whose server may be
+    stuck. Everything cheaper in this module already ran in a thread.
     """
 
     def check() -> bool:
@@ -215,8 +224,8 @@ async def is_mount(path: Path) -> bool:
 class OverlayProbe:
     """What one canary run learned about this host.
 
-    A reason on both outcomes, because the interesting case for an operator is
-    the decline: "why am I on worktrees" is answerable only if the row that
+    Both outcomes carry a reason, because the interesting case for an operator
+    is the decline. "Why am I on worktrees" can be answered only if the row that
     declined said what it tried.
     """
 
@@ -225,17 +234,18 @@ class OverlayProbe:
 
 
 async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
-    """Write a canary through a throwaway overlay and see whether the host moved.
+    """Write a canary through a throwaway overlay and see whether the host copy changed.
 
-    **Isolation, not availability.** A backend can exit 0, print no error, and write
-    straight through to the host — sandboxing only its own mount — so a probe that
-    checked the exit code would claim the tier while the agent had none. This claims
-    the tier only if the host copy is unchanged after a write through the overlay.
+    **It tests isolation, not availability.** A backend can exit 0, print no
+    error, and write straight through to the host, because it sandboxes only its
+    own mount. A probe that checked the exit code would claim the tier while the
+    agent had no isolation. This probe reports isolation only if the host copy
+    is unchanged after a write through the overlay.
 
-    Runs once, at mount, because the answer is a property of the host: a kernel that
-    refuses namespaces or a FUSE backend that will not start does not change its mind
-    between agents, and re-probing per acquire is how a profile that declines pays for
-    the tier it is not using.
+    It runs one time, when the row is mounted, because the answer is a property
+    of the host. A kernel that refuses namespaces, or a FUSE backend that will
+    not start, gives the same answer for every agent. With a probe at each
+    acquire, a profile that declines would pay for a tier that it does not use.
     """
     if shutil.which("agentfs") is None:
         return OverlayProbe(False, "agentfs is not installed")
@@ -244,8 +254,8 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
     base, mount = work / "base", work / "mnt"
 
     def prepare() -> None:
-        # Defensive against a predecessor that died mid-probe; the `finally`
-        # below is what cleans up after *this* one.
+        # This guards against a predecessor that died in the middle of a probe.
+        # The `finally` below cleans up after *this* probe.
         shutil.rmtree(work, ignore_errors=True)
         base.mkdir(parents=True)
         (base / "canary").write_text("host", encoding="utf-8")
@@ -263,8 +273,8 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
         if refused:
             return OverlayProbe(False, refused)
         if await anyio.to_thread.run_sync(write_and_read) != "host":
-            # The `--experimental-sandbox` shape: the command succeeded and the
-            # host moved anyway. Refusing here is the whole point of the probe.
+            # The `--experimental-sandbox` case: the command succeeded and the
+            # host copy changed anyway. The probe exists to refuse this case.
             return OverlayProbe(False, "a write through the overlay reached the host")
         return OverlayProbe(True, "writes land in a delta layer; the host base is unchanged")
     except Exception as error:  # pragma: no cover - a host that fails in a new way
@@ -278,48 +288,45 @@ async def probe_overlay(ctx: Context, scratch: Path) -> OverlayProbe:
 
 @dataclass(slots=True)
 class AgentFsProvider:
-    """The `overlay` kind: one copy-on-write view of the tree per agent.
+    """The `overlay` kind: one copy-on-write view of the tree for each agent.
 
-    **Declares no `vcs`, on purpose** — see `ph.seams.changes`. The overlay's own
-    change log would be the obvious backend for the change filter, and it is
-    unreadable while the overlay is mounted, which is whenever an agent is using
-    it. What works instead is that the mountpoint serves the base's `.git`, so
-    the filter's probe finds git and git reports the delta layer's writes as the
-    uncommitted changes they are. Declaring `vcs` here would override that probe
-    and swap a working backend for an unreadable one.
+    **It declares no `vcs`, on purpose.** See `ph.seams.changes`. The change log
+    of the overlay itself looks like the obvious backend for the change filter.
+    But it cannot be read while the overlay is mounted, and the overlay is
+    mounted whenever an agent uses it. What works is this: the mountpoint serves
+    the `.git` of the base, so the probe of the filter finds git, and git
+    reports the writes in the delta layer as the uncommitted changes that they
+    are. A `vcs` declared here would override that probe, and would replace a
+    working backend with one that cannot be read.
     """
 
     ctx: Context
     root: Path
-    """Where deltas and mountpoints live — `$PH_HOME/overlays/<session>/<agent>`,
-    outside the tree being overlaid, so a mountpoint is never itself a candidate
-    for the walk the agent runs over its own workspace."""
-    probe: OverlayProbe | None = None
-    """What the registration probe found, kept so nobody has to re-run it.
-
-    On the provider because `apply` has already paid for it and the answer is a
-    property of the host: a caller that wants to explain why the overlay is or is
-    not in use should read this rather than mounting a second throwaway one.
-    """
+    """Where deltas and mountpoints live: `$PH_HOME/overlays/<session>/<agent>`.
+    It is outside the tree that is overlaid. So a mountpoint is never itself a
+    candidate for the walk that the agent runs over its own workspace."""
     tier: ContainmentTier = field(default="worktree", init=False)
     """**A peer of the worktree tier, not a rung above it.**
 
-    An overlay bounds exactly what a worktree bounds — writes that resolve against cwd
-    — and misses exactly what a worktree misses, an absolute-path raw write. The rung
-    between `worktree` and `sandbox` belongs to something that confines the process;
-    naming it here would make `phern doctor` overstate this.
+    An overlay bounds exactly what a worktree bounds: writes that resolve
+    against the cwd. It misses exactly what a worktree misses: a raw write to an
+    absolute path. The rung between `worktree` and `sandbox` belongs to
+    something that confines the process. To name that rung here would make
+    `phern doctor` overstate this tier.
     """
 
     def describe_tier(self) -> TierDescription:
-        """What an overlay actually bounds — which is not what its rung's row says.
+        """What an overlay really bounds, which is not what the stock row of its rung says.
 
-        `bounds` is the worktree tier's verbatim, which is the measured result rather
-        than a convenience. The other two columns are where the rung's stock text was
-        false: an overlay's writes reach nobody until somebody exports them, and
-        `TIERS["worktree"]` sells "per-run checkpoints, /revert", which an overlay has
-        none of — `write-tree` against a FUSE mountpoint has nothing to hash, so no
-        restore point is ever written. Advertising a mechanism the mounted tier does not
-        have, in the one place a person looks to check, is the failure E1 is about.
+        `bounds` is the text of the worktree tier, word for word. That is the
+        measured result and not a convenience. The other two columns are where
+        the stock text of the rung was false. The writes of an overlay reach
+        nobody until somebody exports them. And `TIERS["worktree"]` offers
+        "per-run checkpoints, /revert", and an overlay has neither. `write-tree`
+        against a FUSE mountpoint has nothing to hash, so no restore point is
+        ever written. To advertise a mechanism that the mounted tier does not
+        have, in the one place where a user looks to check, is the failure that
+        E1 exists to prevent.
         """
         return TierDescription(
             bounds=TIERS["worktree"].bounds,
@@ -336,17 +343,19 @@ class AgentFsProvider:
         )
 
     async def refs(self, base: Path) -> list[str]:
-        """`ArtifactProvider`, and only that — an overlay leaves refs, not checkouts.
+        """`ArtifactProvider`, and only that. An overlay leaves refs, not checkouts.
 
-        **An overlay's artifact is a git branch like anyone else's**: `export_overlay`
-        builds one out of the delta, and `export`'s closing sentence tells a person to
-        merge it with `/workspaces merge`. So this tier answers the ref verbs, or that
-        sentence names a command that refuses.
+        **The artifact of an overlay is a git branch, like that of any other
+        tier.** `export_overlay` builds one from the delta, and the reply of
+        `/workspaces export` tells the user to merge it with
+        `/workspaces merge`. So this tier answers the ref verbs. Otherwise that
+        reply would name a command that refuses.
 
-        It does *not* implement `EnumeratingProvider`, and that is the reason the two
-        are separate Protocols: a mountpoint is not a checkout `/workspaces` can hand
-        back. This tier used to say so by writing two stubs, which `isinstance` could
-        not tell from a tier that meant them.
+        The tier does *not* implement `EnumeratingProvider`, which holds
+        `strays` and `discard`. That is the reason why the two are separate
+        Protocols. A mountpoint is not a checkout that `/workspaces` can hand
+        back. This tier used to say so with two stubs, and `isinstance` could
+        not tell those stubs from the methods of a tier that meant them.
         """
         return await list_branches(self.ctx, base)
 
@@ -357,12 +366,14 @@ class AgentFsProvider:
         return await merge_branch(self.ctx, base, ref)
 
     def locate(self, *, session_id: str, agent_id: str, access: WorkspaceAccess) -> WorkspaceSite:
-        """Where this agent's overlay is mounted — `LocatingProvider`.
+        """Where the overlay of this agent is mounted. `LocatingProvider`.
 
-        The mountpoint, not the store: `root` is what a record names and what
-        `reclaim` reads, and the delta is its parent. Said first because this tier's
-        acts are the ones a crash leaves worst — a FUSE mount outlives the process
-        that made it, and one no record named was never unmounted.
+        The site is the mountpoint and not the store. `root` is what a record
+        names and what `reclaim` reads, and the delta is in its parent. The
+        site is stated before the tier acts, because the acts of this tier are
+        the ones that a crash leaves in the worst state. A FUSE mount outlives
+        the process that made it, and a mount that no record named was never
+        unmounted.
         """
         return WorkspaceSite(
             root=store_for(self.root, session_id, agent_id) / "mnt",
@@ -380,17 +391,19 @@ class AgentFsProvider:
     ) -> Workspace | None:
         """A private view of `base` for this agent, or a named decline.
 
-        **`write` and `read` split exactly as the worktree tier splits them.** A writer
-        keeps its delta at release so the work can be exported onto a branch; a reader's
-        delta is thrown away. That mapping is the whole reason `write` is servable at all
-        — an overlay with no merge-back would hand a root agent a tree whose work
-        silently evaporates.
+        **`write` and `read` divide exactly as the worktree tier divides them.**
+        A writer keeps its delta at release, so that the work can be exported
+        onto a branch. The delta of a reader is discarded. That mapping is the
+        only reason why `write` can be served at all. An overlay with no way to
+        merge back would give a root agent a tree whose work silently
+        disappears.
 
-        **The base commit is recorded here, not at export**, and that is what makes the
-        export a real merge rather than an overwrite: a branch rooted at whatever `HEAD`
-        happens to be when somebody exports would present the agent's work as though it
-        had been written against a tree it never saw. Nothing to record when the base is
-        not a repository — `export_overlay` refuses those, and says so.
+        **The base commit is recorded here, not at export.** That makes the
+        export a real merge and not an overwrite. A branch rooted at whatever
+        `HEAD` is when somebody exports would present the work of the agent as
+        though it had been written against a tree that the agent never saw.
+        There is nothing to record when the base is not a repository.
+        `export_overlay` refuses such an overlay, and says so.
         """
         site = self.locate(session_id=session_id, agent_id=agent_id, access=access)
         identifier = fs_id(session_id, agent_id)
@@ -410,16 +423,17 @@ class AgentFsProvider:
             root=mount,
             scratch=scratch,
             kind=site.kind,
-            # True, and for `worktree-ephemeral`'s reason: the agent writes the
-            # whole tree freely. That the writes reach nobody is `kind`'s job to
-            # say, not this flag's — `False` here would be a confinement claim
-            # only a sandbox backend can make.
+            # True, for the same reason as `worktree-ephemeral`: the agent
+            # writes the whole tree freely. That the writes reach nobody is for
+            # `kind` to say, not for this flag. `False` here would be a
+            # confinement claim that only a sandbox backend can make.
             repo_writable=True,
             env=redirection_env(scratch),
-            # `discards_writes(kind)`, not a flag derived from `access` again: the
-            # seam's own predicate is what the retention policy reads, and spelling
-            # the rule a second way here is how the two come to disagree. Every tier
-            # releases this way.
+            # `discards_writes(kind)`, and not a flag derived from `access` a
+            # second time. The retention policy reads the predicate of the
+            # seam, and a second spelling of the rule here is how the two would
+            # come to disagree. The git tier and the jj tier release in the
+            # same way.
             release=lambda workspace: self._release(
                 store, discard=discards_writes(workspace.kind) and not workspace.retained
             ),
@@ -428,9 +442,10 @@ class AgentFsProvider:
     async def _record_base(self, store: Path, base: Path) -> None:
         """Remember where this overlay came from, if it came from a repository.
 
-        Gated on a `stat` rather than asked of git unconditionally: on a base that
-        is not a repository the spawn fails just as slowly as it succeeds, which is a
-        process per agent bought on the one branch where it can return nothing.
+        A `stat` gates the call, and git is not asked unconditionally. On a
+        base that is not a repository, the spawn fails as slowly as it
+        succeeds. That would be one process per agent, spent on the one branch
+        where the call can return nothing.
         """
         if not await anyio.to_thread.run_sync((base / ".git").exists):
             return
@@ -442,13 +457,13 @@ class AgentFsProvider:
         )
 
     async def export(self, record: WorkspaceRecord) -> str:
-        """Assemble this overlay's delta into a branch, and name it.
+        """Assemble the delta of this overlay into a branch, and return its name.
 
-        The record locates everything: `root` is the mountpoint, so the delta is
-        its parent, and the repository and commit were written beside it at
-        acquire. The branch is named the way the worktree tier names its own, so
-        an operator reading `git branch` after the fact cannot tell which tier
-        produced which — and does not need to.
+        The record locates everything. `root` is the mountpoint, so the delta
+        is in its parent, and the repository and the commit were written beside
+        it at acquire. The branch is `ph/<session>/<agent>`, which is how the
+        worktree tier names its own. An operator who reads `git branch` later
+        cannot tell which tier produced which branch, and does not need to.
         """
         return await export_overlay(
             self.ctx,
@@ -458,16 +473,17 @@ class AgentFsProvider:
         )
 
     async def _release(self, store: Path, *, discard: bool) -> bool:
-        """Drop the mount, and the delta with it unless the tree is evidence.
+        """Drop the mount. Remove the delta too, unless the tree is evidence.
 
-        Unmounting always, keeping conditionally: a live FUSE mount outlives the
-        process that made it, so leaving one behind leaks a mount table entry and
-        a server process, where leaving a delta database behind costs disk. The
-        two are not the same kind of leak and are not decided together.
+        The mount always goes, and the delta is kept conditionally. A live FUSE
+        mount outlives the process that made it, so a mount left behind leaks a
+        mount table entry and a server process. A delta database left behind
+        costs disk. The two are not the same kind of leak, and they are not
+        decided together.
 
-        `retained` is read off the workspace at teardown rather than captured at
-        acquire, for P6-28's reason: whether this tree is evidence depends on how
-        the agent *ended*, which nobody knows when it starts.
+        `retained` is read from the workspace at teardown and is not captured
+        at acquire, for the reason of P6-28: whether this tree is evidence
+        depends on how the agent *ended*, and nobody knows that when it starts.
         """
         mount = store / "mnt"
         if not await unmount(self.ctx, mount):
@@ -479,22 +495,24 @@ class AgentFsProvider:
         return False
 
     async def reclaim(self, record: WorkspaceRecord) -> bool:
-        """Release an overlay this process never acquired (F6).
+        """Release an overlay that this process never acquired (F6).
 
-        **Without this the leak is reported forever and never closed.** An overlay folds
-        into `workspace_survivors` like any fresh-root kind, so reconciliation finds the
-        pair — and then `isinstance(provider, ReclaimingProvider)` is False, so it logs
-        "no mounted tier can reclaim" and leaves the pair open for every future session to
-        report again, while the retention summary goes on telling people to run a `gc`
-        that collects nothing.
+        **Without this method the leak is reported forever and never closed.**
+        An overlay folds into `workspace_survivors` like any fresh-root kind, so
+        reconciliation finds the pair. Without `reclaim`,
+        `isinstance(provider, ReclaimingProvider)` would be False. The seam
+        would log "no mounted tier can reclaim" and leave the pair open for
+        every future session to report again. The retention summary would
+        continue to tell users to run a `gc` that collects nothing.
 
-        Worse here than for a checkout: a crash skips `_release` entirely, and a live FUSE
-        mount outlives the process that made it — so what is left behind is a mount table
-        entry and a server, not a directory.
+        It is worse here than for a checkout. A crash skips `_release`
+        entirely, and a live FUSE mount outlives the process that made it. So
+        what is left behind is a mount table entry and a server, and not a
+        directory.
 
-        The record locates itself: `root` is the mountpoint, so the delta is its parent.
-        Same disposal policy as an orderly release, for the reason the worktree tier
-        gives.
+        The record locates itself: `root` is the mountpoint, so the delta is in
+        its parent. The disposal policy is the same as that of an orderly
+        release, for the reason that the worktree tier gives.
         """
         return await self._release(
             Path(record.root).parent,
@@ -506,26 +524,27 @@ class Config(WireModel):
     """Row config for the overlay provider."""
 
     root: str | None = None
-    """Where deltas and mountpoints live. `$PH_HOME/overlays` by default, and
-    outside the tree being overlaid for the same reason a worktree is outside the
-    repository: a mountpoint inside `base` would be walked by the agent's own
-    `glob` and nested one level deeper by every child."""
+    """Where deltas and mountpoints live. The default is `$PH_HOME/overlays`.
+    It is outside the tree that is overlaid, for the same reason that a
+    worktree is outside the repository: the agent's own `glob` would walk a
+    mountpoint inside `base`, and every child would nest it one level deeper."""
 
 
 @plugin("workspace-agentfs", affects="environment", inject=[WORKSPACE, SUBPROCESS], config=Config)
 async def apply(ctx: Context, config: Config) -> None:
     """Probe the host, and claim the workspace slot only if the overlay isolates.
 
-    **The probe gates registration, not acquisition**, which is easy to get
-    backwards and expensive when it is. `register_provider` is `claim_slot`:
-    exclusive, one provider. A row that took the slot and then declined every
-    acquire would not fall back to the worktree tier — it would fall back to
-    `shared`, which is advisory, so a deployment that asked for *more* isolation
-    would silently end up with none.
+    **The probe gates registration, not acquisition.** This is easy to get
+    backwards, and the mistake is expensive. `register_provider` is
+    `claim_slot`: exclusive, one provider. A row that took the slot and then
+    declined every acquire would not fall back to the worktree tier. It would
+    fall back to `shared`, which is advisory. So a deployment that asked for
+    *more* isolation would silently end up with none.
 
-    The result reaches `phern doctor` either way, because "why am I on worktrees" is
-    a question a person asks of the tool rather than of the source, and a row that
-    declined without saying so is indistinguishable from a row nobody mounted.
+    The result reaches `phern doctor` in both cases. "Why am I on worktrees" is
+    a question that a user asks of the tool and not of the source. And a row
+    that declined without saying so cannot be told apart from a row that nobody
+    mounted.
     """
     root = default_home_path(config.root, "overlays")
     result = await probe_overlay(ctx, root / "probe")
@@ -538,9 +557,10 @@ async def apply(ctx: Context, config: Config) -> None:
             read=lambda: [
                 ("isolates", "yes" if result.isolates else "no"),
                 ("because", result.because),
-                # The tier's honest columns live in the Containment section now,
-                # through `describe_tier` — a caveat repeated in a second section
-                # is the drift `TIERS`'s own docstring warns about.
+                # The accurate columns of the tier are in the Containment
+                # section now, through `describe_tier`. A caveat that is
+                # repeated in a second section is the drift that the docstring
+                # of `TIERS` warns about.
             ],
             order=30,
         ),
@@ -548,55 +568,61 @@ async def apply(ctx: Context, config: Config) -> None:
     if not result.isolates:
         log.info("ph.seams.workspace_agentfs: declining — %s", result.because)
         return
-    ctx.require(WORKSPACE).register_provider(AgentFsProvider(ctx=ctx, root=root, probe=result))
+    ctx.require(WORKSPACE).register_provider(AgentFsProvider(ctx=ctx, root=root))
 
 
 ORIGIN = "origin"
-"""Filename holding where an overlay came from: the repository, then the commit.
+"""The name of the file that says where an overlay came from: the repository,
+then the commit.
 
-Beside the delta rather than on the `Workspace`, because export happens *after*
-release — the value has to outlive the object, and on a crash it has to outlive
-the process. Two lines of text next to the database they describe.
+It is beside the delta and not on the `Workspace`, because export happens
+*after* release. The value must outlive the object, and after a crash it must
+outlive the process. It is two lines of text next to the database that they
+describe.
 
-**Both facts, not just the commit.** Export is reached from a `WorkspaceRecord`,
-whose `root` is the mountpoint and which has never carried the tree the overlay
-was taken from; without the repository written down here, the one caller that
-matters cannot ask. The commit alone was enough only while the sole caller was a
-test that already had the path in hand.
+**It holds both facts, not only the commit.** Export is reached from a
+`WorkspaceRecord`. The `root` of that record is the mountpoint, and the record
+has never carried the tree that the overlay was taken from. Without the
+repository written down here, the one caller that matters cannot ask. The
+commit alone was enough only while the sole caller was a test that already had
+the path.
 """
 
 _DIFF_LINE = re.compile(r"^([AMD]) (\w) (/.*)$")
-"""`agentfs diff`'s rows: an operation, a type, and an absolute path in the overlay.
+"""A row of `agentfs diff`: an operation, a type, and an absolute path in the overlay.
 
-**Any type letter, not a list of the ones known when this was written.** A row
-that does not match is a row that is not there, so a narrower pattern drops
-whatever AgentFS learns to report next — silently. `_apply` refuses a letter it
-does not understand instead, which turns a new type into a refusal naming it
-rather than into work that quietly fails to arrive.
+**The pattern accepts any type letter, not a list of the letters that were
+known when this was written.** A row that does not match is treated as absent.
+So a narrower pattern would silently drop whatever AgentFS learns to report
+next. `_apply` refuses a letter that it does not understand. That turns a new
+type into a refusal that names it, and not into work that quietly fails to
+arrive.
 """
 
 
 ExportRefusal: TypeAlias = Literal[
     "no-base-commit", "not-a-repository", "branch-exists", "nothing-to-export", "git", "overlay"
 ]
-"""Why an export could not run, as a code rather than prose.
+"""Why an export could not run, as a code and not as prose.
 
-`DeclineReason`'s argument, for the operation next door: a caller that has to
-branch on the answer cannot parse an English sentence. A vocabulary of its own
-rather than members bolted onto `DeclineReason`, because the one name they would
-have shared already means something else there — the worktree tier's
-`branch-in-use` is "a checkout holds this branch", and this one's is "the ref
-exists at all". One code with two meanings is worse than two codes.
+The argument is that of `DeclineReason`, applied to the operation beside it: a
+caller that must branch on the answer cannot parse an English sentence. This is
+a vocabulary of its own, and its members are not added to `DeclineReason`. The
+one name that they would have shared already means something else there. The
+`branch-in-use` of the worktree tier means "a checkout holds this branch". The
+`branch-exists` here means "the ref exists at all". One code with two meanings
+is worse than two codes.
 """
 
 
 class ExportRefused(Exception):
-    """An overlay's work cannot be put on a branch, and why.
+    """The work of an overlay cannot be put on a branch, and why.
 
-    A named reason for `WorkspaceDeclined`'s reason: an export that failed
-    without saying whether the base was not a repository, the branch was taken,
-    or the delta was already discarded leaves an operator with work they can see
-    in a database and no idea how to get it out.
+    It carries a named reason, for the same reason that `WorkspaceDeclined`
+    does. A failed export could mean that the base was not a repository, that
+    the branch was taken, or that the delta was already discarded. An export
+    that did not say which would leave an operator with work that is visible in
+    a database, and with no idea how to get it out.
     """
 
     def __init__(self, message: str, *, reason: ExportRefusal) -> None:
@@ -605,27 +631,29 @@ class ExportRefused(Exception):
 
 
 async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str) -> str:
-    """Put an overlay's delta on a git branch rooted at the commit it was taken from.
+    """Put the delta of an overlay on a git branch rooted at the commit it was taken from.
 
-    **Git detects the conflicts, and that is the whole design.** Comparing file mtimes
-    and refusing when a target has moved underneath is a worse `git merge` written by
-    hand: it cannot tell an edit to a different function from an edit to the same
-    line, so it refuses work that would have merged cleanly and accepts work that
-    silently loses somebody's. Rooting a branch at `base-commit` and committing the
-    delta onto it hands the question to a three-way merge, and leaves the operator a
-    branch — which is what the worktree tier gives them, so the merge-back story is
-    one story rather than two.
+    **Git detects the conflicts, and the design rests on that.** To compare
+    file mtimes and refuse when a target has changed underneath is a worse
+    `git merge`, written by hand. It cannot tell an edit to a different
+    function from an edit to the same line. So it refuses work that would have
+    merged cleanly, and it accepts work that silently loses the work of
+    somebody else. To root a branch at the base commit and commit the delta
+    onto it gives the question to a three-way merge. It also leaves the
+    operator a branch, which is what the worktree tier gives. So there is one
+    way to merge work back and not two.
 
-    **Deliberate, never on release**: disposal is for ending things, not for applying
-    them (P6-28).
+    **It is deliberate, and it never runs on release.** Disposal is for ending
+    things, not for applying them (P6-28).
 
-    **Two phases, because `diff` and the mount cannot coexist.** The delta database
-    takes a single writer, so `agentfs diff` fails with a locking error while the
-    overlay is mounted. The changeset is read first, unmounted, and the content copied
-    afterwards through a temporary mount — which also keeps the copy binary-safe,
-    where `agentfs fs cat` would round-trip every file through a text pipe.
+    **There are two phases, because `diff` and the mount cannot coexist.** The
+    delta database takes a single writer, so `agentfs diff` fails with a
+    locking error while the overlay is mounted. The changeset is read first,
+    while the overlay is not mounted. The content is copied afterwards, through
+    a temporary mount. That also keeps the copy binary-safe, where
+    `agentfs fs cat` would send every file through a text pipe and back.
 
-    Returns the branch it created. The caller merges it, or does not.
+    Returns the branch that it created. The caller merges it, or does not.
     """
     origin = store / ORIGIN
     if not await anyio.to_thread.run_sync(origin.is_file):
@@ -634,8 +662,9 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
             "to root a branch at",
             reason="no-base-commit",
         )
-    # Line-wise, matching how `_record_base` writes it — and refusing rather
-    # than raising `IndexError` on a file some older build truncated (J5).
+    # Read line by line, to match how `_record_base` writes it. A file that
+    # some older build truncated is refused, and does not raise `IndexError`
+    # (J5).
     recorded = (await anyio.to_thread.run_sync(origin.read_text)).splitlines()
     if len(recorded) != 2:
         raise ExportRefused(
@@ -665,12 +694,12 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
     if code != 0:
         raise ExportRefused(first_line(err) or "could not create the export branch", reason="git")
 
-    # **One owner for the checkout's whole life.** The removal was written at
-    # two exits and missing from a third: an `_apply` that raised left both the
-    # worktree *and* the branch behind, and the branch's existence then made
-    # every retry refuse `branch-exists` — while `git branch -D` refused too,
-    # because a registration still pointed at the tree. The operator was told to
-    # "merge or delete it" and could do neither.
+    # **One owner for the whole life of the checkout.** The removal used to be
+    # written at two exits and was missing from a third. An `_apply` that
+    # raised left both the worktree *and* the branch behind. The existing
+    # branch then made every retry refuse with `branch-exists`. `git branch -D`
+    # refused too, because a registration still pointed at the tree. The
+    # operator was told to "merge or delete it" and could do neither.
     try:
         mount = store / "export-mnt"
         refused = await open_overlay(ctx, store, identifier, mount)
@@ -685,16 +714,17 @@ async def export_overlay(ctx: Context, *, store: Path, identifier: str, ref: str
         await git(ctx, tree, "add", "-A")
         await git(ctx, tree, *COMMIT_AS_PH, "-m", f"{ref}: overlay export")
     finally:
-        # The worktree goes, the branch stays — the branch *is* the deliverable,
-        # and a checkout left behind is both a second copy of work that now lives
-        # in git and a registration that wedges the branch.
+        # The worktree goes and the branch stays. The branch *is* the
+        # deliverable. A checkout left behind is a second copy of work that is
+        # now in git, and also a registration that blocks the branch.
         with releasing():
             await git(ctx, repo, "worktree", "remove", "--force", str(tree))
     return ref
 
 
 async def _changeset(ctx: Context, store: Path, identifier: str) -> list[tuple[str, str, str]]:
-    """`agentfs diff`, parsed. Unmounted only — the database takes one writer."""
+    """`agentfs diff`, parsed. It works only while the overlay is not mounted,
+    because the database takes one writer."""
     code, out, err = await agentfs(ctx, store, "diff", identifier)
     if code != 0:
         raise ExportRefused(
@@ -711,11 +741,11 @@ async def _changeset(ctx: Context, store: Path, identifier: str) -> list[tuple[s
 def _apply(changes: list[tuple[str, str, str]], mount: Path, tree: Path) -> None:
     """Copy one changeset out of a mounted overlay and into a checkout.
 
-    Deletions last, so a path that is removed and re-added lands in that order,
-    and ascending within each group so an `A d` exists before its entries do.
-    A `D d` therefore runs *before* the files beneath it, which is harmless:
-    `rmtree` takes the subtree and the child's `unlink(missing_ok=True)` is then
-    a no-op.
+    Deletions come last, so a path that is removed and re-added lands in that
+    order. Within each group the paths ascend, so an `A d` exists before its
+    entries do. A `D d` therefore runs *before* the files beneath it. That is
+    harmless: `rmtree` takes the subtree, and the `unlink(missing_ok=True)` of
+    the child then does nothing.
     """
     for operation, entry, relative in sorted(changes, key=lambda row: (row[0] == "D", row[2])):
         target = tree / relative
@@ -735,9 +765,10 @@ def _apply(changes: list[tuple[str, str, str]], mount: Path, tree: Path) -> None
                 reason="overlay",
             )
         target.parent.mkdir(parents=True, exist_ok=True)
-        # `follow_symlinks=False`, which `workspace_provision` next door calls
-        # "the load-bearing argument": the default copies a symlink as a *copy of
-        # its target* and raises outright on a dangling one, so an export would
-        # flatten links it should preserve and abort on links it should carry.
-        # With it, `l` and `f` need no separate branch — the link is recreated.
+        # `follow_symlinks=False` matters here, and `workspace_provision`
+        # copies with the same argument. The default copies a symlink as a
+        # *copy of its target* and raises on a dangling one. An export would
+        # then flatten links that it should preserve and abort on links that
+        # it should carry. With the argument, `l` and `f` need no separate
+        # branch, because the link is recreated.
         shutil.copy2(mount / relative, target, follow_symlinks=False)

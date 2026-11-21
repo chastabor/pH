@@ -1,35 +1,38 @@
-"""`ctx.containment` — which rung of the ladder this deployment asked for (E1, E8).
+"""`ctx.containment`: which rung of the ladder this deployment asked for (E1, E8).
 
-§4.8's ladder is `advisory` → `worktree` → `sandbox`, and every rung has been
-built: the seam and its fallback (P4-07), the git tier (P4-08), provisioning and
-`/workspaces` (P4-08b), restore points (P4-09), the default write scope (P4-10).
-None of it is *in force* until something chooses, and this is the choosing.
+The ladder of §4.8 is `advisory` → `worktree` → `sandbox`, and every rung has
+been built: the seam and its fallback (P4-07), the git tier (P4-08),
+provisioning and `/workspaces` (P4-08b), restore points (P4-09), and the
+default write scope (P4-10). None of it is *in force* until something chooses.
+This row makes that choice.
 
-**Two tiers, because the interesting default is not uniform.** A person running
-`rlm` is working in their own checkout and would be surprised to find their
-agent editing a copy somewhere else — so the root agent stays `advisory`. Its
-*children* are the fan-out hazard the tier exists for: eight of them writing one
-tree concurrently is the case §4.8 opens with, so `child_tier` defaults to
-`worktree`. One knob would have forced the wrong answer on one of them.
+**There are two tier settings, because the useful default is not uniform.** A
+user who runs `rlm` works in their own checkout and would be surprised to find
+their agent editing a copy somewhere else. So the root agent stays `advisory`.
+Its *children* are the fan-out hazard that the tier exists for: eight children
+that write one tree at the same time are the case that §4.8 opens with. So the
+`rlm` bundle sets `child_tier` to `worktree`. One setting would have forced the
+wrong answer on one of the two.
 
 **Selection is per acquire, not per mounted row.** The provider is registered
-whenever its row is layered; what `tier` decides is whether a given caller
-*asks* for it. That keeps one provider slot (two answers to "what runs this" is
-a contradiction) while letting a parent and its children sit on different rungs,
-and it is why `WorkspaceSeam.acquire` takes a tier rather than this module
-deciding which rows exist.
+whenever its row is layered and, for a tier that probes its host, the probe
+passes. `tier` decides whether a given caller *asks* for it. That keeps one
+provider slot, because two answers to "what runs this" is a contradiction. It
+also lets a parent and its children be on different rungs. It is the reason why
+`WorkspaceSeam.acquire` takes a tier and this module does not decide which rows
+exist.
 
-**`strict` refuses to start, and refuses on `partial`.** dsh's fail-closed
-`SANDBOX_UNAVAILABLE` posture, lifted from per-call to profile start (Q10). An
-operator who sets it is saying "I do not want to run at all unless confinement
-is real", so a `partial` backend is a refusal rather than a downgrade to accept
-quietly — the whole point being that a downgrade nobody notices is
-indistinguishable from the thing they were trying to prevent.
+**`strict` refuses to start, and it refuses on `partial`.** This is the
+fail-closed `SANDBOX_UNAVAILABLE` posture of dsh, moved from each call to
+profile start (Q10). An operator who sets it says "I do not want to run at all
+unless confinement is real". So a `partial` backend is a refusal and not a
+downgrade to accept quietly. A downgrade that nobody notices cannot be told
+from the thing that the operator tried to prevent.
 
-The check runs **after** the profile is mounted rather than inside this row's
-`apply`, because a backend may be layered after this row and a verdict computed
-at mount would be the wrong one for exactly the profile that orders things that
-way — the same reasoning E9's live `reach` sentence is built on.
+The check runs **after** the profile is mounted and not inside the `apply` of
+this row. A backend may be layered after this row, and a verdict computed at
+mount would be wrong for exactly the profile that orders its rows that way.
+The live `reach` sentence of E9 is built on the same reasoning.
 
 @module ph.seams.containment
 """
@@ -62,23 +65,23 @@ STRICT_REFUSAL = (
     "Mount a sandbox backend (sandbox-local, P6-04) and set containment.tier: sandbox, "
     "or unset containment.strict to run at the tier you have."
 )
-"""Why the process is not starting, and the two ways out.
+"""Why the process does not start, and the two ways out.
 
-Both ways, because a refusal that names only the problem leaves an operator
-guessing whether the answer is to install something or to change a setting — and
-one of those is a decision they may be entitled to make.
+It names both ways. A refusal that names only the problem leaves an operator
+to guess whether the answer is to install something or to change a setting.
+One of those is a decision that the operator may be entitled to make.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class TierDescription:
-    """One rung of §4.8's table: what it bounds, what it does not, what it buys.
+    """One rung of the table in §4.8: what it bounds, what it does not, what it buys.
 
-    Three columns and no severity, which is §12 Q10's own instruction for
-    `phern doctor` — *"prints the same three columns rather than a severity
-    color"*. A color invites a reader to skip the sentence, and the sentence is
-    the entire point of E1: the failure being prevented is a **tier name**
-    overstating what the tier does, and only prose can correct that.
+    There are three columns and no severity. That is the instruction of §12 Q10
+    for `phern doctor`: it *"prints the same three columns rather than a
+    severity color"*. A color invites a reader to skip the sentence, and the
+    sentence is the purpose of E1. The failure that E1 prevents is a **tier
+    name** that overstates what the tier does, and only prose can correct that.
     """
 
     bounds: str
@@ -88,20 +91,23 @@ class TierDescription:
 
 @runtime_checkable
 class DescribingProvider(Protocol):
-    """A provider whose bargain differs from the stock description of its rung.
+    """A provider that offers something different from the stock description of its rung.
 
-    **The columns belong to whoever occupies the rung, not to its name.** `TIERS`
-    is keyed by rung, so every provider at `worktree` inherited "buys: collision
-    isolation and revertibility (fan-out safety, per-run checkpoints, /revert)" —
-    true of a checkout and false of an overlay, which has no git tree to hash and
-    therefore never writes a restore point. `phern doctor` was advertising a
-    mechanism the mounted tier does not have, in the one place a person looks to
-    check exactly that, which is the single failure E1 exists to prevent.
+    **The columns belong to the provider that occupies the rung, not to the
+    name of the rung.** `TIERS` is keyed by rung. So every provider at
+    `worktree` inherited "buys: collision isolation and revertibility (fan-out
+    safety, per-run checkpoints, /revert)". That is true of a checkout and
+    false of an overlay, which has no git tree to hash and therefore never
+    writes a restore point. `phern doctor` advertised a mechanism that the
+    mounted tier does not have, in the one place where a user looks to check
+    exactly that. That is the single failure that E1 exists to prevent.
 
-    Optional, like `ReclaimingProvider` and `ExportingProvider`: a provider whose
-    bargain *is* its rung's says nothing and gets the stock row. `tier` is on the
-    Protocol so the override can be matched to the rung it describes — a report
-    with two rungs must not let a child-tier provider rewrite the root's columns.
+    The capability is optional, like `ReclaimingProvider` and
+    `ExportingProvider`. A provider that offers exactly what its rung
+    describes declares nothing and gets the stock row. `tier` is on the
+    Protocol so that the override can be matched to the rung that it
+    describes. A report with two rungs must not let a child-tier provider
+    rewrite the columns of the root.
     """
 
     tier: ContainmentTier
@@ -130,26 +136,27 @@ TIERS: dict[ContainmentTier, TierDescription] = {
         buys="confinement",
     ),
 }
-"""§4.8's table, once, where every reader can reach it.
+"""The table of §4.8, in one place that every reader can reach.
 
-E1's gate is a docs test asserting no tier is described as bounding writes it
-does not bound (P6-06). That is only worth running against a single home: a
-table in prose and a second copy in `phern doctor` would drift, and the drift would
-be invisible precisely because each copy looks right on its own. So the
-sentences live here, `phern doctor` prints them verbatim, and the docs row when it
-lands has one thing to check rather than two things to reconcile.
+The gate of E1 is a docs test which asserts that no tier is described as
+bounding writes that it does not bound (P6-06). That test is only worth
+running against a single source. A table in prose and a second copy in
+`phern doctor` would drift, and nobody would see the drift, because each copy
+looks right on its own. So the sentences live here, and `phern doctor` prints
+them verbatim. When the docs row lands, it has one thing to check and not two
+things to reconcile.
 """
 
 
 class ContainmentUnavailableError(MountRefusal):
     """`strict` was set and the deployment cannot honor it.
 
-    A refusal to start, raised where the profile is composed rather than at the
-    first call that would have been unconfined: by then the agent is running and
-    "refuse to start" has already been disobeyed. A `MountRefusal`, so every
-    command that mounts prints it as the sentence it is — it was a bare
-    `RuntimeError`, and `phern -p` under `strict` answered with a traceback while
-    only doctor caught it (P4-12).
+    This is a refusal to start. It is raised where the profile is composed and
+    not at the first call that would have been unconfined. By then the agent is
+    running, and "refuse to start" has already been disobeyed. It is a
+    `MountRefusal`, so every command that mounts prints it as a sentence. It
+    was a bare `RuntimeError` before, and `phern -p` under `strict` answered
+    with a traceback while only `phern doctor` caught it (P4-12).
     """
 
 
@@ -157,19 +164,20 @@ class Config(WireModel):
     """Row config: which rung, for whom, and how strictly."""
 
     tier: ContainmentTier | None = None
-    """The rung the *root* agent runs on — the person's own session.
+    """The rung that the *root* agent runs on, which is the user's own session.
 
-    `None` is **no opinion**, not `advisory`: mounting this row must not opt
-    every profile out of a provider it deliberately layered. A profile says
-    `advisory` when it means "this agent stays in the person's own checkout",
-    which is a different statement from never having chosen.
+    `None` means **no opinion**, not `advisory`. To mount this row must not opt
+    every profile out of a provider that it deliberately layered. A profile
+    says `advisory` when it means "this agent stays in the user's own
+    checkout". That is a different statement from never having chosen.
     """
     child_tier: ContainmentTier | None = None
-    """The rung spawned children run on. `None` follows `tier`.
+    """The rung that spawned children run on. `None` follows `tier`.
 
-    A separate knob because the fan-out is the hazard: children are the case
-    where "eight agents writing one tree" happens, and a profile wanting them
-    isolated should not have to move the person's own agent to get it.
+    It is a separate setting because the fan-out is the hazard. Children are
+    the case where "eight agents writing one tree" happens. A profile that
+    wants them isolated should not have to move the user's own agent to get
+    that.
     """
     strict: bool = False
     """Refuse to start unless confinement is real (E8)."""
@@ -185,28 +193,29 @@ class ContainmentService:
     strict: bool = False
 
     def for_role(self, *, child: bool) -> ContainmentTier | None:
-        """The rung this role gets. The one place the two knobs are read."""
+        """The rung that this role gets. The one place that reads the two settings."""
         return (self.child_tier or self.tier) if child else self.tier
 
     def describe(self) -> list[tuple[str, str]]:
         """What `phern doctor` prints about this deployment (E1, E10).
 
-        Three claims, and each one is a defect this row could otherwise hide.
+        It makes three claims. Each one is a defect that this row could
+        otherwise hide.
 
-        **Effective, not configured.** It asks the workspace seam rather than
-        reading its own config back to the operator: a `worktree` row over a
-        directory that is not a repository declines on every acquire, and being
-        told your own setting is not being told what you have.
+        **Effective, not configured.** It asks the workspace seam and does not
+        read its own config back to the operator. A `worktree` row over a
+        directory that is not a repository declines on every acquire. To be
+        told your own setting is not to be told what you have.
 
         **Both rungs, each with its own three columns.** The shipped `rlm`
-        posture puts the person's agent on `advisory` and its children on
-        `worktree`, so a report printing one rung's table would say "bounds:
-        nothing" about a process where most of the writing is bounded — or the
-        reverse, which is worse.
+        posture puts the user's agent on `advisory` and its children on
+        `worktree`. A report that printed the table of one rung would say
+        "bounds: nothing" about a process where most of the writing is bounded.
+        Or it would say the reverse, which is worse.
 
-        **No severity, by §12 Q10's own instruction.** The three columns *are*
-        the finding; a color would let a reader skip the sentence, and the
-        sentence is what stops a tier's name from overstating it (E1).
+        **No severity, by the instruction of §12 Q10.** The three columns
+        *are* the finding. A color would let a reader skip the sentence, and
+        the sentence stops the name of a tier from overstating the tier (E1).
         """
         workspace = self.ctx.get(WORKSPACE)
         root: ContainmentTier = "advisory"
@@ -225,8 +234,9 @@ class ContainmentService:
             rungs.append(child)
         provider = None if workspace is None else workspace.provider
         for rung in rungs:
-            # Prefixed only when there are two, so the ordinary single-rung
-            # report reads as the table §4.8 prints rather than as a matrix.
+            # The prefix is added only when there are two rungs. So the ordinary
+            # single-rung report reads as the table that §4.8 prints and not as
+            # a matrix.
             prefix = "" if len(rungs) == 1 else f"{rung} "
             description = TIERS[rung]
             if isinstance(provider, DescribingProvider) and provider.tier == rung:
@@ -234,15 +244,16 @@ class ContainmentService:
             rows.append((f"{prefix}bounds", description.bounds))
             rows.append((f"{prefix}does NOT bound", description.does_not_bound))
             rows.append((f"{prefix}buys", description.buys))
-        # **Both boundaries in one section, because they were contradicting each
-        # other across two.** The rows above describe the *workspace* tier, which
-        # `effective_tier` reads off the workspace provider — so a deployment with
-        # a mounted sandbox backend and no sandbox-tier workspace provider printed
-        # `bounds: nothing` here and `confines: yes` five lines down, with
-        # `strict is satisfied: yes` between them. They are genuinely different
-        # boundaries: one is the tree an agent works in, the other is every
-        # command the harness wraps. Saying so beside them is what stops a reader
-        # having to reconcile two sections.
+        # **Both boundaries are in one section, because they contradicted each
+        # other across two sections.** The rows above describe the *workspace*
+        # tier, which `effective_tier` reads from the workspace provider. So a
+        # deployment with a mounted sandbox backend and no sandbox-tier
+        # workspace provider printed `bounds: nothing` here and `confines: yes`
+        # five lines down, with `strict is satisfied: yes` between them. They
+        # are two different boundaries: one is the tree that an agent works in,
+        # and the other is every command that the harness wraps. The row below
+        # says so next to them, so that a reader does not have to reconcile two
+        # sections.
         confinement = enforcement_of(self.ctx)
         if confinement is not None:
             rows.append(
@@ -263,10 +274,11 @@ class ContainmentService:
     def _unconfined(self) -> str | None:
         """Why confinement is not real under `strict`, or `None`.
 
-        A clause, not the whole refusal: the "here are your two ways out"
-        paragraph only makes sense when refusing to start, and stitching it on
-        at each branch is three places one sentence could drift from the one it
-        wraps. `phern doctor` wants the clause; `verify` wants both.
+        This is a clause and not the whole refusal. The "here are your two ways
+        out" paragraph only makes sense in a refusal to start. To append it at
+        each branch would make three places where one sentence could drift
+        from the sentence that it wraps. `phern doctor` needs the clause, and
+        `verify` needs both.
         """
         if not self.strict:
             return None
@@ -286,10 +298,11 @@ class ContainmentService:
     def verify(self) -> None:
         """Raise unless this deployment can honor what it asked for.
 
-        Registered on `profile/mounted` rather than run in this row's `apply`: a
-        backend may be layered *after* the row that asked for it, so a verdict
-        computed at mount would be wrong for exactly the profile that orders
-        things that way — E9's live-sentence reasoning, one seam over.
+        It is registered on `profile/mounted` and does not run in the `apply`
+        of this row. A backend may be layered *after* the row that asked for
+        it, so a verdict computed at mount would be wrong for exactly the
+        profile that orders its rows that way. This is the live-sentence
+        reasoning of E9, applied to this seam.
         """
         because = self._unconfined()
         if because is not None:
@@ -306,9 +319,10 @@ async def apply(ctx: Context, config: Config) -> None:
         strict=config.strict,
     )
     ctx.provide(CONTAINMENT, containment)
-    # A listener rather than a call here, so the verdict is taken once the whole
-    # profile is composed — and so a *second* row wanting to refuse a deployment
-    # registers one too, instead of another `if` in whoever starts the process.
+    # This is a listener and not a call here, so that the verdict is taken when
+    # the whole profile is composed. A *second* row that wants to refuse a
+    # deployment then registers a listener too, and nobody adds another `if` to
+    # the code that starts the process.
     ctx.on("profile/mounted", lambda: containment.verify())
 
     contribute(

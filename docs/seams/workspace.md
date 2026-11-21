@@ -233,7 +233,7 @@ materials it lacks, so nothing the agent edited is copied over.
 
 | event | |
 |---|---|
-| `workspace/acquired` | an agent took one — with the kind it actually got |
+| `workspace/acquired` | an agent took one — with the kind it actually got, what was provisioned into it, and (jj tier) the commit it forked from, which a crash reclaim needs |
 | `workspace/disposed` | it ended; `kept` and `retained` say what survived |
 | `workspace/retained` | kept deliberately, with a reason |
 | `workspace/provisioned` | materials were placed in a fresh tree (E14) |

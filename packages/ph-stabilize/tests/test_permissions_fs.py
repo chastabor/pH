@@ -1055,7 +1055,7 @@ async def test_every_row_that_hands_the_model_a_path_is_exempt(
 
 
 def test_a_wildcard_that_is_not_a_star_still_makes_a_head() -> None:
-    """D11: `fs.literal_head` and `_WILDCARD` say why the alphabet is shared.
+    """D11: a rule reads its wildcards in the dialect of `matches_glob`.
 
     `sec?ets/**` and `[sf]ecrets/**` are ordinary globs that `matches_glob`
     honors. A head that was split on `*` alone read them as literal directory
@@ -1115,8 +1115,9 @@ def test_every_spelling_of_a_directory_rule_guards_that_directory(pattern: str) 
     directories that it cannot name. They agree because the match is segment by
     segment, in the dialect of the glob itself.
 
-    Sabotage: compare `literal_head(pattern)` as a path again and the `?` and
-    `*` rows allow deleting `secrets` while refusing `sec`.
+    Sabotage: split the pattern at `*` alone and compare its head as a path
+    again, and the `?` and `*` rows allow deleting `secrets` while refusing
+    `sec`.
     """
     policy = _policy(Rule(operations=("read", "write"), paths=(pattern,), mode="deny"))
 
